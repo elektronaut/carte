@@ -49,7 +49,7 @@ impl fmt::Display for Notice {
         match self {
             Notice::PortRewritten { process, from, to } => write!(
                 f,
-                "{process}: replaced the hardcoded port with $PORT: `{from}` runs as `{to}`"
+                "{process}: made the command use $PORT: `{from}` runs as `{to}`"
             ),
             Notice::IgnoredLine { file, line, text } => {
                 write!(f, "{}:{line}: ignored line `{text}`", file.display())
@@ -251,8 +251,22 @@ pub fn is_watcher(name: &str, command: &str) -> bool {
         })
 }
 
-/// Replaces a hardcoded `-p NNNN`, `-pNNNN`, `--port NNNN` or `--port=NNNN` with `$PORT`.
+/// Replaces a hardcoded `-p NNNN`, `-pNNNN`, `--port NNNN` or `--port=NNNN` with `$PORT`,
+/// and drops a leading `unset PORT &&` or `unset PORT;`.
 pub fn rewrite_port(command: &str) -> Option<String> {
+    let unset = ["unset PORT &&", "unset PORT;"]
+        .iter()
+        .find_map(|prefix| command.trim_start().strip_prefix(prefix))
+        .map(str::trim_start);
+    let rewritten = rewrite_port_flag(unset.unwrap_or(command));
+    match (unset, rewritten) {
+        (_, Some(out)) => Some(out),
+        (Some(rest), None) => Some(rest.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn rewrite_port_flag(command: &str) -> Option<String> {
     let tokens = tokens_with_offsets(command);
     let mut ranges = Vec::new();
     for (i, &(start, token)) in tokens.iter().enumerate() {
@@ -368,6 +382,14 @@ mod tests {
         assert_eq!(rewrite_port("bin/rails server -p $PORT"), None);
         assert_eq!(rewrite_port("bin/rails server -p ${PORT:-3000}"), None);
         assert_eq!(rewrite_port("bin/rails server"), None);
+        assert_eq!(
+            rewrite_port("unset PORT && bin/rails server").as_deref(),
+            Some("bin/rails server")
+        );
+        assert_eq!(
+            rewrite_port("unset PORT; bin/rails server -p 3000").as_deref(),
+            Some("bin/rails server -p $PORT")
+        );
     }
 
     #[test]
