@@ -112,9 +112,15 @@ mod tests {
     fn slugs_branches() {
         assert_eq!(branch_slug("feature-x"), "feature-x");
         assert_eq!(branch_slug("claude/fix-thing-123"), "claude-fix-thing-123");
-        assert_eq!(branch_slug("Feature/JIRA-42_Thing"), "feature-jira-42-thing");
+        assert_eq!(
+            branch_slug("Feature/JIRA-42_Thing"),
+            "feature-jira-42-thing"
+        );
         assert_eq!(branch_slug("a//b--c"), "a-b-c");
-        assert_eq!(branch_slug("/-leading/and/trailing-/"), "leading-and-trailing");
+        assert_eq!(
+            branch_slug("/-leading/and/trailing-/"),
+            "leading-and-trailing"
+        );
         assert_eq!(branch_slug("v1.2.3"), "v1-2-3");
         assert_eq!(branch_slug("blåbær"), "bl-b-r");
         assert_eq!(branch_slug("---"), "");
@@ -141,11 +147,17 @@ mod tests {
     fn rejects_short_names() {
         assert!(matches!(
             validate_project_name("mk"),
-            Err(NameError::TooShort { kind: NameKind::Project, .. })
+            Err(NameError::TooShort {
+                kind: NameKind::Project,
+                ..
+            })
         ));
         assert!(matches!(
             validate_app_short_name(""),
-            Err(NameError::TooShort { kind: NameKind::App, .. })
+            Err(NameError::TooShort {
+                kind: NameKind::App,
+                ..
+            })
         ));
     }
 
