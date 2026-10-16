@@ -358,6 +358,10 @@ fn prints_the_env_as_json() {
     assert!(out.success, "{}", out.stderr);
     let env: EnvResponse = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(env.instance, "shop@main/web");
+    assert!(
+        !env.vars.iter().any(|v| v.key == "CARTE_CONFIG_DIR"),
+        "carte's own settings leaked into the app env"
+    );
     let greeting = env.vars.iter().find(|v| v.key == "GREETING").unwrap();
     assert_eq!(greeting.value, "hello shop");
     assert!(

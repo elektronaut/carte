@@ -189,7 +189,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         instances: BTreeMap::new(),
         overrides: BTreeMap::new(),
         providers: HashMap::new(),
-        daemon_env: Arc::new(std::env::vars().collect()),
+        daemon_env: Arc::new(super::base_env()),
         tx: tx.clone(),
         snapshot_tx,
         log_tx: log_tx.clone(),
