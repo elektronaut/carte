@@ -3,6 +3,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use carte_core::model::InstanceKey;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     pub config_dir: PathBuf,
@@ -52,5 +54,22 @@ impl Paths {
     /// Pidfiles and the record of running process groups.
     pub fn run_dir(&self) -> PathBuf {
         self.state_dir.join("run")
+    }
+
+    /// The carte CA alone (`NODE_EXTRA_CA_CERTS`).
+    pub fn ca_cert(&self) -> PathBuf {
+        self.state_dir.join("ca.pem")
+    }
+
+    /// System roots plus the carte CA (`SSL_CERT_FILE`).
+    pub fn ca_bundle(&self) -> PathBuf {
+        self.state_dir.join("ca-bundle.pem")
+    }
+
+    /// The `PIDFILE` handed to an instance's processes.
+    pub fn pidfile(&self, key: &InstanceKey) -> PathBuf {
+        self.run_dir()
+            .join(&key.project)
+            .join(format!("{}@{}.pid", key.app, key.stack.slug()))
     }
 }
