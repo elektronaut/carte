@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod ca;
 pub mod resolver;
 
@@ -6,6 +7,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+pub use bundle::TrustFiles;
 pub use ca::{CaOrigin, CertificateAuthority, CreateReason};
 pub use resolver::{CertResolver, server_config};
 
@@ -25,6 +27,10 @@ pub enum TlsError {
     InvalidTld(String),
     #[error("no TLDs configured")]
     NoTlds,
+    #[error("no system root certificates found")]
+    NoSystemRoots,
+    #[error("`{command}` failed: {detail}")]
+    Command { command: String, detail: String },
     #[error("HOME is not set")]
     NoHome,
 }
