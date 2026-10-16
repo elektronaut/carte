@@ -9,11 +9,11 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use thiserror::Error;
 
-use crate::duration;
 use crate::model::{
     App, AppSettings, EnvProviderKind, EnvTemplate, Limits, MachineConfig, MemoryTarget, Policy,
     Problem, ProcessConfig, ProcessOverride, Project, Readiness, Scheme, Scope, ShareConfig,
 };
+use crate::{duration, slug};
 
 /// The repo-level config file name.
 pub const REPO_CONFIG: &str = "carte.toml";
@@ -344,9 +344,9 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    check_label("project name", &name).map_err(|message| ConfigError::Invalid {
+    slug::validate_project_name(&name).map_err(|err| ConfigError::Invalid {
         path: path.to_path_buf(),
-        message,
+        message: err.to_string(),
     })?;
     let raw: RawProject = from_toml(path, text)?;
     Ok(ProjectFile {
@@ -454,8 +454,8 @@ pub fn assemble_project(
                 .unwrap_or(&name)
                 .to_string(),
         };
-        if let Err(message) = check_label("app name", &short) {
-            problems.push(problem(&name, message));
+        if let Err(err) = slug::validate_app_short_name(&short) {
+            problems.push(problem(&name, err.to_string()));
             continue;
         }
         if let Some(other) = apps.iter().find(|a| a.short == short) {
@@ -530,18 +530,6 @@ pub fn assemble_project(
         apps,
     };
     (project, problems)
-}
-
-/// Checks a name used as a DNS label that may start a public hostname label.
-fn check_label(kind: &str, name: &str) -> Result<(), String> {
-    if name.chars().count() < 3 {
-        return Err(format!("{kind} {name:?} must be at least three characters"));
-    }
-    check_dns_label(name).map_err(|m| format!("{kind} {name:?} {m}"))?;
-    if name.contains("--") {
-        return Err(format!("{kind} {name:?} must not contain \"--\""));
-    }
-    Ok(())
 }
 
 fn check_dns_label(label: &str) -> Result<(), String> {

@@ -8,6 +8,8 @@ use thiserror::Error;
 
 use crate::config::{self, DiscoveredApp, ProjectFile};
 use crate::model::{Problem, ProjectState, Worktree, World};
+use crate::naming;
+use crate::slug::branch_slug;
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
@@ -173,21 +175,6 @@ pub fn list_worktrees(main_checkout: &Path) -> Result<Vec<Worktree>, DiscoveryEr
     Ok(linked_worktrees(&parse_worktree_list(&stdout)))
 }
 
-fn branch_slug(branch: &str) -> String {
-    let mut slug = String::with_capacity(branch.len());
-    for c in branch.to_lowercase().chars() {
-        let c = if c.is_ascii_lowercase() || c.is_ascii_digit() {
-            c
-        } else {
-            '-'
-        };
-        if c != '-' || !slug.ends_with('-') {
-            slug.push(c);
-        }
-    }
-    slug.trim_matches('-').to_string()
-}
-
 /// Expands a project's repos, reads each app's `carte.toml`, assembles the project
 /// and lists each app's worktrees.
 pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
@@ -244,21 +231,14 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
                     ),
                 ));
             }
-            if let Some(other) = project.app_by_short(&wt.slug) {
-                problems.push(problem(
-                    Some(&app.name),
-                    format!(
-                        "branch {:?} is unreachable: its name {:?} is taken by app {}",
-                        wt.branch, wt.slug, other.name
-                    ),
-                ));
-            }
         }
         if !wts.is_empty() {
             worktrees.insert(app.name.clone(), wts);
         }
     }
-    (ProjectState { project, worktrees }, problems)
+    let state = ProjectState { project, worktrees };
+    problems.extend(naming::collisions(&state));
+    (state, problems)
 }
 
 /// Loads `config.toml`, every project file in `projects/` and what they find on disk.
@@ -384,14 +364,6 @@ prunable gitdir file points to non-existent location
         let worktrees = linked_worktrees(&entries);
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].branch, "x");
-    }
-
-    #[test]
-    fn slugs_branches() {
-        assert_eq!(branch_slug("feature/x"), "feature-x");
-        assert_eq!(branch_slug("Fix--Thing__2"), "fix-thing-2");
-        assert_eq!(branch_slug("/lead/trail/"), "lead-trail");
-        assert_eq!(branch_slug("æøå"), "");
     }
 
     #[test]
@@ -566,7 +538,7 @@ prunable gitdir file points to non-existent location
         assert_eq!(state.project.apps.len(), 2);
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems[0].message.contains("\"") && problems[0].message.contains("missing"));
-        assert!(problems[1].message.contains("taken by app acme-api"));
+        assert!(problems[1].message.contains("same name as app acme-api"));
     }
 
     #[test]
