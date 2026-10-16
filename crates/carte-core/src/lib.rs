@@ -4,3 +4,4 @@
 pub mod duration;
 pub mod lifecycle;
 pub mod model;
+pub mod template;
