@@ -6,4 +6,5 @@ pub mod process;
 pub mod proxy;
 pub mod pty;
 pub mod shim;
+pub mod tls;
 pub mod urls;

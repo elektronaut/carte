@@ -12,25 +12,32 @@ bytes.workspace = true
 carte-api.workspace = true
 carte-core.workspace = true
 clap.workspace = true
+gethostname.workspace = true
 hickory-proto.workspace = true
 http-body-util.workspace = true
 http.workspace = true
 hyper-util.workspace = true
 hyper.workspace = true
 libc.workspace = true
+lru.workspace = true
 nix.workspace = true
+rcgen.workspace = true
 rustls.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
+time.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 tower-service.workspace = true
 tracing.workspace = true
+x509-parser.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
+tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 
 [lints]
