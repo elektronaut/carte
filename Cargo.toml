@@ -6,6 +6,7 @@ members = ["crates/*"]
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
+repository = "https://github.com/elektronaut/carte"
 
 [workspace.dependencies]
 carte-core = { path = "crates/carte-core" }
