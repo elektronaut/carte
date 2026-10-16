@@ -6,4 +6,5 @@ pub mod duration;
 pub mod env;
 pub mod lifecycle;
 pub mod model;
+pub mod slug;
 pub mod template;
