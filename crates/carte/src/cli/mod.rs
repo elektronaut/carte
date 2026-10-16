@@ -46,7 +46,7 @@ pub enum Command {
     /// Open an instance in the browser.
     Open(Target),
     /// Print the rendered env with the source of each value.
-    Env(Target),
+    Env(EnvArgs),
     /// Manage projects.
     #[command(subcommand)]
     Project(ProjectCommand),
@@ -80,6 +80,15 @@ pub struct PolicyArgs {
     /// Write the change to the project's config file.
     #[arg(long)]
     pub save: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct EnvArgs {
+    #[command(flatten)]
+    pub target: Target,
+    /// The process whose env to show; defaults to the one serving HTTP.
+    #[arg(long, short)]
+    pub process: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -164,7 +173,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Logs(args) => control::logs(&paths, args, cli.json),
         Command::Open(t) => control::open(&paths, t),
         Command::StopAll { idle } => control::stop_all(&paths, idle, cli.json),
-        Command::Env(t) => env::run(&paths, t, cli.json),
+        Command::Env(args) => env::run(&paths, args, cli.json),
         Command::Project(cmd) => project::run(&paths, cmd, cli.json),
     };
     match result {
