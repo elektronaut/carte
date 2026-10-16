@@ -4,6 +4,7 @@
 
 pub mod address;
 pub mod config;
+pub mod discovery;
 pub mod duration;
 pub mod env;
 pub mod lifecycle;
