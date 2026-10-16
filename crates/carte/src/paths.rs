@@ -3,6 +3,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use carte_core::model::InstanceKey;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,8 +49,19 @@ impl Paths {
         self.projects_dir().join(format!("{name}.toml"))
     }
 
+    /// `CARTE_SOCKET` wins. Unix socket paths are limited to about 100 bytes, so a
+    /// deep state directory gets a short path in the temp directory named after it.
     pub fn socket(&self) -> PathBuf {
-        self.state_dir.join("carte.sock")
+        if let Some(path) = env::var_os("CARTE_SOCKET") {
+            return PathBuf::from(path);
+        }
+        let path = self.state_dir.join("carte.sock");
+        if path.as_os_str().len() < 100 {
+            return path;
+        }
+        let digest = Sha256::digest(self.state_dir.as_os_str().as_encoded_bytes());
+        let name: String = digest[..6].iter().map(|b| format!("{b:02x}")).collect();
+        PathBuf::from("/tmp").join(format!("carte-{name}.sock"))
     }
 
     /// Pidfiles and the record of running process groups.
@@ -71,5 +84,20 @@ impl Paths {
         self.run_dir()
             .join(&key.project)
             .join(format!("{}@{}.pid", key.app, key.stack.slug()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deep_state_dirs_get_a_short_socket_path() {
+        let shallow = Paths::under(Path::new("/tmp/x"));
+        assert_eq!(shallow.socket(), PathBuf::from("/tmp/x/state/carte.sock"));
+        let deep = Paths::under(&Path::new("/tmp").join("d".repeat(120)));
+        let socket = deep.socket();
+        assert!(socket.as_os_str().len() < 100, "{}", socket.display());
+        assert_eq!(socket, deep.socket());
     }
 }
