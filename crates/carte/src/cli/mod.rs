@@ -66,6 +66,8 @@ pub enum Command {
     /// Create projects from another tool's setup.
     #[command(subcommand)]
     Import(ImportCommand),
+    /// Watch and control everything in a terminal UI.
+    Tui,
     /// Run the daemon in the foreground.
     Daemon,
     /// Runs one process for the daemon; not for direct use.
@@ -182,6 +184,7 @@ pub fn run(cli: Cli) -> ExitCode {
             return ExitCode::from(crate::shim::run(fd, &command) as u8);
         }
         Command::Daemon => control::daemon(&paths),
+        Command::Tui => crate::tui::run(&paths),
         Command::Ls { all } => control::ls(&paths, all, cli.json),
         Command::Up(t) => control::control(&paths, t, carte_api::Action::Up, cli.json),
         Command::Down(t) => control::control(&paths, t, carte_api::Action::Down, cli.json),

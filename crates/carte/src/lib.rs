@@ -12,4 +12,5 @@ pub mod setup;
 pub mod shim;
 pub mod supervisor;
 pub mod tls;
+pub mod tui;
 pub mod urls;
