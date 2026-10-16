@@ -45,8 +45,13 @@ impl Paths {
         self.config_dir.join("projects")
     }
 
+    /// The project's file, in whichever folder it is, or where a new one goes.
     pub fn project_file(&self, name: &str) -> PathBuf {
-        self.projects_dir().join(format!("{name}.toml"))
+        carte_core::discovery::project_files(&self.projects_dir())
+            .ok()
+            .and_then(|files| files.into_iter().find(|f| f.name == name))
+            .map(|f| f.path)
+            .unwrap_or_else(|| self.projects_dir().join(format!("{name}.toml")))
     }
 
     /// `CARTE_SOCKET` wins. Unix socket paths are limited to about 100 bytes, so a
@@ -99,5 +104,21 @@ mod tests {
         let socket = deep.socket();
         assert!(socket.as_os_str().len() < 100, "{}", socket.display());
         assert_eq!(socket, deep.socket());
+    }
+
+    #[test]
+    fn project_files_are_found_in_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        std::fs::create_dir_all(paths.projects_dir().join("agency")).unwrap();
+        std::fs::write(paths.projects_dir().join("agency/wiki.toml"), "").unwrap();
+        assert_eq!(
+            paths.project_file("wiki"),
+            paths.projects_dir().join("agency/wiki.toml")
+        );
+        assert_eq!(
+            paths.project_file("new"),
+            paths.projects_dir().join("new.toml")
+        );
     }
 }

@@ -532,6 +532,7 @@ pub fn assemble_project(
     }
 
     let project = Project {
+        folder: None,
         name: project_name,
         config_path,
         strip_prefix,

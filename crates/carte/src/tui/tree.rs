@@ -1,5 +1,5 @@
-//! The project ▸ stack ▸ app ▸ process tree built from a snapshot, and the rows it
-//! shows once collapsed nodes, filters and folding are applied.
+//! The folder ▸ project ▸ stack ▸ app ▸ process tree built from a snapshot, and the
+//! rows it shows once collapsed nodes, filters and folding are applied.
 
 use std::collections::HashMap;
 
@@ -10,6 +10,10 @@ use carte_api::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeId {
+    /// A subdirectory of `projects/`, only for grouping.
+    Folder {
+        folder: String,
+    },
     Project {
         project: String,
     },
@@ -31,8 +35,10 @@ pub enum NodeId {
 }
 
 impl NodeId {
+    /// Empty for a folder.
     pub fn project(&self) -> &str {
         match self {
+            NodeId::Folder { .. } => "",
             NodeId::Project { project }
             | NodeId::Stack { project, .. }
             | NodeId::Instance { project, .. }
@@ -42,7 +48,7 @@ impl NodeId {
 
     pub fn parent(&self) -> Option<NodeId> {
         match self.clone() {
-            NodeId::Project { .. } => None,
+            NodeId::Folder { .. } | NodeId::Project { .. } => None,
             NodeId::Stack { project, .. } => Some(NodeId::Project { project }),
             NodeId::Instance { project, stack, .. } => Some(NodeId::Stack { project, stack }),
             NodeId::Process {
@@ -174,12 +180,43 @@ impl Node {
     }
 }
 
+/// Folders first, by name, then the projects outside any folder.
 pub fn build(snapshot: &Snapshot) -> Vec<Node> {
-    snapshot
-        .projects
-        .iter()
-        .map(|project| project_node(snapshot, project).collapse())
+    let mut folders: Vec<(String, Vec<Node>)> = Vec::new();
+    let mut loose = Vec::new();
+    for project in &snapshot.projects {
+        let node = project_node(snapshot, project).collapse();
+        match &project.folder {
+            Some(folder) => match folders.iter_mut().find(|(name, _)| name == folder) {
+                Some((_, nodes)) => nodes.push(node),
+                None => folders.push((folder.clone(), vec![node])),
+            },
+            None => loose.push(node),
+        }
+    }
+    folders.sort_by(|a, b| a.0.cmp(&b.0));
+    folders
+        .into_iter()
+        .map(|(folder, children)| folder_node(folder, children))
+        .chain(loose)
         .collect()
+}
+
+fn folder_node(folder: String, children: Vec<Node>) -> Node {
+    let mut status = aggregate(&children);
+    status.problems = children.iter().map(|c| c.status.problems).sum();
+    Node {
+        children,
+        status,
+        ..Node::leaf(
+            NodeId::Folder {
+                folder: folder.clone(),
+            },
+            &format!("{folder}/"),
+            &folder,
+            Status::new(State::Stopped),
+        )
+    }
 }
 
 fn project_node(snapshot: &Snapshot, project: &ProjectStatus) -> Node {
@@ -546,6 +583,45 @@ mod tests {
             roots[0].children.is_empty(),
             "a single process stays folded"
         );
+    }
+
+    #[test]
+    fn folders_group_projects_and_start_folded() {
+        let single = |name: &str, folder: Option<&str>, state| {
+            let mut p = project(
+                name,
+                &[name],
+                vec![stack("main", vec![instance(name, "main", "main", state)])],
+            );
+            p.folder = folder.map(str::to_string);
+            p
+        };
+        let snap = snapshot(vec![
+            single("blog", None, InstanceState::Stopped),
+            single("wiki", Some("agency"), InstanceState::Ready),
+            single("marketplace", Some("agency"), InstanceState::Stopped),
+        ]);
+        let roots = build(&snap);
+        let mut fold = Fold::default();
+        assert_eq!(labels(&roots, &fold), ["agency/", "blog"]);
+        assert_eq!((roots[0].status.running, roots[0].status.total), (1, 2));
+
+        fold.expanded.insert(
+            NodeId::Folder {
+                folder: "agency".into(),
+            },
+            true,
+        );
+        assert_eq!(
+            labels(&roots, &fold),
+            ["agency/", "  wiki", "  marketplace", "blog"]
+        );
+
+        let filtered = Fold {
+            filter: "mar".into(),
+            ..Fold::default()
+        };
+        assert_eq!(labels(&roots, &filtered), ["agency/", "  marketplace"]);
     }
 
     #[test]

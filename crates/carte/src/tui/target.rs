@@ -9,6 +9,7 @@ use super::tree::NodeId;
 /// other projects have the same stack or app.
 pub fn address(snapshot: &Snapshot, id: &NodeId) -> Address {
     let address = match id {
+        NodeId::Folder { folder } => format!("{folder}/"),
         NodeId::Project { project } => project.clone(),
         NodeId::Stack { stack, .. } => format!("@{stack}"),
         NodeId::Instance { stack, app, .. } => format!("{app}@{stack}"),

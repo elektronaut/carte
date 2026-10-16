@@ -201,6 +201,7 @@ mod tests {
 
     fn project(deps: &[(&str, &[&str])]) -> Project {
         Project {
+            folder: None,
             name: "nova".into(),
             config_path: PathBuf::new(),
             strip_prefix: Some("nova-".into()),

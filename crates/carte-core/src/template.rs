@@ -371,6 +371,7 @@ pub(crate) mod tests {
 
     pub(crate) fn nova_project() -> Project {
         Project {
+            folder: None,
             name: "nova".into(),
             config_path: "/Users/alex/.config/carte/projects/nova.toml".into(),
             strip_prefix: Some("nova-".into()),

@@ -177,7 +177,10 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
 
 fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     let status = &node.status;
-    let aggregate = matches!(node.id(), NodeId::Project { .. } | NodeId::Stack { .. });
+    let aggregate = matches!(
+        node.id(),
+        NodeId::Folder { .. } | NodeId::Project { .. } | NodeId::Stack { .. }
+    );
     let (symbol, color) = symbol(status.state);
     let mut spans = vec![
         Span::raw("  ".repeat(row.depth)),
@@ -192,7 +195,7 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     ];
     let label = Span::raw(node.label.clone());
     spans.push(match node.ids[0] {
-        NodeId::Project { .. } => label.bold(),
+        NodeId::Folder { .. } | NodeId::Project { .. } => label.bold(),
         _ if status.state == State::Disabled => label.dark_gray(),
         _ => label,
     });
@@ -343,7 +346,7 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let id = node.id();
     match id {
-        NodeId::Project { .. } | NodeId::Stack { .. } => {
+        NodeId::Folder { .. } | NodeId::Project { .. } | NodeId::Stack { .. } => {
             let mut first = vec![
                 Span::raw(symbol).fg(color),
                 Span::raw(format!(
@@ -571,7 +574,7 @@ fn process_details(
 fn problems_for<'a>(app: &'a App, id: &NodeId) -> Vec<&'a Problem> {
     let app_name = match id {
         NodeId::Instance { app, .. } | NodeId::Process { app, .. } => Some(app.as_str()),
-        NodeId::Project { .. } | NodeId::Stack { .. } => None,
+        NodeId::Folder { .. } | NodeId::Project { .. } | NodeId::Stack { .. } => None,
     };
     app.snapshot
         .iter()
@@ -611,6 +614,13 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
             (None, false) => "No lines match the filter.".into(),
             (None, true) if logs.key.is_some() && stopped => "Not running; s starts it.".into(),
             (None, true) if logs.key.is_some() => "No output yet.".into(),
+            (None, true)
+                if app
+                    .selected_node()
+                    .is_some_and(|n| matches!(n.id(), NodeId::Folder { .. })) =>
+            {
+                "A folder has no logs; select a project.".into()
+            }
             (None, true) => String::new(),
         };
         frame.render_widget(Paragraph::new(message.dark_gray()), inner);

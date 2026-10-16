@@ -25,6 +25,7 @@ pub fn worktree(branch: &str, path: &str) -> Worktree {
 
 pub fn project(name: &str, strip_prefix: Option<&str>, apps: Vec<App>) -> Project {
     Project {
+        folder: None,
         name: name.into(),
         config_path: PathBuf::from(format!("/Users/dev/.config/carte/projects/{name}.toml")),
         strip_prefix: strip_prefix.map(Into::into),
