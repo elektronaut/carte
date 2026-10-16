@@ -2,4 +2,5 @@
 //! Nothing in this crate starts processes or listens on sockets.
 
 pub mod duration;
+pub mod lifecycle;
 pub mod model;
