@@ -4,3 +4,4 @@ pub mod paths;
 pub mod process;
 pub mod pty;
 pub mod shim;
+pub mod urls;
