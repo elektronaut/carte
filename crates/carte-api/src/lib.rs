@@ -103,6 +103,9 @@ pub struct InstanceStatus {
     pub memory_bytes: u64,
     pub cpu_percent: f32,
     pub last_error: Option<String>,
+    /// Its tool versions changed since it started; a restart picks them up.
+    #[serde(default)]
+    pub env_changed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

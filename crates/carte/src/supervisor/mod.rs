@@ -99,6 +99,8 @@ pub(crate) enum Msg {
         reply: oneshot::Sender<Result<(Vec<LogLine>, LogFilter), String>>,
     },
     Reload(World),
+    RestartCheckout(PathBuf),
+    EnvChanged(PathBuf),
     Shutdown(oneshot::Sender<()>),
     Internal(actor::Internal),
 }
@@ -194,6 +196,16 @@ impl Handle {
 
     pub fn world(&self) -> Arc<World> {
         self.world.borrow().clone()
+    }
+
+    /// Restarts every running instance of a checkout (`tmp/restart.txt`).
+    pub fn restart_checkout(&self, path: PathBuf) {
+        self.send(Msg::RestartCheckout(path));
+    }
+
+    /// Marks a checkout's running instances as needing a restart for new tool versions.
+    pub fn env_changed(&self, path: PathBuf) {
+        self.send(Msg::EnvChanged(path));
     }
 
     pub fn reload(&self, world: World) {
