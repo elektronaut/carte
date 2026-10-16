@@ -133,6 +133,13 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         .map(|listener| tokio::spawn(listener.serve(shutdown.clone())))
         .collect();
 
+    if let Some(watching) = watch::run(
+        paths.config_dir.clone(),
+        supervisor.clone(),
+        Duration::from_secs(60),
+    ) {
+        tokio::spawn(watching);
+    }
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
@@ -155,11 +162,6 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
             problems
         }),
     };
-    tokio::spawn(watch::run(
-        paths.config_dir.clone(),
-        supervisor.clone(),
-        Duration::from_secs(60),
-    ));
     let api_shutdown = shutdown.clone();
     let api_task = tokio::spawn(async move {
         axum::serve(listener, api::router(api))

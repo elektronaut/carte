@@ -110,9 +110,14 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// Runs until the supervisor goes away. Rescans everything every `rescan` as a
-/// backstop for missed events.
-pub async fn run(config_dir: PathBuf, supervisor: Handle, rescan: Duration) {
+/// Starts watching right away and returns the loop that handles changes until the
+/// supervisor goes away, rescanning everything every `rescan` as a backstop for
+/// missed events. `None` when file watching isn't available.
+pub fn run(
+    config_dir: PathBuf,
+    supervisor: Handle,
+    rescan: Duration,
+) -> Option<impl Future<Output = ()>> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut watcher = match RecommendedWatcher::new(
         move |event: notify::Result<notify::Event>| {
@@ -129,7 +134,7 @@ pub async fn run(config_dir: PathBuf, supervisor: Handle, rescan: Duration) {
         Ok(watcher) => watcher,
         Err(err) => {
             warn!("file watching is off: {err}");
-            return;
+            return None;
         }
     };
 
@@ -138,45 +143,48 @@ pub async fn run(config_dir: PathBuf, supervisor: Handle, rescan: Duration) {
     let real_config_dir = canonical(&config_dir);
     let mut known = checkouts(&world);
     update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
-    let mut interval = tokio::time::interval(rescan);
-    interval.tick().await;
+    Some(async move {
+        let mut interval = tokio::time::interval(rescan);
+        interval.tick().await;
 
-    loop {
-        let mut changes = BTreeSet::new();
-        tokio::select! {
-            Some(path) = rx.recv() => {
-                changes.extend(classify(&path, &real_config_dir, &known));
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                while let Ok(path) = rx.try_recv() {
+        loop {
+            let mut changes = BTreeSet::new();
+            tokio::select! {
+                Some(path) = rx.recv() => {
                     changes.extend(classify(&path, &real_config_dir, &known));
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    while let Ok(path) = rx.try_recv() {
+                        changes.extend(classify(&path, &real_config_dir, &known));
+                    }
+                }
+                _ = interval.tick() => {
+                    changes.insert(Change::Reload);
                 }
             }
-            _ = interval.tick() => {
-                changes.insert(Change::Reload);
+            for change in &changes {
+                debug!(?change, "file change");
+                match change {
+                    Change::Reload => {}
+                    Change::Restart(path) => supervisor.restart_checkout(path.clone()),
+                    Change::EnvChanged(path) => supervisor.env_changed(path.clone()),
+                }
+            }
+            if changes.contains(&Change::Reload) {
+                let dir = config_dir.clone();
+                let Ok(fresh) =
+                    tokio::task::spawn_blocking(move || discovery::load_world(&dir)).await
+                else {
+                    continue;
+                };
+                if fresh != *world {
+                    world = std::sync::Arc::new(fresh.clone());
+                    supervisor.reload(fresh);
+                    known = checkouts(&world);
+                    update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
+                }
             }
         }
-        for change in &changes {
-            debug!(?change, "file change");
-            match change {
-                Change::Reload => {}
-                Change::Restart(path) => supervisor.restart_checkout(path.clone()),
-                Change::EnvChanged(path) => supervisor.env_changed(path.clone()),
-            }
-        }
-        if changes.contains(&Change::Reload) {
-            let dir = config_dir.clone();
-            let Ok(fresh) = tokio::task::spawn_blocking(move || discovery::load_world(&dir)).await
-            else {
-                continue;
-            };
-            if fresh != *world {
-                world = std::sync::Arc::new(fresh.clone());
-                supervisor.reload(fresh);
-                known = checkouts(&world);
-                update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
-            }
-        }
-    }
+    })
 }
 
 fn update_watches(
