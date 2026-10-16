@@ -9,6 +9,7 @@ use crate::paths::Paths;
 
 mod control;
 mod env;
+mod import;
 mod project;
 pub(crate) mod prompt;
 mod setup;
@@ -62,6 +63,9 @@ pub enum Command {
     },
     /// Set up this Mac: DNS resolver, CA trust and the daemon's LaunchAgent.
     Setup(SetupArgs),
+    /// Create projects from another tool's setup.
+    #[command(subcommand)]
+    Import(ImportCommand),
     /// Run the daemon in the foreground.
     Daemon,
     /// Runs one process for the daemon; not for direct use.
@@ -124,6 +128,22 @@ pub struct SetupArgs {
     /// Undo setup: LaunchAgent, resolver file and CA trust.
     #[arg(long)]
     pub uninstall: bool,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ImportCommand {
+    /// Create projects from the apps linked in ~/.puma-dev.
+    PumaDev {
+        /// Show what would be written without writing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask; accept the suggestions.
+        #[arg(long, short)]
+        yes: bool,
+        /// The puma-dev directory.
+        #[arg(long, value_name = "DIR")]
+        from: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -196,6 +216,9 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Env(args) => env::run(&paths, args, cli.json),
         Command::Project(cmd) => project::run(&paths, cmd, cli.json),
         Command::Setup(args) => setup::run(&paths, args),
+        Command::Import(ImportCommand::PumaDev { dry_run, yes, from }) => {
+            import::puma_dev(&paths, from, dry_run, yes)
+        }
     };
     match result {
         Ok(code) => code,

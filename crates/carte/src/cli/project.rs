@@ -215,7 +215,7 @@ fn repos_in_dir(
 
 /// The `xxx-` prefix shared by the most repos (more than half of them), the longest on a
 /// tie, as long as every name it shortens stays a valid hostname label.
-fn suggest_prefix(names: &[String]) -> Option<String> {
+pub(super) fn suggest_prefix(names: &[String]) -> Option<String> {
     let mut best: Option<(usize, &str)> = None;
     for name in names {
         for (i, _) in name.match_indices('-').filter(|(i, _)| *i > 0) {
@@ -271,10 +271,10 @@ fn choose_name(given: Option<&str>, dir_name: &str, interactive: bool) -> anyhow
 
 /// What `add` writes into an app's table.
 #[derive(Default)]
-struct AppEntry {
+pub(super) struct AppEntry {
     /// A short-name override for a directory name that isn't a valid hostname label.
-    name: Option<String>,
-    web_command: Option<String>,
+    pub(super) name: Option<String>,
+    pub(super) web_command: Option<String>,
 }
 
 fn project_toml(
@@ -315,7 +315,7 @@ fn project_toml(
 }
 
 /// Short-name overrides for repos whose name, after the prefix, isn't a valid label.
-fn name_overrides(
+pub(super) fn name_overrides(
     repos: &[String],
     strip_prefix: Option<&str>,
     project: &str,
@@ -346,12 +346,12 @@ fn name_overrides(
         .collect()
 }
 
-fn discover(path: &Path, text: &str) -> anyhow::Result<(ProjectState, Vec<Problem>)> {
+pub(super) fn discover(path: &Path, text: &str) -> anyhow::Result<(ProjectState, Vec<Problem>)> {
     let file = config::parse_project(path, text)?;
     Ok(discovery::discover_project(file))
 }
 
-fn print_summary(
+pub(super) fn print_summary(
     machine: &MachineConfig,
     state: &ProjectState,
     problems: &[Problem],
@@ -417,7 +417,7 @@ fn source_name(source: ProcessSource) -> &'static str {
     }
 }
 
-fn problem_text(problem: &Problem) -> String {
+pub(super) fn problem_text(problem: &Problem) -> String {
     match &problem.app {
         Some(app) => format!("{app}: {}", problem.message),
         None => problem.message.clone(),
