@@ -1,0 +1,1137 @@
+//! Parsing of the machine config, project files and repo-level `carte.toml`.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde::Deserialize;
+use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
+use thiserror::Error;
+
+use crate::duration;
+use crate::model::{
+    App, AppSettings, EnvProviderKind, EnvTemplate, Limits, MachineConfig, MemoryTarget, Policy,
+    Problem, ProcessConfig, ProcessOverride, Project, Readiness, Scheme, Scope, ShareConfig,
+};
+
+/// The repo-level config file name.
+pub const REPO_CONFIG: &str = "carte.toml";
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("{}: {source}", path.display())]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("{}{}: {message}", path.display(), location.as_deref().unwrap_or(""))]
+    Parse {
+        path: PathBuf,
+        /// `:line:column`, when known.
+        location: Option<String>,
+        message: String,
+    },
+    #[error("{}: {message}", path.display())]
+    Invalid { path: PathBuf, message: String },
+}
+
+impl ConfigError {
+    pub fn path(&self) -> &Path {
+        match self {
+            ConfigError::Io { path, .. }
+            | ConfigError::Parse { path, .. }
+            | ConfigError::Invalid { path, .. } => path,
+        }
+    }
+
+    fn parse(path: &Path, text: &str, err: toml::de::Error) -> Self {
+        let Some(span) = err.span() else {
+            return ConfigError::Parse {
+                path: path.to_path_buf(),
+                location: None,
+                message: err.message().to_string(),
+            };
+        };
+        let start = span.start.min(text.len());
+        let before = &text[..start];
+        let line_index = before.matches('\n').count();
+        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        let column = before[line_start..].chars().count() + 1;
+        let line = text.lines().nth(line_index).unwrap_or("").trim();
+        let table = text
+            .lines()
+            .take(line_index)
+            .map(str::trim)
+            .filter(|l| l.starts_with('['))
+            .last();
+        let mut message = err.message().trim_end().to_string();
+        if let Some(table) = table
+            && !line.starts_with('[')
+        {
+            message.push_str(&format!(" (in {table})"));
+        }
+        if !line.is_empty() {
+            message.push_str(&format!(" at `{line}`"));
+        }
+        ConfigError::Parse {
+            path: path.to_path_buf(),
+            location: Some(format!(":{}:{column}", line_index + 1)),
+            message,
+        }
+    }
+}
+
+fn read(path: &Path) -> Result<String, ConfigError> {
+    std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn from_toml<'a, T: Deserialize<'a>>(path: &Path, text: &'a str) -> Result<T, ConfigError> {
+    toml::from_str(text).map_err(|err| ConfigError::parse(path, text, err))
+}
+
+// Machine config
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawMachine {
+    tld: Option<String>,
+    http_port: Option<u16>,
+    https_port: Option<u16>,
+    dns_port: Option<u16>,
+    idle_timeout: Option<DurationValue>,
+    #[serde(default)]
+    limits: RawLimits,
+    share: Option<RawShare>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLimits {
+    memory_target: Option<MemoryTargetValue>,
+    instance_target: Option<u32>,
+    hard_ceiling: Option<u32>,
+    pty_reserve: Option<u32>,
+    log_buffer: Option<ByteSize>,
+    log_budget: Option<ByteSize>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawShare {
+    #[serde(default = "default_share_provider")]
+    provider: String,
+    domain: String,
+}
+
+fn default_share_provider() -> String {
+    "cloudflare".into()
+}
+
+/// Parses `config.toml`.
+pub fn parse_machine_config(path: &Path, text: &str) -> Result<MachineConfig, ConfigError> {
+    let raw: RawMachine = from_toml(path, text)?;
+    let defaults = MachineConfig::default();
+    let limit_defaults = Limits::default();
+    let to_usize = |size: Option<ByteSize>, default: usize| {
+        size.map_or(Ok(default), |ByteSize(n)| {
+            usize::try_from(n).map_err(|_| ConfigError::Invalid {
+                path: path.to_path_buf(),
+                message: format!("log size {n} is too large"),
+            })
+        })
+    };
+    Ok(MachineConfig {
+        tld: raw.tld.unwrap_or(defaults.tld),
+        http_port: raw.http_port.unwrap_or(defaults.http_port),
+        https_port: raw.https_port.unwrap_or(defaults.https_port),
+        dns_port: raw.dns_port.unwrap_or(defaults.dns_port),
+        idle_timeout: raw.idle_timeout.map_or(defaults.idle_timeout, |d| d.0),
+        limits: Limits {
+            memory_target: raw
+                .limits
+                .memory_target
+                .map_or(limit_defaults.memory_target, |m| m.0),
+            instance_target: raw.limits.instance_target,
+            hard_ceiling: raw
+                .limits
+                .hard_ceiling
+                .unwrap_or(limit_defaults.hard_ceiling),
+            pty_reserve: raw.limits.pty_reserve.unwrap_or(limit_defaults.pty_reserve),
+            log_buffer_bytes: to_usize(raw.limits.log_buffer, limit_defaults.log_buffer_bytes)?,
+            log_budget_bytes: to_usize(raw.limits.log_budget, limit_defaults.log_budget_bytes)?,
+        },
+        share: raw.share.map(|s| ShareConfig {
+            provider: s.provider,
+            domain: s.domain,
+        }),
+    })
+}
+
+/// Reads `config.toml`; a missing file means defaults.
+pub fn load_machine_config(path: &Path) -> Result<MachineConfig, ConfigError> {
+    if !path.exists() {
+        return Ok(MachineConfig::default());
+    }
+    parse_machine_config(path, &read(path)?)
+}
+
+// Project files
+
+/// A parsed project file, before its repos are discovered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectFile {
+    pub name: String,
+    pub path: PathBuf,
+    /// Paths or globs, unexpanded.
+    pub repos: Vec<String>,
+    pub strip_prefix: Option<String>,
+    pub env_provider: Option<EnvProviderKind>,
+    pub env: Vec<EnvTemplate>,
+    pub requires: Vec<String>,
+    pub scheme: Scheme,
+    pub idle_timeout: Option<Duration>,
+    /// `[apps.<full name>]` tables.
+    pub apps: BTreeMap<String, AppConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProject {
+    #[serde(default)]
+    repos: OneOrMany,
+    strip_prefix: Option<String>,
+    env_provider: Option<EnvProviderKind>,
+    #[serde(default)]
+    env: EnvTable,
+    #[serde(default)]
+    requires: Vec<String>,
+    #[serde(default)]
+    scheme: Scheme,
+    idle_timeout: Option<DurationValue>,
+    #[serde(default)]
+    apps: BTreeMap<String, AppConfig>,
+}
+
+/// Per-app settings as written in a project file's `[apps.X]` table or a repo's `carte.toml`.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppConfig {
+    /// Short-name override.
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "env_table")]
+    pub env: Vec<EnvTemplate>,
+    pub env_files: Option<Vec<String>>,
+    pub depends_on: Option<Vec<String>>,
+    pub aliases: Option<Vec<String>>,
+    pub subdomains: Option<bool>,
+    pub policy: Option<Policy>,
+    pub port: Option<u16>,
+    pub replace_processes: Option<bool>,
+    #[serde(default, deserialize_with = "process_table")]
+    pub processes: BTreeMap<String, ProcessOverride>,
+}
+
+impl AppConfig {
+    /// Merges `self` over `base` key by key: scalars and lists from `self` win,
+    /// env entries and processes are merged.
+    pub fn merged_over(self, base: AppConfig) -> AppConfig {
+        let mut processes = base.processes;
+        for (name, over) in self.processes {
+            let merged = match processes.remove(&name) {
+                Some(base) => merge_process(over, base),
+                None => over,
+            };
+            processes.insert(name, merged);
+        }
+        AppConfig {
+            name: self.name.or(base.name),
+            env: merge_env(base.env, self.env),
+            env_files: self.env_files.or(base.env_files),
+            depends_on: self.depends_on.or(base.depends_on),
+            aliases: self.aliases.or(base.aliases),
+            subdomains: self.subdomains.or(base.subdomains),
+            policy: self.policy.or(base.policy),
+            port: self.port.or(base.port),
+            replace_processes: self.replace_processes.or(base.replace_processes),
+            processes,
+        }
+    }
+
+    pub fn into_settings(self) -> AppSettings {
+        AppSettings {
+            env: self.env,
+            env_files: self.env_files.unwrap_or_default(),
+            depends_on: self.depends_on.unwrap_or_default(),
+            aliases: self.aliases.unwrap_or_default(),
+            subdomains: self.subdomains.unwrap_or(false),
+            policy: self.policy,
+            port: self.port,
+            processes: ProcessConfig {
+                replace: self.replace_processes.unwrap_or(false),
+                entries: self.processes,
+            },
+        }
+    }
+}
+
+fn merge_env(base: Vec<EnvTemplate>, over: Vec<EnvTemplate>) -> Vec<EnvTemplate> {
+    let mut merged = base;
+    for entry in over {
+        match merged.iter_mut().find(|e| e.key == entry.key) {
+            Some(existing) => existing.value = entry.value,
+            None => merged.push(entry),
+        }
+    }
+    merged
+}
+
+fn merge_process(over: ProcessOverride, base: ProcessOverride) -> ProcessOverride {
+    ProcessOverride {
+        command: over.command.or(base.command),
+        cwd: over.cwd.or(base.cwd),
+        env: merge_env(base.env, over.env),
+        http: over.http.or(base.http),
+        ready: over.ready.or(base.ready),
+        scope: over.scope.or(base.scope),
+        pty: over.pty.or(base.pty),
+        policy: over.policy.or(base.policy),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProcess {
+    command: Option<String>,
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    env: EnvTable,
+    http: Option<bool>,
+    ready: Option<ReadyValue>,
+    scope: Option<Scope>,
+    pty: Option<bool>,
+    policy: Option<Policy>,
+}
+
+fn process_table<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, ProcessOverride>, D::Error> {
+    let raw = BTreeMap::<String, RawProcess>::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|(name, p)| {
+            let ov = ProcessOverride {
+                command: p.command,
+                cwd: p.cwd,
+                env: p.env.0,
+                http: p.http,
+                ready: p.ready.map(|r| r.0),
+                scope: p.scope,
+                pty: p.pty,
+                policy: p.policy,
+            };
+            (name, ov)
+        })
+        .collect())
+}
+
+/// Parses a project file. The project's name is the file stem.
+pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError> {
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    check_label("project name", &name).map_err(|message| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        message,
+    })?;
+    let raw: RawProject = from_toml(path, text)?;
+    Ok(ProjectFile {
+        name,
+        path: path.to_path_buf(),
+        repos: raw.repos.0,
+        strip_prefix: raw.strip_prefix.filter(|p| !p.is_empty()),
+        env_provider: raw.env_provider,
+        env: raw.env.0,
+        requires: raw.requires,
+        scheme: raw.scheme,
+        idle_timeout: raw.idle_timeout.map(|d| d.0),
+        apps: raw.apps,
+    })
+}
+
+pub fn load_project_file(path: &Path) -> Result<ProjectFile, ConfigError> {
+    parse_project(path, &read(path)?)
+}
+
+/// Parses a repo's `carte.toml`, which has the shape of one `[apps.X]` table.
+pub fn parse_repo_config(path: &Path, text: &str) -> Result<AppConfig, ConfigError> {
+    from_toml(path, text)
+}
+
+/// Reads `carte.toml` from a checkout, if it has one.
+pub fn load_repo_config(checkout: &Path) -> Result<Option<AppConfig>, ConfigError> {
+    let path = checkout.join(REPO_CONFIG);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    parse_repo_config(&path, &read(&path)?).map(Some)
+}
+
+/// An app directory found by expanding a project's `repos`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoveredApp {
+    /// The directory name.
+    pub name: String,
+    pub path: PathBuf,
+    pub repo_config: Option<AppConfig>,
+}
+
+/// Builds a project from its file and discovered app directories, merging each
+/// app's `carte.toml` under the project file and validating names and references.
+/// Apps that fail validation are left out and reported.
+pub fn assemble_project(
+    file: ProjectFile,
+    discovered: Vec<DiscoveredApp>,
+) -> (Project, Vec<Problem>) {
+    let ProjectFile {
+        name: project_name,
+        path: config_path,
+        strip_prefix,
+        env_provider,
+        env,
+        requires,
+        scheme,
+        idle_timeout,
+        apps: mut app_tables,
+        repos: _,
+    } = file;
+    let mut problems = Vec::new();
+    let problem = |app: &str, message: String| Problem {
+        project: Some(project_name.clone()),
+        app: Some(app.to_string()),
+        message,
+    };
+
+    let mut candidates: Vec<(String, PathBuf, AppConfig)> = discovered
+        .into_iter()
+        .map(|d| {
+            let table = app_tables.remove(&d.name).unwrap_or_default();
+            let config = match d.repo_config {
+                Some(repo) => table.merged_over(repo),
+                None => table,
+            };
+            (d.name, d.path, config)
+        })
+        .collect();
+    for (name, table) in std::mem::take(&mut app_tables) {
+        if table.port.is_some() {
+            candidates.push((name, PathBuf::new(), table));
+        } else {
+            problems.push(problem(
+                &name,
+                format!("[apps.{name}] does not match any repo in the project"),
+            ));
+        }
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut apps: Vec<App> = Vec::new();
+    for (name, path, mut config) in candidates {
+        if apps.iter().any(|a| a.name == name) {
+            problems.push(problem(&name, format!("app {name:?} is found twice")));
+            continue;
+        }
+        let short = match config.name.take() {
+            Some(short) => short,
+            None => strip_prefix
+                .as_deref()
+                .and_then(|p| name.strip_prefix(p))
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&name)
+                .to_string(),
+        };
+        if let Err(message) = check_label("app name", &short) {
+            problems.push(problem(&name, message));
+            continue;
+        }
+        if let Some(other) = apps.iter().find(|a| a.short == short) {
+            problems.push(problem(
+                &name,
+                format!("app name {short:?} is already used by {}", other.name),
+            ));
+            continue;
+        }
+        apps.push(App {
+            name,
+            short,
+            path,
+            settings: config.into_settings(),
+        });
+    }
+
+    let names: Vec<(String, String)> = apps
+        .iter()
+        .map(|a| (a.name.clone(), a.short.clone()))
+        .collect();
+    let mut seen_aliases = BTreeSet::new();
+    for app in &mut apps {
+        let mut depends_on = Vec::new();
+        for dep in std::mem::take(&mut app.settings.depends_on) {
+            let target = names
+                .iter()
+                .find(|(n, _)| *n == dep)
+                .or_else(|| names.iter().find(|(_, s)| *s == dep));
+            match target {
+                Some((full, _)) if *full == app.name => {
+                    problems.push(problem(&app.name, "an app cannot depend on itself".into()));
+                }
+                Some((full, _)) => {
+                    if !depends_on.contains(full) {
+                        depends_on.push(full.clone());
+                    }
+                }
+                None => problems.push(problem(
+                    &app.name,
+                    format!("depends_on refers to unknown app {dep:?}"),
+                )),
+            }
+        }
+        app.settings.depends_on = depends_on;
+
+        let mut aliases = Vec::new();
+        for alias in std::mem::take(&mut app.settings.aliases) {
+            if let Err(message) = check_hostname(&alias) {
+                problems.push(problem(&app.name, format!("alias {alias:?}: {message}")));
+            } else if !seen_aliases.insert(alias.clone()) {
+                problems.push(problem(
+                    &app.name,
+                    format!("alias {alias:?} is used by more than one app"),
+                ));
+            } else {
+                aliases.push(alias);
+            }
+        }
+        app.settings.aliases = aliases;
+    }
+
+    let project = Project {
+        name: project_name,
+        config_path,
+        strip_prefix,
+        env_provider,
+        env,
+        requires,
+        scheme,
+        idle_timeout,
+        apps,
+    };
+    (project, problems)
+}
+
+/// Checks a name used as a DNS label that may start a public hostname label.
+fn check_label(kind: &str, name: &str) -> Result<(), String> {
+    if name.chars().count() < 3 {
+        return Err(format!("{kind} {name:?} must be at least three characters"));
+    }
+    check_dns_label(name).map_err(|m| format!("{kind} {name:?} {m}"))?;
+    if name.contains("--") {
+        return Err(format!("{kind} {name:?} must not contain \"--\""));
+    }
+    Ok(())
+}
+
+fn check_dns_label(label: &str) -> Result<(), String> {
+    if label.is_empty() {
+        return Err("must not be empty".into());
+    }
+    if label.len() > 63 {
+        return Err("must be at most 63 characters".into());
+    }
+    if !label
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("may only contain lowercase letters, digits and dashes".into());
+    }
+    if label.starts_with('-') || label.ends_with('-') {
+        return Err("must not start or end with a dash".into());
+    }
+    Ok(())
+}
+
+fn check_hostname(name: &str) -> Result<(), String> {
+    name.split('.').try_for_each(check_dns_label)
+}
+
+// Value types
+
+/// A duration string like `"15m"`.
+struct DurationValue(Duration);
+
+impl<'de> Deserialize<'de> for DurationValue {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        duration::parse(&s)
+            .map(DurationValue)
+            .map_err(de::Error::custom)
+    }
+}
+
+/// `"port"` or an HTTP path such as `"/up"`.
+struct ReadyValue(Readiness);
+
+impl<'de> Deserialize<'de> for ReadyValue {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        if s == "port" {
+            Ok(ReadyValue(Readiness::Port))
+        } else if s.starts_with('/') {
+            Ok(ReadyValue(Readiness::Http(s)))
+        } else {
+            Err(de::Error::custom(format!(
+                "invalid ready check {s:?}: use \"port\" or an HTTP path like \"/up\""
+            )))
+        }
+    }
+}
+
+/// A byte count: an integer, or a string like `"256MB"` (binary units).
+struct ByteSize(u64);
+
+impl ByteSize {
+    fn parse(s: &str) -> Option<u64> {
+        let s = s.trim();
+        let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+        let (digits, unit) = s.split_at(split);
+        let n: u64 = digits.parse().ok()?;
+        let exp = match unit.trim().to_ascii_lowercase().as_str() {
+            "" | "b" => 0,
+            "k" | "kb" | "kib" => 1,
+            "m" | "mb" | "mib" => 2,
+            "g" | "gb" | "gib" => 3,
+            "t" | "tb" | "tib" => 4,
+            _ => return None,
+        };
+        n.checked_mul(1024u64.pow(exp))
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = ByteSize;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a size like \"256MB\" or a number of bytes")
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<ByteSize, E> {
+                u64::try_from(v)
+                    .map(ByteSize)
+                    .map_err(|_| E::custom("size must not be negative"))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<ByteSize, E> {
+                Ok(ByteSize(v))
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<ByteSize, E> {
+                ByteSize::parse(v).map(ByteSize).ok_or_else(|| {
+                    E::custom(format!(
+                        "invalid size {v:?}: use a number with B, KB, MB, GB or TB"
+                    ))
+                })
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// `"50%"` of RAM, or a size like `"16GB"`.
+struct MemoryTargetValue(MemoryTarget);
+
+impl<'de> Deserialize<'de> for MemoryTargetValue {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = MemoryTargetValue;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a percentage of RAM like \"50%\" or a size like \"16GB\"")
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+                ByteSize::deserialize(de::value::I64Deserializer::<E>::new(v))
+                    .map(|b| MemoryTargetValue(MemoryTarget::Bytes(b.0)))
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if let Some(percent) = v.trim().strip_suffix('%') {
+                    return match percent.trim().parse::<u8>() {
+                        Ok(p) if (1..=100).contains(&p) => {
+                            Ok(MemoryTargetValue(MemoryTarget::PercentOfRam(p)))
+                        }
+                        _ => Err(E::custom(format!(
+                            "invalid memory target {v:?}: the percentage must be 1-100"
+                        ))),
+                    };
+                }
+                ByteSize::parse(v)
+                    .map(|b| MemoryTargetValue(MemoryTarget::Bytes(b)))
+                    .ok_or_else(|| {
+                        E::custom(format!(
+                            "invalid memory target {v:?}: use a percentage like \"50%\" or a size like \"16GB\""
+                        ))
+                    })
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// A string or a list of strings.
+#[derive(Default)]
+struct OneOrMany(Vec<String>);
+
+impl<'de> Deserialize<'de> for OneOrMany {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = OneOrMany;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a path or glob, or a list of them")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<OneOrMany, E> {
+                Ok(OneOrMany(vec![v.to_string()]))
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<OneOrMany, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element::<String>()? {
+                    items.push(item);
+                }
+                Ok(OneOrMany(items))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+/// An `[env]` table, in file order. Values may be strings, numbers or booleans.
+#[derive(Default)]
+struct EnvTable(Vec<EnvTemplate>);
+
+fn env_table<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<EnvTemplate>, D::Error> {
+    EnvTable::deserialize(d).map(|t| t.0)
+}
+
+impl<'de> Deserialize<'de> for EnvTable {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = EnvTable;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a table of environment variables")
+            }
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<EnvTable, A::Error> {
+                let mut entries: Vec<EnvTemplate> = Vec::new();
+                while let Some((key, EnvValue(value))) = map.next_entry::<String, EnvValue>()? {
+                    entries.retain(|e| e.key != key);
+                    entries.push(EnvTemplate { key, value });
+                }
+                Ok(EnvTable(entries))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
+struct EnvValue(String);
+
+impl<'de> Deserialize<'de> for EnvValue {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl Visitor<'_> for V {
+            type Value = EnvValue;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a string, number or boolean")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<EnvValue, E> {
+                Ok(EnvValue(v.to_string()))
+            }
+            fn visit_i64<E: de::Error>(self, v: i64) -> Result<EnvValue, E> {
+                Ok(EnvValue(v.to_string()))
+            }
+            fn visit_u64<E: de::Error>(self, v: u64) -> Result<EnvValue, E> {
+                Ok(EnvValue(v.to_string()))
+            }
+            fn visit_f64<E: de::Error>(self, v: f64) -> Result<EnvValue, E> {
+                Ok(EnvValue(v.to_string()))
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<EnvValue, E> {
+                Ok(EnvValue(v.to_string()))
+            }
+        }
+        d.deserialize_any(V)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(text: &str) -> Result<ProjectFile, ConfigError> {
+        parse_project(Path::new("/c/projects/make.toml"), text)
+    }
+
+    fn discovered(name: &str) -> DiscoveredApp {
+        DiscoveredApp {
+            name: name.into(),
+            path: PathBuf::from(format!("/work/{name}")),
+            repo_config: None,
+        }
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<EnvTemplate> {
+        pairs
+            .iter()
+            .map(|(k, v)| EnvTemplate {
+                key: k.to_string(),
+                value: v.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn machine_config_defaults_when_missing() {
+        let config = load_machine_config(Path::new("/nonexistent/config.toml")).unwrap();
+        assert_eq!(config, MachineConfig::default());
+    }
+
+    #[test]
+    fn parses_machine_config() {
+        let config = parse_machine_config(
+            Path::new("config.toml"),
+            r#"
+            tld = "localhost"
+            http_port = 8080
+            idle_timeout = "30m"
+
+            [limits]
+            memory_target = "16GB"
+            instance_target = 20
+            hard_ceiling = 40
+            pty_reserve = 32
+            log_buffer = "2MB"
+            log_budget = 1048576
+
+            [share]
+            domain = "dev.example.com"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.tld, "localhost");
+        assert_eq!(config.http_port, 8080);
+        assert_eq!(config.https_port, 443);
+        assert_eq!(config.idle_timeout, Duration::from_secs(1800));
+        assert_eq!(
+            config.limits,
+            Limits {
+                memory_target: MemoryTarget::Bytes(16 * 1024 * 1024 * 1024),
+                instance_target: Some(20),
+                hard_ceiling: 40,
+                pty_reserve: 32,
+                log_buffer_bytes: 2 * 1024 * 1024,
+                log_budget_bytes: 1048576,
+            }
+        );
+        assert_eq!(
+            config.share,
+            Some(ShareConfig {
+                provider: "cloudflare".into(),
+                domain: "dev.example.com".into()
+            })
+        );
+    }
+
+    #[test]
+    fn parses_memory_percentage() {
+        let config =
+            parse_machine_config(Path::new("c"), "[limits]\nmemory_target = \"40%\"").unwrap();
+        assert_eq!(config.limits.memory_target, MemoryTarget::PercentOfRam(40));
+        assert!(
+            parse_machine_config(Path::new("c"), "[limits]\nmemory_target = \"140%\"").is_err()
+        );
+        assert!(
+            parse_machine_config(Path::new("c"), "[limits]\nmemory_target = \"lots\"").is_err()
+        );
+    }
+
+    #[test]
+    fn machine_errors_point_at_file_and_key() {
+        let err = parse_machine_config(
+            Path::new("/c/config.toml"),
+            "tld = \"test\"\n[limits]\nmemmory_target = \"50%\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with("/c/config.toml:3:1: unknown field `memmory_target`"),
+            "{err}"
+        );
+        assert!(err.contains("(in [limits])"), "{err}");
+
+        let err = parse_machine_config(Path::new("/c/config.toml"), "idle_timeout = \"15\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("/c/config.toml:1:"), "{err}");
+        assert!(err.contains("invalid duration"), "{err}");
+    }
+
+    #[test]
+    fn parses_project_file() {
+        let file = project(
+            r#"
+            repos = "~/work/make-*"
+            strip_prefix = "make-"
+            env_provider = "mise"
+            requires = ["tcp://localhost:5432"]
+            scheme = "http"
+            idle_timeout = "1h"
+
+            [env]
+            "{{app.name | upper}}_URL" = "{{url:app}}"
+            DATABASE_URL = "postgres:///{{app.name}}_{{checkout}}"
+            A_NUMBER = 3
+            BEFORE = "z"
+
+            [apps.make-newsmail-api]
+            name = "api"
+            env_files = [".env"]
+            depends_on = ["make-billing"]
+            aliases = ["make-newsmail-api"]
+            subdomains = true
+            policy = "pinned"
+            replace_processes = true
+
+            [apps.make-newsmail-api.env]
+            NEWSMAIL_API_URL = "{{url:make-newsmail-api}}"
+
+            [apps.make-newsmail-api.processes.web]
+            command = "bin/rails s"
+            cwd = "backend"
+            http = true
+            ready = "/up"
+            scope = "instance"
+            pty = false
+            policy = "disabled"
+            env = { FOO = "bar" }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(file.name, "make");
+        assert_eq!(file.repos, vec!["~/work/make-*"]);
+        assert_eq!(file.strip_prefix.as_deref(), Some("make-"));
+        assert_eq!(file.env_provider, Some(EnvProviderKind::Mise));
+        assert_eq!(file.scheme, Scheme::Http);
+        assert_eq!(file.idle_timeout, Some(Duration::from_secs(3600)));
+        assert_eq!(
+            file.env,
+            env(&[
+                ("{{app.name | upper}}_URL", "{{url:app}}"),
+                ("DATABASE_URL", "postgres:///{{app.name}}_{{checkout}}"),
+                ("A_NUMBER", "3"),
+                ("BEFORE", "z"),
+            ])
+        );
+        let app = &file.apps["make-newsmail-api"];
+        assert_eq!(app.name.as_deref(), Some("api"));
+        assert_eq!(app.replace_processes, Some(true));
+        assert_eq!(app.policy, Some(Policy::Pinned));
+        let web = &app.processes["web"];
+        assert_eq!(web.ready, Some(Readiness::Http("/up".into())));
+        assert_eq!(web.cwd, Some(PathBuf::from("backend")));
+        assert_eq!(web.pty, Some(false));
+        assert_eq!(web.policy, Some(Policy::Disabled));
+        assert_eq!(web.env, env(&[("FOO", "bar")]));
+    }
+
+    #[test]
+    fn repos_accepts_a_list() {
+        let file = project("repos = [\"~/a\", \"/b/*\"]").unwrap();
+        assert_eq!(file.repos, vec!["~/a", "/b/*"]);
+    }
+
+    #[test]
+    fn project_errors_point_at_file_and_key() {
+        let err =
+            project("repos = \"x\"\n[apps.foo.processes.web]\ncommand = \"x\"\npty = \"yes\"\n")
+                .unwrap_err()
+                .to_string();
+        assert!(err.starts_with("/c/projects/make.toml:4:"), "{err}");
+        assert!(err.contains("[apps.foo.processes.web]"), "{err}");
+        assert!(err.contains("`pty = \"yes\"`"), "{err}");
+
+        let err = project("repos = \"x\"\nenv = \"mise\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(":2:"), "{err}");
+
+        let err = project("[apps.foo]\nport = 3000\nbogus = 1\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field `bogus`"), "{err}");
+
+        let err = project("[apps.foo.processes.web]\nready = \"tcp\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid ready check"), "{err}");
+    }
+
+    #[test]
+    fn rejects_bad_project_names() {
+        for name in ["ab", "Make", "a--b", "-abc", "with_underscore"] {
+            let path = PathBuf::from(format!("/c/projects/{name}.toml"));
+            assert!(
+                matches!(parse_project(&path, ""), Err(ConfigError::Invalid { .. })),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn project_file_wins_over_repo_config_key_by_key() {
+        let repo = parse_repo_config(
+            Path::new("carte.toml"),
+            r#"
+            env_files = [".env"]
+            subdomains = true
+            policy = "pinned"
+            [env]
+            A = "repo"
+            B = "repo"
+            [processes.web]
+            command = "bin/rails s"
+            ready = "/up"
+            [processes.worker]
+            command = "bin/jobs"
+            "#,
+        )
+        .unwrap();
+        let file = project(
+            r#"
+            [apps.app-one]
+            policy = "auto"
+            [apps.app-one.env]
+            B = "project"
+            C = "project"
+            [apps.app-one.processes.web]
+            pty = false
+            "#,
+        )
+        .unwrap();
+        let merged = file.apps["app-one"].clone().merged_over(repo);
+        assert_eq!(merged.policy, Some(Policy::Auto));
+        assert_eq!(merged.subdomains, Some(true));
+        assert_eq!(merged.env_files, Some(vec![".env".into()]));
+        assert_eq!(
+            merged.env,
+            env(&[("A", "repo"), ("B", "project"), ("C", "project")])
+        );
+        let web = &merged.processes["web"];
+        assert_eq!(web.command.as_deref(), Some("bin/rails s"));
+        assert_eq!(web.ready, Some(Readiness::Http("/up".into())));
+        assert_eq!(web.pty, Some(false));
+        assert!(merged.processes.contains_key("worker"));
+    }
+
+    #[test]
+    fn assembles_apps_with_short_names() {
+        let file = project(
+            r#"
+            strip_prefix = "make-"
+            [apps.make-billing]
+            name = "invoices"
+            depends_on = ["frontend", "make-billing", "make-nope"]
+            [apps.make-frontend]
+            depends_on = ["invoices", "make-billing"]
+            aliases = ["make-frontend", "Bad_Alias"]
+            [apps.legacy]
+            port = 3000
+            [apps.make-missing]
+            policy = "pinned"
+            "#,
+        )
+        .unwrap();
+        let (project, problems) = assemble_project(
+            file,
+            vec![
+                discovered("make-frontend"),
+                discovered("make-billing"),
+                discovered("make"),
+            ],
+        );
+        let shorts: Vec<_> = project
+            .apps
+            .iter()
+            .map(|a| (a.name.as_str(), a.short.as_str()))
+            .collect();
+        assert_eq!(
+            shorts,
+            vec![
+                ("legacy", "legacy"),
+                ("make", "make"),
+                ("make-billing", "invoices"),
+                ("make-frontend", "frontend"),
+            ]
+        );
+        assert!(project.app("make").unwrap().is_collapsed("make"));
+        assert_eq!(project.app("legacy").unwrap().settings.port, Some(3000));
+        assert_eq!(
+            project.app("make-frontend").unwrap().settings.depends_on,
+            vec!["make-billing"]
+        );
+        assert_eq!(
+            project.app("make-frontend").unwrap().settings.aliases,
+            vec!["make-frontend"]
+        );
+        assert_eq!(
+            project.app("make-billing").unwrap().settings.depends_on,
+            vec!["make-frontend"]
+        );
+        let messages: Vec<_> = problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(problems.len(), 4, "{messages:?}");
+        assert!(messages.iter().any(|m| m.contains("[apps.make-missing]")));
+        assert!(messages.iter().any(|m| m.contains("depend on itself")));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("unknown app \"make-nope\""))
+        );
+        assert!(messages.iter().any(|m| m.contains("Bad_Alias")));
+    }
+
+    #[test]
+    fn reports_invalid_and_duplicate_short_names() {
+        let file = project(
+            r#"
+            strip_prefix = "make-"
+            [apps.make-other]
+            name = "api"
+            "#,
+        )
+        .unwrap();
+        let (project, problems) = assemble_project(
+            file,
+            vec![
+                discovered("make-ab"),
+                discovered("make-api"),
+                discovered("make-other"),
+                discovered("make-x--y"),
+            ],
+        );
+        let names: Vec<_> = project.apps.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["make-api"]);
+        assert_eq!(problems.len(), 3);
+        assert_eq!(problems[0].app.as_deref(), Some("make-ab"));
+        assert!(problems[1].message.contains("already used by make-api"));
+        assert!(problems[2].message.contains("\"--\""));
+    }
+}
