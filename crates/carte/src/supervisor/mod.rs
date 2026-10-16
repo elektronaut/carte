@@ -6,6 +6,7 @@ pub mod groups;
 pub mod runner;
 mod snapshot;
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -209,6 +210,19 @@ impl Handle {
     fn send(&self, msg: Msg) {
         let _ = self.tx.send(msg);
     }
+}
+
+/// The environment apps build on: carte's own, minus carte's settings.
+pub fn base_env() -> BTreeMap<String, String> {
+    std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .filter(|(k, _)| !k.starts_with("CARTE_"))
+        .collect()
 }
 
 /// Starts the supervisor task.

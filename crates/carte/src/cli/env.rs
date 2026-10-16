@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
@@ -103,14 +103,7 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
         ca_cert: &ca_cert,
         pidfile: &pidfile,
     };
-    let daemon_env: BTreeMap<String, String> = std::env::vars_os()
-        .map(|(k, v)| {
-            (
-                k.to_string_lossy().into_owned(),
-                v.to_string_lossy().into_owned(),
-            )
-        })
-        .collect();
+    let daemon_env = crate::supervisor::base_env();
     let runner = SystemRunner::from_env();
     let env = core_env::build_env(&req, &daemon_env, &runner)?;
 
