@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{fixture, repo};
+use common::{fixture, git, repo};
 
 struct Daemon {
     _dir: tempfile::TempDir,
@@ -35,6 +35,7 @@ impl Daemon {
                 "web: FIXTURE_NAME=web FIXTURE_ENV=CARTE_URL exec {fixture}\nworker: FIXTURE_NAME=worker FIXTURE_LINES=2 exec {fixture}\n"
             ),
         );
+        std::fs::create_dir_all(root.join("work/acme-web/tmp")).unwrap();
         let config = root.join("config");
         std::fs::create_dir_all(config.join("projects")).unwrap();
         let (http_port, https_port, dns_port) = (free_port(), free_port(), free_port());
@@ -241,4 +242,90 @@ fn a_second_daemon_refuses_to_start() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("already running"), "{stderr}");
+}
+
+fn snapshot(daemon: &Daemon) -> carte_api::Snapshot {
+    serde_json::from_str(&stdout(&daemon.run(&["ls", "--json"]))).unwrap()
+}
+
+fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+    let started = Instant::now();
+    while !check() {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "timed out: {what}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn web_pid(daemon: &Daemon) -> Option<u32> {
+    snapshot(daemon).projects[0].stacks[0].instances[0]
+        .processes
+        .iter()
+        .find(|p| p.name == "web" && p.state == carte_api::ProcessState::Running)
+        .and_then(|p| p.pid)
+}
+
+#[test]
+fn touching_restart_txt_restarts_the_instance() {
+    let daemon = Daemon::start();
+    assert!(
+        daemon
+            .request("web.acme.test", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+    let before = web_pid(&daemon).unwrap();
+    std::fs::write(daemon.root.join("work/acme-web/tmp/restart.txt"), "").unwrap();
+    eventually("a new web process", || {
+        web_pid(&daemon).is_some_and(|pid| pid != before)
+    });
+}
+
+#[test]
+fn new_worktrees_become_stacks() {
+    let daemon = Daemon::start();
+    git(
+        &daemon.root.join("work/acme-web"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature-x",
+            "../acme-web-feature-x",
+        ],
+    );
+    eventually("the feature-x stack", || {
+        snapshot(&daemon).projects[0]
+            .stacks
+            .iter()
+            .any(|s| s.name == "feature-x")
+    });
+    let response = daemon.request("web.feature-x.acme.test", "/");
+    assert!(
+        response.contains("https://web.feature-x.acme.test"),
+        "{response}"
+    );
+}
+
+#[test]
+fn config_changes_are_picked_up() {
+    let daemon = Daemon::start();
+    repo(
+        &daemon.root.join("other/shop"),
+        &format!("web: exec {}\n", fixture().display()),
+    );
+    std::fs::write(
+        daemon.root.join("config/projects/shop.toml"),
+        format!(
+            "repos = \"{}/other/shop\"\nenv_provider = \"none\"\n",
+            daemon.root.display()
+        ),
+    )
+    .unwrap();
+    eventually("the shop project", || {
+        snapshot(&daemon).projects.iter().any(|p| p.name == "shop")
+    });
+    assert!(daemon.request("shop.test", "/").starts_with("HTTP/1.1 200"));
 }
