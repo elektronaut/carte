@@ -400,8 +400,7 @@ fn http_status_line(addr: SocketAddr, host: &str) -> std::io::Result<String> {
 /// What to do when the daemon didn't come up behind launchd's sockets.
 pub fn fallback(env: &SetupEnv) -> String {
     format!(
-        "carte isn't answering as it should.\n\
-         - `launchctl print gui/{uid}/{LABEL}` shows whether launchd started it and why it stopped; \
+        "- `launchctl print gui/{uid}/{LABEL}` shows whether launchd started carte and why it stopped; \
          its log is {log}.\n\
          - If launchd didn't hand over ports {http} and {https} on 127.0.0.1, carte can still run on \
          high ports: set http_port = 8080 and https_port = 8443 in {config} and run `carte setup` \

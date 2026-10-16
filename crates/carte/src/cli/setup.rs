@@ -89,7 +89,13 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
         println!("Nothing changed.");
         return Ok(ExitCode::SUCCESS);
     }
-    setup::execute(&plan.steps, &env)?;
+    if let Err(err) = setup::execute(&plan.steps, &env) {
+        eprintln!("carte: {err:#}");
+        if !args.uninstall {
+            eprintln!("\n{}", check::fallback(&env));
+        }
+        return Ok(ExitCode::FAILURE);
+    }
     if args.uninstall {
         println!("\ncarte is uninstalled.");
     } else {
