@@ -323,6 +323,9 @@ impl App {
     }
 
     fn control(&mut self, control: Control) -> Option<Command> {
+        if control == Control::Save {
+            return self.save();
+        }
         let node = self.selected_node()?;
         let snapshot = self.snapshot.as_ref()?;
         let action = match control {
@@ -335,6 +338,7 @@ impl App {
                 Action::Enable { save: false }
             }
             Control::ToggleDisable => Action::Disable { save: false },
+            Control::Save => unreachable!("handled by save"),
         };
         let verb = match action {
             Action::Up => "starting",
@@ -351,6 +355,44 @@ impl App {
                 action,
             },
             verb,
+        })
+    }
+
+    /// Writes the temporary pin or disable of the selected process, or of the one
+    /// process below the selection that has one, to the project file.
+    fn save(&mut self) -> Option<Command> {
+        let node = self.selected_node()?;
+        let snapshot = self.snapshot.as_ref()?;
+        let mut candidates = Vec::new();
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if matches!(n.id(), NodeId::Process { .. }) {
+                let temporary = Some(tree::Source::Temporary);
+                if n.status.pinned == temporary {
+                    candidates.push((n.id().clone(), Action::Pin { save: true }));
+                } else if n.status.disabled == temporary {
+                    candidates.push((n.id().clone(), Action::Disable { save: true }));
+                }
+            }
+            stack.extend(&n.children);
+        }
+        let request = match candidates.as_slice() {
+            [(id, action)] => ControlRequest {
+                target: target::address(snapshot, id),
+                action: *action,
+            },
+            [] => {
+                self.inform("Nothing temporary to save here");
+                return None;
+            }
+            _ => {
+                self.inform("Several temporary changes here; select the process to save");
+                return None;
+            }
+        };
+        Some(Command::Control {
+            request,
+            verb: "saved",
         })
     }
 
@@ -523,6 +565,30 @@ mod tests {
         assert_eq!(request.target.address, "nova-billing@main");
         assert_eq!(request.action, Action::Restart);
         assert_eq!(*verb, "restarting");
+    }
+
+    #[test]
+    fn saving_writes_the_temporary_pin() {
+        let (mut app, now) = connected();
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        assert!(press(&mut app, now, KeyCode::Char('S')).is_empty());
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("Nothing temporary to save here")
+        );
+
+        let mut snapshot = sample();
+        let worker = &mut snapshot.projects[0].stacks[0].instances[0].processes[1];
+        worker.policy = carte_api::Policy::Pinned;
+        worker.temporary = true;
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let commands = press(&mut app, now, KeyCode::Char('S'));
+        let [Command::Control { request, .. }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(request.target.address, "nova-billing@main/worker");
+        assert_eq!(request.action, Action::Pin { save: true });
     }
 
     #[test]

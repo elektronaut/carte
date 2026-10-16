@@ -30,6 +30,8 @@ pub enum Control {
     Restart,
     TogglePin,
     ToggleDisable,
+    /// Writes a temporary pin or disable to the project file.
+    Save,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +86,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("r", "restart"),
             ("p", "pin or unpin"),
             ("d", "disable or enable"),
+            ("S", "save a temporary pin or disable"),
             ("o", "open in the browser"),
         ],
     ),
@@ -143,6 +146,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('r') => Some(Intent::Control(Control::Restart)),
         KeyCode::Char('p') => Some(Intent::Control(Control::TogglePin)),
         KeyCode::Char('d') => Some(Intent::Control(Control::ToggleDisable)),
+        KeyCode::Char('S') => Some(Intent::Control(Control::Save)),
         KeyCode::Char('o') => Some(Intent::Open),
         KeyCode::Char('I') => Some(Intent::StopIdle),
         KeyCode::Char('X') => Some(Intent::StopAll),
