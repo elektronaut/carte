@@ -1,10 +1,12 @@
 //! The TUI's state and how events change it. Nothing here touches the terminal or
 //! the socket: `update` returns the commands for the IO side to carry out.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use carte_api::{
-    Action, ControlRequest, ControlResponse, InstanceStatus, LogLine, LogsRequest, Snapshot,
+    Action, ControlRequest, ControlResponse, Credentials, InstanceStatus, LogLine, LogsRequest,
+    ShareRequest, ShareResponse, Snapshot, UnshareRequest,
 };
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -34,6 +36,8 @@ pub enum Event {
         verb: &'static str,
         result: Result<ControlResponse, String>,
     },
+    Shared(Result<ShareResponse, String>),
+    Unshared(Result<Vec<String>, String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +54,8 @@ pub enum Command {
         request: LogsRequest,
     },
     StopLogs,
+    Share(ShareRequest),
+    Unshare(UnshareRequest),
     Open(String),
     MouseCapture(bool),
 }
@@ -82,6 +88,9 @@ pub struct App {
     pub mode: Mode,
     pub logs: Logs,
     pub notice: Option<Notice>,
+    /// Passwords of the shares made here, by project and stack: the daemon only hands
+    /// them out when a share is made.
+    pub credentials: BTreeMap<(String, String), Credentials>,
     /// Rows the tree showed last time it was drawn.
     pub tree_height: usize,
     /// Where the tree and the logs were drawn, and the tree's first visible row, for
@@ -109,6 +118,7 @@ impl App {
             mode: Mode::Normal,
             logs: Logs::default(),
             notice: None,
+            credentials: BTreeMap::new(),
             tree_height: 0,
             tree_area: Rect::default(),
             tree_offset: 0,
@@ -131,6 +141,12 @@ impl App {
             Event::Mouse(_) | Event::Tick | Event::Redraw => {}
             Event::Snapshot(snapshot) => {
                 self.connection = Connection::Connected;
+                self.credentials.retain(|(project, stack), _| {
+                    snapshot
+                        .shares
+                        .iter()
+                        .any(|s| s.project == *project && s.stack == *stack)
+                });
                 self.snapshot = Some(*snapshot);
                 self.snapshot_at = now;
                 self.rebuild();
@@ -143,6 +159,11 @@ impl App {
             Event::Log { generation, line } => self.logs.push(generation, line),
             Event::LogsEnded { generation, error } => self.logs.end(generation, error),
             Event::ControlDone { verb, result } => self.control_done(verb, result),
+            Event::Shared(result) => self.shared(result),
+            Event::Unshared(Ok(apps)) => {
+                self.inform(&format!("no longer shared: {}", apps.join(", ")))
+            }
+            Event::Unshared(Err(message)) => self.warn(&message),
         }
         if let Some(notice) = &self.notice {
             let lasts = Duration::from_secs(if notice.error { 10 } else { 5 });
@@ -330,6 +351,8 @@ impl App {
                 self.mode = Mode::Normal;
             }
             (Intent::Open, _) => commands.extend(self.open()),
+            (Intent::OpenPublic, _) => commands.extend(self.open_public()),
+            (Intent::Share { auth }, _) => commands.extend(self.share(auth)),
         }
     }
 
@@ -480,6 +503,76 @@ impl App {
         }
     }
 
+    /// The instance under the selection, for an instance or one of its processes.
+    fn selected_instance(&self) -> Option<(NodeId, &InstanceStatus)> {
+        let id = match self.selected_node()?.id() {
+            id @ NodeId::Process { .. } => id.parent()?,
+            id => id.clone(),
+        };
+        let instance = self.instance(&id)?;
+        Some((id, instance))
+    }
+
+    fn open_public(&mut self) -> Option<Command> {
+        match self.selected_instance() {
+            Some((_, instance)) => match instance.public_url.clone() {
+                Some(url) => Some(Command::Open(url)),
+                None => {
+                    self.warn("not shared; w shares it");
+                    None
+                }
+            },
+            None => {
+                self.warn("select an app to open");
+                None
+            }
+        }
+    }
+
+    /// Shares the selected app, or ends its stack's share. With `auth` it shares, or
+    /// adds a password to the share.
+    fn share(&mut self, auth: bool) -> Option<Command> {
+        let snapshot = self.snapshot.as_ref()?;
+        let Some((id, instance)) = self.selected_instance() else {
+            self.warn("select an app to share");
+            return None;
+        };
+        let target = target::address(snapshot, &id);
+        Some(if instance.public_url.is_some() && !auth {
+            Command::Unshare(UnshareRequest { target })
+        } else {
+            Command::Share(ShareRequest {
+                target,
+                apps: Vec::new(),
+                ttl_secs: None,
+                auth,
+                pin: false,
+            })
+        })
+    }
+
+    fn shared(&mut self, result: Result<ShareResponse, String>) {
+        let response = match result {
+            Ok(response) => response,
+            Err(message) => return self.warn(&message),
+        };
+        let share = &response.share;
+        let urls: Vec<&str> = share.apps.iter().map(|a| a.url.as_str()).collect();
+        let mut parts = vec![format!("shared at {}", urls.join(", "))];
+        if let Some(credentials) = &response.credentials {
+            parts.push(format!(
+                "user {}, password {}",
+                credentials.user, credentials.password
+            ));
+            self.credentials.insert(
+                (share.project.clone(), share.stack.clone()),
+                credentials.clone(),
+            );
+        }
+        parts.extend(response.messages);
+        self.inform(&parts.join("; "));
+    }
+
     fn inform(&mut self, text: &str) {
         self.notice = Some(Notice {
             text: text.to_string(),
@@ -563,7 +656,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
     use super::*;
-    use crate::tui::fixtures::sample;
+    use crate::tui::fixtures::{sample, shared_sample};
 
     fn connected() -> (App, Instant) {
         let now = Instant::now();
@@ -699,6 +792,64 @@ mod tests {
         assert_ne!(app.rows.len(), rows, "clicking the selected row folds it");
         app.update(click(5, 0), now);
         assert_eq!(app.cursor, 2, "the border and header aren't rows");
+    }
+
+    #[test]
+    fn sharing_toggles_the_selected_app_and_keeps_its_password() {
+        let (mut app, now) = connected();
+        assert!(press(&mut app, now, KeyCode::Char('w')).is_empty());
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("select an app to share")
+        );
+
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        let commands = press(&mut app, now, KeyCode::Char('W'));
+        let [Command::Share(request)] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(request.target.address, "nova-billing@main");
+        assert!(request.auth);
+
+        let snapshot = shared_sample();
+        app.update(
+            Event::Shared(Ok(ShareResponse {
+                share: snapshot.shares[0].clone(),
+                credentials: Some(Credentials {
+                    user: "carte".into(),
+                    password: "s3cret".into(),
+                }),
+                messages: Vec::new(),
+            })),
+            now,
+        );
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some(
+                "shared at https://nova-billing--main--nova.demo.dev; user carte, password s3cret"
+            )
+        );
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        assert_eq!(app.credentials.len(), 1);
+
+        let commands = press(&mut app, now, KeyCode::Char('w'));
+        let [Command::Unshare(request)] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(request.target.address, "nova-billing@main");
+        assert_eq!(
+            press(&mut app, now, KeyCode::Char('O')),
+            [Command::Open(
+                "https://nova-billing--main--nova.demo.dev".into()
+            )]
+        );
+
+        app.update(Event::Snapshot(Box::new(sample())), now);
+        assert!(
+            app.credentials.is_empty(),
+            "an ended share forgets its password"
+        );
     }
 
     #[test]
