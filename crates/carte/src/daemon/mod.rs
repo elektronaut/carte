@@ -3,6 +3,7 @@
 mod api;
 mod launchd;
 mod router;
+pub mod tunnel;
 pub mod watch;
 
 use std::net::{Ipv4Addr, SocketAddr};
@@ -107,10 +108,28 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     )
     .await
     .with_context(|| bind_hint(machine.https_port))?;
+    let mut share_listener = Vec::new();
+    if let Some(share) = &machine.share {
+        let listener = proxy
+            .bind(
+                loopback(share.port),
+                ListenerOptions::share(share.domain.clone()),
+            )
+            .await
+            .with_context(|| format!("binding the share listener on {}", loopback(share.port)))?;
+        share_listener.push(listener);
+        tokio::spawn(tunnel::run(
+            share.clone(),
+            supervisor.clone(),
+            Arc::new(Spawner::current()?),
+            paths.state_dir.clone(),
+        ));
+    }
     let shutdown = CancellationToken::new();
     let proxy_tasks: Vec<_> = http
         .into_iter()
         .chain(https)
+        .chain(share_listener)
         .map(|listener| tokio::spawn(listener.serve(shutdown.clone())))
         .collect();
 

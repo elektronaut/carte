@@ -13,6 +13,7 @@ struct Daemon {
     root: PathBuf,
     http_port: u16,
     https_port: u16,
+    share_port: Option<u16>,
     child: Option<Child>,
 }
 
@@ -29,16 +30,33 @@ impl Daemon {
         Self::start_with(false)
     }
 
+    /// With a `[share]` section whose provider is `none`, so no real tunnel runs.
+    fn start_sharing() -> Self {
+        let share_port = free_port();
+        let mut daemon = Self::start_configured(
+            false,
+            &format!(
+                "\n[share]\nprovider = \"none\"\ndomain = \"share.example\"\nport = {share_port}\n"
+            ),
+        );
+        daemon.share_port = Some(share_port);
+        daemon
+    }
+
     /// With `linked_config`, the config directory is reached through a symlink, like
     /// a config under `/tmp` on macOS.
     fn start_with(linked_config: bool) -> Self {
+        Self::start_configured(linked_config, "")
+    }
+
+    fn start_configured(linked_config: bool, extra_config: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let fixture = fixture().display().to_string();
         repo(
             &root.join("work/acme-web"),
             &format!(
-                "web: FIXTURE_NAME=web FIXTURE_ENV=CARTE_URL exec {fixture}\nworker: FIXTURE_NAME=worker FIXTURE_LINES=2 exec {fixture}\n"
+                "web: FIXTURE_NAME=web FIXTURE_ENV=CARTE_URL,CARTE_PUBLIC_URL exec {fixture}\nworker: FIXTURE_NAME=worker FIXTURE_LINES=2 exec {fixture}\n"
             ),
         );
         std::fs::create_dir_all(root.join("work/acme-web/tmp")).unwrap();
@@ -53,7 +71,7 @@ impl Daemon {
         std::fs::write(
             config.join("config.toml"),
             format!(
-                "tld = \"test\"\nhttp_port = {http_port}\nhttps_port = {https_port}\ndns_port = {dns_port}\n"
+                "tld = \"test\"\nhttp_port = {http_port}\nhttps_port = {https_port}\ndns_port = {dns_port}\n{extra_config}"
             ),
         )
         .unwrap();
@@ -70,6 +88,7 @@ impl Daemon {
             root,
             http_port,
             https_port,
+            share_port: None,
             child: None,
         };
         let child = daemon
@@ -379,4 +398,101 @@ fn config_changes_are_seen_through_a_symlinked_config_dir() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+impl Daemon {
+    /// A request as the tunnel would send it to the share listener.
+    fn public_request(&self, host: &str, auth: Option<&str>) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.share_port.unwrap())).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let auth = auth
+            .map(|a| format!("Authorization: Basic {a}\r\n"))
+            .unwrap_or_default();
+        write!(
+            stream,
+            "GET / HTTP/1.1\r\nHost: {host}\r\n{auth}Connection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    }
+}
+
+#[test]
+fn shares_reach_only_shared_apps_and_carry_the_public_url() {
+    let daemon = Daemon::start_sharing();
+    let unshared = daemon.public_request("web--acme.share.example", None);
+    assert!(unshared.starts_with("HTTP/1.1 404"), "{unshared}");
+
+    let out = stdout(&daemon.run(&["share", "web"]));
+    assert!(out.contains("https://web--acme.share.example"), "{out}");
+    let shared = daemon.public_request("web--acme.share.example", None);
+    assert!(shared.starts_with("HTTP/1.1 200"), "{shared}");
+    assert!(
+        shared.contains("\"CARTE_PUBLIC_URL\":\"https://web--acme.share.example\""),
+        "{shared}"
+    );
+    let ls = stdout(&daemon.run(&["ls"]));
+    assert!(
+        ls.contains("public: acme-web@main  https://web--acme.share.example"),
+        "{ls}"
+    );
+    let snapshot = snapshot(&daemon);
+    assert_eq!(snapshot.shares[0].requests.len(), 1);
+    assert_eq!(
+        snapshot.projects[0].stacks[0].instances[0]
+            .public_url
+            .as_deref(),
+        Some("https://web--acme.share.example")
+    );
+
+    daemon.run(&["unshare", "web"]);
+    let after = daemon.public_request("web--acme.share.example", None);
+    assert!(after.starts_with("HTTP/1.1 404"), "{after}");
+    assert!(
+        daemon
+            .request("web.acme.test", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+}
+
+#[test]
+fn password_protected_shares_ask_for_credentials() {
+    use base64::Engine;
+    let daemon = Daemon::start_sharing();
+    let json = stdout(&daemon.run(&["share", "web", "--auth", "--json"]));
+    let response: carte_api::ShareResponse = serde_json::from_str(&json).unwrap();
+    let credentials = response.credentials.unwrap();
+
+    let refused = daemon.public_request("web--acme.share.example", None);
+    assert!(refused.starts_with("HTTP/1.1 401"), "{refused}");
+    assert!(
+        refused.contains("www-authenticate: Basic realm=\"carte\""),
+        "{refused}"
+    );
+    let wrong = base64::engine::general_purpose::STANDARD.encode("carte:nope");
+    assert!(
+        daemon
+            .public_request("web--acme.share.example", Some(&wrong))
+            .starts_with("HTTP/1.1 401")
+    );
+
+    let right = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:{}", credentials.user, credentials.password));
+    let allowed = daemon.public_request("web--acme.share.example", Some(&right));
+    assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
+    let requests = &snapshot(&daemon).shares[0].requests;
+    assert_eq!(requests.iter().filter(|r| r.refused).count(), 2);
+}
+
+#[test]
+fn sharing_without_a_share_section_explains_itself() {
+    let daemon = Daemon::start();
+    let output = daemon.command(&["share", "web"]).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("sharing isn't set up"), "{stderr}");
 }

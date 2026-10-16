@@ -8,7 +8,10 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use carte_api::{ControlRequest, ErrorBody, LogsRequest, Problem, StopAllRequest, paths};
+use carte_api::{
+    ControlRequest, ErrorBody, LogsRequest, Problem, ShareRequest, StopAllRequest, UnshareRequest,
+    paths,
+};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -31,6 +34,8 @@ pub fn router(api: Api) -> Router {
         .route(paths::LOGS, post(logs))
         .route(paths::RELOAD, post(reload))
         .route(paths::ENV, get(daemon_env))
+        .route(paths::SHARE, post(share))
+        .route(paths::UNSHARE, post(unshare))
         .with_state(api)
 }
 
@@ -107,6 +112,20 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
         }
     });
     stream(rx)
+}
+
+async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Response {
+    match api.supervisor.share(request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
+    }
+}
+
+async fn unshare(State(api): State<Api>, Json(request): Json<UnshareRequest>) -> Response {
+    match api.supervisor.unshare(request.target).await {
+        Ok(apps) => Json(apps).into_response(),
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
+    }
 }
 
 async fn daemon_env() -> Response {
