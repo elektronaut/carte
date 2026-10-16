@@ -545,7 +545,7 @@ fn run_step(step: &Step, env: &SetupEnv) -> anyhow::Result<()> {
             let report = check::verify(env);
             print!("{report}");
             if !report.ok() {
-                bail!("{}", check::fallback(env));
+                bail!("carte isn't answering as it should");
             }
         }
     }
