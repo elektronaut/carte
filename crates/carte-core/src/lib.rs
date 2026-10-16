@@ -6,5 +6,9 @@ pub mod duration;
 pub mod env;
 pub mod lifecycle;
 pub mod model;
+pub mod naming;
 pub mod slug;
 pub mod template;
+
+#[cfg(test)]
+mod test_support;
