@@ -25,6 +25,11 @@ pub struct RouteRequest<'a> {
     /// The request came in over TLS.
     pub tls: bool,
     pub kind: ListenerKind,
+    pub method: &'a http::Method,
+    /// The path and query.
+    pub path: &'a str,
+    /// The `Authorization` header, for routers that check credentials themselves.
+    pub authorization: Option<&'a str>,
 }
 
 pub enum Route {
