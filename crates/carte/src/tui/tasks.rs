@@ -105,6 +105,7 @@ impl Tasks {
                 });
             }
             Command::MouseCapture(on) => set_mouse_capture(on),
+            Command::Copy(text) => copy(&text),
             Command::Open(url) => {
                 let opener = if cfg!(target_os = "macos") {
                     "open"
@@ -179,6 +180,8 @@ fn read_terminal(tx: UnboundedSender<Event>) {
                     MouseEventKind::ScrollUp
                         | MouseEventKind::ScrollDown
                         | MouseEventKind::Down(MouseButton::Left)
+                        | MouseEventKind::Drag(MouseButton::Left)
+                        | MouseEventKind::Up(MouseButton::Left)
                 ) =>
             {
                 Event::Mouse(mouse)
@@ -190,6 +193,34 @@ fn read_terminal(tx: UnboundedSender<Event>) {
             return;
         }
     }
+}
+
+/// Puts text on the clipboard: `pbcopy` on this Mac, or OSC 52 for the terminal to
+/// copy, which also reaches the local clipboard over SSH.
+fn copy(text: &str) {
+    use std::io::Write;
+    let remote = std::env::var_os("SSH_CONNECTION").is_some();
+    if !remote && cfg!(target_os = "macos") {
+        let copied = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                child
+                    .stdin
+                    .take()
+                    .expect("piped stdin")
+                    .write_all(text.as_bytes())?;
+                child.wait()
+            });
+        if copied.is_ok_and(|status| status.success()) {
+            return;
+        }
+    }
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]52;c;{encoded}\x07");
+    let _ = out.flush();
 }
 
 pub fn set_mouse_capture(on: bool) {
