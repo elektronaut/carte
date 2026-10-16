@@ -1,6 +1,7 @@
 //! The daemon: supervisor, proxy, DNS and the API socket, until a signal stops it.
 
 mod api;
+mod launchd;
 mod router;
 pub mod watch;
 
@@ -89,20 +90,28 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
             paths.machine_config().display()
         )
     };
-    let http = proxy
-        .bind(loopback(machine.http_port), ListenerOptions::local())
-        .await
-        .with_context(|| bind_hint(machine.http_port))?;
-    let https = proxy
-        .bind(
-            loopback(machine.https_port),
-            ListenerOptions::local().tls(tls_config),
-        )
-        .await
-        .with_context(|| bind_hint(machine.https_port))?;
+    let http = launchd::proxy_listeners(
+        &proxy,
+        "http",
+        loopback(machine.http_port),
+        ListenerOptions::local(),
+    )
+    .await
+    .with_context(|| bind_hint(machine.http_port))?;
+    let https = launchd::proxy_listeners(
+        &proxy,
+        "https",
+        loopback(machine.https_port),
+        ListenerOptions::local().tls(tls_config),
+    )
+    .await
+    .with_context(|| bind_hint(machine.https_port))?;
     let shutdown = CancellationToken::new();
-    let http_task = tokio::spawn(http.serve(shutdown.clone()));
-    let https_task = tokio::spawn(https.serve(shutdown.clone()));
+    let proxy_tasks: Vec<_> = http
+        .into_iter()
+        .chain(https)
+        .map(|listener| tokio::spawn(listener.serve(shutdown.clone())))
+        .collect();
 
     let listener =
         UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
@@ -159,8 +168,9 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         warn!("some processes didn't stop in time");
     }
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
-        let _ = http_task.await;
-        let _ = https_task.await;
+        for task in proxy_tasks {
+            let _ = task.await;
+        }
         let _ = api_task.await;
     })
     .await;
