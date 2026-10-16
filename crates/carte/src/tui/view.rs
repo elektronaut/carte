@@ -741,3 +741,239 @@ fn render_confirm(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use carte_api::{Hold, InstanceState, LogLine, ProcessState};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+    use crate::tui::app::{Command, Event};
+    use crate::tui::fixtures::{process, sample};
+
+    fn draw(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let line: String = (0..width).map(|x| buffer[(x, y)].symbol()).collect();
+                line.trim_end().to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn press(app: &mut App, now: Instant, code: KeyCode) -> Vec<Command> {
+        app.update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), now)
+    }
+
+    fn busy_app() -> App {
+        let mut snapshot = sample();
+        snapshot.running_instances = 2;
+        snapshot.problems.push(Problem {
+            project: Some("nova".into()),
+            app: Some("nova-frontend".into()),
+            message: "branch slug \"billing\" names an app".into(),
+        });
+        let nova = &mut snapshot.projects[0];
+        let billing = &mut nova.stacks[0].instances[0];
+        billing.processes[1].policy = Policy::Pinned;
+        billing.processes[1].temporary = true;
+        billing.holds = vec![Hold::Pinned];
+        billing.memory_bytes = 412 * 1024 * 1024;
+        billing.cpu_percent = 3.2;
+        let frontend = &mut nova.stacks[0].instances[1];
+        frontend.state = InstanceState::Crashed;
+        frontend.last_error = Some("web exited with code 1 before it was ready".into());
+        frontend.processes = vec![process(
+            "web",
+            ProcessState::Exited {
+                code: Some(1),
+                signal: None,
+            },
+        )];
+        let feature = &mut nova.stacks[1].instances[1];
+        feature.state = InstanceState::Ready;
+        feature.idle_in_secs = Some(840);
+        feature.processes = vec![process("web", ProcessState::Running)];
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        app
+    }
+
+    fn log(app: &mut App, generation: u64, process: &str, text: &str) {
+        app.update(
+            Event::Log {
+                generation,
+                line: LogLine {
+                    app: "nova-billing".into(),
+                    stack: "main".into(),
+                    process: process.into(),
+                    at_ms: 0,
+                    text: text.into(),
+                },
+            },
+            app.now,
+        );
+    }
+
+    #[test]
+    fn renders_the_tree_details_and_merged_logs() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
+        let generation = app.logs.generation;
+        log(
+            &mut app,
+            generation,
+            "web",
+            "Puma starting in single mode...",
+        );
+        log(
+            &mut app,
+            generation,
+            "worker",
+            "Started worker with 5 threads",
+        );
+        log(&mut app, generation, "web", "GET /up 200 in 2ms");
+        let screen = draw(&mut app, 120, 18);
+        assert_eq!(
+            screen,
+            "\
+╭ carte · 2 running · 1 problem (!) ─────────────────╮╭ nova-billing@main ─────────────────────────────────────────────╮
+│                                         CPU   MEM  ││● running · https://nova-billing.test                           │
+│▾ ✖ nova !              2/4                 3%  412M││checkout main · /work/nova-billing                              │
+│  ▾ ✖ main              1/2                 3%  412M││worker pinned until the daemon restarts                         │
+│    ▾ ● billing pin*    ready               3%  412M│╰────────────────────────────────────────────────────────────────╯
+│        ● web           running             0%    0B│╭ logs following ────────────────────────────────────────────────╮
+│        ● worker pin*   running             0%    0B││web    Puma starting in single mode...                          │
+│      ✖ frontend !      crashed                     ││worker Started worker with 5 threads                            │
+│  ▾ ● feature-x         1/2                 0%    0B││web    GET /up 200 in 2ms                                       │
+│      ○ billing main                                ││                                                                │
+│      ● frontend !      idle in 14m         0%    0B││                                                                │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
+╰────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────╯
+
+ ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a running only  tab logs"
+        );
+    }
+
+    #[test]
+    fn renders_a_crash_and_its_problem() {
+        let mut app = busy_app();
+        let now = app.now;
+        for _ in 0..3 {
+            press(&mut app, now, KeyCode::Down);
+        }
+        let screen = draw(&mut app, 80, 24);
+        assert_eq!(
+            screen,
+            "\
+╭ carte · 2 running · 1 problem (!) ───────────────────────────────────────────╮
+│                                                                   CPU   MEM  │
+│▾ ✖ nova !                                        2/4                 3%  412M│
+│  ▾ ✖ main                                        1/2                 3%  412M│
+│    ▸ ● billing pin*                              ready               3%  412M│
+│      ✖ frontend !                                crashed                     │
+│  ▾ ● feature-x                                   1/2                 0%    0B│
+│      ○ billing main                                                          │
+│      ● frontend !                                idle in 14m         0%    0B│
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ nova-frontend@main ──────────────────────────────────────────────────────────╮
+│✖ crashed · https://nova-frontend.test                                        │
+│checkout main · /work/nova-frontend                                           │
+│web exited with code 1 before it was ready                                    │
+│! branch slug \"billing\" names an app                                          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭ logs following ──────────────────────────────────────────────────────────────╮
+│No output yet.                                                                │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+ ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a runni"
+        );
+    }
+
+    #[test]
+    fn renders_the_wait_for_the_daemon() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(
+            Event::Disconnected("the carte daemon isn't running".into()),
+            now,
+        );
+        let screen = draw(&mut app, 80, 12);
+        assert_eq!(
+            screen,
+            "\
+╭ carte ───────────────────────────────────────────────────────────────────────╮
+│                                                                              │
+│                       The carte daemon isn't reachable.                      │
+│                                                                              │
+│                        the carte daemon isn't running                        │
+│                                                                              │
+│                            Retrying every second.                            │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ reconnecting to the daemon…
+ ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a runni"
+        );
+    }
+
+    #[test]
+    fn renders_help() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('?'));
+        let screen = draw(&mut app, 100, 32);
+        assert_eq!(
+            screen,
+            "\
+╭ carte · 2 running · 1 pr╭ keys ────────────────────────────────────────╮─────────────────────────╮
+│                         │ Navigate                                     │              CPU   MEM  │
+│▾ ✖ nova !               │ ↑↓ j k       move                            │                 3%  412M│
+│  ▾ ✖ main               │ ←→ h l       fold, unfold                    │                 3%  412M│
+│    ▸ ● billing pin*     │ enter space  fold or unfold                  │dy               3%  412M│
+│      ✖ frontend !       │ g G          top, bottom                     │shed                     │
+│  ▾ ● feature-x          │ PgUp PgDn    page                            │                 0%    0B│
+│      ○ billing main     │ tab          switch between tree and logs    │                         │
+│      ● frontend !       │ /            filter the focused pane         │e in 14m         0%    0B│
+│                         │ esc          clear the filter                │                         │
+│                         │ a            show only running               │                         │
+│                         │                                              │                         │
+│                         │ Control the selection                        │                         │
+│                         │ s            start                           │                         │
+╰─────────────────────────│ x            stop                            │─────────────────────────╯
+╭ nova ───────────────────│ r            restart                         │─────────────────────────╮
+│✖ 2 of 4 instances runnin│ p            pin or unpin                    │                         │
+│crashed: frontend        │ d            disable or enable               │                         │
+│! branch slug \"billing\" n│ o            open in the browser             │                         │
+╰─────────────────────────│                                              │─────────────────────────╯
+╭ logs following ─────────│ Everything                                   │─────────────────────────╮
+│No output yet.           │ I            stop idle instances             │                         │
+│                         │ X            stop all instances              │                         │
+│                         │ !            config problems                 │                         │
+│                         │ ?            this help                       │                         │
+│                         │ q            quit                            │                         │
+│                         │                                              │                         │
+│                         │ pin* and off* last until the daemon restarts │                         │
+│                         ╰──────────────────────────────────────────────╯                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a running only  tab logs"
+        );
+    }
+}
