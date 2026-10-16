@@ -960,18 +960,18 @@ mod tests {
 ╭ make ───────────────────│ r            restart                         │─────────────────────────╮
 │✖ 2 of 4 instances runnin│ p            pin or unpin                    │                         │
 │crashed: frontend        │ d            disable or enable               │                         │
-│! branch slug \"billing\" n│ o            open in the browser             │                         │
-╰─────────────────────────│                                              │─────────────────────────╯
-╭ logs following ─────────│ Everything                                   │─────────────────────────╮
-│No output yet.           │ I            stop idle instances             │                         │
+│! branch slug \"billing\" n│ S            save a temporary pin or disable │                         │
+╰─────────────────────────│ o            open in the browser             │─────────────────────────╯
+╭ logs following ─────────│                                              │─────────────────────────╮
+│No output yet.           │ Everything                                   │                         │
+│                         │ I            stop idle instances             │                         │
 │                         │ X            stop all instances              │                         │
 │                         │ !            config problems                 │                         │
 │                         │ ?            this help                       │                         │
 │                         │ q            quit                            │                         │
 │                         │                                              │                         │
 │                         │ pin* and off* last until the daemon restarts │                         │
-│                         ╰──────────────────────────────────────────────╯                         │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+╰─────────────────────────╰──────────────────────────────────────────────╯─────────────────────────╯
 
  ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a running only  tab logs"
         );
