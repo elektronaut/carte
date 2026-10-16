@@ -291,14 +291,10 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_times_out_with_a_readable_message() {
-        let port = free_port().unwrap();
-        let err = wait_ready(port, &Readiness::Port, Duration::from_millis(300))
+        let err = wait_ready(1, &Readiness::Port, Duration::from_millis(300))
             .await
             .unwrap_err();
-        assert!(
-            err.contains(&format!("accept connections on port {port}")),
-            "{err}"
-        );
+        assert!(err.contains("accept connections on port 1"), "{err}");
     }
 
     #[tokio::test]

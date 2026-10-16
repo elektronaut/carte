@@ -366,3 +366,39 @@ async fn logs_are_kept_and_filtered() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn missing_infrastructure_fails_with_one_clear_message() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("requires = [\"tcp://127.0.0.1:1\"]\n");
+    let handle = setup.start();
+
+    let failure = handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap_err();
+    assert!(
+        failure.detail.contains("tcp://127.0.0.1:1 isn't reachable"),
+        "{failure:?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn running_processes_report_memory() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    wait_for(&handle, "memory sampled", |s| {
+        status(s, "acme-web", "main").memory_bytes > 0 && s.memory_bytes > 0
+    })
+    .await;
+    handle.shutdown().await;
+}

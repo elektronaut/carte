@@ -83,7 +83,11 @@ pub(super) fn build(
             })
             .collect(),
         running_instances: running,
-        memory_bytes: 0,
+        memory_bytes: instances
+            .values()
+            .flat_map(|i| &i.procs)
+            .map(|p| p.memory_bytes)
+            .sum(),
     }
 }
 
@@ -182,15 +186,15 @@ fn stack_status(
                             port: Some(p.port),
                             http: p.spec.http,
                             restarts: p.restarts,
-                            memory_bytes: 0,
-                            cpu_percent: 0.0,
+                            memory_bytes: p.memory_bytes,
+                            cpu_percent: p.cpu_percent,
                         }
                     })
                     .collect(),
                 holds,
                 idle_in_secs,
-                memory_bytes: 0,
-                cpu_percent: 0.0,
+                memory_bytes: inst.procs.iter().map(|p| p.memory_bytes).sum(),
+                cpu_percent: inst.procs.iter().map(|p| p.cpu_percent).sum(),
                 last_error: inst.last_error.clone(),
             }
         })

@@ -3,6 +3,7 @@ pub mod client;
 pub mod daemon;
 pub mod dns;
 pub mod logs;
+pub mod metrics;
 pub mod paths;
 pub mod process;
 pub mod proxy;
