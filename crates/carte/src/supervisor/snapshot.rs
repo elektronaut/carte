@@ -5,20 +5,33 @@ use std::time::Instant;
 
 use carte_api::{
     AppInfo, Hold, InstanceState, InstanceStatus, Policy as ApiPolicy, ProcessStatus,
-    ProjectStatus, Snapshot, StackStatus,
+    ProjectStatus, Snapshot, StackStatus, TunnelStatus,
 };
 use carte_core::lifecycle;
 use carte_core::model::{InstanceKey, Policy, ProjectState, Stack, World};
 use carte_core::naming;
 
 use super::actor::{Instance, Overrides, effective_policy};
+use super::share::{self, Shares};
 
-pub(super) fn build(
-    world: &World,
-    instances: &BTreeMap<InstanceKey, Instance>,
-    overrides: &Overrides,
-    now: Instant,
-) -> Snapshot {
+pub(super) struct Input<'a> {
+    pub world: &'a World,
+    pub instances: &'a BTreeMap<InstanceKey, Instance>,
+    pub overrides: &'a Overrides,
+    pub shares: &'a Shares,
+    pub tunnel: Option<&'a TunnelStatus>,
+    pub now: Instant,
+}
+
+pub(super) fn build(input: &Input) -> Snapshot {
+    let Input {
+        world,
+        instances,
+        shares,
+        tunnel,
+        now,
+        ..
+    } = *input;
     let mut running = 0;
     let projects = world
         .projects
@@ -34,25 +47,9 @@ pub(super) fn build(
                 .collect();
             running += active.len() as u32;
             let holders = lifecycle::holders(&state.project, &active);
-            let mut stacks = vec![stack_status(
-                world,
-                state,
-                Stack::Main,
-                instances,
-                overrides,
-                &holders,
-                now,
-            )];
+            let mut stacks = vec![stack_status(input, state, Stack::Main, &holders)];
             for slug in state.stacks() {
-                stacks.push(stack_status(
-                    world,
-                    state,
-                    Stack::Branch(slug),
-                    instances,
-                    overrides,
-                    &holders,
-                    now,
-                ));
+                stacks.push(stack_status(input, state, Stack::Branch(slug), &holders));
             }
             ProjectStatus {
                 name: state.project.name.clone(),
@@ -88,18 +85,31 @@ pub(super) fn build(
             .flat_map(|i| &i.procs)
             .map(|p| p.memory_bytes)
             .sum(),
+        shares: match &world.machine.share {
+            Some(config) => shares
+                .iter()
+                .map(|(entry, share)| share::status(world, config, entry, share, now))
+                .collect(),
+            None => Vec::new(),
+        },
+        tunnel: tunnel.cloned(),
     }
 }
 
 fn stack_status(
-    world: &World,
+    input: &Input,
     state: &ProjectState,
     stack: Stack,
-    instances: &BTreeMap<InstanceKey, Instance>,
-    overrides: &Overrides,
     holders: &BTreeMap<InstanceKey, Vec<InstanceKey>>,
-    now: Instant,
 ) -> StackStatus {
+    let Input {
+        world,
+        instances,
+        overrides,
+        shares,
+        now,
+        ..
+    } = *input;
     let project = &state.project;
     let instances = project
         .apps
@@ -112,6 +122,12 @@ fn stack_status(
             };
             let checkout = state.checkout(app, &stack);
             let url = naming::instance_url(&world.machine, project, app, &stack);
+            let public_url = world.machine.share.as_ref().and_then(|config| {
+                share::shared_apps(shares, &project.name, &stack)
+                    .contains(&app.name)
+                    .then(|| naming::public_url(config, state, app, &stack).ok())
+                    .flatten()
+            });
             let Some(inst) = instances.get(&key) else {
                 return InstanceStatus {
                     app: app.name.clone(),
@@ -119,7 +135,7 @@ fn stack_status(
                     checkout: checkout.slug().to_string(),
                     checkout_path: checkout.path().clone(),
                     url,
-                    public_url: None,
+                    public_url,
                     state: InstanceState::Stopped,
                     processes: Vec::new(),
                     holds: Vec::new(),
@@ -167,7 +183,7 @@ fn stack_status(
                 checkout: checkout.slug().to_string(),
                 checkout_path: checkout.path().clone(),
                 url,
-                public_url: None,
+                public_url,
                 state: inst.state,
                 processes: inst
                     .procs
