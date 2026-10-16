@@ -1109,11 +1109,6 @@ impl Actor {
         action: Action,
     ) -> Result<Option<String>, String> {
         let active = self.instances.get(key).is_some_and(Instance::is_active);
-        let save_note = |save: bool| {
-            save.then(|| {
-                "--save isn't supported yet; the change lasts until the daemon restarts".to_string()
-            })
-        };
         match action {
             Action::Up => match process {
                 Some(name) if active => self.start_process(key, name).map(|_| None),
@@ -1161,11 +1156,11 @@ impl Actor {
                 } else if let Some(name) = process {
                     self.start_process(key, name)?;
                 }
-                Ok(save_note(save))
+                self.maybe_save(save, key, process, Some(Policy::Pinned))
             }
             Action::Unpin { save } => {
                 self.set_override(key, process, Policy::Auto);
-                Ok(save_note(save))
+                self.maybe_save(save, key, process, None)
             }
             Action::Disable { save } => {
                 self.set_override(key, process, Policy::Disabled);
@@ -1176,13 +1171,72 @@ impl Actor {
                     Some(_) => {}
                     None => self.stop(key),
                 }
-                Ok(save_note(save))
+                self.maybe_save(save, key, process, Some(Policy::Disabled))
             }
             Action::Enable { save } => {
                 self.set_override(key, process, Policy::Auto);
-                Ok(save_note(save))
+                self.maybe_save(save, key, process, None)
             }
         }
+    }
+
+    /// Writes the policy to the project file, applies it to every running instance
+    /// of the app and drops the temporary overrides it replaces.
+    fn maybe_save(
+        &mut self,
+        save: bool,
+        key: &InstanceKey,
+        process: Option<&str>,
+        policy: Option<Policy>,
+    ) -> Result<Option<String>, String> {
+        if !save {
+            return Ok(None);
+        }
+        let state = self
+            .world
+            .project(&key.project)
+            .ok_or_else(|| format!("no project named {}", key.project))?;
+        let path = state.project.config_path.clone();
+        let app_policy = state
+            .project
+            .app(&key.app)
+            .and_then(|a| a.settings.policy)
+            .unwrap_or_default();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| format!("reading {}: {err}", path.display()))?;
+        let edited = carte_core::config_edit::set_policy(&text, &key.app, process, policy)
+            .map_err(|err| err.to_string())?;
+        std::fs::write(&path, edited)
+            .map_err(|err| format!("writing {}: {err}", path.display()))?;
+
+        let configured = match (policy, process) {
+            (Some(policy), _) => policy,
+            (None, Some(_)) => app_policy,
+            (None, None) => Policy::Auto,
+        };
+        for inst in self
+            .instances
+            .values_mut()
+            .filter(|i| i.key.project == key.project && i.key.app == key.app)
+        {
+            for proc in &mut inst.procs {
+                if process.is_none_or(|name| name == proc.spec.name) {
+                    proc.spec.policy = configured;
+                }
+            }
+        }
+        self.overrides.retain(|(k, p), _| {
+            !(k.project == key.project && k.app == key.app && p.as_deref() == process)
+        });
+
+        let tx = self.tx.clone();
+        let config_dir = self.paths.config_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let world = carte_core::discovery::load_world(&config_dir);
+            let _ = tx.send(Msg::Reload(world));
+        });
+        self.dirty = true;
+        Ok(Some(format!("saved to {}", path.display())))
     }
 
     fn set_override(&mut self, key: &InstanceKey, process: Option<&str>, policy: Policy) {

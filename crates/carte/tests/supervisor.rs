@@ -402,3 +402,36 @@ async fn running_processes_report_memory() {
     .await;
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn saved_policies_are_written_to_the_project_file() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("# keep me\n");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let response = handle
+        .control(control("web/worker", Action::Pin { save: true }))
+        .await
+        .unwrap();
+    assert!(response.messages[0].starts_with("saved to"), "{response:?}");
+    let text = std::fs::read_to_string(setup.paths.project_file("acme")).unwrap();
+    assert!(text.contains("# keep me"), "{text}");
+    assert!(
+        text.contains("[apps.acme-web.processes.worker]\npolicy = \"pinned\""),
+        "{text}"
+    );
+    let snapshot = handle.snapshot();
+    let worker = status(&snapshot, "acme-web", "main")
+        .processes
+        .iter()
+        .find(|p| p.name == "worker")
+        .unwrap();
+    assert_eq!(worker.policy, carte_api::Policy::Pinned);
+    assert!(!worker.temporary);
+    handle.shutdown().await;
+}
