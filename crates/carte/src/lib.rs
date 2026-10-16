@@ -8,6 +8,7 @@ pub mod paths;
 pub mod process;
 pub mod proxy;
 pub mod pty;
+pub mod setup;
 pub mod shim;
 pub mod supervisor;
 pub mod tls;

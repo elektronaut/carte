@@ -12,7 +12,7 @@ pub struct CommandLine {
 }
 
 impl CommandLine {
-    fn new(program: &str, args: &[&str]) -> Self {
+    pub fn new(program: &str, args: &[&str]) -> Self {
         Self {
             program: program.to_owned(),
             args: args.iter().map(|&arg| arg.to_owned()).collect(),

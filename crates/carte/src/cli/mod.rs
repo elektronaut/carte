@@ -10,7 +10,8 @@ use crate::paths::Paths;
 mod control;
 mod env;
 mod project;
-mod prompt;
+pub(crate) mod prompt;
+mod setup;
 
 #[derive(Parser)]
 #[command(name = "carte", version, about = "Runs your apps' processes on demand")]
@@ -59,6 +60,8 @@ pub enum Command {
         #[arg(long)]
         idle: bool,
     },
+    /// Set up this Mac: DNS resolver, CA trust and the daemon's LaunchAgent.
+    Setup(SetupArgs),
     /// Run the daemon in the foreground.
     Daemon,
     /// Runs one process for the daemon; not for direct use.
@@ -108,6 +111,19 @@ pub struct LogsArgs {
     /// Only lines containing this text.
     #[arg(long)]
     pub search: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct SetupArgs {
+    /// Show the plan without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Report what is set up, read-only.
+    #[arg(long, conflicts_with_all = ["dry_run", "uninstall"])]
+    pub check: bool,
+    /// Undo setup: LaunchAgent, resolver file and CA trust.
+    #[arg(long)]
+    pub uninstall: bool,
 }
 
 #[derive(Subcommand, Clone)]
@@ -179,6 +195,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::StopAll { idle } => control::stop_all(&paths, idle, cli.json),
         Command::Env(args) => env::run(&paths, args, cli.json),
         Command::Project(cmd) => project::run(&paths, cmd, cli.json),
+        Command::Setup(args) => setup::run(&paths, args),
     };
     match result {
         Ok(code) => code,
