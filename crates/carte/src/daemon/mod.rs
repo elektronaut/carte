@@ -45,10 +45,11 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     }
     let machine = world.machine.clone();
 
+    let tlds = machine.served_tlds();
     let ca = CertificateAuthority::load_or_create(
         &paths.state_dir,
         &tls::ca::default_common_name(),
-        &[machine.tld.as_str()],
+        &tlds,
     )
     .context("loading the local CA")?;
     if let CaOrigin::Created(reason) = ca.origin() {
@@ -74,7 +75,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let supervisor = supervisor::start(world, paths.clone(), Spawner::current()?, options);
 
     let loopback = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let dns = DnsServer::bind(loopback(machine.dns_port), Responder::new(&[&machine.tld])?)
+    let dns = DnsServer::bind(loopback(machine.dns_port), Responder::new(&tlds)?)
         .await
         .with_context(|| format!("binding DNS on {}", loopback(machine.dns_port)))?;
     tokio::spawn(dns.run());

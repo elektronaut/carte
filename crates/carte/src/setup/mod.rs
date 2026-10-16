@@ -140,20 +140,22 @@ pub struct Facts {
 
 impl Facts {
     pub fn gather(env: &SetupEnv) -> Self {
-        let ca =
-            match CertificateAuthority::load_existing(&env.paths.state_dir, &[&env.machine.tld]) {
-                Err(CreateReason::Missing) => CaState::Missing,
-                Err(CreateReason::Invalid(why)) => CaState::Replace(why),
-                Err(CreateReason::Expiring) => CaState::Replace("it is about to expire".into()),
-                Err(CreateReason::TldsChanged { previous }) => {
-                    CaState::Replace(format!("it was made for .{}", previous.join(", .")))
-                }
-                Ok(ca) => match trust::is_trusted(&ca) {
-                    Ok(true) => CaState::Trusted,
-                    Ok(false) => CaState::Untrusted,
-                    Err(err) => CaState::Unknown(err.to_string()),
-                },
-            };
+        let ca = match CertificateAuthority::load_existing(
+            &env.paths.state_dir,
+            &env.machine.served_tlds(),
+        ) {
+            Err(CreateReason::Missing) => CaState::Missing,
+            Err(CreateReason::Invalid(why)) => CaState::Replace(why),
+            Err(CreateReason::Expiring) => CaState::Replace("it is about to expire".into()),
+            Err(CreateReason::TldsChanged { previous }) => {
+                CaState::Replace(format!("it was made for .{}", previous.join(", .")))
+            }
+            Ok(ca) => match trust::is_trusted(&ca) {
+                Ok(true) => CaState::Trusted,
+                Ok(false) => CaState::Untrusted,
+                Err(err) => CaState::Unknown(err.to_string()),
+            },
+        };
         let projects = fs::read_dir(env.paths.projects_dir())
             .map(|entries| {
                 entries
@@ -346,11 +348,20 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
     }
 
     let ca_cert = env.ca_cert();
+    let names = env
+        .machine
+        .served_tlds()
+        .iter()
+        .map(|tld| format!(".{tld}"))
+        .collect::<Vec<_>>()
+        .join(" and ");
     let trust_step = || {
         let command = trust::trust_command(&ca_cert);
         let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
         Step::sudo(
-            "Trust carte's local CA in the system keychain (it can only sign .test names)",
+            format!(
+                "Trust carte's local CA in the system keychain (it can only sign {names} names)"
+            ),
             &command.program,
             &args,
         )
@@ -537,7 +548,7 @@ fn run_step(step: &Step, env: &SetupEnv) -> anyhow::Result<()> {
             let ca = CertificateAuthority::load_or_create(
                 &env.paths.state_dir,
                 &crate::tls::ca::default_common_name(),
-                &[&env.machine.tld],
+                &env.machine.served_tlds(),
             )?;
             crate::tls::bundle::rebuild(&env.paths.state_dir, &ca)?;
         }
@@ -806,6 +817,9 @@ mod tests {
         }];
         execute(&steps, &env).unwrap();
         assert!(env.ca_cert().exists());
-        assert!(CertificateAuthority::load_existing(&env.paths.state_dir, &["test"]).is_ok());
+        assert!(
+            CertificateAuthority::load_existing(&env.paths.state_dir, &env.machine.served_tlds())
+                .is_ok()
+        );
     }
 }

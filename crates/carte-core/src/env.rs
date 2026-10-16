@@ -370,6 +370,9 @@ pub fn injected(req: &EnvRequest) -> Vec<(&'static str, String)> {
         vars.push(("CARTE_PUBLIC_URL", public));
     }
     let mut hosts = vec![format!(".{}.{}", req.project.name, req.tld)];
+    if req.tld != "localhost" {
+        hosts.push(format!(".{}.localhost", req.project.name));
+    }
     if let Some(domain) = req.share_domain {
         hosts.push(format!(".{}", domain.trim_start_matches('.')));
     }
@@ -506,7 +509,10 @@ mod tests {
                 "/Users/alex/.local/state/carte/ca.pem",
             ),
             ("DISABLE_SPRING", "1"),
-            ("RAILS_DEVELOPMENT_HOSTS", ".nova.test,.example.dev"),
+            (
+                "RAILS_DEVELOPMENT_HOSTS",
+                ".nova.test,.nova.localhost,.example.dev",
+            ),
             ("PIDFILE", "/tmp/carte/nova-postcard-frontend@feature-x.pid"),
         ];
         for (key, value) in expected {
@@ -526,7 +532,10 @@ mod tests {
         fx.urls.stack = "main";
         let env = fx.render_empty();
         assert_eq!(env.value("CARTE_PUBLIC_URL"), None);
-        assert_eq!(env.value("RAILS_DEVELOPMENT_HOSTS"), Some(".nova.test"));
+        assert_eq!(
+            env.value("RAILS_DEVELOPMENT_HOSTS"),
+            Some(".nova.test,.nova.localhost")
+        );
         assert_eq!(env.value("CARTE_CHECKOUT"), Some("main"));
         assert_eq!(env.value("CARTE_STACK"), Some("main"));
     }
