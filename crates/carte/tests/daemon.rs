@@ -26,6 +26,12 @@ fn free_port() -> u16 {
 
 impl Daemon {
     fn start() -> Self {
+        Self::start_with(false)
+    }
+
+    /// With `linked_config`, the config directory is reached through a symlink, like
+    /// a config under `/tmp` on macOS.
+    fn start_with(linked_config: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let fixture = fixture().display().to_string();
@@ -37,7 +43,12 @@ impl Daemon {
         );
         std::fs::create_dir_all(root.join("work/acme-web/tmp")).unwrap();
         let config = root.join("config");
-        std::fs::create_dir_all(config.join("projects")).unwrap();
+        if linked_config {
+            std::fs::create_dir_all(root.join("real-config/projects")).unwrap();
+            std::os::unix::fs::symlink(root.join("real-config"), &config).unwrap();
+        } else {
+            std::fs::create_dir_all(config.join("projects")).unwrap();
+        }
         let (http_port, https_port, dns_port) = (free_port(), free_port(), free_port());
         std::fs::write(
             config.join("config.toml"),
@@ -354,4 +365,18 @@ fn env_shows_the_assigned_port_while_running() {
     };
     assert_eq!(value("PORT"), Some(port.to_string()));
     assert_eq!(value("CARTE_STATE_DIR"), None);
+}
+
+#[test]
+fn config_changes_are_seen_through_a_symlinked_config_dir() {
+    let daemon = Daemon::start_with(true);
+    std::fs::remove_file(daemon.root.join("config/projects/acme.toml")).unwrap();
+    let started = Instant::now();
+    while !snapshot(&daemon).projects.is_empty() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the removed project is still there; only the 60 s rescan would find it"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
