@@ -87,6 +87,8 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
     let ca_cert = paths.ca_cert();
     let pidfile = paths.pidfile(&key);
     let tld_length = naming::tld_length(&machine.tld, &state.project, app, &key.stack);
+    let daemon = daemon_view(paths, &key, &process.name);
+    let port = daemon.as_ref().and_then(|d| d.port).unwrap_or(0);
     let req = EnvRequest {
         project: &state.project,
         app,
@@ -94,7 +96,7 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
         checkout: &checkout,
         stack: &key.stack,
         branch: &branch,
-        port: 0,
+        port,
         urls: &urls,
         tld: &machine.tld,
         share_domain: machine.share.as_ref().map(|s| s.domain.as_str()),
@@ -103,13 +105,16 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
         ca_cert: &ca_cert,
         pidfile: &pidfile,
     };
-    let daemon_env = crate::supervisor::base_env();
+    let daemon_env = match &daemon {
+        Some(view) => view.env.clone(),
+        None => crate::supervisor::base_env(),
+    };
     let runner = SystemRunner::from_env();
     let env = core_env::build_env(&req, &daemon_env, &runner)?;
 
     let instance = format!("{}@{}/{}", app.name, key.stack.slug(), process.name);
     let shown = |key: &str, value: &str, source: &Source| {
-        if key == "PORT" && *source == Source::Injected {
+        if key == "PORT" && *source == Source::Injected && port == 0 {
             "<assigned at start>".to_string()
         } else {
             value.to_string()
@@ -135,9 +140,14 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
 
     let provider = core_env::detect_provider(state.project.env_provider, checkout.path(), &runner);
     println!(
-        "{instance}  {}  (env from {})",
+        "{instance}  {}  (env from {}{})",
         tilde(checkout.path()),
-        core_env::provider_name(provider)
+        core_env::provider_name(provider),
+        if daemon.is_some() {
+            ", as the daemon builds it"
+        } else {
+            "; the daemon isn't running, so this shell's environment stands in for it"
+        }
     );
     println!();
     let label = |source: &Source| source_label(source, checkout.path());
@@ -169,6 +179,44 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
         println!("note: {notice}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+struct DaemonView {
+    env: std::collections::BTreeMap<String, String>,
+    /// The process's port while it runs.
+    port: Option<u16>,
+}
+
+/// The daemon's base env and the process's assigned port, when the daemon runs.
+fn daemon_view(
+    paths: &Paths,
+    key: &carte_core::model::InstanceKey,
+    process: &str,
+) -> Option<DaemonView> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let client = crate::client::Client::new(&paths.socket());
+    runtime.block_on(async {
+        let env: carte_api::DaemonEnv = client.get(carte_api::paths::ENV).await.ok()?;
+        let snapshot: carte_api::Snapshot = client.get(carte_api::paths::SNAPSHOT).await.ok()?;
+        let port = snapshot
+            .projects
+            .iter()
+            .filter(|p| p.name == key.project)
+            .flat_map(|p| &p.stacks)
+            .filter(|s| s.name == key.stack.slug())
+            .flat_map(|s| &s.instances)
+            .filter(|i| i.app == key.app)
+            .flat_map(|i| &i.processes)
+            .find(|p| p.name == process && p.pid.is_some())
+            .and_then(|p| p.port);
+        Some(DaemonView {
+            env: env.vars,
+            port,
+        })
+    })
 }
 
 /// A short name for a source; the JSON output has the full one.
