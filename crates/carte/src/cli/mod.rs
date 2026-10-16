@@ -10,6 +10,7 @@ use crate::paths::Paths;
 mod control;
 mod env;
 mod project;
+mod prompt;
 
 #[derive(Parser)]
 #[command(name = "carte", version, about = "Runs your apps' processes on demand")]
