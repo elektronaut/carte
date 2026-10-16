@@ -1,5 +1,6 @@
 //! Pure logic for carte: configuration, naming, resolution, templates and policies.
-//! Nothing in this crate starts processes or listens on sockets.
+//! Nothing in this crate supervises processes or listens on sockets; it only runs
+//! short-lived commands such as git and env providers.
 
 pub mod duration;
 pub mod env;
