@@ -57,6 +57,7 @@ pub(super) struct Instance {
     pub connections: u32,
     pub last_activity: Instant,
     pub last_error: Option<String>,
+    pub env_changed: bool,
     restart_pending: bool,
     forced: BTreeSet<String>,
 }
@@ -100,6 +101,7 @@ impl Instance {
             connections: 0,
             last_activity: Instant::now(),
             last_error: None,
+            env_changed: false,
             restart_pending: false,
             forced: BTreeSet::new(),
         }
@@ -259,6 +261,17 @@ impl Actor {
                 let _ = reply.send(self.logs(&target, tail, search));
             }
             Msg::Reload(world) => self.reload(world),
+            Msg::RestartCheckout(path) => self.restart_checkout(&path),
+            Msg::EnvChanged(path) => {
+                self.providers.remove(&path);
+                for inst in self.instances.values_mut() {
+                    if inst.is_active() && inst.checkout.as_ref().is_some_and(|c| *c.path() == path)
+                    {
+                        inst.env_changed = true;
+                        self.dirty = true;
+                    }
+                }
+            }
             Msg::Shutdown(reply) => {
                 self.shutdown = Some(reply);
                 let keys: Vec<_> = self.instances.keys().cloned().collect();
@@ -446,6 +459,7 @@ impl Actor {
         inst.checkout = Some(checkout.clone());
         inst.boot = boot;
         inst.last_error = None;
+        inst.env_changed = false;
         inst.last_activity = Instant::now();
         inst.restart_pending = false;
         self.dirty = true;
@@ -1403,20 +1417,47 @@ impl Actor {
         Ok((lines.split_off(skip), filter))
     }
 
+    fn restart_checkout(&mut self, path: &Path) {
+        let keys: Vec<InstanceKey> = self
+            .instances
+            .values()
+            .filter(|i| i.is_active() && i.checkout.as_ref().is_some_and(|c| c.path() == path))
+            .map(|i| i.key.clone())
+            .collect();
+        for key in keys {
+            if let Some(inst) = self.instances.get_mut(&key) {
+                inst.restart_pending = true;
+            }
+            self.stop(&key);
+        }
+    }
+
+    /// Takes a new view of config and disk. Instances whose app is gone, or whose
+    /// checkout moved (a removed worktree, a switched branch), are stopped; the next
+    /// request starts them from the right place.
     fn reload(&mut self, world: World) {
+        if *self.world == world {
+            return;
+        }
         self.world = Arc::new(world);
         self.world_tx.send_replace(self.world.clone());
         self.providers.clear();
         let gone: Vec<InstanceKey> = self
             .instances
-            .keys()
-            .filter(|key| {
-                self.world
-                    .project(&key.project)
-                    .and_then(|p| p.project.app(&key.app))
-                    .is_none()
+            .values()
+            .filter(|inst| inst.is_active() || inst.any_running())
+            .filter(|inst| {
+                let Some(state) = self.world.project(&inst.key.project) else {
+                    return true;
+                };
+                let Some(app) = state.project.app(&inst.key.app) else {
+                    return true;
+                };
+                inst.checkout
+                    .as_ref()
+                    .is_some_and(|c| *c != state.checkout(app, &inst.key.stack))
             })
-            .cloned()
+            .map(|inst| inst.key.clone())
             .collect();
         for key in gone {
             self.stop(&key);

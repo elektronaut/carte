@@ -127,6 +127,7 @@ fn stack_status(
                     memory_bytes: 0,
                     cpu_percent: 0.0,
                     last_error: None,
+                    env_changed: false,
                 };
             };
             let mut holds = Vec::new();
@@ -196,6 +197,7 @@ fn stack_status(
                 memory_bytes: inst.procs.iter().map(|p| p.memory_bytes).sum(),
                 cpu_percent: inst.procs.iter().map(|p| p.cpu_percent).sum(),
                 last_error: inst.last_error.clone(),
+                env_changed: inst.env_changed,
             }
         })
         .collect();
