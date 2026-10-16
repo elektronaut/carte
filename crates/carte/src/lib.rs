@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod dns;
 pub mod logs;
 pub mod paths;
 pub mod process;
