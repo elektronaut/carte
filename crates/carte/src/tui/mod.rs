@@ -28,7 +28,14 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
     let socket = paths.socket();
     runtime.block_on(async move {
         let mut terminal = ratatui::try_init()?;
+        let restore = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tasks::set_mouse_capture(false);
+            restore(info);
+        }));
+        tasks::set_mouse_capture(true);
         let result = event_loop(&mut terminal, socket).await;
+        tasks::set_mouse_capture(false);
         ratatui::restore();
         result
     })?;

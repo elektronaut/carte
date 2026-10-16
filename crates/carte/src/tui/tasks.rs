@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use carte_api::{ControlResponse, LogLine, Snapshot, StopAllRequest, paths};
 use http::Method;
-use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind, MouseButton,
+    MouseEventKind,
+};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 
@@ -83,6 +86,7 @@ impl Tasks {
                 }));
             }
             Command::StopLogs => self.stop_logs(),
+            Command::MouseCapture(on) => set_mouse_capture(on),
             Command::Open(url) => {
                 let opener = if cfg!(target_os = "macos") {
                     "open"
@@ -151,6 +155,16 @@ fn read_terminal(tx: UnboundedSender<Event>) {
         let event = match event::read() {
             Ok(TermEvent::Key(key)) if key.kind != KeyEventKind::Release => Event::Key(key),
             Ok(TermEvent::Resize(..)) => Event::Redraw,
+            Ok(TermEvent::Mouse(mouse))
+                if matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::Down(MouseButton::Left)
+                ) =>
+            {
+                Event::Mouse(mouse)
+            }
             Ok(_) => continue,
             Err(_) => return,
         };
@@ -158,4 +172,13 @@ fn read_terminal(tx: UnboundedSender<Event>) {
             return;
         }
     }
+}
+
+pub fn set_mouse_capture(on: bool) {
+    let mut out = std::io::stdout();
+    let _ = if on {
+        ratatui::crossterm::execute!(out, EnableMouseCapture)
+    } else {
+        ratatui::crossterm::execute!(out, DisableMouseCapture)
+    };
 }

@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use carte_api::{
     Action, ControlRequest, ControlResponse, InstanceStatus, LogLine, LogsRequest, Snapshot,
 };
-use ratatui::crossterm::event::KeyEvent;
+use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 
 use super::input::{self, Confirm, Control, Focus, Intent, Mode};
 use super::logs::{self, Logs, Prefix};
@@ -16,6 +17,7 @@ use super::tree::{self, Fold, Node, NodeId, Row};
 #[derive(Debug)]
 pub enum Event {
     Key(KeyEvent),
+    Mouse(MouseEvent),
     Tick,
     Redraw,
     Snapshot(Box<Snapshot>),
@@ -49,6 +51,7 @@ pub enum Command {
     },
     StopLogs,
     Open(String),
+    MouseCapture(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +84,12 @@ pub struct App {
     pub notice: Option<Notice>,
     /// Rows the tree showed last time it was drawn.
     pub tree_height: usize,
+    /// Where the tree and the logs were drawn, and the tree's first visible row, for
+    /// mapping mouse events.
+    pub tree_area: Rect,
+    pub tree_offset: usize,
+    pub logs_area: Rect,
+    pub mouse: bool,
     pub quit: bool,
 }
 
@@ -101,6 +110,10 @@ impl App {
             logs: Logs::default(),
             notice: None,
             tree_height: 0,
+            tree_area: Rect::default(),
+            tree_offset: 0,
+            logs_area: Rect::default(),
+            mouse: true,
             quit: false,
         }
     }
@@ -114,7 +127,8 @@ impl App {
                     self.apply(intent, &mut commands);
                 }
             }
-            Event::Tick | Event::Redraw => {}
+            Event::Mouse(mouse) if self.mode == Mode::Normal => self.mouse(mouse),
+            Event::Mouse(_) | Event::Tick | Event::Redraw => {}
             Event::Snapshot(snapshot) => {
                 self.connection = Connection::Connected;
                 self.snapshot = Some(*snapshot);
@@ -209,6 +223,40 @@ impl App {
         self.selected = self.selected_node().map(|n| n.id().clone());
     }
 
+    /// The wheel scrolls the pane under the pointer; a click focuses a pane, selects a
+    /// tree row, or folds and unfolds the row that is already selected.
+    fn mouse(&mut self, event: MouseEvent) {
+        let at = Position::new(event.column, event.row);
+        match event.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let up = event.kind == MouseEventKind::ScrollUp;
+                if self.logs_area.contains(at) {
+                    self.logs.scroll_by(if up { 3 } else { -3 });
+                } else if self.tree_area.contains(at) {
+                    self.move_by(if up { -1 } else { 1 });
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.logs_area.contains(at) {
+                    self.focus = Focus::Logs;
+                } else if self.tree_area.contains(at) {
+                    self.focus = Focus::Tree;
+                    let first = self.tree_area.y + 2;
+                    if at.y < first || at.y + 1 >= self.tree_area.bottom() {
+                        return;
+                    }
+                    let index = self.tree_offset + usize::from(at.y - first);
+                    if index == self.cursor {
+                        self.apply(Intent::Toggle, &mut Vec::new());
+                    } else if index < self.rows.len() {
+                        self.select(index);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn move_by(&mut self, delta: isize) {
         self.select(self.cursor.saturating_add_signed(delta));
     }
@@ -254,6 +302,15 @@ impl App {
             (Intent::FilterBackspace, _) => self.edit_filter(|filter| {
                 filter.pop();
             }),
+            (Intent::ToggleMouse, _) => {
+                self.mouse = !self.mouse;
+                commands.push(Command::MouseCapture(self.mouse));
+                self.inform(if self.mouse {
+                    "Mouse on"
+                } else {
+                    "Mouse off: drag to select text, m turns it back on"
+                });
+            }
             (Intent::RunningOnly, _) => {
                 self.fold.running_only = !self.fold.running_only;
                 self.refresh_rows();
@@ -589,6 +646,59 @@ mod tests {
         };
         assert_eq!(request.target.address, "nova-billing@main/worker");
         assert_eq!(request.action, Action::Pin { save: true });
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_pane_under_the_pointer() {
+        let (mut app, now) = connected();
+        app.tree_area = Rect::new(0, 0, 40, 20);
+        app.logs_area = Rect::new(40, 0, 40, 20);
+        app.logs.height = 5;
+        for i in 0..50 {
+            app.logs.push(
+                app.logs.generation,
+                LogLine {
+                    app: "nova-billing".into(),
+                    stack: "main".into(),
+                    process: "web".into(),
+                    at_ms: i,
+                    text: format!("line {i}"),
+                },
+            );
+        }
+        app.update(mouse(MouseEventKind::ScrollUp, 50, 5), now);
+        assert_eq!(app.logs.scroll, 3);
+        assert_eq!(app.cursor, 0);
+        app.update(mouse(MouseEventKind::ScrollDown, 10, 5), now);
+        assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn clicks_select_rows_focus_panes_and_fold() {
+        let (mut app, now) = connected();
+        app.tree_area = Rect::new(0, 0, 40, 20);
+        app.logs_area = Rect::new(40, 0, 40, 20);
+        let click = |column, row| mouse(MouseEventKind::Down(MouseButton::Left), column, row);
+
+        app.update(click(50, 3), now);
+        assert_eq!(app.focus, Focus::Logs);
+        app.update(click(5, 4), now);
+        assert_eq!(app.focus, Focus::Tree);
+        assert_eq!(app.cursor, 2);
+        let rows = app.rows.len();
+        app.update(click(5, 4), now);
+        assert_ne!(app.rows.len(), rows, "clicking the selected row folds it");
+        app.update(click(5, 0), now);
+        assert_eq!(app.cursor, 2, "the border and header aren't rows");
     }
 
     #[test]
