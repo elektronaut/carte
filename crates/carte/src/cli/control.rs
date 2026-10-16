@@ -9,7 +9,7 @@ use carte_api::{
 use carte_core::{address, discovery, naming};
 use http::Method;
 
-use super::{LogsArgs, Target};
+use super::{LogsArgs, ShareArgs, Target};
 use crate::client::Client;
 use crate::paths::Paths;
 
@@ -89,6 +89,43 @@ pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
         out.push_str(&format!(
             "{} running, {stopped} stopped (carte ls --all lists them)\n",
             snapshot.running_instances
+        ));
+    }
+    for share in &snapshot.shares {
+        let mut notes = Vec::new();
+        if share.auth {
+            notes.push("password".to_string());
+        }
+        if share.pinned {
+            notes.push("pinned".to_string());
+        }
+        notes.push(format!(
+            "for {}",
+            carte_core::duration::format(std::time::Duration::from_secs(share.shared_secs))
+        ));
+        if let Some(secs) = share.expires_in_secs {
+            notes.push(format!(
+                "ends in {}",
+                carte_core::duration::format(std::time::Duration::from_secs(secs))
+            ));
+        }
+        for app in &share.apps {
+            out.push_str(&format!(
+                "public: {}@{}  {}  ({})\n",
+                app.app,
+                share.stack,
+                app.url,
+                notes.join(", ")
+            ));
+        }
+    }
+    if let Some(tunnel) = &snapshot.tunnel
+        && tunnel.state == carte_api::TunnelState::Failed
+    {
+        out.push_str(&format!(
+            "tunnel: {} isn't working: {}\n",
+            tunnel.provider,
+            tunnel.message.as_deref().unwrap_or("no details")
         ));
     }
     for problem in &snapshot.problems {
@@ -283,6 +320,74 @@ pub fn stop_all(paths: &Paths, idle: bool, json: bool) -> anyhow::Result<ExitCod
         for affected in &response.affected {
             println!("stopping {affected}");
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn share(paths: &Paths, args: ShareArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let ttl_secs = match &args.ttl {
+        Some(ttl) => Some(carte_core::duration::parse(ttl)?.as_secs()),
+        None => None,
+    };
+    let request = carte_api::ShareRequest {
+        target: address(&args.target),
+        apps: args.apps,
+        ttl_secs,
+        auth: args.auth,
+        pin: args.pin,
+    };
+    let client = Client::new(&paths.socket());
+    let runtime = runtime()?;
+    let response: carte_api::ShareResponse =
+        runtime.block_on(client.post(paths::SHARE, &request))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let share = &response.share;
+    println!("Shared from {}@{}:", share.project, share.stack);
+    for app in &share.apps {
+        println!("  {}  {}", app.app, app.url);
+    }
+    if let Some(credentials) = &response.credentials {
+        println!(
+            "User {}, password {}",
+            credentials.user, credentials.password
+        );
+    }
+    match share.expires_in_secs {
+        Some(secs) => println!(
+            "Ends in {}, or with `carte unshare`.",
+            carte_core::duration::format(std::time::Duration::from_secs(secs))
+        ),
+        None => println!("Stays shared until `carte unshare` or the daemon restarts."),
+    }
+    for message in &response.messages {
+        eprintln!("note: {message}");
+    }
+    let snapshot: Snapshot = runtime.block_on(client.get(paths::SNAPSHOT))?;
+    if let Some(tunnel) = &snapshot.tunnel
+        && tunnel.state == carte_api::TunnelState::Failed
+    {
+        eprintln!(
+            "The {} tunnel isn't working: {}",
+            tunnel.provider,
+            tunnel.message.as_deref().unwrap_or("no details")
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn unshare(paths: &Paths, target: Target, json: bool) -> anyhow::Result<ExitCode> {
+    let request = carte_api::UnshareRequest {
+        target: address(&target),
+    };
+    let apps: Vec<String> =
+        runtime()?.block_on(Client::new(&paths.socket()).post(paths::UNSHARE, &request))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&apps)?);
+    } else {
+        println!("No longer shared: {}", apps.join(", "));
     }
     Ok(ExitCode::SUCCESS)
 }

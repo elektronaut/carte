@@ -2,14 +2,15 @@
 
 use std::time::Duration;
 
-use carte_core::model::InstanceKey;
+use carte_api::ExternalRequest;
+use carte_core::model::{InstanceKey, World};
 use carte_core::naming;
 use http::StatusCode;
 
 use crate::proxy::{
     ActivityGuard, BoxFuture, ErrorPage, ListenerKind, Route, RouteRequest, Router,
 };
-use crate::supervisor::{Activity, Handle};
+use crate::supervisor::{Activity, Handle, share};
 
 pub struct SupervisorRouter {
     pub supervisor: Handle,
@@ -20,25 +21,24 @@ pub struct SupervisorRouter {
 impl Router for SupervisorRouter {
     fn route<'a>(&'a self, request: RouteRequest<'a>) -> BoxFuture<'a, Route> {
         Box::pin(async move {
-            if request.kind == ListenerKind::Share {
-                return Route::Error(ErrorPage::new(
-                    StatusCode::NOT_FOUND,
-                    "Not shared",
-                    "Nothing is shared under this name.",
-                ));
-            }
             let world = self.supervisor.world();
-            let resolved = match naming::resolve_host(&world, request.host) {
-                Ok(resolved) => resolved,
-                Err(not_found) => {
-                    return Route::Error(ErrorPage::new(
-                        StatusCode::NOT_FOUND,
-                        "No app here",
-                        not_found.to_string(),
-                    ));
+            let key = if request.kind == ListenerKind::Share {
+                match self.shared_key(&world, request) {
+                    Ok(key) => key,
+                    Err(page) => return Route::Error(page),
+                }
+            } else {
+                match naming::resolve_host(&world, request.host) {
+                    Ok(resolved) => resolved.key,
+                    Err(not_found) => {
+                        return Route::Error(ErrorPage::new(
+                            StatusCode::NOT_FOUND,
+                            "No app here",
+                            not_found.to_string(),
+                        ));
+                    }
                 }
             };
-            let key = resolved.key;
             match tokio::time::timeout(self.hold, self.supervisor.ensure_ready(key.clone())).await {
                 Ok(Ok(upstream)) => Route::Upstream {
                     port: upstream.port,
@@ -67,6 +67,50 @@ impl Router for SupervisorRouter {
                 ),
             }
         })
+    }
+}
+
+impl SupervisorRouter {
+    /// The instance a request from the tunnel is for, once it is known to be shared
+    /// and its credentials check out. Every request that names a share is logged.
+    fn shared_key(
+        &self,
+        world: &World,
+        request: RouteRequest<'_>,
+    ) -> Result<InstanceKey, ErrorPage> {
+        let not_shared = || {
+            ErrorPage::new(
+                StatusCode::NOT_FOUND,
+                "Not shared",
+                "Nothing is shared under this name.",
+            )
+        };
+        let host = request.host.split(':').next().unwrap_or(request.host);
+        let key = naming::resolve_public_host(world, host).map_err(|_| not_shared())?;
+        let routes = self.supervisor.shared_routes();
+        let credentials = routes.get(&key).ok_or_else(not_shared)?;
+        let refused = credentials
+            .as_ref()
+            .is_some_and(|c| !share::authorized(request.authorization, c));
+        self.supervisor.external_request(
+            key.clone(),
+            ExternalRequest {
+                at_ms: crate::supervisor::runner::now_ms(),
+                app: key.app.clone(),
+                method: request.method.to_string(),
+                path: request.path.to_string(),
+                refused,
+            },
+        );
+        if refused {
+            return Err(ErrorPage::new(
+                StatusCode::UNAUTHORIZED,
+                "Credentials needed",
+                "This share is protected; ask whoever shared it for the user name and password.",
+            )
+            .with_basic_challenge("carte"));
+        }
+        Ok(key)
     }
 }
 

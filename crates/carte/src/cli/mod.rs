@@ -56,6 +56,10 @@ pub enum Command {
     /// Manage projects.
     #[command(subcommand)]
     Project(ProjectCommand),
+    /// Expose apps on the public internet through the share tunnel.
+    Share(ShareArgs),
+    /// End the share of a stack.
+    Unshare(Target),
     /// Stop every instance, or only idle ones.
     StopAll {
         #[arg(long)]
@@ -102,6 +106,25 @@ pub struct EnvArgs {
     /// The process whose env to show; defaults to the one serving HTTP.
     #[arg(long, short)]
     pub process: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct ShareArgs {
+    /// An app (`wiki`, `api@feature-x`) or a stack (`@feature-x`) together with --apps.
+    #[command(flatten)]
+    pub target: Target,
+    /// More apps of the same stack, comma-separated.
+    #[arg(long, value_delimiter = ',')]
+    pub apps: Vec<String>,
+    /// End the share after this long, like `2h`.
+    #[arg(long)]
+    pub ttl: Option<String>,
+    /// Require a user name and password, which are printed.
+    #[arg(long)]
+    pub auth: bool,
+    /// Keep the apps running while shared, so visitors never wait for a boot.
+    #[arg(long)]
+    pub pin: bool,
 }
 
 #[derive(Args, Clone)]
@@ -216,6 +239,8 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Logs(args) => control::logs(&paths, args, cli.json),
         Command::Open(t) => control::open(&paths, t),
         Command::StopAll { idle } => control::stop_all(&paths, idle, cli.json),
+        Command::Share(args) => control::share(&paths, args, cli.json),
+        Command::Unshare(t) => control::unshare(&paths, t, cli.json),
         Command::Env(args) => env::run(&paths, args, cli.json),
         Command::Project(cmd) => project::run(&paths, cmd, cli.json),
         Command::Setup(args) => setup::run(&paths, args),
