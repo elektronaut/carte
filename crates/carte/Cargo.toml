@@ -23,6 +23,7 @@ libc.workspace = true
 lru.workspace = true
 nix.workspace = true
 notify.workspace = true
+ratatui.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 serde.workspace = true

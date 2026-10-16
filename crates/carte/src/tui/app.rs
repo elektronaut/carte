@@ -1,0 +1,616 @@
+//! The TUI's state and how events change it. Nothing here touches the terminal or
+//! the socket: `update` returns the commands for the IO side to carry out.
+
+use std::time::{Duration, Instant};
+
+use carte_api::{
+    Action, ControlRequest, ControlResponse, InstanceStatus, LogLine, LogsRequest, Snapshot,
+};
+use ratatui::crossterm::event::KeyEvent;
+
+use super::input::{self, Confirm, Control, Focus, Intent, Mode};
+use super::logs::{self, Logs, Prefix};
+use super::target;
+use super::tree::{self, Fold, Node, NodeId, Row};
+
+#[derive(Debug)]
+pub enum Event {
+    Key(KeyEvent),
+    Tick,
+    Redraw,
+    Snapshot(Box<Snapshot>),
+    Disconnected(String),
+    Log {
+        generation: u64,
+        line: LogLine,
+    },
+    LogsEnded {
+        generation: u64,
+        error: Option<String>,
+    },
+    ControlDone {
+        verb: &'static str,
+        result: Result<ControlResponse, String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command {
+    Control {
+        request: ControlRequest,
+        verb: &'static str,
+    },
+    StopAll {
+        idle_only: bool,
+    },
+    FollowLogs {
+        generation: u64,
+        request: LogsRequest,
+    },
+    StopLogs,
+    Open(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Connection {
+    Connecting,
+    Connected,
+    Lost(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub error: bool,
+    pub at: Instant,
+}
+
+pub struct App {
+    pub connection: Connection,
+    pub snapshot: Option<Snapshot>,
+    pub snapshot_at: Instant,
+    pub now: Instant,
+    pub roots: Vec<Node>,
+    pub rows: Vec<Row>,
+    pub fold: Fold,
+    pub cursor: usize,
+    pub selected: Option<NodeId>,
+    pub focus: Focus,
+    pub mode: Mode,
+    pub logs: Logs,
+    pub notice: Option<Notice>,
+    /// Rows the tree showed last time it was drawn.
+    pub tree_height: usize,
+    pub quit: bool,
+}
+
+impl App {
+    pub fn new(now: Instant) -> Self {
+        App {
+            connection: Connection::Connecting,
+            snapshot: None,
+            snapshot_at: now,
+            now,
+            roots: Vec::new(),
+            rows: Vec::new(),
+            fold: Fold::default(),
+            cursor: 0,
+            selected: None,
+            focus: Focus::Tree,
+            mode: Mode::Normal,
+            logs: Logs::default(),
+            notice: None,
+            tree_height: 0,
+            quit: false,
+        }
+    }
+
+    pub fn update(&mut self, event: Event, now: Instant) -> Vec<Command> {
+        self.now = now;
+        let mut commands = Vec::new();
+        match event {
+            Event::Key(key) => {
+                if let Some(intent) = input::intent(&self.mode, self.focus, key) {
+                    self.apply(intent, &mut commands);
+                }
+            }
+            Event::Tick | Event::Redraw => {}
+            Event::Snapshot(snapshot) => {
+                self.connection = Connection::Connected;
+                self.snapshot = Some(*snapshot);
+                self.snapshot_at = now;
+                self.rebuild();
+            }
+            Event::Disconnected(message) => {
+                self.connection = Connection::Lost(message);
+                self.snapshot = None;
+                self.rebuild();
+            }
+            Event::Log { generation, line } => self.logs.push(generation, line),
+            Event::LogsEnded { generation, error } => self.logs.end(generation, error),
+            Event::ControlDone { verb, result } => self.control_done(verb, result),
+        }
+        if let Some(notice) = &self.notice {
+            let lasts = Duration::from_secs(if notice.error { 10 } else { 5 });
+            if now.duration_since(notice.at) > lasts {
+                self.notice = None;
+            }
+        }
+        commands.extend(self.sync_logs());
+        commands
+    }
+
+    pub fn selected_node(&self) -> Option<&Node> {
+        let row = self.rows.get(self.cursor)?;
+        Some(tree::node(&self.roots, &row.path))
+    }
+
+    /// The instance a node belongs to, for nodes at instance level or below.
+    pub fn instance(&self, id: &NodeId) -> Option<&InstanceStatus> {
+        let (NodeId::Instance {
+            project,
+            stack,
+            app,
+        }
+        | NodeId::Process {
+            project,
+            stack,
+            app,
+            ..
+        }) = id
+        else {
+            return None;
+        };
+        self.snapshot
+            .as_ref()?
+            .projects
+            .iter()
+            .find(|p| p.name == *project)?
+            .stacks
+            .iter()
+            .find(|s| s.name == *stack)?
+            .instances
+            .iter()
+            .find(|i| i.app == *app)
+    }
+
+    /// Seconds left before an instance idles out, counted down since the snapshot.
+    pub fn idle_in(&self, secs: u64) -> u64 {
+        secs.saturating_sub(self.now.duration_since(self.snapshot_at).as_secs())
+    }
+
+    fn rebuild(&mut self) {
+        self.roots = self.snapshot.as_ref().map(tree::build).unwrap_or_default();
+        self.refresh_rows();
+    }
+
+    /// Recomputes the visible rows and keeps the selection on the same node, or the
+    /// closest ancestor still shown.
+    fn refresh_rows(&mut self) {
+        self.rows = self.fold.rows(&self.roots);
+        let mut wanted = self.selected.clone();
+        while let Some(id) = wanted {
+            if let Some(i) = self
+                .rows
+                .iter()
+                .position(|row| tree::node(&self.roots, &row.path).ids.contains(&id))
+            {
+                self.cursor = i;
+                break;
+            }
+            wanted = id.parent();
+        }
+        self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+        self.selected = self.selected_node().map(|n| n.id().clone());
+    }
+
+    fn select(&mut self, index: usize) {
+        self.cursor = index.min(self.rows.len().saturating_sub(1));
+        self.selected = self.selected_node().map(|n| n.id().clone());
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        self.select(self.cursor.saturating_add_signed(delta));
+    }
+
+    fn apply(&mut self, intent: Intent, commands: &mut Vec<Command>) {
+        let page = |height: usize| height.saturating_sub(1).max(1) as isize;
+        match (intent, self.focus) {
+            (Intent::Quit, _) => self.quit = true,
+            (Intent::Help, _) => self.mode = Mode::Help,
+            (Intent::Problems, _) => self.mode = Mode::Problems,
+            (Intent::Close, _) => self.mode = Mode::Normal,
+            (Intent::SwitchFocus, _) => {
+                self.focus = match self.focus {
+                    Focus::Tree => Focus::Logs,
+                    Focus::Logs => Focus::Tree,
+                }
+            }
+            (Intent::Move(delta), Focus::Tree) => self.move_by(delta),
+            (Intent::Move(delta), Focus::Logs) => self.logs.scroll_by(-delta),
+            (Intent::PageDown, Focus::Tree) => self.move_by(page(self.tree_height)),
+            (Intent::PageUp, Focus::Tree) => self.move_by(-page(self.tree_height)),
+            (Intent::PageDown, Focus::Logs) => self.logs.scroll_by(-page(self.logs.height)),
+            (Intent::PageUp, Focus::Logs) => self.logs.scroll_by(page(self.logs.height)),
+            (Intent::Top, Focus::Tree) => self.select(0),
+            (Intent::Bottom, Focus::Tree) => self.select(usize::MAX),
+            (Intent::Top, Focus::Logs) => self.logs.scroll_to_top(),
+            (Intent::Bottom, Focus::Logs) => self.logs.follow(),
+            (Intent::Collapse, _) => self.collapse(),
+            (Intent::Expand, _) => self.expand(),
+            (Intent::Toggle, _) => {
+                if let Some(row) = self.rows.get(self.cursor).filter(|r| r.expandable) {
+                    let expanded = !row.expanded;
+                    self.set_expanded(expanded);
+                }
+            }
+            (Intent::StartFilter, _) => self.mode = Mode::Filter,
+            (Intent::FilterDone, _) => self.mode = Mode::Normal,
+            (Intent::ClearFilter, _) => {
+                self.mode = Mode::Normal;
+                self.edit_filter(|filter| filter.clear());
+            }
+            (Intent::FilterChar(c), _) => self.edit_filter(|filter| filter.push(c)),
+            (Intent::FilterBackspace, _) => self.edit_filter(|filter| {
+                filter.pop();
+            }),
+            (Intent::RunningOnly, _) => {
+                self.fold.running_only = !self.fold.running_only;
+                self.refresh_rows();
+                self.inform(if self.fold.running_only {
+                    "showing only running instances"
+                } else {
+                    "showing every instance"
+                });
+            }
+            (Intent::Control(control), _) => commands.extend(self.control(control)),
+            (Intent::StopIdle, _) => commands.push(Command::StopAll { idle_only: true }),
+            (Intent::StopAll, _) => self.mode = Mode::Confirm(Confirm::StopAll),
+            (Intent::Yes, _) => {
+                if self.mode == Mode::Confirm(Confirm::StopAll) {
+                    commands.push(Command::StopAll { idle_only: false });
+                }
+                self.mode = Mode::Normal;
+            }
+            (Intent::Open, _) => commands.extend(self.open()),
+        }
+    }
+
+    fn edit_filter(&mut self, edit: impl FnOnce(&mut String)) {
+        match self.focus {
+            Focus::Tree => {
+                edit(&mut self.fold.filter);
+                self.refresh_rows();
+            }
+            Focus::Logs => {
+                let mut filter = self.logs.filter.clone();
+                edit(&mut filter);
+                self.logs.set_filter(filter);
+            }
+        }
+    }
+
+    fn set_expanded(&mut self, expanded: bool) {
+        if let Some(id) = self.selected.clone() {
+            self.fold.expanded.insert(id, expanded);
+            self.refresh_rows();
+        }
+    }
+
+    fn collapse(&mut self) {
+        let Some(row) = self.rows.get(self.cursor) else {
+            return;
+        };
+        if row.expanded {
+            self.set_expanded(false);
+        } else if let Some(parent) = self.rows[..self.cursor]
+            .iter()
+            .rposition(|r| r.depth < row.depth)
+        {
+            self.select(parent);
+        }
+    }
+
+    fn expand(&mut self) {
+        let Some(row) = self.rows.get(self.cursor) else {
+            return;
+        };
+        if row.expanded {
+            self.move_by(1);
+        } else if row.expandable {
+            self.set_expanded(true);
+        }
+    }
+
+    fn control(&mut self, control: Control) -> Option<Command> {
+        let node = self.selected_node()?;
+        let snapshot = self.snapshot.as_ref()?;
+        let action = match control {
+            Control::Start => Action::Up,
+            Control::Stop => Action::Down,
+            Control::Restart => Action::Restart,
+            Control::TogglePin if node.status.pinned.is_some() => Action::Unpin { save: false },
+            Control::TogglePin => Action::Pin { save: false },
+            Control::ToggleDisable if node.status.disabled.is_some() => {
+                Action::Enable { save: false }
+            }
+            Control::ToggleDisable => Action::Disable { save: false },
+        };
+        let verb = match action {
+            Action::Up => "starting",
+            Action::Down => "stopping",
+            Action::Restart => "restarting",
+            Action::Pin { .. } => "pinned",
+            Action::Unpin { .. } => "unpinned",
+            Action::Disable { .. } => "disabled",
+            Action::Enable { .. } => "enabled",
+        };
+        Some(Command::Control {
+            request: ControlRequest {
+                target: target::address(snapshot, node.id()),
+                action,
+            },
+            verb,
+        })
+    }
+
+    fn control_done(&mut self, verb: &str, result: Result<ControlResponse, String>) {
+        match result {
+            Ok(response) => {
+                let mut parts = Vec::new();
+                if response.affected.is_empty() {
+                    parts.push("nothing to do".to_string());
+                } else {
+                    parts.push(format!("{verb} {}", response.affected.join(", ")));
+                }
+                parts.extend(response.messages);
+                self.inform(&parts.join("; "));
+            }
+            Err(message) => self.warn(&message),
+        }
+    }
+
+    fn open(&mut self) -> Option<Command> {
+        let id = self.selected_node()?.id().clone();
+        match self.instance(&id) {
+            Some(instance) => Some(Command::Open(instance.url.clone())),
+            None => {
+                self.warn("select an app to open");
+                None
+            }
+        }
+    }
+
+    fn inform(&mut self, text: &str) {
+        self.notice = Some(Notice {
+            text: text.to_string(),
+            error: false,
+            at: self.now,
+        });
+    }
+
+    fn warn(&mut self, text: &str) {
+        self.notice = Some(Notice {
+            text: text.to_string(),
+            error: true,
+            at: self.now,
+        });
+    }
+
+    /// Starts a new log stream when the selection, or the instances a merged view
+    /// covers, changed.
+    fn sync_logs(&mut self) -> Option<Command> {
+        let wanted = self.log_key();
+        if wanted == self.logs.key {
+            return None;
+        }
+        let prefix = self.log_prefix();
+        let generation = self.logs.restart(wanted.clone(), prefix);
+        let (Some(snapshot), Some(node)) = (&self.snapshot, self.selected_node()) else {
+            return Some(Command::StopLogs);
+        };
+        Some(Command::FollowLogs {
+            generation,
+            request: LogsRequest {
+                target: target::address(snapshot, node.id()),
+                follow: true,
+                tail: Some(1000),
+                search: None,
+            },
+        })
+    }
+
+    fn log_key(&self) -> Option<logs::Key> {
+        let snapshot = self.snapshot.as_ref()?;
+        let id = self.selected_node()?.id();
+        let instances = match id {
+            NodeId::Project { project } | NodeId::Stack { project, .. } => snapshot
+                .projects
+                .iter()
+                .filter(|p| p.name == *project)
+                .flat_map(|p| &p.stacks)
+                .filter(|s| match id {
+                    NodeId::Stack { stack, .. } => s.name == *stack,
+                    _ => true,
+                })
+                .flat_map(|s| &s.instances)
+                .filter(|i| !i.processes.is_empty())
+                .map(|i| (i.app.clone(), i.stack.clone()))
+                .collect(),
+            NodeId::Instance { .. } | NodeId::Process { .. } => Vec::new(),
+        };
+        Some(logs::Key {
+            address: target::address(snapshot, id).address,
+            instances,
+        })
+    }
+
+    fn log_prefix(&self) -> Prefix {
+        match self.selected_node().map(Node::id) {
+            Some(NodeId::Project { .. }) => Prefix::Full,
+            Some(NodeId::Stack { .. }) => Prefix::AppProcess,
+            Some(id @ NodeId::Instance { .. })
+                if self.instance(id).is_some_and(|i| i.processes.len() > 1) =>
+            {
+                Prefix::Process
+            }
+            _ => Prefix::None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+
+    use super::*;
+    use crate::tui::fixtures::sample;
+
+    fn connected() -> (App, Instant) {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(sample())), now);
+        (app, now)
+    }
+
+    fn press(app: &mut App, now: Instant, code: KeyCode) -> Vec<Command> {
+        app.update(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), now)
+    }
+
+    fn follows(commands: &[Command]) -> Vec<String> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                Command::FollowLogs { request, .. } => Some(request.target.address.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_first_snapshot_selects_the_top_and_follows_its_logs() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        let commands = app.update(Event::Snapshot(Box::new(sample())), now);
+        assert_eq!(follows(&commands), ["nova"]);
+        assert_eq!(
+            app.selected,
+            Some(NodeId::Project {
+                project: "nova".into()
+            })
+        );
+    }
+
+    #[test]
+    fn moving_follows_the_new_selection() {
+        let (mut app, now) = connected();
+        press(&mut app, now, KeyCode::Down);
+        let commands = press(&mut app, now, KeyCode::Down);
+        assert_eq!(follows(&commands), ["nova-billing@main"]);
+        assert_eq!(app.logs.prefix, Prefix::Process);
+        assert!(press(&mut app, now, KeyCode::Char('?')).is_empty());
+    }
+
+    #[test]
+    fn controls_address_the_selection() {
+        let (mut app, now) = connected();
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        let commands = press(&mut app, now, KeyCode::Char('r'));
+        let [Command::Control { request, verb }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(request.target.address, "nova-billing@main");
+        assert_eq!(request.action, Action::Restart);
+        assert_eq!(*verb, "restarting");
+    }
+
+    #[test]
+    fn stopping_everything_asks_first() {
+        let (mut app, now) = connected();
+        assert!(press(&mut app, now, KeyCode::Char('X')).is_empty());
+        assert_eq!(app.mode, Mode::Confirm(Confirm::StopAll));
+        assert_eq!(
+            press(&mut app, now, KeyCode::Char('y')),
+            [Command::StopAll { idle_only: false }]
+        );
+        press(&mut app, now, KeyCode::Char('X'));
+        assert!(press(&mut app, now, KeyCode::Char('n')).is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn folding_keeps_the_cursor_on_the_folded_node() {
+        let (mut app, now) = connected();
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
+        assert_eq!(app.rows.len(), 9);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Left);
+        assert_eq!(app.cursor, 2, "left on a leaf goes to the parent");
+        press(&mut app, now, KeyCode::Left);
+        assert_eq!(app.rows.len(), 7);
+        assert_eq!(app.cursor, 2);
+    }
+
+    #[test]
+    fn filtering_narrows_the_tree_as_you_type() {
+        let (mut app, now) = connected();
+        press(&mut app, now, KeyCode::Char('/'));
+        for c in "front".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        assert_eq!(app.fold.filter, "front");
+        assert_eq!(app.rows.len(), 5);
+        press(&mut app, now, KeyCode::Esc);
+        assert_eq!(app.fold.filter, "");
+        assert_eq!(app.rows.len(), 7);
+    }
+
+    #[test]
+    fn a_snapshot_keeps_the_selection_by_identity() {
+        let (mut app, now) = connected();
+        for _ in 0..6 {
+            press(&mut app, now, KeyCode::Down);
+        }
+        let selected = app.selected.clone();
+        let mut next = sample();
+        next.projects[0].stacks[0].instances.remove(0);
+        next.projects[0].apps.remove(0);
+        next.projects[0].stacks[1].instances.remove(0);
+        app.update(Event::Snapshot(Box::new(next)), now);
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.cursor, 2, "single-app stacks fold into one row each");
+    }
+
+    #[test]
+    fn losing_the_daemon_stops_the_logs_and_reconnecting_resumes_them() {
+        let (mut app, now) = connected();
+        let commands = app.update(Event::Disconnected("gone".into()), now);
+        assert_eq!(commands, [Command::StopLogs]);
+        let commands = app.update(Event::Snapshot(Box::new(sample())), now);
+        assert_eq!(follows(&commands), ["nova"]);
+    }
+
+    #[test]
+    fn notices_expire() {
+        let (mut app, now) = connected();
+        app.update(
+            Event::ControlDone {
+                verb: "stopping",
+                result: Ok(ControlResponse {
+                    affected: vec!["nova-billing@main".into()],
+                    messages: Vec::new(),
+                }),
+            },
+            now,
+        );
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("stopping nova-billing@main")
+        );
+        app.update(Event::Tick, now + Duration::from_secs(6));
+        assert_eq!(app.notice, None);
+    }
+}

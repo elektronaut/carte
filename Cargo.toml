@@ -45,6 +45,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 time = "0.3"
 tower-service = "0.3"
 lru = "0.18"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 x509-parser = "0.18"
 
 [workspace.lints.rust]
