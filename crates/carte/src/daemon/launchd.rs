@@ -1,0 +1,89 @@
+//! Sockets handed over by launchd through the LaunchAgent's `Sockets` entries.
+
+use std::io;
+use std::net::{SocketAddr, TcpListener};
+
+use tracing::info;
+
+use crate::proxy::{Listener, ListenerOptions, Proxy};
+
+/// The proxy's listeners for the launchd socket `name`, or a socket bound to `addr`
+/// when the daemon wasn't started by launchd with such a socket.
+pub async fn proxy_listeners(
+    proxy: &Proxy,
+    name: &str,
+    addr: SocketAddr,
+    options: ListenerOptions,
+) -> io::Result<Vec<Listener>> {
+    let activated = activate_socket(name)?;
+    if activated.is_empty() {
+        return Ok(vec![proxy.bind(addr, options).await?]);
+    }
+    activated
+        .into_iter()
+        .map(|socket| {
+            let listener = proxy.listen(socket, options.clone())?;
+            if let Ok(local) = listener.local_addr() {
+                info!("listening on {local} (socket {name:?} from launchd)");
+            }
+            Ok(listener)
+        })
+        .collect()
+}
+
+/// The listening sockets launchd holds for `name`; empty when the process wasn't
+/// started by launchd or its job has no such socket.
+#[cfg(target_os = "macos")]
+pub fn activate_socket(name: &str) -> io::Result<Vec<TcpListener>> {
+    use std::ffi::CString;
+    use std::os::fd::FromRawFd;
+
+    use libc::{c_char, c_int, size_t};
+
+    unsafe extern "C" {
+        fn launch_activate_socket(
+            name: *const c_char,
+            fds: *mut *mut c_int,
+            cnt: *mut size_t,
+        ) -> c_int;
+    }
+
+    let name = CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let mut fds: *mut c_int = std::ptr::null_mut();
+    let mut count: size_t = 0;
+    // SAFETY: `name` is a valid C string and both out-pointers point at live locals.
+    let err = unsafe { launch_activate_socket(name.as_ptr(), &mut fds, &mut count) };
+    match err {
+        0 => {}
+        libc::ESRCH | libc::ENOENT => return Ok(Vec::new()),
+        err => return Err(io::Error::from_raw_os_error(err)),
+    }
+    if fds.is_null() {
+        return Ok(Vec::new());
+    }
+    // SAFETY: on success launchd returns a malloc'ed array of `count` descriptors that
+    // the caller owns, and frees nothing itself.
+    let raw = unsafe { std::slice::from_raw_parts(fds, count) }.to_vec();
+    // SAFETY: `fds` came from malloc in launchd and is freed exactly once.
+    unsafe { libc::free(fds.cast()) };
+    Ok(raw
+        .into_iter()
+        // SAFETY: each descriptor is an open listening socket now owned by us alone.
+        .map(|fd| unsafe { TcpListener::from_raw_fd(fd) })
+        .collect())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn activate_socket(_name: &str) -> io::Result<Vec<TcpListener>> {
+    Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_no_sockets_outside_launchd() {
+        assert!(activate_socket("http").unwrap().is_empty());
+    }
+}
