@@ -57,6 +57,25 @@ pub struct AppInfo {
     pub runnable: bool,
 }
 
+/// `carte project ls --json`: what the config files say, without the daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectList {
+    pub projects: Vec<ProjectSummary>,
+    /// Problems that belong to no project, such as an invalid `config.toml`.
+    pub problems: Vec<Problem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    pub name: String,
+    pub config_path: PathBuf,
+    /// Empty when the project file can't be read.
+    pub apps: Vec<AppInfo>,
+    /// Branch slugs, sorted.
+    pub stacks: Vec<String>,
+    pub problems: Vec<Problem>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StackStatus {
     /// `main` or the branch slug.
