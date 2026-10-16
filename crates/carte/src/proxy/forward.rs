@@ -67,10 +67,24 @@ pub(crate) async fn handle(
         );
         return Ok(render(&page, request.headers()));
     };
+    let path = request
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| "/".into());
+    let authorization = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let method = request.method().clone();
     let route_request = RouteRequest {
         host: &host,
         tls: inbound.tls,
         kind: inbound.kind,
+        method: &method,
+        path: &path,
+        authorization: authorization.as_deref(),
     };
     let route = shared.router.route(route_request).await;
     Ok(match route {

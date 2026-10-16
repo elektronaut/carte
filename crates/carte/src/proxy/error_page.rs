@@ -17,6 +17,8 @@ pub struct ErrorPage {
     pub log: Vec<String>,
     /// Sent as `Retry-After`, e.g. for a 503 after a boot timeout.
     pub retry_after: Option<Duration>,
+    /// Sent as `WWW-Authenticate` with a 401, so browsers ask for credentials.
+    pub challenge: Option<String>,
 }
 
 impl ErrorPage {
@@ -27,6 +29,7 @@ impl ErrorPage {
             detail: detail.into(),
             log: Vec::new(),
             retry_after: None,
+            challenge: None,
         }
     }
 
@@ -37,6 +40,12 @@ impl ErrorPage {
 
     pub fn with_retry_after(mut self, retry_after: Duration) -> Self {
         self.retry_after = Some(retry_after);
+        self
+    }
+
+    /// Asks for HTTP basic credentials.
+    pub fn with_basic_challenge(mut self, realm: &str) -> Self {
+        self.challenge = Some(format!("Basic realm=\"{realm}\", charset=\"UTF-8\""));
         self
     }
 
@@ -54,6 +63,13 @@ impl ErrorPage {
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         if let Some(retry_after) = self.retry_after {
             headers.insert(RETRY_AFTER, retry_after.as_secs().max(1).into());
+        }
+        if let Some(challenge) = self
+            .challenge
+            .as_deref()
+            .and_then(|c| HeaderValue::from_str(c).ok())
+        {
+            headers.insert(http::header::WWW_AUTHENTICATE, challenge);
         }
         response
     }
