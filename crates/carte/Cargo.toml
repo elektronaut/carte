@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+carte-api.workspace = true
+carte-core.workspace = true
 clap.workspace = true
 libc.workspace = true
 nix.workspace = true
