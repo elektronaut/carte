@@ -125,6 +125,18 @@ struct RawShare {
     #[serde(default = "default_share_provider")]
     provider: String,
     domain: String,
+    #[serde(default = "default_share_tunnel")]
+    tunnel: String,
+    #[serde(default = "default_share_port")]
+    port: u16,
+}
+
+fn default_share_tunnel() -> String {
+    "carte".into()
+}
+
+fn default_share_port() -> u16 {
+    9254
 }
 
 fn default_share_provider() -> String {
@@ -167,6 +179,8 @@ pub fn parse_machine_config(path: &Path, text: &str) -> Result<MachineConfig, Co
         share: raw.share.map(|s| ShareConfig {
             provider: s.provider,
             domain: s.domain,
+            tunnel: s.tunnel,
+            port: s.port,
         }),
     })
 }
@@ -834,7 +848,9 @@ mod tests {
             config.share,
             Some(ShareConfig {
                 provider: "cloudflare".into(),
-                domain: "dev.example.com".into()
+                domain: "dev.example.com".into(),
+                tunnel: "carte".into(),
+                port: 9254,
             })
         );
     }

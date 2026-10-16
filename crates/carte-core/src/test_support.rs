@@ -131,6 +131,8 @@ pub fn world() -> World {
             share: Some(ShareConfig {
                 provider: "cloudflare".into(),
                 domain: "inge.carte.dev".into(),
+                tunnel: "carte".into(),
+                port: 9254,
             }),
             ..MachineConfig::default()
         },

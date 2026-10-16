@@ -76,6 +76,10 @@ pub enum MemoryTarget {
 pub struct ShareConfig {
     pub provider: String,
     pub domain: String,
+    /// The provider's tunnel name (Cloudflare: a named tunnel).
+    pub tunnel: String,
+    /// The loopback port the tunnel delivers requests to.
+    pub port: u16,
 }
 
 /// A loaded and validated project.
