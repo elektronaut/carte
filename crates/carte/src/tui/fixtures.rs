@@ -21,6 +21,7 @@ pub fn snapshot(projects: Vec<ProjectStatus>) -> Snapshot {
 pub fn project(name: &str, apps: &[&str], stacks: Vec<StackStatus>) -> ProjectStatus {
     let prefix = format!("{name}-");
     ProjectStatus {
+        folder: None,
         name: name.into(),
         apps: apps
             .iter()

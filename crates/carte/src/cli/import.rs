@@ -186,12 +186,8 @@ impl<'a> Importer<'a> {
             .iter()
             .map(|p| p.project.name.clone())
             .collect();
-        if let Ok(entries) = fs::read_dir(paths.projects_dir()) {
-            taken.extend(entries.filter_map(Result::ok).filter_map(|e| {
-                let path = e.path();
-                (path.extension()? == "toml")
-                    .then(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))?
-            }));
+        if let Ok(files) = carte_core::discovery::project_files(&paths.projects_dir()) {
+            taken.extend(files.into_iter().map(|f| f.name));
         }
         let apps = world.projects.iter().flat_map(|p| {
             p.project

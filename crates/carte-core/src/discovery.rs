@@ -255,13 +255,8 @@ pub fn load_world(config_dir: &Path) -> World {
     }
 
     let projects_dir = config_dir.join("projects");
-    let mut files: Vec<PathBuf> = match std::fs::read_dir(&projects_dir) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "toml") && p.is_file())
-            .collect(),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+    let files = match project_files(&projects_dir) {
+        Ok(files) => files,
         Err(err) => {
             world.problems.push(Problem {
                 project: None,
@@ -271,12 +266,24 @@ pub fn load_world(config_dir: &Path) -> World {
             Vec::new()
         }
     };
-    files.sort();
 
-    for path in files {
+    for ProjectFileEntry { name, folder, path } in files {
+        if let Some(other) = world.project(&name) {
+            world.problems.push(Problem {
+                project: Some(name.clone()),
+                app: None,
+                message: format!(
+                    "{} is skipped: {} already defines a project named {name}, and names are hostnames, so they must be unique across folders",
+                    path.display(),
+                    other.project.config_path.display()
+                ),
+            });
+            continue;
+        }
         match config::load_project_file(&path) {
             Ok(file) => {
-                let (state, problems) = discover_project(file);
+                let (mut state, problems) = discover_project(file);
+                state.project.folder = folder;
                 world.projects.push(state);
                 world.problems.extend(problems);
             }
@@ -289,6 +296,66 @@ pub fn load_world(config_dir: &Path) -> World {
     }
     resolve_elsewhere(&mut world);
     world
+}
+
+pub struct ProjectFileEntry {
+    pub name: String,
+    /// The subdirectory of `projects/` the file is in.
+    pub folder: Option<String>,
+    pub path: PathBuf,
+}
+
+/// The project files in `projects/` and its subdirectories one level down, top level
+/// first, each level sorted by name. A missing directory has none.
+pub fn project_files(projects_dir: &Path) -> std::io::Result<Vec<ProjectFileEntry>> {
+    let mut top = Vec::new();
+    let mut nested = Vec::new();
+    let entries = match std::fs::read_dir(projects_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let toml_files = |dir: &Path| -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "toml") && p.is_file())
+            .collect();
+        files.sort();
+        files
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    let entry = |path: PathBuf, folder: Option<String>| ProjectFileEntry {
+        name: path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        folder,
+        path,
+    };
+    for path in toml_files(projects_dir) {
+        top.push(entry(path, None));
+    }
+    for dir in dirs {
+        let Some(folder) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if folder.starts_with('.') {
+            continue;
+        }
+        for path in toml_files(&dir) {
+            nested.push(entry(path, Some(folder.clone())));
+        }
+    }
+    top.extend(nested);
+    Ok(top)
 }
 
 /// Resolves the `depends_on` names that aren't apps of their own project: another
@@ -523,6 +590,51 @@ prunable gitdir file points to non-existent location
         std::fs::create_dir_all(dir).unwrap();
         git(dir, &["init", "-q"]);
         git(dir, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    }
+
+    #[test]
+    fn folders_group_projects_and_names_stay_unique() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for name in ["gwpa", "auksjon3000", "blog"] {
+            repo(&root.join("work").join(name));
+        }
+        let projects = root.join("config/projects");
+        std::fs::create_dir_all(projects.join("anyone")).unwrap();
+        std::fs::create_dir_all(projects.join(".git")).unwrap();
+        let file = |path: &str, repo: &str| {
+            std::fs::write(
+                projects.join(path),
+                format!("repos = \"{}/work/{repo}\"\n", root.display()),
+            )
+            .unwrap();
+        };
+        file("anyone/gwpa.toml", "gwpa");
+        file("anyone/auksjon3000.toml", "auksjon3000");
+        file("blog.toml", "blog");
+        file("gwpa.toml", "gwpa");
+        file(".git/stray.toml", "blog");
+
+        let world = load_world(&root.join("config"));
+        let folders: Vec<_> = world
+            .projects
+            .iter()
+            .map(|p| (p.project.name.as_str(), p.project.folder.as_deref()))
+            .collect();
+        assert_eq!(
+            folders,
+            [
+                ("blog", None),
+                ("gwpa", None),
+                ("auksjon3000", Some("anyone"))
+            ]
+        );
+        assert_eq!(world.problems.len(), 1, "{:?}", world.problems);
+        assert!(
+            world.problems[0]
+                .message
+                .contains("already defines a project named gwpa")
+        );
     }
 
     #[test]

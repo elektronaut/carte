@@ -371,6 +371,7 @@ pub(crate) mod tests {
 
     pub(crate) fn make_project() -> Project {
         Project {
+            folder: None,
             name: "make".into(),
             config_path: "/Users/inge/.config/carte/projects/make.toml".into(),
             strip_prefix: Some("make-".into()),

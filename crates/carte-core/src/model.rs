@@ -95,6 +95,8 @@ impl ShareConfig {
 pub struct Project {
     pub name: String,
     pub config_path: PathBuf,
+    /// The subdirectory of `projects/` its file is in, for grouping in the TUI only.
+    pub folder: Option<String>,
     pub strip_prefix: Option<String>,
     pub env_provider: Option<EnvProviderKind>,
     /// Project-level env templates, in file order.

@@ -201,6 +201,7 @@ mod tests {
 
     fn project(deps: &[(&str, &[&str])]) -> Project {
         Project {
+            folder: None,
             name: "make".into(),
             config_path: PathBuf::new(),
             strip_prefix: Some("make-".into()),

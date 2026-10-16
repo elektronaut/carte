@@ -135,6 +135,9 @@ pub struct Problem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProjectStatus {
     pub name: String,
+    /// The subdirectory of `projects/` its file is in, for grouping in the TUI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
     pub apps: Vec<AppInfo>,
     /// `main` first, then stacks by name.
     pub stacks: Vec<StackStatus>,

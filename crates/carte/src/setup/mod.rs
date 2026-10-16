@@ -157,14 +157,8 @@ impl Facts {
                 Err(err) => CaState::Unknown(err.to_string()),
             },
         };
-        let projects = fs::read_dir(env.paths.projects_dir())
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
-                    .count()
-            })
-            .unwrap_or(0);
+        let projects = carte_core::discovery::project_files(&env.paths.projects_dir())
+            .map_or(0, |files| files.len());
         Facts {
             resolver: fs::read_to_string(env.resolver_file()).ok(),
             ca,

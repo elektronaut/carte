@@ -499,6 +499,10 @@ impl App {
             return self.save();
         }
         let node = self.selected_node()?;
+        if matches!(node.id(), NodeId::Folder { .. }) {
+            self.warn("select a project, stack or app in the folder");
+            return None;
+        }
         let snapshot = self.snapshot.as_ref()?;
         let action = match control {
             Control::Start => Action::Up,
@@ -691,6 +695,9 @@ impl App {
         let prefix = self.log_prefix();
         self.selection = None;
         let generation = self.logs.restart(wanted.clone(), prefix);
+        if wanted.is_none() {
+            return Some(Command::StopLogs);
+        }
         let (Some(snapshot), Some(node)) = (&self.snapshot, self.selected_node()) else {
             return Some(Command::StopLogs);
         };
@@ -709,6 +716,7 @@ impl App {
         let snapshot = self.snapshot.as_ref()?;
         let id = self.selected_node()?.id();
         let instances = match id {
+            NodeId::Folder { .. } => return None,
             NodeId::Project { project } | NodeId::Stack { project, .. } => snapshot
                 .projects
                 .iter()
@@ -732,7 +740,7 @@ impl App {
 
     fn log_prefix(&self) -> Prefix {
         match self.selected_node().map(Node::id) {
-            Some(NodeId::Project { .. }) => Prefix::Full,
+            Some(NodeId::Folder { .. } | NodeId::Project { .. }) => Prefix::Full,
             Some(NodeId::Stack { .. }) => Prefix::AppProcess,
             Some(id @ NodeId::Instance { .. })
                 if self.instance(id).is_some_and(|i| i.processes.len() > 1) =>
@@ -1014,6 +1022,25 @@ mod tests {
             app.credentials.is_empty(),
             "an ended share forgets its password"
         );
+    }
+
+    #[test]
+    fn a_folder_has_no_logs_or_controls() {
+        let mut snapshot = sample();
+        snapshot.projects[0].folder = Some("clients".into());
+        let now = Instant::now();
+        let mut app = App::new(now);
+        let commands = app.update(Event::Snapshot(Box::new(snapshot)), now);
+        assert!(follows(&commands).is_empty(), "{commands:?}");
+        assert_eq!(app.rows.len(), 1, "folders start folded");
+        assert!(press(&mut app, now, KeyCode::Char('x')).is_empty());
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("select a project, stack or app in the folder")
+        );
+        press(&mut app, now, KeyCode::Right);
+        let commands = press(&mut app, now, KeyCode::Down);
+        assert_eq!(follows(&commands), ["make"]);
     }
 
     #[test]

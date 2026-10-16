@@ -49,6 +49,7 @@ pub(super) fn build(input: &Input) -> Snapshot {
             }
             ProjectStatus {
                 name: state.project.name.clone(),
+                folder: state.project.folder.clone(),
                 apps: state
                     .project
                     .apps
