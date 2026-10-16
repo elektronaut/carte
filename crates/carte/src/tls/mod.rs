@@ -1,6 +1,7 @@
 pub mod bundle;
 pub mod ca;
 pub mod resolver;
+pub mod trust;
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
