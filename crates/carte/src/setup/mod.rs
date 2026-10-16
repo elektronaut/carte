@@ -2,6 +2,7 @@
 
 pub mod check;
 pub mod plist;
+pub mod share;
 
 use std::fmt::Write as _;
 use std::fs;

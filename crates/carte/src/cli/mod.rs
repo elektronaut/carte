@@ -153,6 +153,12 @@ pub struct SetupArgs {
     /// Undo setup: LaunchAgent, resolver file and CA trust.
     #[arg(long)]
     pub uninstall: bool,
+    /// Set up sharing through Cloudflare Tunnel under this domain.
+    #[arg(long, value_name = "DOMAIN", conflicts_with_all = ["check", "uninstall"])]
+    pub share: Option<String>,
+    /// The Cloudflare tunnel to create or reuse for --share.
+    #[arg(long, default_value = "carte", requires = "share")]
+    pub tunnel: String,
 }
 
 #[derive(Subcommand, Clone)]
