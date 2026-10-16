@@ -52,6 +52,7 @@ pub enum Intent {
     FilterBackspace,
     FilterDone,
     RunningOnly,
+    ToggleMouse,
     Control(Control),
     StopIdle,
     StopAll,
@@ -76,6 +77,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "filter the focused pane"),
             ("esc", "clear the filter"),
             ("a", "show only running"),
+            ("m", "mouse on or off"),
         ],
     ),
     (
@@ -151,6 +153,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('I') => Some(Intent::StopIdle),
         KeyCode::Char('X') => Some(Intent::StopAll),
         KeyCode::Char('a') => Some(Intent::RunningOnly),
+        KeyCode::Char('m') => Some(Intent::ToggleMouse),
         _ => None,
     };
     if shared.is_some() {

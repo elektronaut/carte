@@ -141,6 +141,8 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
     let mut state =
         TableState::default().with_selected((!app.rows.is_empty()).then_some(app.cursor));
     frame.render_stateful_widget(table, area, &mut state);
+    app.tree_area = area;
+    app.tree_offset = state.offset();
     if app.rows.is_empty() {
         let message = if app.fold.filter.is_empty() && !app.fold.running_only {
             "No projects. Add one with `carte project add`."
@@ -519,6 +521,7 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
     });
     let block = pane(Line::from(title), app.focus == Focus::Logs);
     let inner = block.inner(area);
+    app.logs_area = area;
     frame.render_widget(block, area);
     app.logs.height = inner.height as usize;
     let logs = &app.logs;
@@ -938,7 +941,7 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Char('?'));
-        let screen = draw(&mut app, 100, 32);
+        let screen = draw(&mut app, 100, 34);
         assert_eq!(
             screen,
             "\
@@ -953,6 +956,7 @@ mod tests {
 │      ● frontend !       │ /            filter the focused pane         │e in 14m         0%    0B│
 │                         │ esc          clear the filter                │                         │
 │                         │ a            show only running               │                         │
+│                         │ m            mouse on or off                 │                         │
 │                         │                                              │                         │
 │                         │ Control the selection                        │                         │
 │                         │ s            start                           │                         │
@@ -971,7 +975,8 @@ mod tests {
 │                         │ q            quit                            │                         │
 │                         │                                              │                         │
 │                         │ pin* and off* last until the daemon restarts │                         │
-╰─────────────────────────╰──────────────────────────────────────────────╯─────────────────────────╯
+│                         ╰──────────────────────────────────────────────╯                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
  ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a running only  tab logs"
         );
