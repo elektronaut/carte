@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use carte_api::{InstanceStatus, Policy, Problem, ProcessState, ProcessStatus};
+use carte_api::{InstanceStatus, Policy, Problem, ProcessState, ProcessStatus, TunnelState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -103,6 +103,23 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
     ];
     if app.fold.running_only {
         title.push(Span::raw("· running only ").dark_gray());
+    }
+    if !snapshot.shares.is_empty()
+        && let Some(tunnel) = &snapshot.tunnel
+    {
+        let shared: usize = snapshot.shares.iter().map(|s| s.apps.len()).sum();
+        let (word, color) = match tunnel.state {
+            TunnelState::Connected => ("online", Color::Magenta),
+            TunnelState::Starting => ("connecting", Color::Yellow),
+            TunnelState::Failed => ("tunnel down (!)", Color::Red),
+            TunnelState::Idle => ("", Color::DarkGray),
+        };
+        let what = if tunnel.state == TunnelState::Idle {
+            format!("· {shared} shared ")
+        } else {
+            format!("· {shared} shared, {word} ")
+        };
+        title.push(Span::raw(what).fg(color));
     }
     if !snapshot.problems.is_empty() {
         let count = snapshot.problems.len();
@@ -354,7 +371,7 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
         }
         NodeId::Instance { .. } => {
             if let Some(instance) = app.instance(id) {
-                lines.extend(instance_details(app, instance, state, status));
+                lines.extend(instance_details(app, id.project(), instance, state, status));
             }
         }
         NodeId::Process { process, .. } => {
@@ -387,6 +404,7 @@ fn crashed_below(node: &Node) -> Vec<&str> {
 
 fn instance_details(
     app: &App,
+    project: &str,
     instance: &InstanceStatus,
     state: Span<'static>,
     status: &Status,
@@ -396,12 +414,7 @@ fn instance_details(
         Span::raw(" · "),
         Span::raw(instance.url.clone()).underlined(),
     ])];
-    if let Some(public) = &instance.public_url {
-        lines.push(Line::from(vec![
-            Span::raw("shared at ").magenta(),
-            Span::raw(public.clone()).underlined(),
-        ]));
-    }
+    lines.extend(share_details(app, project, instance));
     let checkout = if status.fallback {
         "main (no worktree for this stack)".to_string()
     } else {
@@ -445,6 +458,68 @@ fn instance_details(
         && status.state == State::Crashed
     {
         lines.push(Line::from(error.clone()).red());
+    }
+    lines
+}
+
+/// Where a shared instance is public, how it's guarded, and its latest visitors.
+fn share_details(app: &App, project: &str, instance: &InstanceStatus) -> Vec<Line<'static>> {
+    let Some(public) = &instance.public_url else {
+        return Vec::new();
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::raw("shared at ").magenta(),
+        Span::raw(public.clone()).underlined(),
+    ])];
+    let snapshot = app.snapshot.as_ref().expect("a snapshot to draw");
+    if let Some(tunnel) = &snapshot.tunnel
+        && tunnel.state == TunnelState::Failed
+    {
+        let message = tunnel.message.as_deref().unwrap_or("no reason given");
+        lines.push(Line::from(format!("the tunnel is down: {message}")).red());
+    }
+    let Some(share) = snapshot
+        .shares
+        .iter()
+        .find(|s| s.project == project && s.stack == instance.stack)
+    else {
+        return lines;
+    };
+    let mut notes = Vec::new();
+    match app
+        .credentials
+        .get(&(share.project.clone(), share.stack.clone()))
+    {
+        Some(credentials) => notes.push(format!(
+            "user {}, password {}",
+            credentials.user, credentials.password
+        )),
+        None if share.auth => notes.push("behind a password".into()),
+        None => notes.push("open to anyone with the address".into()),
+    }
+    if share.pinned {
+        notes.push("kept running".into());
+    }
+    match share.expires_in_secs {
+        Some(secs) => notes.push(format!("ends in {}", duration(app.idle_in(secs)))),
+        None => notes.push(format!(
+            "shared for {}",
+            duration(share.shared_secs + app.now.duration_since(app.snapshot_at).as_secs())
+        )),
+    }
+    lines.push(Line::from(notes.join(" · ")).dark_gray());
+    let visits: Vec<_> = share
+        .requests
+        .iter()
+        .filter(|r| r.app == instance.app)
+        .collect();
+    for request in visits.iter().rev().take(3).rev() {
+        let line = Line::from(format!("← {} {}", request.method, request.path));
+        lines.push(if request.refused {
+            line.red()
+        } else {
+            line.dark_gray()
+        });
     }
     lines
 }
@@ -697,8 +772,13 @@ fn render_help(frame: &mut Frame, area: Rect) {
 
 fn render_problems(frame: &mut Frame, area: Rect, app: &App) {
     let problems: Vec<&Problem> = app.snapshot.iter().flat_map(|s| &s.problems).collect();
-    let lines = if problems.is_empty() {
-        vec![Line::from("No config problems.")]
+    let tunnel = app
+        .snapshot
+        .as_ref()
+        .and_then(|s| s.tunnel.as_ref())
+        .filter(|t| t.state == TunnelState::Failed);
+    let mut lines = if problems.is_empty() && tunnel.is_none() {
+        vec![Line::from("No problems.")]
     } else {
         problems
             .iter()
@@ -720,7 +800,13 @@ fn render_problems(frame: &mut Frame, area: Rect, app: &App) {
             })
             .collect()
     };
-    popup(frame, area, "config problems", lines);
+    if let Some(tunnel) = tunnel {
+        lines.push(Line::from(vec![
+            Span::raw(format!("{} tunnel: ", tunnel.provider)).bold(),
+            Span::raw(tunnel.message.clone().unwrap_or_default()),
+        ]));
+    }
+    popup(frame, area, "problems", lines);
 }
 
 fn render_confirm(frame: &mut Frame, area: Rect, app: &App) {
@@ -755,7 +841,7 @@ mod tests {
 
     use super::*;
     use crate::tui::app::{Command, Event};
-    use crate::tui::fixtures::{process, sample};
+    use crate::tui::fixtures::{process, sample, shared_sample};
 
     fn draw(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -872,6 +958,43 @@ mod tests {
     }
 
     #[test]
+    fn renders_a_share_and_its_visitors() {
+        let mut snapshot = shared_sample();
+        snapshot.shares[0].requests = ["/", "/login", "/admin", "/admin"]
+            .iter()
+            .enumerate()
+            .map(|(i, path)| carte_api::ExternalRequest {
+                at_ms: i as u64,
+                app: "make-billing".into(),
+                method: "GET".into(),
+                path: path.to_string(),
+                refused: i == 3,
+            })
+            .collect();
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        let screen = draw(&mut app, 120, 18);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(
+            lines[0].contains("carte · 0 running · 1 shared, online"),
+            "{screen}"
+        );
+        for wanted in [
+            "shared at https://make-billing--main--make.inge.dev",
+            "behind a password · shared for 2m",
+            "← GET /login",
+            "← GET /admin",
+        ] {
+            assert!(screen.contains(wanted), "{wanted:?} in\n{screen}");
+        }
+        assert!(!screen.contains("← GET / "), "only the last three visits");
+        assert!(screen.contains("billing shared"), "{screen}");
+    }
+
+    #[test]
     fn renders_a_crash_and_its_problem() {
         let mut app = busy_app();
         let now = app.now;
@@ -941,41 +1064,47 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Char('?'));
-        let screen = draw(&mut app, 100, 34);
+        let screen = draw(&mut app, 100, 40);
         assert_eq!(
             screen,
             "\
-╭ carte · 2 running · 1 pr╭ keys ────────────────────────────────────────╮─────────────────────────╮
-│                         │ Navigate                                     │              CPU   MEM  │
-│▾ ✖ make !               │ ↑↓ j k       move                            │                 3%  412M│
-│  ▾ ✖ main               │ ←→ h l       fold, unfold                    │                 3%  412M│
-│    ▸ ● billing pin*     │ enter space  fold or unfold                  │dy               3%  412M│
-│      ✖ frontend !       │ g G          top, bottom                     │shed                     │
-│  ▾ ● feature-x          │ PgUp PgDn    page                            │                 0%    0B│
-│      ○ billing main     │ tab          switch between tree and logs    │                         │
-│      ● frontend !       │ /            filter the focused pane         │e in 14m         0%    0B│
-│                         │ esc          clear the filter                │                         │
-│                         │ a            show only running               │                         │
-│                         │ m            mouse on or off                 │                         │
-│                         │                                              │                         │
-│                         │ Control the selection                        │                         │
-│                         │ s            start                           │                         │
-╰─────────────────────────│ x            stop                            │─────────────────────────╯
-╭ make ───────────────────│ r            restart                         │─────────────────────────╮
-│✖ 2 of 4 instances runnin│ p            pin or unpin                    │                         │
-│crashed: frontend        │ d            disable or enable               │                         │
-│! branch slug \"billing\" n│ S            save a temporary pin or disable │                         │
-╰─────────────────────────│ o            open in the browser             │─────────────────────────╯
-╭ logs following ─────────│                                              │─────────────────────────╮
-│No output yet.           │ Everything                                   │                         │
-│                         │ I            stop idle instances             │                         │
-│                         │ X            stop all instances              │                         │
-│                         │ !            config problems                 │                         │
-│                         │ ?            this help                       │                         │
-│                         │ q            quit                            │                         │
-│                         │                                              │                         │
-│                         │ pin* and off* last until the daemon restarts │                         │
-│                         ╰──────────────────────────────────────────────╯                         │
+╭ carte · 2 running · 1 problem (!) ───────────────────────────────────────────────────────────────╮
+│                                                                                       CPU   MEM  │
+│▾ ✖ make !              ╭ keys ──────────────────────────────────────────╮                3%  412M│
+│  ▾ ✖ main              │ Navigate                                       │                3%  412M│
+│    ▸ ● billing pin*    │ ↑↓ j k       move                              │y               3%  412M│
+│      ✖ frontend !      │ ←→ h l       fold, unfold                      │hed                     │
+│  ▾ ● feature-x         │ enter space  fold or unfold                    │                0%    0B│
+│      ○ billing main    │ g G          top, bottom                       │                        │
+│      ● frontend !      │ PgUp PgDn    page                              │ in 14m         0%    0B│
+│                        │ tab          switch between tree and logs      │                        │
+│                        │ /            filter the focused pane           │                        │
+│                        │ esc          clear the filter                  │                        │
+│                        │ a            show only running                 │                        │
+│                        │ m            mouse on or off                   │                        │
+│                        │                                                │                        │
+│                        │ Control the selection                          │                        │
+│                        │ s            start                             │                        │
+│                        │ x            stop                              │                        │
+╰────────────────────────│ r            restart                           │────────────────────────╯
+╭ make ──────────────────│ p            pin or unpin                      │────────────────────────╮
+│✖ 2 of 4 instances runni│ d            disable or enable                 │                        │
+│crashed: frontend       │ S            save a temporary pin or disable   │                        │
+│! branch slug \"billing\" │ o            open in the browser               │                        │
+╰────────────────────────│ w            share on the web, or stop sharing │────────────────────────╯
+╭ logs following ────────│ W            share behind a password           │────────────────────────╮
+│No output yet.          │ O            open the shared address           │                        │
+│                        │                                                │                        │
+│                        │ Everything                                     │                        │
+│                        │ I            stop idle instances               │                        │
+│                        │ X            stop all instances                │                        │
+│                        │ !            problems                          │                        │
+│                        │ ?            this help                         │                        │
+│                        │ q            quit                              │                        │
+│                        │                                                │                        │
+│                        │ pin* and off* last until the daemon restarts   │                        │
+│                        ╰────────────────────────────────────────────────╯                        │
+│                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
  ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a running only  tab logs"

@@ -111,3 +111,29 @@ pub fn sample() -> Snapshot {
         ],
     )])
 }
+
+/// `sample()` with make-billing@main shared, as the daemon reports it.
+pub fn shared_sample() -> Snapshot {
+    let mut snapshot = sample();
+    snapshot.projects[0].stacks[0].instances[0].public_url =
+        Some("https://make-billing--main--make.inge.dev".into());
+    snapshot.shares.push(carte_api::ShareStatus {
+        project: "make".into(),
+        stack: "main".into(),
+        apps: vec![carte_api::SharedApp {
+            app: "make-billing".into(),
+            url: "https://make-billing--main--make.inge.dev".into(),
+        }],
+        auth: true,
+        pinned: false,
+        shared_secs: 120,
+        expires_in_secs: None,
+        requests: Vec::new(),
+    });
+    snapshot.tunnel = Some(carte_api::TunnelStatus {
+        provider: "cloudflare".into(),
+        state: carte_api::TunnelState::Connected,
+        message: None,
+    });
+    snapshot
+}

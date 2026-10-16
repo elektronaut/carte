@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carte_api::{ControlResponse, LogLine, Snapshot, StopAllRequest, paths};
+use carte_api::{ControlResponse, LogLine, ShareResponse, Snapshot, StopAllRequest, paths};
 use http::Method;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind, MouseButton,
@@ -86,6 +86,24 @@ impl Tasks {
                 }));
             }
             Command::StopLogs => self.stop_logs(),
+            Command::Share(request) => {
+                tokio::spawn(async move {
+                    let result = client
+                        .post::<_, ShareResponse>(paths::SHARE, &request)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Event::Shared(result));
+                });
+            }
+            Command::Unshare(request) => {
+                tokio::spawn(async move {
+                    let result = client
+                        .post::<_, Vec<String>>(paths::UNSHARE, &request)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Event::Unshared(result));
+                });
+            }
             Command::MouseCapture(on) => set_mouse_capture(on),
             Command::Open(url) => {
                 let opener = if cfg!(target_os = "macos") {

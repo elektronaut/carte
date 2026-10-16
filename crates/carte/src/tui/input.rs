@@ -57,6 +57,11 @@ pub enum Intent {
     StopIdle,
     StopAll,
     Open,
+    OpenPublic,
+    /// Share or unshare the selected app; with `auth`, share it behind a password.
+    Share {
+        auth: bool,
+    },
     Help,
     Problems,
     Yes,
@@ -90,6 +95,9 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("d", "disable or enable"),
             ("S", "save a temporary pin or disable"),
             ("o", "open in the browser"),
+            ("w", "share on the web, or stop sharing"),
+            ("W", "share behind a password"),
+            ("O", "open the shared address"),
         ],
     ),
     (
@@ -97,7 +105,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("I", "stop idle instances"),
             ("X", "stop all instances"),
-            ("!", "config problems"),
+            ("!", "problems"),
             ("?", "this help"),
             ("q", "quit"),
         ],
@@ -150,6 +158,9 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('d') => Some(Intent::Control(Control::ToggleDisable)),
         KeyCode::Char('S') => Some(Intent::Control(Control::Save)),
         KeyCode::Char('o') => Some(Intent::Open),
+        KeyCode::Char('O') => Some(Intent::OpenPublic),
+        KeyCode::Char('w') => Some(Intent::Share { auth: false }),
+        KeyCode::Char('W') => Some(Intent::Share { auth: true }),
         KeyCode::Char('I') => Some(Intent::StopIdle),
         KeyCode::Char('X') => Some(Intent::StopAll),
         KeyCode::Char('a') => Some(Intent::RunningOnly),
