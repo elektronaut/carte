@@ -547,6 +547,30 @@ async fn sharing_a_running_app_restarts_it_with_its_public_url() {
 }
 
 #[tokio::test]
+async fn a_single_host_provider_shares_one_app_at_a_time() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.app("acme-api", WEB);
+    setup.project("");
+    std::fs::write(
+        setup.paths.machine_config(),
+        "[share]\nprovider = \"ngrok\"\ndomain = \"acme-dev.ngrok-free.app\"\n",
+    )
+    .unwrap();
+    let handle = setup.start();
+
+    let shared = handle.share(share_request("web", false)).await.unwrap();
+    assert_eq!(shared.share.apps[0].url, "https://acme-dev.ngrok-free.app");
+    let refused = handle.share(share_request("api", false)).await.unwrap_err();
+    assert!(
+        refused.contains("ngrok shares one app at a time, and acme-web@main is shared"),
+        "{refused}"
+    );
+    assert!(handle.share(share_request("web", false)).await.is_ok());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn pinned_shares_start_and_hold_their_apps() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);

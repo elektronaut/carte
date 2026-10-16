@@ -51,9 +51,42 @@ impl Provider for Cloudflare {
     }
 }
 
+/// ngrok's agent on the account's dev domain. The free plan has one domain and no
+/// names under it, so it carries one app at a time; visitors first see ngrok's warning
+/// page.
+pub struct Ngrok;
+
+impl Provider for Ngrok {
+    fn program(&self) -> &str {
+        "ngrok"
+    }
+
+    fn args(&self, config: &ShareConfig) -> Vec<String> {
+        vec![
+            "http".into(),
+            format!("http://127.0.0.1:{}", config.port),
+            "--url".into(),
+            format!("https://{}", config.domain),
+            "--log".into(),
+            "stdout".into(),
+            "--log-format".into(),
+            "logfmt".into(),
+        ]
+    }
+
+    fn connected(&self, line: &str) -> bool {
+        line.contains("msg=\"started tunnel\"")
+    }
+
+    fn install_hint(&self) -> &str {
+        "install it with `brew install ngrok`, then run `ngrok config add-authtoken <token>`"
+    }
+}
+
 pub fn provider(name: &str) -> Option<Arc<dyn Provider>> {
     match name {
         "cloudflare" => Some(Arc::new(Cloudflare)),
+        "ngrok" => Some(Arc::new(Ngrok)),
         _ => None,
     }
 }
@@ -91,7 +124,7 @@ pub async fn run(config: ShareConfig, supervisor: Handle, spawner: Arc<Spawner>,
         report(
             TunnelState::Failed,
             Some(format!(
-                "unknown share provider {:?}; carte supports cloudflare, or none to run your own tunnel",
+                "unknown share provider {:?}; carte supports cloudflare and ngrok, or none to run your own tunnel",
                 config.provider
             )),
         );
@@ -224,7 +257,29 @@ mod tests {
         assert!(Cloudflare.connected(
             "2026-10-17T10:00:00Z INF Registered tunnel connection connIndex=0 location=osl01"
         ));
-        assert!(provider("ngrok").is_none());
+        assert!(provider("tailscale").is_none());
+    }
+
+    #[test]
+    fn ngrok_serves_the_dev_domain() {
+        let config = ShareConfig {
+            provider: "ngrok".into(),
+            domain: "alex.ngrok-free.app".into(),
+            tunnel: "carte".into(),
+            port: 9254,
+        };
+        assert_eq!(
+            Ngrok.args(&config).join(" "),
+            "http http://127.0.0.1:9254 --url https://alex.ngrok-free.app --log stdout --log-format logfmt"
+        );
+        assert!(Ngrok.connected(
+            "t=2026-10-17T10:00:00+0200 lvl=info msg=\"started tunnel\" obj=tunnels name=command_line addr=http://127.0.0.1:9254 url=https://alex.ngrok-free.app"
+        ));
+        assert!(
+            !Ngrok.connected(
+                "t=2026-10-17T10:00:00+0200 lvl=info msg=\"client session established\""
+            )
+        );
     }
 
     #[test]

@@ -108,7 +108,8 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
 }
 
 fn share(env: &SetupEnv, domain: &str, tunnel: &str, dry_run: bool) -> anyhow::Result<ExitCode> {
-    let facts = setup::share::ShareFacts::gather(env, tunnel);
+    let provider = setup::share::Provider::for_domain(domain);
+    let facts = setup::share::ShareFacts::gather(env, provider, tunnel);
     let plan = setup::share::plan(env, &facts, domain, tunnel)?;
     println!("Sharing plan:\n");
     print!("{}", plan.render(env, true));

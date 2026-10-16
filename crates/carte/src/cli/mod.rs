@@ -153,7 +153,8 @@ pub struct SetupArgs {
     /// Undo setup: LaunchAgent, resolver file and CA trust.
     #[arg(long)]
     pub uninstall: bool,
-    /// Set up sharing through Cloudflare Tunnel under this domain.
+    /// Set up sharing under this domain: a Cloudflare zone, or your ngrok dev domain
+    /// (`<name>.ngrok-free.app`) to share through ngrok.
     #[arg(long, value_name = "DOMAIN", conflicts_with_all = ["check", "uninstall"])]
     pub share: Option<String>,
     /// The Cloudflare tunnel to create or reuse for --share.

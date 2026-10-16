@@ -86,8 +86,13 @@ impl SupervisorRouter {
             )
         };
         let host = request.host.split(':').next().unwrap_or(request.host);
-        let key = naming::resolve_public_host(world, host).map_err(|_| not_shared())?;
         let routes = self.supervisor.shared_routes();
+        let key = match &world.machine.share {
+            Some(share) if share.single_host() && host.eq_ignore_ascii_case(&share.domain) => {
+                routes.keys().next().cloned().ok_or_else(not_shared)?
+            }
+            _ => naming::resolve_public_host(world, host).map_err(|_| not_shared())?,
+        };
         let credentials = routes.get(&key).ok_or_else(not_shared)?;
         let refused = credentials
             .as_ref()
