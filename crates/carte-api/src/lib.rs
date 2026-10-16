@@ -14,6 +14,7 @@ pub mod paths {
     pub const STOP_ALL: &str = "/v1/stop-all";
     /// Newline-delimited JSON `LogLine`s.
     pub const LOGS: &str = "/v1/logs";
+    /// The daemon's own environment, which apps build on.
     pub const ENV: &str = "/v1/env";
     pub const RELOAD: &str = "/v1/reload";
 }
@@ -212,6 +213,11 @@ pub struct LogLine {
     pub at_ms: u64,
     /// The line with escape codes stripped.
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonEnv {
+    pub vars: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

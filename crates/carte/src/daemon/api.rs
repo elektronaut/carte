@@ -30,6 +30,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::STOP_ALL, post(stop_all))
         .route(paths::LOGS, post(logs))
         .route(paths::RELOAD, post(reload))
+        .route(paths::ENV, get(daemon_env))
         .with_state(api)
 }
 
@@ -106,6 +107,13 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
         }
     });
     stream(rx)
+}
+
+async fn daemon_env() -> Response {
+    Json(carte_api::DaemonEnv {
+        vars: crate::supervisor::base_env(),
+    })
+    .into_response()
 }
 
 async fn reload(State(api): State<Api>) -> Response {

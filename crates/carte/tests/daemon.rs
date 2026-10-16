@@ -329,3 +329,29 @@ fn config_changes_are_picked_up() {
     });
     assert!(daemon.request("shop.test", "/").starts_with("HTTP/1.1 200"));
 }
+
+#[test]
+fn env_shows_the_assigned_port_while_running() {
+    let daemon = Daemon::start();
+    assert!(
+        daemon
+            .request("web.acme.test", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+    let port = snapshot(&daemon).projects[0].stacks[0].instances[0]
+        .processes
+        .iter()
+        .find(|p| p.name == "web")
+        .and_then(|p| p.port)
+        .unwrap();
+    let env: carte_api::EnvResponse =
+        serde_json::from_str(&stdout(&daemon.run(&["env", "web", "--json"]))).unwrap();
+    let value = |key: &str| {
+        env.vars
+            .iter()
+            .find(|v| v.key == key)
+            .map(|v| v.value.clone())
+    };
+    assert_eq!(value("PORT"), Some(port.to_string()));
+    assert_eq!(value("CARTE_STATE_DIR"), None);
+}
