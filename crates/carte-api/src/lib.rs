@@ -17,6 +17,8 @@ pub mod paths {
     /// The daemon's own environment, which apps build on.
     pub const ENV: &str = "/v1/env";
     pub const RELOAD: &str = "/v1/reload";
+    pub const SHARE: &str = "/v1/share";
+    pub const UNSHARE: &str = "/v1/unshare";
 }
 
 /// A CLI address (`app@branch/process`, any part optional) and the directory it was
@@ -33,6 +35,94 @@ pub struct Snapshot {
     pub problems: Vec<Problem>,
     pub running_instances: u32,
     pub memory_bytes: u64,
+    #[serde(default)]
+    pub shares: Vec<ShareStatus>,
+    /// `None` when sharing isn't configured.
+    #[serde(default)]
+    pub tunnel: Option<TunnelStatus>,
+}
+
+/// Apps of one stack exposed on the public internet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareStatus {
+    pub project: String,
+    pub stack: String,
+    pub apps: Vec<SharedApp>,
+    /// Visitors need the credentials returned when the share was made.
+    pub auth: bool,
+    pub pinned: bool,
+    pub shared_secs: u64,
+    pub expires_in_secs: Option<u64>,
+    /// The latest requests from the internet, newest last.
+    pub requests: Vec<ExternalRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedApp {
+    pub app: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalRequest {
+    /// Milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    pub app: String,
+    pub method: String,
+    pub path: String,
+    /// Refused because the credentials were missing or wrong.
+    pub refused: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunnelStatus {
+    pub provider: String,
+    pub state: TunnelState,
+    /// The provider's last words, for when it fails.
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TunnelState {
+    /// Nothing is shared, so no tunnel runs.
+    Idle,
+    Starting,
+    Connected,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareRequest {
+    /// An app (`gwpa`, `api@feature-x`) or a stack (`@feature-x`) with `apps`.
+    pub target: Address,
+    /// More apps of the same stack, full or short names.
+    #[serde(default)]
+    pub apps: Vec<String>,
+    pub ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub auth: bool,
+    #[serde(default)]
+    pub pin: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareResponse {
+    pub share: ShareStatus,
+    pub credentials: Option<Credentials>,
+    pub messages: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credentials {
+    pub user: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnshareRequest {
+    /// Any app of the share, or its stack.
+    pub target: Address,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

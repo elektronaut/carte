@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, InstanceState, LogLine, ProcessState,
-    Snapshot,
+    ShareRequest, ShareResponse, Snapshot, TunnelState, TunnelStatus,
 };
 use carte_core::address::{self, Target};
 use carte_core::env::{self, Env, EnvRequest, SystemRunner};
@@ -19,7 +19,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::groups::GroupRecord;
 use super::runner::{self, LogLabel, ProcLog};
-use super::{Activity, BootFailure, Handle, LogFilter, Msg, Options, Upstream, snapshot};
+use super::{Activity, BootFailure, Handle, LogFilter, Msg, Options, Upstream, share, snapshot};
 use crate::paths::Paths;
 use crate::process::{IoMode, SpawnSpec, Spawner};
 use crate::urls::StackUrls;
@@ -172,6 +172,11 @@ struct Actor {
     ticks: u64,
     dirty: bool,
     shutdown: Option<oneshot::Sender<()>>,
+    shares: share::Shares,
+    shared_tx: watch::Sender<Arc<share::SharedRoutes>>,
+    /// Instances a share pinned, so unsharing unpins only those.
+    share_pins: BTreeSet<InstanceKey>,
+    tunnel: Option<TunnelStatus>,
 }
 
 pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Options) -> Handle {
@@ -179,13 +184,21 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
     let world = Arc::new(world);
     let (world_tx, world_rx) = watch::channel(world.clone());
     let (log_tx, _) = broadcast::channel(4096);
-    let initial = Arc::new(snapshot::build(
-        &world,
-        &BTreeMap::new(),
-        &BTreeMap::new(),
-        Instant::now(),
-    ));
+    let tunnel = world.machine.share.as_ref().map(|config| TunnelStatus {
+        provider: config.provider.clone(),
+        state: TunnelState::Idle,
+        message: None,
+    });
+    let initial = Arc::new(snapshot::build(&snapshot::Input {
+        world: &world,
+        instances: &BTreeMap::new(),
+        overrides: &BTreeMap::new(),
+        shares: &BTreeMap::new(),
+        tunnel: tunnel.as_ref(),
+        now: Instant::now(),
+    }));
     let (snapshot_tx, snapshot_rx) = watch::channel(initial);
+    let (shared_tx, shared_rx) = watch::channel(Arc::new(share::SharedRoutes::new()));
     let _ = std::fs::create_dir_all(paths.run_dir());
     let actor = Actor {
         world,
@@ -205,6 +218,10 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         ticks: 0,
         dirty: false,
         shutdown: None,
+        shares: BTreeMap::new(),
+        shared_tx,
+        share_pins: BTreeSet::new(),
+        tunnel,
     };
     let tick_tx = tx.clone();
     let tick = actor.options.tick;
@@ -223,6 +240,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         tx,
         snapshot: snapshot_rx,
         world: world_rx,
+        shared: shared_rx,
         logs: log_tx,
     }
 }
@@ -264,6 +282,25 @@ impl Actor {
             }
             Msg::Reload(world) => self.reload(world),
             Msg::RestartCheckout(path) => self.restart_checkout(&path),
+            Msg::Share { request, reply } => {
+                let _ = reply.send(self.share(request));
+            }
+            Msg::Unshare { target, reply } => {
+                let _ = reply.send(self.unshare(&target));
+            }
+            Msg::ExternalRequest(key, request) => {
+                if let Some(share) = self.shares.get_mut(&(key.project, key.stack)) {
+                    share.requests.push_back(request);
+                    if share.requests.len() > 50 {
+                        share.requests.pop_front();
+                    }
+                    self.dirty = true;
+                }
+            }
+            Msg::Tunnel(status) => {
+                self.tunnel = Some(status);
+                self.dirty = true;
+            }
             Msg::EnvChanged(path) => {
                 self.providers.remove(&path);
                 for inst in self.instances.values_mut() {
@@ -310,12 +347,14 @@ impl Actor {
     }
 
     fn publish(&mut self) {
-        let snapshot = snapshot::build(
-            &self.world,
-            &self.instances,
-            &self.overrides,
-            Instant::now(),
-        );
+        let snapshot = snapshot::build(&snapshot::Input {
+            world: &self.world,
+            instances: &self.instances,
+            overrides: &self.overrides,
+            shares: &self.shares,
+            tunnel: self.tunnel.as_ref(),
+            now: Instant::now(),
+        });
         self.snapshot_tx.send_replace(Arc::new(snapshot));
     }
 
@@ -581,6 +620,7 @@ impl Actor {
             ca_bundle: self.options.ca_bundle.clone(),
             ca_cert: self.options.ca_cert.clone(),
             requires: state.project.requires.clone(),
+            shared: share::shared_apps(&self.shares, &key.project, &key.stack),
             ptys_free: crate::pty::capacity()
                 .map(|c| {
                     c.available(self.world.machine.limits.pty_reserve as usize) >= indices.len()
@@ -992,6 +1032,7 @@ impl Actor {
         }
         self.enforce_log_budget();
         self.adopt_shared_processes();
+        self.expire_shares(now);
         let usages = self.usages();
         let mut to_stop = Vec::new();
         for usage in &usages {
@@ -1293,6 +1334,159 @@ impl Actor {
         Ok(Some(format!("saved to {}", path.display())))
     }
 
+    // Sharing
+
+    fn share(&mut self, request: ShareRequest) -> Result<ShareResponse, String> {
+        let Some(config) = self.world.machine.share.clone() else {
+            return Err(format!(
+                "sharing isn't set up: add a [share] section with your domain to {}",
+                self.paths.machine_config().display()
+            ));
+        };
+        let target = self.resolve(&request.target)?;
+        let stack = target.stack.clone().unwrap_or(Stack::Main);
+        let state = self
+            .world
+            .project(&target.project)
+            .ok_or_else(|| format!("no project named {}", target.project))?;
+        let mut apps: BTreeSet<String> = target.app.iter().cloned().collect();
+        for name in &request.apps {
+            let app = state
+                .project
+                .app(name)
+                .or_else(|| state.project.app_by_short(name))
+                .ok_or_else(|| format!("{} has no app named {name}", target.project))?;
+            apps.insert(app.name.clone());
+        }
+        if apps.is_empty() {
+            return Err("name the apps to share: an app address, or --apps".into());
+        }
+        for name in &apps {
+            let app = state.project.app(name).expect("resolved app");
+            naming::public_url(&config, state, app, &stack).map_err(|e| e.to_string())?;
+        }
+
+        let before = share::routes(&self.shares);
+        let now = Instant::now();
+        let entry = (target.project.clone(), stack.clone());
+        let share = self
+            .shares
+            .entry(entry.clone())
+            .or_insert_with(|| share::Share {
+                apps: BTreeSet::new(),
+                credentials: None,
+                pin: false,
+                started: now,
+                expires: None,
+                requests: Default::default(),
+            });
+        share.apps.extend(apps);
+        share.pin |= request.pin;
+        share.expires = request.ttl_secs.map(|secs| now + Duration::from_secs(secs));
+        if request.auth && share.credentials.is_none() {
+            share.credentials = Some(share::new_credentials());
+        }
+        let credentials = share.credentials.clone();
+        let mut messages = Vec::new();
+        if state
+            .project
+            .apps
+            .iter()
+            .any(|a| a.settings.subdomains && share.apps.contains(&a.name))
+        {
+            messages.push(
+                "app subdomains aren't reachable when shared: the certificate covers one level"
+                    .to_string(),
+            );
+        }
+        self.apply_shares(&before);
+        let status = share::status(&self.world, &config, &entry, &self.shares[&entry], now);
+        Ok(ShareResponse {
+            share: status,
+            credentials,
+            messages,
+        })
+    }
+
+    fn unshare(&mut self, target: &Address) -> Result<Vec<String>, String> {
+        let resolved = self.resolve(target)?;
+        let entry = (
+            resolved.project.clone(),
+            resolved.stack.clone().unwrap_or(Stack::Main),
+        );
+        let before = share::routes(&self.shares);
+        let Some(share) = self.shares.remove(&entry) else {
+            return Err(format!(
+                "nothing in {}@{} is shared",
+                entry.0,
+                entry.1.slug()
+            ));
+        };
+        self.apply_shares(&before);
+        Ok(share.apps.into_iter().collect())
+    }
+
+    fn expire_shares(&mut self, now: Instant) {
+        let before = share::routes(&self.shares);
+        self.shares
+            .retain(|_, share| share.expires.is_none_or(|at| at > now));
+        if before.len() != share::routes(&self.shares).len() {
+            self.apply_shares(&before);
+        }
+    }
+
+    /// Publishes the shared routes, restarts running instances whose public URL
+    /// appeared or went away, and keeps pinned shares running.
+    fn apply_shares(&mut self, before: &share::SharedRoutes) {
+        let after = share::routes(&self.shares);
+        self.shared_tx.send_replace(Arc::new(after.clone()));
+        let changed: Vec<InstanceKey> = before
+            .keys()
+            .filter(|k| !after.contains_key(*k))
+            .chain(after.keys().filter(|k| !before.contains_key(*k)))
+            .cloned()
+            .collect();
+        for key in changed {
+            if self.instances.get(&key).is_some_and(Instance::is_active) {
+                if let Some(inst) = self.instances.get_mut(&key) {
+                    inst.restart_pending = true;
+                }
+                self.stop(&key);
+            }
+        }
+
+        let pinned: BTreeSet<InstanceKey> = self
+            .shares
+            .iter()
+            .filter(|(_, share)| share.pin)
+            .flat_map(|((project, stack), share)| {
+                share.apps.iter().map(move |app| InstanceKey {
+                    project: project.clone(),
+                    app: app.clone(),
+                    stack: stack.clone(),
+                })
+            })
+            .collect();
+        for key in self
+            .share_pins
+            .difference(&pinned)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            self.overrides.remove(&(key.clone(), None));
+            self.share_pins.remove(&key);
+        }
+        for key in pinned {
+            if self.share_pins.insert(key.clone()) {
+                self.overrides.insert((key.clone(), None), Policy::Pinned);
+            }
+            if !self.instances.get(&key).is_some_and(Instance::is_active) {
+                let _ = self.start(&key, None);
+            }
+        }
+        self.dirty = true;
+    }
+
     fn set_override(&mut self, key: &InstanceKey, process: Option<&str>, policy: Policy) {
         let entry = (key.clone(), process.map(str::to_string));
         let configured = self.instances.get(key).and_then(|inst| {
@@ -1570,6 +1764,7 @@ struct EnvInput {
     ca_bundle: PathBuf,
     ca_cert: PathBuf,
     requires: Vec<String>,
+    shared: BTreeSet<String>,
     ptys_free: bool,
 }
 
@@ -1602,12 +1797,11 @@ impl EnvInput {
         if let Some(dir) = self.pidfile.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let shared = BTreeSet::new();
         let urls = StackUrls {
             machine: &self.machine,
             state: &self.state,
             stack: &self.key.stack,
-            shared: &shared,
+            shared: &self.shared,
         };
         let tld_length = naming::tld_length(
             &self.machine.tld,

@@ -485,3 +485,97 @@ async fn checkout_watchers_run_once_and_move_to_another_instance() {
     .await;
     handle.shutdown().await;
 }
+
+fn share_config(setup: &Setup) {
+    std::fs::write(
+        setup.paths.machine_config(),
+        "[share]\nprovider = \"none\"\ndomain = \"share.example\"\n",
+    )
+    .unwrap();
+}
+
+fn share_request(address: &str, pin: bool) -> carte_api::ShareRequest {
+    carte_api::ShareRequest {
+        target: Address {
+            address: address.into(),
+            cwd: None,
+        },
+        apps: Vec::new(),
+        ttl_secs: None,
+        auth: false,
+        pin,
+    }
+}
+
+#[tokio::test]
+async fn sharing_a_running_app_restarts_it_with_its_public_url() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: FIXTURE_ENV=CARTE_PUBLIC_URL exec {fixture}\n",
+    );
+    setup.project("");
+    share_config(&setup);
+    let handle = setup.start();
+    let web = key("acme-web", Stack::Main);
+
+    let before = handle.ensure_ready(web.clone()).await.unwrap();
+    assert!(!http_get(before.port, "/").contains("share.example"));
+
+    handle.share(share_request("web", false)).await.unwrap();
+    assert!(handle.shared_routes().contains_key(&web));
+    wait_for(&handle, "a restart", |s| {
+        status(s, "acme-web", "main")
+            .processes
+            .iter()
+            .any(|p| p.name == "web" && p.restarts > 0 && p.state == ProcessState::Running)
+    })
+    .await;
+    let after = handle.ensure_ready(web.clone()).await.unwrap();
+    let body = http_get(after.port, "/");
+    assert!(body.contains("https://web--acme.share.example"), "{body}");
+
+    handle
+        .unshare(Address {
+            address: "web".into(),
+            cwd: None,
+        })
+        .await
+        .unwrap();
+    assert!(handle.shared_routes().is_empty());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn pinned_shares_start_and_hold_their_apps() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("idle_timeout = \"1s\"\n");
+    share_config(&setup);
+    let handle = setup.start();
+
+    handle.share(share_request("web", true)).await.unwrap();
+    wait_for(&handle, "the pinned app running", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Ready
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Ready,
+        "a pinned share doesn't idle out"
+    );
+
+    handle
+        .unshare(Address {
+            address: "web".into(),
+            cwd: None,
+        })
+        .await
+        .unwrap();
+    wait_for(&handle, "idle stop after unsharing", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Stopped
+    })
+    .await;
+    handle.shutdown().await;
+}

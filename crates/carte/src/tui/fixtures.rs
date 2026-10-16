@@ -13,6 +13,8 @@ pub fn snapshot(projects: Vec<ProjectStatus>) -> Snapshot {
         problems: Vec::new(),
         running_instances: 0,
         memory_bytes: 0,
+        shares: Vec::new(),
+        tunnel: None,
     }
 }
 

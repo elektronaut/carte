@@ -4,6 +4,7 @@
 mod actor;
 pub mod groups;
 pub mod runner;
+pub mod share;
 mod snapshot;
 
 use std::collections::BTreeMap;
@@ -11,7 +12,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carte_api::{Address, ControlRequest, ControlResponse, LogLine, Snapshot};
+use carte_api::{
+    Address, ControlRequest, ControlResponse, ExternalRequest, LogLine, ShareRequest,
+    ShareResponse, Snapshot, TunnelStatus,
+};
 use carte_core::model::{InstanceKey, World};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -101,6 +105,16 @@ pub(crate) enum Msg {
     Reload(World),
     RestartCheckout(PathBuf),
     EnvChanged(PathBuf),
+    Share {
+        request: ShareRequest,
+        reply: oneshot::Sender<Result<ShareResponse, String>>,
+    },
+    Unshare {
+        target: Address,
+        reply: oneshot::Sender<Result<Vec<String>, String>>,
+    },
+    ExternalRequest(InstanceKey, ExternalRequest),
+    Tunnel(TunnelStatus),
     Shutdown(oneshot::Sender<()>),
     Internal(actor::Internal),
 }
@@ -131,6 +145,7 @@ pub struct Handle {
     tx: mpsc::UnboundedSender<Msg>,
     snapshot: watch::Receiver<Arc<Snapshot>>,
     world: watch::Receiver<Arc<World>>,
+    shared: watch::Receiver<Arc<share::SharedRoutes>>,
     logs: broadcast::Sender<LogLine>,
 }
 
@@ -196,6 +211,38 @@ impl Handle {
 
     pub fn world(&self) -> Arc<World> {
         self.world.borrow().clone()
+    }
+
+    pub async fn share(&self, request: ShareRequest) -> Result<ShareResponse, String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::Share { request, reply });
+        rx.await
+            .unwrap_or_else(|_| Err("carte is shutting down".into()))
+    }
+
+    /// Ends the share of a stack; returns the apps that were shared.
+    pub async fn unshare(&self, target: Address) -> Result<Vec<String>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::Unshare { target, reply });
+        rx.await
+            .unwrap_or_else(|_| Err("carte is shutting down".into()))
+    }
+
+    /// What the share listener may serve right now.
+    pub fn shared_routes(&self) -> Arc<share::SharedRoutes> {
+        self.shared.borrow().clone()
+    }
+
+    pub fn watch_shared(&self) -> watch::Receiver<Arc<share::SharedRoutes>> {
+        self.shared.clone()
+    }
+
+    pub fn external_request(&self, key: InstanceKey, request: ExternalRequest) {
+        self.send(Msg::ExternalRequest(key, request));
+    }
+
+    pub fn tunnel_status(&self, status: TunnelStatus) {
+        self.send(Msg::Tunnel(status));
     }
 
     /// Restarts every running instance of a checkout (`tmp/restart.txt`).
