@@ -2,6 +2,7 @@
 
 mod api;
 mod router;
+pub mod watch;
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
@@ -125,6 +126,11 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
             problems
         }),
     };
+    tokio::spawn(watch::run(
+        paths.config_dir.clone(),
+        supervisor.clone(),
+        Duration::from_secs(60),
+    ));
     let api_shutdown = shutdown.clone();
     let api_task = tokio::spawn(async move {
         axum::serve(listener, api::router(api))

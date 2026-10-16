@@ -22,6 +22,7 @@ hyper-util.workspace = true
 libc.workspace = true
 lru.workspace = true
 nix.workspace = true
+notify.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 serde.workspace = true
