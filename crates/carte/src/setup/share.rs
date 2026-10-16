@@ -1,5 +1,5 @@
-//! `carte setup --share <domain>`: a Cloudflare tunnel for this machine and the
-//! `[share]` section that points carte at it.
+//! `carte setup --share <domain>`: a Cloudflare tunnel for this machine, or the
+//! account's ngrok dev domain, and the `[share]` section that points carte at it.
 
 use std::path::PathBuf;
 
@@ -10,21 +10,71 @@ use toml_edit::{DocumentMut, Item, Table, value};
 use super::plist::LABEL;
 use super::{Action, Plan, SetupEnv, Step};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Cloudflare,
+    Ngrok,
+}
+
+impl Provider {
+    /// ngrok's own domains mean ngrok; any other domain is a Cloudflare zone.
+    pub fn for_domain(domain: &str) -> Self {
+        let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+        let ngrok = [
+            "ngrok-free.app",
+            "ngrok-free.dev",
+            "ngrok.app",
+            "ngrok.dev",
+            "ngrok.io",
+        ];
+        if ngrok
+            .iter()
+            .any(|suffix| domain.ends_with(&format!(".{suffix}")))
+        {
+            Provider::Ngrok
+        } else {
+            Provider::Cloudflare
+        }
+    }
+
+    fn program(self) -> &'static str {
+        match self {
+            Provider::Cloudflare => "cloudflared",
+            Provider::Ngrok => "ngrok",
+        }
+    }
+}
+
 /// What the plan depends on, gathered read-only.
 pub struct ShareFacts {
-    pub cloudflared: Option<PathBuf>,
-    /// `cloudflared tunnel login` has left its certificate.
+    pub provider: Provider,
+    pub program: Option<PathBuf>,
+    /// Cloudflare: `cloudflared tunnel login` has left its certificate. ngrok: the
+    /// agent's config has an authtoken.
     pub logged_in: bool,
     pub tunnel_exists: bool,
     pub daemon_loaded: bool,
 }
 
 impl ShareFacts {
-    pub fn gather(env: &SetupEnv, tunnel: &str) -> Self {
-        let cloudflared = SystemRunner::from_env().find_program("cloudflared");
-        let logged_in = env.home.join(".cloudflared/cert.pem").is_file();
-        let tunnel_exists = match (&cloudflared, logged_in) {
-            (Some(program), true) => std::process::Command::new(program)
+    pub fn gather(env: &SetupEnv, provider: Provider, tunnel: &str) -> Self {
+        let program = SystemRunner::from_env().find_program(provider.program());
+        let logged_in = match provider {
+            Provider::Cloudflare => env.home.join(".cloudflared/cert.pem").is_file(),
+            Provider::Ngrok => [
+                "Library/Application Support/ngrok/ngrok.yml",
+                ".config/ngrok/ngrok.yml",
+                ".ngrok2/ngrok.yml",
+            ]
+            .iter()
+            .filter_map(|path| std::fs::read_to_string(env.home.join(path)).ok())
+            .any(|text| {
+                text.lines()
+                    .any(|l| l.trim_start().starts_with("authtoken:"))
+            }),
+        };
+        let tunnel_exists = match (provider, &program, logged_in) {
+            (Provider::Cloudflare, Some(program), true) => std::process::Command::new(program)
                 .args(["tunnel", "list", "--name", tunnel, "--output", "json"])
                 .output()
                 .ok()
@@ -37,7 +87,8 @@ impl ShareFacts {
             .output()
             .is_ok_and(|o| o.status.success());
         ShareFacts {
-            cloudflared,
+            provider,
+            program,
             logged_in,
             tunnel_exists,
             daemon_loaded,
@@ -54,44 +105,27 @@ pub fn plan(
     let domain = domain.trim().trim_start_matches("*.").trim_end_matches('.');
     if domain.is_empty() || !domain.contains('.') {
         bail!(
-            "{domain:?} isn't a domain; give the domain whose Cloudflare zone shares live under, like example.dev"
+            "{domain:?} isn't a domain; give the domain whose Cloudflare zone shares live under, like example.dev, or your ngrok dev domain"
         );
     }
-    let Some(program) = &facts.cloudflared else {
-        bail!("cloudflared isn't installed: run `brew install cloudflared` first");
+    let Some(program) = &facts.program else {
+        let name = facts.provider.program();
+        bail!("{name} isn't installed: run `brew install {name}` first");
     };
     let program = program.display().to_string();
     let mut steps = Vec::new();
-    if !facts.logged_in {
-        steps.push(Step::run(
-            "Log in to Cloudflare and pick the domain's zone (opens your browser)",
-            &program,
-            &["tunnel", "login"],
-        ));
+    if facts.provider == Provider::Ngrok {
+        if !facts.logged_in {
+            bail!(
+                "ngrok needs your authtoken first: run `ngrok config add-authtoken <token>` with the token from https://dashboard.ngrok.com/get-started/your-authtoken"
+            );
+        }
+    } else {
+        cloudflare_steps(&mut steps, facts, &program, domain, tunnel);
     }
-    if !facts.tunnel_exists {
-        steps.push(Step::run(
-            format!("Create the tunnel {tunnel:?} for this machine"),
-            &program,
-            &["tunnel", "create", tunnel],
-        ));
-    }
-    let wildcard = format!("*.{domain}");
-    steps.push(Step::run(
-        format!("Send every {wildcard} name to the tunnel"),
-        &program,
-        &[
-            "tunnel",
-            "route",
-            "dns",
-            "--overwrite-dns",
-            tunnel,
-            &wildcard,
-        ],
-    ));
     let config_path = env.paths.machine_config();
     let current = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let contents = share_section(&current, domain, tunnel)?;
+    let contents = share_section(&current, facts.provider, domain, tunnel)?;
     if contents != current {
         steps.push(Step {
             description: format!("Tell carte to share under {domain}"),
@@ -114,14 +148,60 @@ pub fn plan(
                 .into(),
         );
     }
-    notes.push(format!(
-        "after this, `carte share <app>` makes an app public at https://<app>.{domain}"
-    ));
+    notes.push(match facts.provider {
+        Provider::Cloudflare => format!(
+            "after this, `carte share <app>` makes an app public at https://<app>.{domain}"
+        ),
+        Provider::Ngrok => format!(
+            "after this, `carte share <app>` makes an app public at https://{domain}: ngrok's free plan carries one app at a time, and visitors first see ngrok's warning page"
+        ),
+    });
     Ok(Plan { steps, notes })
 }
 
+fn cloudflare_steps(
+    steps: &mut Vec<Step>,
+    facts: &ShareFacts,
+    program: &str,
+    domain: &str,
+    tunnel: &str,
+) {
+    if !facts.logged_in {
+        steps.push(Step::run(
+            "Log in to Cloudflare and pick the domain's zone (opens your browser)",
+            program,
+            &["tunnel", "login"],
+        ));
+    }
+    if !facts.tunnel_exists {
+        steps.push(Step::run(
+            format!("Create the tunnel {tunnel:?} for this machine"),
+            program,
+            &["tunnel", "create", tunnel],
+        ));
+    }
+    let wildcard = format!("*.{domain}");
+    steps.push(Step::run(
+        format!("Send every {wildcard} name to the tunnel"),
+        program,
+        &[
+            "tunnel",
+            "route",
+            "dns",
+            "--overwrite-dns",
+            tunnel,
+            &wildcard,
+        ],
+    ));
+}
+
 /// `config.toml` with its `[share]` section set, everything else kept as written.
-pub fn share_section(text: &str, domain: &str, tunnel: &str) -> anyhow::Result<String> {
+pub fn share_section(
+    text: &str,
+    provider: Provider,
+    domain: &str,
+    tunnel: &str,
+) -> anyhow::Result<String> {
     let mut doc: DocumentMut = text.parse()?;
     if !doc.contains_key("share") {
         doc.insert("share", Item::Table(Table::new()));
@@ -129,9 +209,17 @@ pub fn share_section(text: &str, domain: &str, tunnel: &str) -> anyhow::Result<S
     let Some(share) = doc["share"].as_table_mut() else {
         bail!("[share] in config.toml isn't a table");
     };
-    share["provider"] = value("cloudflare");
+    share["provider"] = value(match provider {
+        Provider::Cloudflare => "cloudflare",
+        Provider::Ngrok => "ngrok",
+    });
     share["domain"] = value(domain);
-    share["tunnel"] = value(tunnel);
+    match provider {
+        Provider::Cloudflare => share["tunnel"] = value(tunnel),
+        Provider::Ngrok => {
+            share.remove("tunnel");
+        }
+    }
     Ok(doc.to_string())
 }
 
@@ -157,7 +245,8 @@ mod tests {
 
     fn facts(logged_in: bool, tunnel_exists: bool) -> ShareFacts {
         ShareFacts {
-            cloudflared: Some(PathBuf::from("/opt/homebrew/bin/cloudflared")),
+            provider: Provider::Cloudflare,
+            program: Some(PathBuf::from("/opt/homebrew/bin/cloudflared")),
             logged_in,
             tunnel_exists,
             daemon_loaded: true,
@@ -208,7 +297,7 @@ mod tests {
     #[test]
     fn the_config_keeps_its_comments() {
         let text = "# mine\ntld = \"test\" # keep\n";
-        let out = share_section(text, "inge.dev", "carte").unwrap();
+        let out = share_section(text, Provider::Cloudflare, "inge.dev", "carte").unwrap();
         assert!(out.starts_with("# mine\ntld = \"test\" # keep\n"), "{out}");
         assert!(
             out.ends_with(
@@ -223,7 +312,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = env(dir.path());
         let missing = ShareFacts {
-            cloudflared: None,
+            program: None,
             ..facts(true, true)
         };
         assert!(
@@ -233,5 +322,54 @@ mod tests {
                 .contains("brew install cloudflared")
         );
         assert!(plan(&env, &facts(true, true), "localhost", "carte").is_err());
+    }
+
+    #[test]
+    fn ngrok_domains_mean_ngrok() {
+        assert_eq!(
+            Provider::for_domain("inge-dev.ngrok-free.app"),
+            Provider::Ngrok
+        );
+        assert_eq!(Provider::for_domain("x.NGROK.dev."), Provider::Ngrok);
+        assert_eq!(Provider::for_domain("ngrok.app"), Provider::Cloudflare);
+        assert_eq!(Provider::for_domain("inge.dev"), Provider::Cloudflare);
+    }
+
+    #[test]
+    fn ngrok_needs_only_its_authtoken_and_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        std::fs::create_dir_all(env.paths.machine_config().parent().unwrap()).unwrap();
+        std::fs::write(
+            env.paths.machine_config(),
+            "[share]\nprovider = \"cloudflare\"\ndomain = \"inge.dev\"\ntunnel = \"carte\"\n",
+        )
+        .unwrap();
+        let ngrok = |logged_in| ShareFacts {
+            provider: Provider::Ngrok,
+            program: Some(PathBuf::from("/opt/homebrew/bin/ngrok")),
+            logged_in,
+            tunnel_exists: false,
+            daemon_loaded: true,
+        };
+        assert!(
+            plan(&env, &ngrok(false), "inge.ngrok-free.app", "carte")
+                .unwrap_err()
+                .to_string()
+                .contains("ngrok config add-authtoken")
+        );
+        let plan = plan(&env, &ngrok(true), "inge.ngrok-free.app", "carte").unwrap();
+        assert_eq!(
+            commands(&plan),
+            ["launchctl kickstart -k gui/501/carte.daemon"]
+        );
+        let written = plan.steps.iter().find_map(|s| match &s.action {
+            Action::WriteFile { contents, .. } => Some(contents.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            written.as_deref(),
+            Some("[share]\nprovider = \"ngrok\"\ndomain = \"inge.ngrok-free.app\"\n")
+        );
     }
 }

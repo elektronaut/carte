@@ -14,6 +14,8 @@ struct Daemon {
     http_port: u16,
     https_port: u16,
     share_port: Option<u16>,
+    /// Searched before the inherited `PATH`, for fake tunnel programs.
+    bin: Option<PathBuf>,
     child: Option<Child>,
 }
 
@@ -32,11 +34,21 @@ impl Daemon {
 
     /// With a `[share]` section whose provider is `none`, so no real tunnel runs.
     fn start_sharing() -> Self {
+        Self::start_sharing_with("none", "share.example")
+    }
+
+    /// Sharing through ngrok, with a fake `ngrok` that records its arguments in
+    /// `bin/ngrok.args` and reports a tunnel the way the real agent logs it.
+    fn start_ngrok() -> Self {
+        Self::start_sharing_with("ngrok", "acme-dev.ngrok-free.app")
+    }
+
+    fn start_sharing_with(provider: &str, domain: &str) -> Self {
         let share_port = free_port();
         let mut daemon = Self::start_configured(
             false,
             &format!(
-                "\n[share]\nprovider = \"none\"\ndomain = \"share.example\"\nport = {share_port}\n"
+                "\n[share]\nprovider = \"{provider}\"\ndomain = \"{domain}\"\nport = {share_port}\n"
             ),
         );
         daemon.share_port = Some(share_port);
@@ -83,12 +95,23 @@ impl Daemon {
             ),
         )
         .unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let ngrok = bin.join("ngrok");
+        std::fs::write(
+            &ngrok,
+            "#!/bin/sh\necho \"$@\" > \"$(dirname \"$0\")/ngrok.args\"\necho 't=2026-10-17T10:00:00+0200 lvl=info msg=\"started tunnel\" obj=tunnels name=command_line'\nexec sleep 600\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ngrok, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut daemon = Daemon {
             _dir: dir,
             root,
             http_port,
             https_port,
             share_port: None,
+            bin: Some(bin),
             child: None,
         };
         let child = daemon
@@ -118,6 +141,14 @@ impl Daemon {
             .env("CARTE_STATE_DIR", self.root.join("state"))
             .env("NO_COLOR", "1")
             .current_dir(&self.root);
+        if let Some(bin) = &self.bin {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            let path = std::env::join_paths(
+                std::iter::once(bin.clone()).chain(std::env::split_paths(&inherited)),
+            )
+            .unwrap();
+            command.env("PATH", path);
+        }
         command
     }
 
@@ -486,6 +517,41 @@ fn password_protected_shares_ask_for_credentials() {
     assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
     let requests = &snapshot(&daemon).shares[0].requests;
     assert_eq!(requests.iter().filter(|r| r.refused).count(), 2);
+}
+
+#[test]
+fn ngrok_carries_the_shared_app_on_its_dev_domain() {
+    let daemon = Daemon::start_ngrok();
+    let out = stdout(&daemon.run(&["share", "web"]));
+    assert!(out.contains("https://acme-dev.ngrok-free.app"), "{out}");
+    let shared = daemon.public_request("acme-dev.ngrok-free.app", None);
+    assert!(shared.starts_with("HTTP/1.1 200"), "{shared}");
+    assert!(
+        shared.contains("\"CARTE_PUBLIC_URL\":\"https://acme-dev.ngrok-free.app\""),
+        "{shared}"
+    );
+    eventually("the tunnel connected", || {
+        snapshot(&daemon)
+            .tunnel
+            .is_some_and(|t| t.state == carte_api::TunnelState::Connected)
+    });
+    let args = std::fs::read_to_string(daemon.root.join("bin/ngrok.args")).unwrap();
+    assert_eq!(
+        args.trim(),
+        format!(
+            "http http://127.0.0.1:{} --url https://acme-dev.ngrok-free.app --log stdout --log-format logfmt",
+            daemon.share_port.unwrap()
+        )
+    );
+
+    daemon.run(&["unshare", "web"]);
+    eventually("the tunnel stopped", || {
+        snapshot(&daemon)
+            .tunnel
+            .is_some_and(|t| t.state == carte_api::TunnelState::Idle)
+    });
+    let after = daemon.public_request("acme-dev.ngrok-free.app", None);
+    assert!(after.starts_with("HTTP/1.1 404"), "{after}");
 }
 
 #[test]

@@ -82,6 +82,14 @@ pub struct ShareConfig {
     pub port: u16,
 }
 
+impl ShareConfig {
+    /// The provider serves the domain itself and nothing under it (ngrok's free dev
+    /// domain), so one app is shared at a time.
+    pub fn single_host(&self) -> bool {
+        self.provider == "ngrok"
+    }
+}
+
 /// A loaded and validated project.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Project {

@@ -119,6 +119,9 @@ pub fn public_host(
     app: &App,
     stack: &Stack,
 ) -> Result<String, NamingError> {
+    if share.single_host() {
+        return Ok(share.domain.clone());
+    }
     Ok(format!(
         "{}.{}",
         public_label(state, app, stack)?,
@@ -1012,6 +1015,21 @@ mod tests {
         assert_eq!(
             resolve_public_label(&world, &label),
             Some(key("make", "make-newsmail-frontend", branch(&slug)))
+        );
+    }
+
+    #[test]
+    fn a_single_host_provider_shares_on_its_domain() {
+        let mut world = world();
+        let share = world.machine.share.as_mut().unwrap();
+        share.provider = "ngrok".into();
+        share.domain = "inge.ngrok-free.app".into();
+        let share = share.clone();
+        let make = &world.projects[0];
+        let billing = make.project.app("make-billing").unwrap();
+        assert_eq!(
+            public_url(&share, make, billing, &branch("feature-x")),
+            Ok("https://inge.ngrok-free.app".to_string())
         );
     }
 

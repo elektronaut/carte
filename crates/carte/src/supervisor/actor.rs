@@ -1361,6 +1361,25 @@ impl Actor {
         if apps.is_empty() {
             return Err("name the apps to share: an app address, or --apps".into());
         }
+        if config.single_host() {
+            let one_at_a_time = format!("{} shares one app at a time", config.provider);
+            if apps.len() > 1 {
+                return Err(one_at_a_time);
+            }
+            let others: Vec<String> = share::routes(&self.shares)
+                .into_keys()
+                .filter(|k| {
+                    !(k.project == target.project && k.stack == stack && apps.contains(&k.app))
+                })
+                .map(|k| format!("{}@{}", k.app, k.stack.slug()))
+                .collect();
+            if !others.is_empty() {
+                return Err(format!(
+                    "{one_at_a_time}, and {} is shared: unshare it first",
+                    others.join(", ")
+                ));
+            }
+        }
         for name in &apps {
             let app = state.project.app(name).expect("resolved app");
             naming::public_url(&config, state, app, &stack).map_err(|e| e.to_string())?;
