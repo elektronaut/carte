@@ -63,6 +63,16 @@ impl CertificateAuthority {
         Self::create(state_dir, common_name, tlds, reason)
     }
 
+    /// Loads the CA from `state_dir` without creating or replacing anything; the error
+    /// says why `load_or_create` would create a new one.
+    pub fn load_existing<S: AsRef<str>>(
+        state_dir: &Path,
+        tlds: &[S],
+    ) -> Result<Self, CreateReason> {
+        let tlds = normalize_tlds(tlds).map_err(|e| CreateReason::Invalid(e.to_string()))?;
+        Self::load(state_dir, &tlds)
+    }
+
     pub fn cert_path_in(state_dir: &Path) -> PathBuf {
         state_dir.join("ca.pem")
     }
