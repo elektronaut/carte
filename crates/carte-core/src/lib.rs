@@ -3,6 +3,7 @@
 //! short-lived commands such as git and env providers.
 
 pub mod address;
+pub mod config;
 pub mod duration;
 pub mod env;
 pub mod lifecycle;
