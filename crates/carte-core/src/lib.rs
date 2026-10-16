@@ -9,6 +9,7 @@ pub mod env;
 pub mod lifecycle;
 pub mod model;
 pub mod naming;
+pub mod procfile;
 pub mod slug;
 pub mod template;
 
