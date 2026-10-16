@@ -7,7 +7,7 @@ use std::process::Command;
 use thiserror::Error;
 
 use crate::config::{self, DiscoveredApp, ProjectFile};
-use crate::model::{Problem, ProjectState, Worktree, World};
+use crate::model::{AppRef, Problem, ProjectState, Worktree, World};
 use crate::naming;
 use crate::slug::branch_slug;
 
@@ -287,12 +287,136 @@ pub fn load_world(config_dir: &Path) -> World {
             }),
         }
     }
+    resolve_elsewhere(&mut world);
     world
+}
+
+/// Resolves the `depends_on` names that aren't apps of their own project: another
+/// project (its collapsed app, or its only app) or `app.project`, like the hostname.
+fn resolve_elsewhere(world: &mut World) {
+    let index: Vec<(String, Vec<(String, String)>)> = world
+        .projects
+        .iter()
+        .map(|state| {
+            let apps = state
+                .project
+                .apps
+                .iter()
+                .map(|a| (a.name.clone(), a.short.clone()))
+                .collect();
+            (state.project.name.clone(), apps)
+        })
+        .collect();
+    for state in &mut world.projects {
+        let project = state.project.name.clone();
+        for app in &mut state.project.apps {
+            for dep in std::mem::take(&mut app.settings.unresolved_deps) {
+                match find_elsewhere(&index, &project, &dep) {
+                    Ok(found) => {
+                        if !app.settings.depends_on_elsewhere.contains(&found) {
+                            app.settings.depends_on_elsewhere.push(found);
+                        }
+                    }
+                    Err(message) => world.problems.push(Problem {
+                        project: Some(project.clone()),
+                        app: Some(app.name.clone()),
+                        message,
+                    }),
+                }
+            }
+        }
+    }
+}
+
+fn find_elsewhere(
+    index: &[(String, Vec<(String, String)>)],
+    own: &str,
+    dep: &str,
+) -> Result<AppRef, String> {
+    let unknown = || format!("depends_on refers to unknown app {dep:?}");
+    let (app, project) = if index.iter().any(|(name, _)| name == dep) {
+        (None, dep)
+    } else {
+        match dep.split_once('.') {
+            Some((app, project)) => (Some(app), project),
+            None => return Err(unknown()),
+        }
+    };
+    if project == own {
+        return Err(unknown());
+    }
+    let (_, apps) = index
+        .iter()
+        .find(|(name, _)| name == project)
+        .ok_or_else(unknown)?;
+    let found = match app {
+        Some(app) => apps
+            .iter()
+            .find(|(name, _)| name == app)
+            .or_else(|| apps.iter().find(|(_, short)| short == app)),
+        None => apps
+            .iter()
+            .find(|(_, short)| short == project)
+            .or(if apps.len() == 1 { apps.first() } else { None }),
+    };
+    match (found, app) {
+        (Some((name, _)), _) => Ok(AppRef {
+            project: project.to_string(),
+            app: name.clone(),
+        }),
+        (None, None) => Err(format!(
+            "depends_on names project {project}, which has several apps: name one, like {}.{project}",
+            apps.first().map_or("app", |(_, short)| short.as_str())
+        )),
+        (None, Some(_)) => Err(unknown()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_apps_of_other_projects() {
+        let index = vec![
+            (
+                "marketplace".to_string(),
+                vec![("marketplace".to_string(), "marketplace".to_string())],
+            ),
+            (
+                "nova".to_string(),
+                vec![
+                    ("nova-billing".to_string(), "invoices".to_string()),
+                    ("nova-frontend".to_string(), "frontend".to_string()),
+                ],
+            ),
+            (
+                "wiki".to_string(),
+                vec![("wiki".to_string(), "wiki".to_string())],
+            ),
+        ];
+        let found = |dep| find_elsewhere(&index, "wiki", dep);
+        let app_ref = |project: &str, app: &str| AppRef {
+            project: project.into(),
+            app: app.into(),
+        };
+        assert_eq!(
+            found("marketplace"),
+            Ok(app_ref("marketplace", "marketplace"))
+        );
+        assert_eq!(found("invoices.nova"), Ok(app_ref("nova", "nova-billing")));
+        assert_eq!(
+            found("nova-frontend.nova"),
+            Ok(app_ref("nova", "nova-frontend"))
+        );
+        assert_eq!(
+            found("nova"),
+            Err("depends_on names project nova, which has several apps: name one, like invoices.nova".into())
+        );
+        assert!(found("nope").is_err());
+        assert!(found("api.nova").is_err());
+        assert!(found("wiki").is_err(), "not its own project");
+    }
 
     const PORCELAIN: &str = "\
 worktree /work/app

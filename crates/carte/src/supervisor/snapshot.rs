@@ -32,21 +32,17 @@ pub(super) fn build(input: &Input) -> Snapshot {
         now,
         ..
     } = *input;
-    let mut running = 0;
+    let active: Vec<InstanceKey> = instances
+        .values()
+        .filter(|i| matches!(i.state, InstanceState::Starting | InstanceState::Ready))
+        .map(|i| i.key.clone())
+        .collect();
+    let running = active.len() as u32;
+    let holders = lifecycle::holders(world, &active);
     let projects = world
         .projects
         .iter()
         .map(|state| {
-            let active: Vec<InstanceKey> = instances
-                .values()
-                .filter(|i| {
-                    i.key.project == state.project.name
-                        && matches!(i.state, InstanceState::Starting | InstanceState::Ready)
-                })
-                .map(|i| i.key.clone())
-                .collect();
-            running += active.len() as u32;
-            let holders = lifecycle::holders(&state.project, &active);
             let mut stacks = vec![stack_status(input, state, Stack::Main, &holders)];
             for slug in state.stacks() {
                 stacks.push(stack_status(input, state, Stack::Branch(slug), &holders));
@@ -165,9 +161,12 @@ fn stack_status(
                 });
             }
             for dependent in holders.get(&key).into_iter().flatten() {
-                holds.push(Hold::Dependent {
-                    app: dependent.app.clone(),
-                });
+                let app = if dependent.stack == key.stack {
+                    dependent.app.clone()
+                } else {
+                    format!("{}@{}", dependent.app, dependent.stack.slug())
+                };
+                holds.push(Hold::Dependent { app });
             }
             let timeout = project.idle_timeout.unwrap_or(world.machine.idle_timeout);
             let idle_in_secs =

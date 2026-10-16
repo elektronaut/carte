@@ -442,7 +442,7 @@ impl Actor {
         }
         let (state, app) = self.lookup(key)?;
         let checkout = state.checkout(app, &key.stack);
-        let deps = lifecycle::dependency_closure(&state.project, &app.name);
+        let deps = lifecycle::dependencies(&self.world, key);
         let route_port = app.settings.port;
         let list = procfile::load(checkout.path(), &app.settings)
             .map_err(|err| BootFailure::new(format!("{} can't start", app.name), err.to_string()));
@@ -556,12 +556,7 @@ impl Actor {
         inst.state = InstanceState::Starting;
         self.build_env(key, boot, to_run);
 
-        for dep in deps {
-            let dep_key = InstanceKey {
-                project: key.project.clone(),
-                app: dep,
-                stack: key.stack.clone(),
-            };
+        for dep_key in deps {
             if !self
                 .instances
                 .get(&dep_key)
@@ -991,14 +986,19 @@ impl Actor {
 
     pub(super) fn usages(&self) -> Vec<Usage> {
         let mut usages = Vec::new();
+        let active: Vec<InstanceKey> = self
+            .instances
+            .values()
+            .filter(|i| i.is_active())
+            .map(|i| i.key.clone())
+            .collect();
+        let holders = lifecycle::holders(&self.world, &active);
         for state in &self.world.projects {
-            let running: Vec<InstanceKey> = self
-                .instances
-                .values()
-                .filter(|i| i.key.project == state.project.name && i.is_active())
-                .map(|i| i.key.clone())
+            let running: Vec<InstanceKey> = active
+                .iter()
+                .filter(|k| k.project == state.project.name)
+                .cloned()
                 .collect();
-            let holders = lifecycle::holders(&state.project, &running);
             for key in &running {
                 let inst = &self.instances[key];
                 let pinned = inst.procs.iter().any(|p| {
