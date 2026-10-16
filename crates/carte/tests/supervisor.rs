@@ -271,6 +271,42 @@ async fn dependencies_start_with_their_dependent_in_the_same_stack() {
 }
 
 #[tokio::test]
+async fn dependencies_reach_other_projects_main_stack() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.app("auth", WEB);
+    setup.project("[apps.acme-web]\ndepends_on = [\"auth\"]\n");
+    std::fs::write(
+        setup.paths.project_file("auth"),
+        format!(
+            "repos = \"{}/work/auth\"\nenv_provider = \"none\"\n",
+            setup.root.display()
+        ),
+    )
+    .unwrap();
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let auth = |s: &carte_api::Snapshot| {
+        s.projects.iter().find(|p| p.name == "auth").unwrap().stacks[0].instances[0].clone()
+    };
+    wait_for(&handle, "auth started", |s| {
+        auth(s).state == InstanceState::Ready
+    })
+    .await;
+    assert_eq!(
+        auth(&handle.snapshot()).holds,
+        vec![carte_api::Hold::Dependent {
+            app: "acme-web".into()
+        }]
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn control_starts_and_stops_by_address() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);

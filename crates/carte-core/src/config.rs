@@ -280,6 +280,8 @@ impl AppConfig {
             env: self.env,
             env_files: self.env_files.unwrap_or_default(),
             depends_on: self.depends_on.unwrap_or_default(),
+            depends_on_elsewhere: Vec::new(),
+            unresolved_deps: Vec::new(),
             aliases: self.aliases.unwrap_or_default(),
             subdomains: self.subdomains.unwrap_or(false),
             policy: self.policy,
@@ -508,10 +510,7 @@ pub fn assemble_project(
                         depends_on.push(full.clone());
                     }
                 }
-                None => problems.push(problem(
-                    &app.name,
-                    format!("depends_on refers to unknown app {dep:?}"),
-                )),
+                None => app.settings.unresolved_deps.push(dep),
             }
         }
         app.settings.depends_on = depends_on;
@@ -1101,11 +1100,20 @@ mod tests {
             vec!["make-frontend"]
         );
         let messages: Vec<_> = problems.iter().map(|p| p.message.as_str()).collect();
-        assert_eq!(problems.len(), 4, "{messages:?}");
+        assert_eq!(problems.len(), 3, "{messages:?}");
         assert!(messages.iter().any(|m| m.contains("[apps.make-missing]")));
         assert!(messages.iter().any(|m| m.contains("depend on itself")));
+        assert_eq!(
+            project
+                .app("make-billing")
+                .unwrap()
+                .settings
+                .unresolved_deps,
+            vec!["make-nope"],
+            "names outside the project resolve once every project is loaded"
+        );
         assert!(
-            messages
+            !messages
                 .iter()
                 .any(|m| m.contains("unknown app \"make-nope\""))
         );

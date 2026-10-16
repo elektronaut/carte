@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use crate::model::{InstanceKey, MemoryTarget, Project};
+use crate::model::{InstanceKey, MemoryTarget, Project, Stack, World};
 
 /// What the supervisor knows about one running (or starting) instance when deciding
 /// whether it may idle out or be evicted.
@@ -120,22 +120,51 @@ pub fn dependency_closure(project: &Project, app: &str) -> BTreeSet<String> {
     seen
 }
 
-/// For each running instance, the running instances in the same project and stack that
-/// depend on it, directly or transitively.
-pub fn holders(
-    project: &Project,
-    running: &[InstanceKey],
-) -> BTreeMap<InstanceKey, Vec<InstanceKey>> {
+/// Every instance an instance depends on, directly or through others. Apps of the
+/// same project run in the dependent's stack; apps of other projects in their main
+/// stack.
+pub fn dependencies(world: &World, key: &InstanceKey) -> BTreeSet<InstanceKey> {
+    let mut seen = BTreeSet::new();
+    let mut queue = vec![key.clone()];
+    while let Some(current) = queue.pop() {
+        let Some(app) = world
+            .project(&current.project)
+            .and_then(|state| state.project.app(&current.app))
+        else {
+            continue;
+        };
+        let here = app.settings.depends_on.iter().map(|dep| InstanceKey {
+            project: current.project.clone(),
+            app: dep.clone(),
+            stack: current.stack.clone(),
+        });
+        let elsewhere = app
+            .settings
+            .depends_on_elsewhere
+            .iter()
+            .map(|dep| InstanceKey {
+                project: dep.project.clone(),
+                app: dep.app.clone(),
+                stack: Stack::Main,
+            });
+        for dep in here.chain(elsewhere) {
+            if seen.insert(dep.clone()) {
+                queue.push(dep);
+            }
+        }
+    }
+    seen.remove(key);
+    seen
+}
+
+/// For each running instance, the running instances that depend on it, directly or
+/// transitively.
+pub fn holders(world: &World, running: &[InstanceKey]) -> BTreeMap<InstanceKey, Vec<InstanceKey>> {
     let mut out: BTreeMap<InstanceKey, Vec<InstanceKey>> = BTreeMap::new();
-    for dependent in running.iter().filter(|k| k.project == project.name) {
-        for dep in dependency_closure(project, &dependent.app) {
-            let key = InstanceKey {
-                project: dependent.project.clone(),
-                app: dep,
-                stack: dependent.stack.clone(),
-            };
-            if running.contains(&key) {
-                out.entry(key).or_default().push(dependent.clone());
+    for dependent in running {
+        for dep in dependencies(world, dependent) {
+            if running.contains(&dep) {
+                out.entry(dep).or_default().push(dependent.clone());
             }
         }
     }
@@ -311,6 +340,19 @@ mod tests {
         );
     }
 
+    fn world(projects: Vec<Project>) -> World {
+        World {
+            projects: projects
+                .into_iter()
+                .map(|project| crate::model::ProjectState {
+                    project,
+                    worktrees: Default::default(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn holders_are_running_dependents_in_the_same_stack() {
         let p = project(&[
@@ -321,11 +363,48 @@ mod tests {
         let mut other_stack = key("make-frontend");
         other_stack.stack = Stack::Main;
         let running = vec![key("make-frontend"), key("make-api"), other_stack];
-        let held = holders(&p, &running);
+        let held = holders(&world(vec![p]), &running);
         assert_eq!(
             held.get(&key("make-api")),
             Some(&vec![key("make-frontend")])
         );
         assert_eq!(held.len(), 1);
+    }
+
+    #[test]
+    fn apps_of_other_projects_run_in_their_main_stack() {
+        let mut make = project(&[("make-frontend", &["make-billing"]), ("make-billing", &[])]);
+        make.apps[1].settings.depends_on_elsewhere = vec![crate::model::AppRef {
+            project: "auth".into(),
+            app: "auth".into(),
+        }];
+        let mut auth = project(&[("auth", &[])]);
+        auth.name = "auth".into();
+        auth.apps[0].settings.depends_on_elsewhere = vec![crate::model::AppRef {
+            project: "make".into(),
+            app: "make-frontend".into(),
+        }];
+        let world = world(vec![make, auth]);
+        let auth_main = InstanceKey {
+            project: "auth".into(),
+            app: "auth".into(),
+            stack: Stack::Main,
+        };
+        let main = |app: &str| InstanceKey {
+            stack: Stack::Main,
+            ..key(app)
+        };
+        assert_eq!(
+            dependencies(&world, &key("make-frontend")),
+            BTreeSet::from([
+                key("make-billing"),
+                auth_main.clone(),
+                main("make-frontend"),
+                main("make-billing")
+            ]),
+            "a cycle through another project comes back in main"
+        );
+        let held = holders(&world, &[key("make-frontend"), auth_main.clone()]);
+        assert_eq!(held.get(&auth_main), Some(&vec![key("make-frontend")]));
     }
 }

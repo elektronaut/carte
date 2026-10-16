@@ -138,7 +138,13 @@ impl App {
 pub struct AppSettings {
     pub env: Vec<EnvTemplate>,
     pub env_files: Vec<String>,
+    /// Apps of the same project, by full name; they run in the dependent's stack.
     pub depends_on: Vec<String>,
+    /// Apps of other projects; they run in their project's main stack.
+    pub depends_on_elsewhere: Vec<AppRef>,
+    /// `depends_on` names that aren't apps of this project, until every project is
+    /// loaded and they resolve into `depends_on_elsewhere`.
+    pub unresolved_deps: Vec<String>,
     pub aliases: Vec<String>,
     pub subdomains: bool,
     pub policy: Option<Policy>,
@@ -280,6 +286,14 @@ impl Checkout {
             Checkout::Worktree(wt) => &wt.slug,
         }
     }
+}
+
+/// An app of some project.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AppRef {
+    pub project: String,
+    /// The app's full (directory) name.
+    pub app: String,
 }
 
 /// One app running for one stack.
