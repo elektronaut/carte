@@ -67,7 +67,7 @@ impl Daemon {
             .spawn()
             .unwrap();
         daemon.child = Some(child);
-        let socket = daemon.root.join("state/carte.sock");
+        let socket = carte::paths::Paths::under(&daemon.root).socket();
         let started = Instant::now();
         while !socket.exists() {
             assert!(
@@ -182,7 +182,7 @@ fn boots_an_app_on_the_first_request_and_stops_it_on_sigterm() {
             "{pid} survived"
         );
     }
-    assert!(!daemon.root.join("state/carte.sock").exists());
+    assert!(!carte::paths::Paths::under(&daemon.root).socket().exists());
 }
 
 #[test]
