@@ -8,31 +8,35 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum.workspace = true
 bytes.workspace = true
 carte-api.workspace = true
 carte-core.workspace = true
 clap.workspace = true
 gethostname.workspace = true
 hickory-proto.workspace = true
-http-body-util.workspace = true
 http.workspace = true
-hyper-util.workspace = true
+http-body-util.workspace = true
 hyper.workspace = true
+hyper-util.workspace = true
 libc.workspace = true
 lru.workspace = true
 nix.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio-rustls.workspace = true
-tokio-util.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
 toml_edit.workspace = true
 tower-service.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 x509-parser.workspace = true
 
 [dev-dependencies]

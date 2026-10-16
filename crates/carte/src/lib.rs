@@ -1,4 +1,6 @@
 pub mod cli;
+pub mod client;
+pub mod daemon;
 pub mod dns;
 pub mod logs;
 pub mod paths;

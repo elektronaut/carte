@@ -1,0 +1,163 @@
+//! The daemon: supervisor, proxy, DNS and the API socket, until a signal stops it.
+
+mod api;
+mod router;
+
+use std::net::{Ipv4Addr, SocketAddr};
+use std::os::unix::fs::PermissionsExt;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Context, bail};
+use carte_core::discovery;
+use tokio::net::{UnixListener, UnixStream};
+use tokio::signal::unix::{SignalKind, signal};
+use tokio_util::sync::CancellationToken;
+use tracing::{info, warn};
+
+use crate::dns::{DnsServer, Responder};
+use crate::paths::Paths;
+use crate::process::Spawner;
+use crate::proxy::{ListenerOptions, Proxy};
+use crate::supervisor::{self, Options, groups};
+use crate::tls::{self, CaOrigin, CertResolver, CertificateAuthority, CreateReason};
+
+pub async fn run(paths: Paths) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&paths.state_dir)
+        .with_context(|| format!("creating {}", paths.state_dir.display()))?;
+    let socket = paths.socket();
+    if UnixStream::connect(&socket).await.is_ok() {
+        bail!("a carte daemon is already running on {}", socket.display());
+    }
+    let _ = std::fs::remove_file(&socket);
+
+    match groups::kill_leftovers(&paths.run_dir().join("groups")) {
+        Ok(0) => {}
+        Ok(n) => warn!("killed {n} process groups left behind by a previous daemon"),
+        Err(err) => warn!("couldn't read the previous daemon's process groups: {err}"),
+    }
+
+    let world = discovery::load_world(&paths.config_dir);
+    for problem in &world.problems {
+        warn!(project = ?problem.project, app = ?problem.app, "{}", problem.message);
+    }
+    let machine = world.machine.clone();
+
+    let ca = CertificateAuthority::load_or_create(
+        &paths.state_dir,
+        &tls::ca::default_common_name(),
+        &[machine.tld.as_str()],
+    )
+    .context("loading the local CA")?;
+    if let CaOrigin::Created(reason) = ca.origin() {
+        let why = match reason {
+            CreateReason::Missing => "none existed".to_string(),
+            CreateReason::Invalid(err) => format!("the old one was invalid: {err}"),
+            CreateReason::Expiring => "the old one was about to expire".to_string(),
+            CreateReason::TldsChanged { previous } => {
+                format!("the TLD changed from {}", previous.join(", "))
+            }
+        };
+        warn!("created a new local CA because {why}; run `carte setup` to trust it");
+    }
+    if let Err(err) = tls::bundle::rebuild(&paths.state_dir, &ca) {
+        warn!("couldn't build the CA bundle for apps: {err}");
+    }
+    let tls_config = Arc::new(tls::server_config(Arc::new(CertResolver::new(Arc::new(
+        ca,
+    ))))?);
+
+    let options = Options::new(&paths);
+    let hold = options.boot_timeout + Duration::from_secs(10);
+    let supervisor = supervisor::start(world, paths.clone(), Spawner::current()?, options);
+
+    let loopback = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let dns = DnsServer::bind(loopback(machine.dns_port), Responder::new(&[&machine.tld])?)
+        .await
+        .with_context(|| format!("binding DNS on {}", loopback(machine.dns_port)))?;
+    tokio::spawn(dns.run());
+
+    let proxy = Proxy::new(Arc::new(router::SupervisorRouter {
+        supervisor: supervisor.clone(),
+        hold,
+    }));
+    let bind_hint = |port| {
+        format!(
+            "binding {} (ports below 1024 need `carte setup`; for a trial, set http_port and https_port in {})",
+            loopback(port),
+            paths.machine_config().display()
+        )
+    };
+    let http = proxy
+        .bind(loopback(machine.http_port), ListenerOptions::local())
+        .await
+        .with_context(|| bind_hint(machine.http_port))?;
+    let https = proxy
+        .bind(
+            loopback(machine.https_port),
+            ListenerOptions::local().tls(tls_config),
+        )
+        .await
+        .with_context(|| bind_hint(machine.https_port))?;
+    let shutdown = CancellationToken::new();
+    let http_task = tokio::spawn(http.serve(shutdown.clone()));
+    let https_task = tokio::spawn(https.serve(shutdown.clone()));
+
+    let listener =
+        UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    let reload_supervisor = supervisor.clone();
+    let config_dir = paths.config_dir.clone();
+    let api = api::Api {
+        supervisor: supervisor.clone(),
+        reload: Arc::new(move || {
+            let world = discovery::load_world(&config_dir);
+            let problems = world
+                .problems
+                .iter()
+                .map(|p| carte_api::Problem {
+                    project: p.project.clone(),
+                    app: p.app.clone(),
+                    message: p.message.clone(),
+                })
+                .collect();
+            reload_supervisor.reload(world);
+            problems
+        }),
+    };
+    let api_shutdown = shutdown.clone();
+    let api_task = tokio::spawn(async move {
+        axum::serve(listener, api::router(api))
+            .with_graceful_shutdown(api_shutdown.cancelled_owned())
+            .await
+    });
+
+    info!(
+        "carte is running: http {}, https {}, dns {}, tld .{}",
+        machine.http_port, machine.https_port, machine.dns_port, machine.tld
+    );
+
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    tokio::select! {
+        _ = term.recv() => info!("stopping on SIGTERM"),
+        _ = int.recv() => info!("stopping on SIGINT"),
+    }
+
+    shutdown.cancel();
+    let grace = Options::new(&paths).grace + Duration::from_secs(5);
+    if tokio::time::timeout(grace, supervisor.shutdown())
+        .await
+        .is_err()
+    {
+        warn!("some processes didn't stop in time");
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        let _ = http_task.await;
+        let _ = https_task.await;
+        let _ = api_task.await;
+    })
+    .await;
+    let _ = std::fs::remove_file(&socket);
+    Ok(())
+}
