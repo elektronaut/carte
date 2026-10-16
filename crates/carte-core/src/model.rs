@@ -16,6 +16,19 @@ pub struct MachineConfig {
     pub share: Option<ShareConfig>,
 }
 
+impl MachineConfig {
+    /// The TLDs carte routes and issues certificates for: the configured one, and
+    /// `localhost`, which browsers resolve to loopback without any DNS setup.
+    pub fn served_tlds(&self) -> Vec<String> {
+        let tld = self.tld.to_ascii_lowercase();
+        if tld == "localhost" {
+            vec![tld]
+        } else {
+            vec![tld, "localhost".into()]
+        }
+    }
+}
+
 impl Default for MachineConfig {
     fn default() -> Self {
         Self {

@@ -215,20 +215,23 @@ fn host_labels(host: &str) -> Result<Vec<String>, NotFound> {
 /// Anything left over is a subdomain for apps that allow them.
 pub fn resolve_host(world: &World, host: &str) -> Result<Resolved, NotFound> {
     let labels = host_labels(host)?;
-    let tld = world.machine.tld.to_ascii_lowercase();
-    let tld_labels: Vec<&str> = tld.split('.').collect();
-    let under_tld = labels.len() > tld_labels.len()
-        && labels[labels.len() - tld_labels.len()..]
-            .iter()
-            .zip(&tld_labels)
-            .all(|(a, b)| a == b);
-    if !under_tld {
+    let tlds = world.machine.served_tlds();
+    let matched = tlds.iter().find_map(|tld| {
+        let tld_labels: Vec<&str> = tld.split('.').collect();
+        let under = labels.len() > tld_labels.len()
+            && labels[labels.len() - tld_labels.len()..]
+                .iter()
+                .zip(&tld_labels)
+                .all(|(a, b)| a == b);
+        under.then_some(tld_labels.len())
+    });
+    let Some(tld_len) = matched else {
         return Err(NotFound::UnknownTld {
             host: labels.join("."),
-            tld,
+            tld: tlds.join(" or ."),
         });
-    }
-    let rest = &labels[..labels.len() - tld_labels.len()];
+    };
+    let rest = &labels[..labels.len() - tld_len];
     let (top, left) = rest.split_last().expect("checked above");
 
     if let Some(state) = world.project(top) {
@@ -626,6 +629,23 @@ mod tests {
                 stack: slug
             })
         );
+    }
+
+    #[test]
+    fn localhost_works_like_the_tld() {
+        let world = world();
+        assert_eq!(
+            resolve_host(&world, "newsmail-frontend.make.localhost"),
+            resolve_host(&world, "newsmail-frontend.make.test")
+        );
+        assert_eq!(
+            resolve_host(&world, "oslo.feature-x.delegatbase.localhost:443"),
+            resolve_host(&world, "oslo.feature-x.delegatbase.test")
+        );
+        assert!(matches!(
+            resolve_host(&world, "make.example.com"),
+            Err(NotFound::UnknownTld { .. })
+        ));
     }
 
     #[test]
