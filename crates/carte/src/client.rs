@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use carte_api::ErrorBody;
 use http::{Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -98,8 +98,7 @@ impl Client {
 
 async fn decode<T: DeserializeOwned>(response: http::Response<Incoming>) -> anyhow::Result<T> {
     let status = response.status();
-    let body = response.into_body().collect().await?.aggregate();
-    let bytes = body.chunk().to_vec();
+    let bytes = response.into_body().collect().await?.to_bytes();
     if status != StatusCode::OK {
         if let Ok(error) = serde_json::from_slice::<ErrorBody>(&bytes) {
             bail!("{}", error.error);
@@ -107,4 +106,26 @@ async fn decode<T: DeserializeOwned>(response: http::Response<Incoming>) -> anyh
         bail!("the daemon answered {status}");
     }
     serde_json::from_slice(&bytes).context("reading the daemon's answer")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reads_bodies_larger_than_one_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("test.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let big: Vec<String> = (0..20_000).map(|i| format!("item {i}")).collect();
+        let body = big.clone();
+        let app = axum::Router::new().route(
+            "/big",
+            axum::routing::get(move || async move { axum::Json(body) }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let got: Vec<String> = Client::new(&socket).get("/big").await.unwrap();
+        assert_eq!(got, big);
+    }
 }
