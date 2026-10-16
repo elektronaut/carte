@@ -435,3 +435,53 @@ async fn saved_policies_are_written_to_the_project_file() {
     assert!(!worker.temporary);
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn checkout_watchers_run_once_and_move_to_another_instance() {
+    let setup = Setup::new();
+    let web = setup.app("acme-web", WEB);
+    setup.app(
+        "acme-api",
+        "web: FIXTURE_NAME=api exec {fixture}\ncss: FIXTURE_NAME=css exec {fixture}\n",
+    );
+    git(
+        &web,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature-x",
+            "../acme-web-feature-x",
+        ],
+    );
+    setup.project("");
+    let handle = setup.start();
+    let css_running = |s: &carte_api::Snapshot, stack: &str| {
+        status(s, "acme-api", stack)
+            .processes
+            .iter()
+            .any(|p| p.name == "css" && p.state == ProcessState::Running)
+    };
+
+    handle
+        .ensure_ready(key("acme-api", Stack::Main))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-api", Stack::Branch("feature-x".into())))
+        .await
+        .unwrap();
+    wait_for(&handle, "css in main", |s| css_running(s, "main")).await;
+    assert!(!css_running(&handle.snapshot(), "feature-x"));
+
+    handle
+        .control(control("api@main", Action::Down))
+        .await
+        .unwrap();
+    wait_for(&handle, "css moved to feature-x", |s| {
+        css_running(s, "feature-x") && !css_running(s, "main")
+    })
+    .await;
+    handle.shutdown().await;
+}
