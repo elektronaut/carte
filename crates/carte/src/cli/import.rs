@@ -15,8 +15,6 @@ use super::project;
 use super::prompt::{self, tilde};
 use crate::paths::Paths;
 
-const PORT_PROJECT: &str = "puma-dev";
-
 /// An app directory linked from puma-dev under one or more names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Linked {
@@ -143,7 +141,6 @@ fn parse_port_file(text: &str) -> Result<u16, String> {
 #[derive(Debug, Clone)]
 struct Draft {
     name: String,
-    strip_prefix: Option<String>,
     apps: Vec<DraftApp>,
 }
 
@@ -263,108 +260,38 @@ impl<'a> Importer<'a> {
         }
     }
 
-    fn group(&mut self, dir: &Path, linked: Vec<Linked>) -> anyhow::Result<Option<Draft>> {
-        let mut apps = Vec::new();
-        for link in linked {
-            match self.configured.get(&link.path) {
-                Some(project) => {
-                    let reason = format!("{} is already in project {project}", tilde(&link.path));
-                    self.skip_all(link.names, &reason);
-                }
-                None => apps.push(link),
-            }
-        }
-        if apps.is_empty() {
+    /// A project for one linked repo, named after its puma-dev link so the app keeps
+    /// its hostname.
+    fn app(&mut self, link: Linked) -> anyhow::Result<Option<Draft>> {
+        if let Some(project) = self.configured.get(&link.path) {
+            let reason = format!("{} is already in project {project}", tilde(&link.path));
+            self.skip_all(link.names, &reason);
             return Ok(None);
         }
-        let dir_names: Vec<String> = apps.iter().map(|a| dir_name(&a.path)).collect();
-        let single = apps.len() == 1;
-
-        let (what, suggestion) = if single {
-            let link = &apps[0].names[0];
-            (tilde(&apps[0].path), valid_project_name(link))
-        } else {
-            let base = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let generic = [
-                "apps", "code", "dev", "git", "projects", "repos", "sites", "src", "work",
-            ];
-            let base = if generic.contains(&base.as_str()) {
-                dir.parent()
-                    .and_then(Path::file_name)
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or(base)
-            } else {
-                base
-            };
-            if self.interactive {
-                println!(
-                    "\n{} linked repos in {}: {}",
-                    apps.len(),
-                    tilde(dir),
-                    dir_names.join(", ")
-                );
-            }
-            (
-                format!("the {} repos in {}", apps.len(), tilde(dir)),
-                valid_project_name(&base),
-            )
-        };
-        let names = || {
-            apps.iter()
-                .flat_map(|a| a.names.clone())
-                .collect::<Vec<_>>()
-        };
-        let Some(name) = self.project_name(&what, suggestion)? else {
+        let what = tilde(&link.path);
+        let Some(name) = self.project_name(&what, valid_project_name(&link.names[0]))? else {
             let reason = if self.interactive {
                 "skipped when asked for a project name".to_string()
             } else {
                 format!("no free project name for {what}; run the import in a terminal to pick one")
             };
-            self.skip_all(names(), &reason);
+            self.skip_all(link.names, &reason);
             return Ok(None);
         };
         self.taken.insert(name.clone());
-
-        let strip_prefix = if single {
-            None
-        } else {
-            let suggested = project::suggest_prefix(&dir_names);
-            if self.interactive {
-                let answer = prompt::ask(
-                    "Prefix to strip from app names (- for none)",
-                    Some(suggested.as_deref().unwrap_or("-")),
-                )?;
-                Some(answer).filter(|a| a != "-" && !a.is_empty())
-            } else {
-                suggested
-            }
-        };
-        let overrides = project::name_overrides(&dir_names, strip_prefix.as_deref(), &name, single);
-
-        let mut draft_apps = Vec::new();
-        for (link, dir_name) in apps.into_iter().zip(dir_names) {
-            let short = if single && dir_name != name {
-                Some(name.clone())
-            } else {
-                overrides.get(&dir_name).and_then(|e| e.name.clone())
-            };
-            let env_files = self.env_files(&link);
-            draft_apps.push(DraftApp {
+        let dir_name = dir_name(&link.path);
+        let short = (dir_name != name).then(|| name.clone());
+        let env_files = self.env_files(&link);
+        Ok(Some(Draft {
+            name,
+            apps: vec![DraftApp {
                 name: dir_name,
                 links: link.names,
                 path: Some(link.path),
                 port: None,
                 short,
                 env_files,
-            });
-        }
-        Ok(Some(Draft {
-            name,
-            strip_prefix,
-            apps: draft_apps,
+            }],
         }))
     }
 
@@ -393,47 +320,28 @@ impl<'a> Importer<'a> {
         files
     }
 
-    fn ports(&mut self, ports: Vec<PortApp>) -> Option<Draft> {
-        if ports.is_empty() {
-            return None;
-        }
-        if self.taken.contains(PORT_PROJECT) {
-            let reason = format!("its port goes in project {PORT_PROJECT}, which already exists");
-            self.skip_all(ports.into_iter().map(|p| p.name), &reason);
-            return None;
-        }
-        let mut apps = Vec::new();
-        for port in ports {
-            let name = Some(port.name.to_ascii_lowercase())
-                .filter(|n| slug::validate_app_short_name(n).is_ok())
-                .or_else(|| {
-                    let fixed = slug::branch_slug(&port.name);
-                    slug::validate_app_short_name(&fixed)
-                        .is_ok()
-                        .then_some(fixed)
-                });
-            let Some(name) = name else {
-                self.skip_all([port.name], "no valid app name can be made from it");
-                continue;
-            };
-            apps.push(DraftApp {
+    /// A project for one port file: an app that only routes to a fixed port.
+    fn port(&mut self, port: PortApp) -> anyhow::Result<Option<Draft>> {
+        let what = format!("port file {}", port.name);
+        let Some(name) = self.project_name(&what, valid_project_name(&port.name))? else {
+            self.skip_all(
+                [port.name],
+                "no free or valid project name can be made from it",
+            );
+            return Ok(None);
+        };
+        self.taken.insert(name.clone());
+        Ok(Some(Draft {
+            name: name.clone(),
+            apps: vec![DraftApp {
                 name,
                 links: vec![port.name],
                 path: None,
                 port: Some(port.port),
                 short: None,
                 env_files: Vec::new(),
-            });
-        }
-        if apps.is_empty() {
-            return None;
-        }
-        self.taken.insert(PORT_PROJECT.to_string());
-        Some(Draft {
-            name: PORT_PROJECT.to_string(),
-            strip_prefix: None,
-            apps,
-        })
+            }],
+        }))
     }
 
     /// Adds aliases for puma-dev names carte doesn't already answer to, and validates.
@@ -525,27 +433,8 @@ fn string_array<'s>(items: impl IntoIterator<Item = &'s str>) -> Array {
 
 fn project_text(draft: &Draft, aliases: &BTreeMap<String, Vec<String>>) -> String {
     let mut doc = DocumentMut::new();
-    let repos: Vec<String> = draft
-        .apps
-        .iter()
-        .filter_map(|a| a.path.as_deref())
-        .map(tilde)
-        .collect();
-    match repos.as_slice() {
-        [] => {}
-        [one] => doc["repos"] = value(one.as_str()),
-        many => {
-            let mut array = string_array(many.iter().map(String::as_str));
-            for repo in array.iter_mut() {
-                repo.decor_mut().set_prefix("\n  ");
-            }
-            array.set_trailing_comma(true);
-            array.set_trailing("\n");
-            doc["repos"] = value(array);
-        }
-    }
-    if let Some(prefix) = &draft.strip_prefix {
-        doc["strip_prefix"] = value(prefix.as_str());
+    if let Some(path) = draft.apps.iter().find_map(|a| a.path.as_deref()) {
+        doc["repos"] = value(tilde(path));
     }
     let mut apps = Table::new();
     apps.set_implicit(true);
@@ -597,20 +486,13 @@ pub fn puma_dev(
         );
     }
 
-    let mut by_dir: BTreeMap<PathBuf, Vec<Linked>> = BTreeMap::new();
-    for linked in scan.linked {
-        let parent = linked
-            .path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_default();
-        by_dir.entry(parent).or_default().push(linked);
-    }
     let mut drafts = Vec::new();
-    for (dir, linked) in by_dir {
-        drafts.extend(importer.group(&dir, linked)?);
+    for link in scan.linked {
+        drafts.extend(importer.app(link)?);
     }
-    drafts.extend(importer.ports(scan.ports));
+    for port in scan.ports {
+        drafts.extend(importer.port(port)?);
+    }
 
     let mut built = Vec::new();
     for draft in &drafts {
@@ -811,24 +693,19 @@ mod tests {
         let scan = scan(&fixture.root.join("puma-dev")).unwrap();
         let mut importer = Importer::new(paths, &machine, &world, false);
         importer.skipped = scan.skipped;
-        let mut by_dir: BTreeMap<PathBuf, Vec<Linked>> = BTreeMap::new();
-        for linked in scan.linked {
-            by_dir
-                .entry(linked.path.parent().unwrap().to_path_buf())
-                .or_default()
-                .push(linked);
-        }
         let mut drafts = Vec::new();
-        for (dir, linked) in by_dir {
-            drafts.extend(importer.group(&dir, linked).unwrap());
+        for link in scan.linked {
+            drafts.extend(importer.app(link).unwrap());
         }
-        drafts.extend(importer.ports(scan.ports));
+        for port in scan.ports {
+            drafts.extend(importer.port(port).unwrap());
+        }
         let built = drafts.iter().map(|d| importer.build(d).unwrap()).collect();
         (built, importer.skipped, importer.notes)
     }
 
     #[test]
-    fn groups_repos_into_projects_with_aliases() {
+    fn makes_a_project_for_each_app() {
         let fixture = fixture();
         let paths = Paths::under(&fixture.root.join("carte"));
         let (built, skipped, notes) = import(&fixture, &paths);
@@ -836,7 +713,10 @@ mod tests {
             .iter()
             .map(|b| b.state.project.name.as_str())
             .collect();
-        assert_eq!(names, ["blog", "work", PORT_PROJECT]);
+        assert_eq!(
+            names,
+            ["blog", "shop-admin", "shop-api", "storefront", "legacy"]
+        );
         let root = fixture.root.display();
 
         assert_eq!(
@@ -845,18 +725,16 @@ mod tests {
         );
         assert_eq!(
             built[1].text,
-            format!(
-                "repos = [\n  \"{root}/work/apps/shop-admin\",\n  \"{root}/work/apps/shop-api\",\n  \"{root}/work/apps/shop-web\",\n]\n\
-                 strip_prefix = \"shop-\"\n\n\
-                 [apps.shop-admin]\naliases = [\"shop-admin\"]\n\n\
-                 [apps.shop-api]\naliases = [\"shop-api\"]\n\n\
-                 [apps.shop-web]\naliases = [\"storefront\", \"web\"]\nenv_files = [\".env\", \".powenv\"]\n"
-            )
+            format!("repos = \"{root}/work/apps/shop-admin\"\n")
         );
         assert_eq!(
-            built[2].text,
-            "[apps.legacy]\nport = 3005\naliases = [\"legacy\"]\n"
+            built[3].text,
+            format!(
+                "repos = \"{root}/work/apps/shop-web\"\n\n\
+                 [apps.shop-web]\nname = \"storefront\"\naliases = [\"web\"]\nenv_files = [\".env\", \".powenv\"]\n"
+            )
         );
+        assert_eq!(built[4].text, "[apps.legacy]\nport = 3005\n");
         for project in &built {
             assert!(project.problems.is_empty(), "{:?}", project.problems);
         }
@@ -869,15 +747,13 @@ mod tests {
             rows,
             [
                 ("blog.test", "https://blog.test", false),
-                ("shop-admin.test", "https://admin.work.test", true),
-                ("shop-api.test", "https://api.work.test", true),
-                ("storefront.test", "https://web.work.test", true),
-                ("web.test", "https://web.work.test", true),
-                ("legacy.test", "https://legacy.puma-dev.test", true),
+                ("shop-admin.test", "https://shop-admin.test", false),
+                ("shop-api.test", "https://shop-api.test", false),
+                ("storefront.test", "https://storefront.test", false),
+                ("web.test", "https://storefront.test", true),
+                ("legacy.test", "https://legacy.test", false),
             ]
         );
-        let unlinked = built[1].state.project.app("unlinked");
-        assert!(unlinked.is_none());
         let skipped: Vec<&str> = skipped.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(skipped, ["gone", "remote", "thing"]);
         assert_eq!(notes.len(), 1);
@@ -889,7 +765,7 @@ mod tests {
         let fixture = fixture();
         let paths = Paths::under(&fixture.root.join("carte"));
         fs::create_dir_all(paths.projects_dir()).unwrap();
-        fs::write(paths.project_file("work"), "repos = \"/elsewhere\"\n").unwrap();
+        fs::write(paths.project_file("blog"), "repos = \"/elsewhere\"\n").unwrap();
         fs::write(
             paths.project_file("mine"),
             format!(
@@ -903,17 +779,16 @@ mod tests {
             .iter()
             .map(|b| b.state.project.name.as_str())
             .collect();
-        assert_eq!(names, ["blog", PORT_PROJECT]);
+        assert_eq!(names, ["shop-admin", "storefront", "legacy"]);
         let reasons: BTreeMap<&str, &str> = skipped
             .iter()
             .map(|s| (s.name.as_str(), s.reason.as_str()))
             .collect();
         assert!(reasons["shop-api"].ends_with("is already in project mine"));
         assert!(
-            reasons["web"].contains("no free project name"),
+            reasons["blog"].contains("no free project name"),
             "{reasons:?}"
         );
-        assert!(reasons["shop-admin"].contains("no free project name"));
     }
 
     #[test]
@@ -925,17 +800,18 @@ mod tests {
         assert!(!paths.projects_dir().exists());
 
         puma_dev(&paths, from.clone(), false, true).unwrap();
-        for name in ["blog", "work", PORT_PROJECT] {
+        let names = ["blog", "shop-admin", "shop-api", "storefront", "legacy"];
+        for name in names {
             assert!(paths.project_file(name).is_file(), "{name}");
         }
         let world = discovery::load_world(&paths.config_dir);
         assert!(world.problems.is_empty(), "{:?}", world.problems);
-        assert_eq!(world.projects.len(), 3);
+        assert_eq!(world.projects.len(), names.len());
 
-        let before = fs::read_to_string(paths.project_file("work")).unwrap();
+        let before = fs::read_to_string(paths.project_file("storefront")).unwrap();
         puma_dev(&paths, from, false, true).unwrap();
         assert_eq!(
-            fs::read_to_string(paths.project_file("work")).unwrap(),
+            fs::read_to_string(paths.project_file("storefront")).unwrap(),
             before
         );
     }
