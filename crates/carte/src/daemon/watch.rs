@@ -1,7 +1,7 @@
 //! Watches configuration, worktrees and a few files in each checkout, and tells the
 //! supervisor what changed. Only specific directories are watched, never whole repos.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -57,32 +57,39 @@ pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> 
     set
 }
 
-/// What a changed path means, given the checkouts in the world.
-pub fn classify(path: &Path, config_dir: &Path, checkouts: &BTreeSet<PathBuf>) -> Option<Change> {
+/// What a changed path means. File events carry real paths, so `config_dir` and the
+/// checkouts' keys are canonical; the checkouts' values are the paths the supervisor
+/// knows them by.
+pub fn classify(
+    path: &Path,
+    config_dir: &Path,
+    checkouts: &BTreeMap<PathBuf, PathBuf>,
+) -> Option<Change> {
     if path.starts_with(config_dir) {
         return Some(Change::Reload);
     }
     if path.components().any(|c| c.as_os_str() == ".git") {
         return Some(Change::Reload);
     }
-    if checkouts.contains(path) {
+    if checkouts.contains_key(path) {
         return Some(Change::Reload);
     }
     let name = path.file_name()?.to_str()?;
     let parent = path.parent()?;
     if name == "restart.txt" && parent.file_name()? == "tmp" {
-        let checkout = parent.parent()?;
-        return checkouts
-            .contains(checkout)
-            .then(|| Change::Restart(checkout.to_path_buf()));
+        let checkout = checkouts.get(parent.parent()?)?;
+        return Some(Change::Restart(checkout.clone()));
     }
-    if TOOL_FILES.contains(&name) && checkouts.contains(parent) {
-        return Some(Change::EnvChanged(parent.to_path_buf()));
+    if TOOL_FILES.contains(&name) {
+        return checkouts
+            .get(parent)
+            .map(|checkout| Change::EnvChanged(checkout.clone()));
     }
     None
 }
 
-fn checkouts(world: &World) -> BTreeSet<PathBuf> {
+/// Every checkout, keyed by its canonical path.
+fn checkouts(world: &World) -> BTreeMap<PathBuf, PathBuf> {
     world
         .projects
         .iter()
@@ -95,7 +102,12 @@ fn checkouts(world: &World) -> BTreeSet<PathBuf> {
                 .chain(state.worktrees.values().flatten().map(|wt| wt.path.clone()))
         })
         .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| (canonical(&p), p))
         .collect()
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Runs until the supervisor goes away. Rescans everything every `rescan` as a
@@ -123,6 +135,7 @@ pub async fn run(config_dir: PathBuf, supervisor: Handle, rescan: Duration) {
 
     let mut watched = BTreeSet::new();
     let mut world = supervisor.world();
+    let real_config_dir = canonical(&config_dir);
     let mut known = checkouts(&world);
     update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
     let mut interval = tokio::time::interval(rescan);
@@ -132,10 +145,10 @@ pub async fn run(config_dir: PathBuf, supervisor: Handle, rescan: Duration) {
         let mut changes = BTreeSet::new();
         tokio::select! {
             Some(path) = rx.recv() => {
-                changes.extend(classify(&path, &config_dir, &known));
+                changes.extend(classify(&path, &real_config_dir, &known));
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 while let Ok(path) = rx.try_recv() {
-                    changes.extend(classify(&path, &config_dir, &known));
+                    changes.extend(classify(&path, &real_config_dir, &known));
                 }
             }
             _ = interval.tick() => {
@@ -191,11 +204,11 @@ fn update_watches(
 mod tests {
     use super::*;
 
-    fn checkouts() -> BTreeSet<PathBuf> {
-        BTreeSet::from([
-            PathBuf::from("/work/acme-web"),
-            PathBuf::from("/work/acme-web-feature-x"),
-        ])
+    fn checkouts() -> BTreeMap<PathBuf, PathBuf> {
+        ["/work/acme-web", "/work/acme-web-feature-x"]
+            .into_iter()
+            .map(|p| (PathBuf::from(p), PathBuf::from(p)))
+            .collect()
     }
 
     #[test]
@@ -233,6 +246,24 @@ mod tests {
         assert_eq!(
             classify(Path::new("/work/acme-web/tmp/cache"), config, &c),
             None
+        );
+    }
+
+    #[test]
+    fn events_on_real_paths_map_back_to_configured_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real.join("work/app/tmp")).unwrap();
+        std::os::unix::fs::symlink(real.join("work"), real.join("link")).unwrap();
+        let configured = real.join("link/app");
+        let map: BTreeMap<PathBuf, PathBuf> = [(canonical(&configured), configured.clone())].into();
+        assert_eq!(
+            classify(
+                &real.join("work/app/tmp/restart.txt"),
+                &real.join("config"),
+                &map
+            ),
+            Some(Change::Restart(configured))
         );
     }
 }
