@@ -69,6 +69,9 @@ pub(super) struct Proc {
     stop: Option<oneshot::Sender<Duration>>,
     pub log: Arc<Mutex<ProcLog>>,
     pub restarts: u32,
+    pub memory_bytes: u64,
+    pub cpu_percent: f32,
+    cpu_sample: Option<(Instant, Duration)>,
     run: u64,
     manual_stop: bool,
     restart: bool,
@@ -162,6 +165,7 @@ struct Actor {
     snapshot_tx: watch::Sender<Arc<Snapshot>>,
     log_tx: broadcast::Sender<LogLine>,
     next_id: u64,
+    ticks: u64,
     dirty: bool,
     shutdown: Option<oneshot::Sender<()>>,
 }
@@ -194,6 +198,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         snapshot_tx,
         log_tx: log_tx.clone(),
         next_id: 0,
+        ticks: 0,
         dirty: false,
         shutdown: None,
     };
@@ -432,6 +437,9 @@ impl Actor {
                 run: 0,
                 manual_stop: false,
                 restart: false,
+                memory_bytes: 0,
+                cpu_percent: 0.0,
+                cpu_sample: None,
             });
         }
         inst.procs = procs;
@@ -549,13 +557,15 @@ impl Actor {
                 .get(inst.checkout.as_ref().unwrap().path())
                 .cloned(),
             daemon_env: self.daemon_env.clone(),
-            pidfile: self.paths.run_dir().join(&key.project).join(format!(
-                "{}@{}.pid",
-                key.app,
-                key.stack.slug()
-            )),
+            pidfile: self.paths.pidfile(key),
             ca_bundle: self.options.ca_bundle.clone(),
             ca_cert: self.options.ca_cert.clone(),
+            requires: state.project.requires.clone(),
+            ptys_free: crate::pty::capacity()
+                .map(|c| {
+                    c.available(self.world.machine.limits.pty_reserve as usize) >= indices.len()
+                })
+                .unwrap_or(true),
         };
         let tx = self.tx.clone();
         let key = key.clone();
@@ -942,7 +952,7 @@ impl Actor {
                     connections: inst.connections,
                     held_by: holders.get(key).cloned().unwrap_or_default(),
                     last_activity: inst.last_activity,
-                    memory_bytes: 0,
+                    memory_bytes: inst.procs.iter().map(|p| p.memory_bytes).sum(),
                     ptys: inst
                         .procs
                         .iter()
@@ -956,6 +966,11 @@ impl Actor {
 
     fn tick(&mut self) {
         let now = Instant::now();
+        self.ticks += 1;
+        if self.ticks.is_multiple_of(2) {
+            self.sample_metrics(now);
+        }
+        self.enforce_log_budget();
         let usages = self.usages();
         let mut to_stop = Vec::new();
         for usage in &usages {
@@ -997,6 +1012,61 @@ impl Actor {
             .any(|i| i.state == InstanceState::Ready)
         {
             self.dirty = true;
+        }
+    }
+
+    fn sample_metrics(&mut self, now: Instant) {
+        for inst in self.instances.values_mut() {
+            for proc in &mut inst.procs {
+                let Some(pid) = proc.pid.filter(|_| proc.is_running()) else {
+                    proc.memory_bytes = 0;
+                    proc.cpu_percent = 0.0;
+                    proc.cpu_sample = None;
+                    continue;
+                };
+                let Some(usage) = crate::metrics::group_usage(pid) else {
+                    continue;
+                };
+                proc.memory_bytes = usage.memory_bytes;
+                if let Some((at, cpu)) = proc.cpu_sample {
+                    proc.cpu_percent = crate::metrics::cpu_percent(cpu, usage.cpu_time, now - at);
+                }
+                proc.cpu_sample = Some((now, usage.cpu_time));
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Drops the logs of stopped instances, least recently used first, while all logs
+    /// together are over the budget. Running processes are only held to their own cap.
+    fn enforce_log_budget(&mut self) {
+        let budget = self.world.machine.limits.log_budget_bytes;
+        let mut total: usize = self
+            .instances
+            .values()
+            .flat_map(|i| &i.procs)
+            .map(|p| p.log.lock().unwrap().bytes())
+            .sum();
+        if total <= budget {
+            return;
+        }
+        let mut stopped: Vec<(Instant, InstanceKey)> = self
+            .instances
+            .values()
+            .filter(|i| !i.is_active() && !i.any_running())
+            .map(|i| (i.last_activity, i.key.clone()))
+            .collect();
+        stopped.sort();
+        let cap = self.world.machine.limits.log_buffer_bytes;
+        for (_, key) in stopped {
+            if total <= budget {
+                break;
+            }
+            for proc in &mut self.instances.get_mut(&key).expect("instance").procs {
+                let mut log = proc.log.lock().unwrap();
+                total -= log.bytes();
+                *log = ProcLog::new(cap);
+            }
         }
     }
 
@@ -1364,11 +1434,16 @@ struct EnvInput {
     pidfile: PathBuf,
     ca_bundle: PathBuf,
     ca_cert: PathBuf,
+    requires: Vec<String>,
+    ptys_free: bool,
 }
 
 impl EnvInput {
     fn build(self) -> BuiltEnv {
         let checkout_path = self.checkout.path().clone();
+        if let Err(message) = check_requires(&self.requires) {
+            return (Err(message), None);
+        }
         let runner = SystemRunner::from_env();
         let (provider, fresh) = match self.cached_provider {
             Some(env) => (env, None),
@@ -1438,7 +1513,7 @@ impl EnvInput {
                 .into_iter()
                 .map(|(k, v)| (OsString::from(k), OsString::from(v)))
                 .collect();
-            spawn.io = if spec.pty {
+            spawn.io = if spec.pty && self.ptys_free {
                 IoMode::default()
             } else {
                 IoMode::Pipes
@@ -1458,4 +1533,32 @@ fn current_branch(path: &Path) -> String {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+/// Checks a project's `requires`: `tcp://host:port` or `unix:///path`.
+fn check_requires(requires: &[String]) -> Result<(), String> {
+    use std::net::ToSocketAddrs;
+    let timeout = Duration::from_millis(500);
+    for entry in requires {
+        let reachable = if let Some(path) = entry.strip_prefix("unix://") {
+            std::os::unix::net::UnixStream::connect(path).is_ok()
+        } else if let Some(address) = entry.strip_prefix("tcp://") {
+            address
+                .to_socket_addrs()
+                .map(|mut addrs| {
+                    addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
+                })
+                .unwrap_or(false)
+        } else {
+            return Err(format!(
+                "requires entry {entry:?} must start with tcp:// or unix://"
+            ));
+        };
+        if !reachable {
+            return Err(format!(
+                "{entry} isn't reachable; the project requires it to be running"
+            ));
+        }
+    }
+    Ok(())
 }
