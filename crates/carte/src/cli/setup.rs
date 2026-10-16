@@ -9,6 +9,9 @@ use crate::setup::{self, Facts, SetupEnv, check};
 
 pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
     let env = SetupEnv::from_system(paths)?;
+    if let Some(domain) = &args.share {
+        return share(&env, domain, &args.tunnel, args.dry_run);
+    }
     let facts = Facts::gather(&env);
     if args.check {
         let report = check::check(&env, &facts);
@@ -101,5 +104,27 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
     } else {
         println!("\ncarte is set up.");
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn share(env: &SetupEnv, domain: &str, tunnel: &str, dry_run: bool) -> anyhow::Result<ExitCode> {
+    let facts = setup::share::ShareFacts::gather(env, tunnel);
+    let plan = setup::share::plan(env, &facts, domain, tunnel)?;
+    println!("Sharing plan:\n");
+    print!("{}", plan.render(env, true));
+    if dry_run {
+        println!("\nDry run: nothing was changed.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if !prompt::interactive(false) {
+        bail!("setup asks for confirmation, so it needs a terminal; `--dry-run` shows the plan");
+    }
+    println!();
+    if !prompt::confirm("Run these steps?", true)? {
+        println!("Nothing changed.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    setup::execute(&plan.steps, env)?;
+    println!("\nSharing is set up. Try `carte share <app>`.");
     Ok(ExitCode::SUCCESS)
 }
