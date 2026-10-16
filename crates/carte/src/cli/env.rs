@@ -1,8 +1,208 @@
-use std::process::ExitCode;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+use std::process::{Command, ExitCode};
 
-use super::Target;
+use anyhow::{anyhow, bail};
+use carte_api::{EnvResponse, EnvVar};
+use carte_core::address::{self, Address};
+use carte_core::env::{self as core_env, EnvRequest, Source, SystemRunner, TemplateOrigin};
+use carte_core::model::Checkout;
+use carte_core::procfile::{self, ProcessSource};
+use carte_core::{discovery, naming};
+
+use super::EnvArgs;
+use super::prompt::tilde;
 use crate::paths::Paths;
+use crate::urls::StackUrls;
 
-pub fn run(_paths: &Paths, _target: Target, _json: bool) -> anyhow::Result<ExitCode> {
-    anyhow::bail!("carte env is not implemented yet")
+pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let world = discovery::load_world(&paths.config_dir);
+    let typed = args.target.address.as_deref().unwrap_or("");
+    let mut address: Address = typed.parse()?;
+    if args.process.is_some() {
+        address.process = args.process;
+    }
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let target = address::resolve(&world, &address, Some(&cwd))?;
+    let Some(key) = target.instance() else {
+        bail!("{typed:?} names a whole project or stack; give an app, as in `carte env <app>`");
+    };
+    let state = world
+        .project(&key.project)
+        .ok_or_else(|| anyhow!("unknown project {}", key.project))?;
+    let app = state
+        .project
+        .app(&key.app)
+        .ok_or_else(|| anyhow!("unknown app {}", key.app))?;
+    let checkout = state.checkout(app, &key.stack);
+    let branch = match &checkout {
+        Checkout::Worktree(wt) => wt.branch.clone(),
+        Checkout::Main { path } => current_branch(path),
+    };
+
+    let list = procfile::load(checkout.path(), &app.settings)?;
+    if list.source == ProcessSource::RouteOnly {
+        bail!(
+            "{} only routes to a fixed port; it runs no processes",
+            app.name
+        );
+    }
+    let names = || {
+        list.processes
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let process = match &target.process {
+        Some(name) => list
+            .processes
+            .iter()
+            .find(|p| &p.name == name)
+            .ok_or_else(|| {
+                anyhow!(
+                    "{} has no process {name:?}; choose from {}",
+                    app.name,
+                    names()
+                )
+            })?,
+        None => list.processes.iter().find(|p| p.http).ok_or_else(|| {
+            anyhow!(
+                "no process of {} serves HTTP; choose one with --process: {}",
+                app.name,
+                names()
+            )
+        })?,
+    };
+
+    let machine = &world.machine;
+    let shared = BTreeSet::new();
+    let urls = StackUrls {
+        machine,
+        state,
+        stack: &key.stack,
+        shared: &shared,
+    };
+    let ca_bundle = paths.ca_bundle();
+    let ca_cert = paths.ca_cert();
+    let pidfile = paths.pidfile(&key);
+    let tld_length = naming::tld_length(&machine.tld, &state.project, app, &key.stack);
+    let req = EnvRequest {
+        project: &state.project,
+        app,
+        process,
+        checkout: &checkout,
+        stack: &key.stack,
+        branch: &branch,
+        port: 0,
+        urls: &urls,
+        tld: &machine.tld,
+        share_domain: machine.share.as_ref().map(|s| s.domain.as_str()),
+        tld_length: tld_length as u32,
+        ca_bundle: &ca_bundle,
+        ca_cert: &ca_cert,
+        pidfile: &pidfile,
+    };
+    let daemon_env: BTreeMap<String, String> = std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let runner = SystemRunner::from_env();
+    let env = core_env::build_env(&req, &daemon_env, &runner)?;
+
+    let instance = format!("{}@{}/{}", app.name, key.stack.slug(), process.name);
+    let shown = |key: &str, value: &str, source: &Source| {
+        if key == "PORT" && *source == Source::Injected {
+            "<assigned at start>".to_string()
+        } else {
+            value.to_string()
+        }
+    };
+
+    if json {
+        let response = EnvResponse {
+            instance,
+            vars: env
+                .iter()
+                .map(|(key, v)| EnvVar {
+                    key: key.to_string(),
+                    value: shown(key, &v.value, &v.source),
+                    source: v.source.to_string(),
+                    overrides: v.overrode.iter().map(|o| o.source.to_string()).collect(),
+                })
+                .collect(),
+        };
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let provider = core_env::detect_provider(state.project.env_provider, checkout.path(), &runner);
+    println!(
+        "{instance}  {}  (env from {})",
+        tilde(checkout.path()),
+        core_env::provider_name(provider)
+    );
+    println!();
+    let label = |source: &Source| source_label(source, checkout.path());
+    let key_width = env.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let source_width = env
+        .iter()
+        .map(|(_, v)| label(&v.source).len())
+        .max()
+        .unwrap_or(0);
+    for (key, v) in env.iter() {
+        println!(
+            "{key:key_width$}  {:source_width$}  {}",
+            label(&v.source),
+            shown(key, &v.value, &v.source)
+        );
+        for old in v.overrode.iter().rev() {
+            println!(
+                "{:key_width$}  ↳ overrode {}: {}",
+                "",
+                label(&old.source),
+                old.value
+            );
+        }
+    }
+    if !list.notices.is_empty() {
+        println!();
+    }
+    for notice in &list.notices {
+        println!("note: {notice}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A short name for a source; the JSON output has the full one.
+fn source_label(source: &Source, checkout: &Path) -> String {
+    match source {
+        Source::EnvFile { path, line } => {
+            let path = path.strip_prefix(checkout).unwrap_or(path);
+            format!("{}:{line}", path.display())
+        }
+        Source::Template { origin, .. } => match origin {
+            TemplateOrigin::Project { .. } => "project template".into(),
+            TemplateOrigin::App { .. } => "app template".into(),
+            TemplateOrigin::Process { .. } => "process template".into(),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// The branch checked out in a primary checkout; empty when detached.
+fn current_branch(checkout: &Path) -> String {
+    Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_default()
 }
