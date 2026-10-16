@@ -76,6 +76,8 @@ pub(super) struct Proc {
     run: u64,
     manual_stop: bool,
     restart: bool,
+    /// A checkout-scope process another instance runs; taken over when that stops.
+    deferred: bool,
 }
 
 impl Proc {
@@ -450,6 +452,7 @@ impl Actor {
                 run: 0,
                 manual_stop: false,
                 restart: false,
+                deferred: false,
                 memory_bytes: 0,
                 cpu_percent: 0.0,
                 cpu_sample: None,
@@ -508,6 +511,9 @@ impl Actor {
                 )
         });
         let inst = self.instances.get_mut(key).expect("instance");
+        for &idx in &shared {
+            inst.procs[idx].deferred = !to_run.contains(&idx);
+        }
         inst.state = InstanceState::Starting;
         self.build_env(key, boot, to_run);
 
@@ -985,6 +991,7 @@ impl Actor {
             self.sample_metrics(now);
         }
         self.enforce_log_budget();
+        self.adopt_shared_processes();
         let usages = self.usages();
         let mut to_stop = Vec::new();
         for usage in &usages {
@@ -1026,6 +1033,39 @@ impl Actor {
             .any(|i| i.state == InstanceState::Ready)
         {
             self.dirty = true;
+        }
+    }
+
+    /// Starts deferred checkout-scope processes whose running copy went away.
+    fn adopt_shared_processes(&mut self) {
+        let mut adopt = Vec::new();
+        for inst in self.instances.values() {
+            if inst.state != InstanceState::Ready {
+                continue;
+            }
+            let Some(checkout) = &inst.checkout else {
+                continue;
+            };
+            for proc in inst.procs.iter().filter(|p| p.deferred && !p.is_running()) {
+                if !self_runs_elsewhere(
+                    &self.instances,
+                    &inst.key,
+                    checkout.path(),
+                    &proc.spec.name,
+                ) {
+                    adopt.push((inst.key.clone(), proc.spec.name.clone()));
+                }
+            }
+        }
+        for (key, name) in adopt {
+            if let Some(proc) = self
+                .instances
+                .get_mut(&key)
+                .and_then(|i| i.procs.iter_mut().find(|p| p.spec.name == name))
+            {
+                proc.deferred = false;
+            }
+            let _ = self.start_process(&key, &name);
         }
     }
 
