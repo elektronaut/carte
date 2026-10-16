@@ -40,6 +40,9 @@ pub struct Logs {
     pub key: Option<Key>,
     pub prefix: Prefix,
     lines: VecDeque<LogLine>,
+    /// Lines dropped from the front so far; a line's sequence number is this plus its
+    /// index, which stays put while lines come and go.
+    dropped: u64,
     /// Prefix labels in order of appearance, which picks their colours.
     labels: Vec<String>,
     pub filter: String,
@@ -48,6 +51,8 @@ pub struct Logs {
     pub ended: Option<String>,
     /// Rows the pane showed last time it was drawn.
     pub height: usize,
+    /// Keep the view still while lines arrive, even when following.
+    pub hold: bool,
 }
 
 const CAPACITY: usize = 5000;
@@ -59,11 +64,13 @@ impl Default for Logs {
             key: None,
             prefix: Prefix::None,
             lines: VecDeque::new(),
+            dropped: 0,
             labels: Vec::new(),
             filter: String::new(),
             scroll: 0,
             ended: None,
             height: 0,
+            hold: false,
         }
     }
 }
@@ -74,7 +81,9 @@ impl Logs {
         self.generation += 1;
         self.key = key;
         self.prefix = prefix;
+        self.dropped += self.lines.len() as u64;
         self.lines.clear();
+        self.hold = false;
         self.labels.clear();
         self.scroll = 0;
         self.ended = None;
@@ -90,12 +99,13 @@ impl Logs {
         {
             self.labels.push(label);
         }
-        if self.scroll > 0 && self.matches(&line) {
+        if (self.scroll > 0 || self.hold) && self.matches(&line) {
             self.scroll += 1;
         }
         self.lines.push_back(line);
         if self.lines.len() > CAPACITY {
             self.lines.pop_front();
+            self.dropped += 1;
         }
     }
 
@@ -121,12 +131,54 @@ impl Logs {
         self.lines.iter().filter(|l| self.matches(l)).collect()
     }
 
-    /// The lines that fit in `height` rows at the current scroll position.
-    pub fn window(&self, height: usize) -> Vec<&LogLine> {
-        let visible = self.visible();
+    /// Visible lines with their sequence numbers.
+    fn numbered(&self) -> Vec<(u64, &LogLine)> {
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| self.matches(l))
+            .map(|(i, l)| (self.dropped + i as u64, l))
+            .collect()
+    }
+
+    /// The lines that fit in `height` rows at the current scroll position, with their
+    /// sequence numbers.
+    pub fn window_numbered(&self, height: usize) -> Vec<(u64, &LogLine)> {
+        let visible = self.numbered();
         let scroll = self.scroll.min(visible.len().saturating_sub(height));
         let end = visible.len() - scroll;
         visible[end.saturating_sub(height)..end].to_vec()
+    }
+
+    #[cfg(test)]
+    pub fn window(&self, height: usize) -> Vec<&LogLine> {
+        self.window_numbered(height)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    /// The sequence number of the line on a row of the pane, or of the last line when
+    /// the row is below it.
+    pub fn seq_at(&self, row: usize) -> Option<u64> {
+        let window = self.window_numbered(self.height);
+        window.get(row).or(window.last()).map(|(seq, _)| *seq)
+    }
+
+    /// The visible lines between two sequence numbers, inclusive, as plain text with
+    /// their prefixes.
+    pub fn text_between(&self, a: u64, b: u64) -> (String, usize) {
+        let range = a.min(b)..=a.max(b);
+        let lines: Vec<String> = self
+            .numbered()
+            .into_iter()
+            .filter(|(seq, _)| range.contains(seq))
+            .map(|(_, line)| match self.prefix.label(line) {
+                Some(label) => format!("{label} {}", line.text),
+                None => line.text.clone(),
+            })
+            .collect();
+        (lines.join("\n"), lines.len())
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
@@ -197,6 +249,33 @@ mod tests {
         assert_eq!(texts(logs.window(3)), ["8", "9", "10"]);
         logs.scroll_to_top();
         assert_eq!(texts(logs.window(3)), ["0", "1", "2"]);
+    }
+
+    #[test]
+    fn selections_keep_their_lines_while_lines_come_and_go() {
+        let mut logs = Logs::default();
+        let generation = logs.restart(None, Prefix::Process);
+        for i in 0..CAPACITY {
+            logs.push(generation, line(&format!("{i}")));
+        }
+        logs.height = 3;
+        logs.hold = true;
+        let (first, last) = (logs.seq_at(0).unwrap(), logs.seq_at(1).unwrap());
+        logs.push(generation, line("new"));
+        assert_eq!(
+            texts(logs.window(3)),
+            ["4997", "4998", "4999"],
+            "a hold keeps the view still"
+        );
+        assert_eq!(
+            logs.text_between(last, first),
+            ("web 4997\nweb 4998".to_string(), 2)
+        );
+        assert_eq!(
+            logs.seq_at(10),
+            logs.seq_at(2),
+            "below the lines is the last"
+        );
     }
 
     #[test]

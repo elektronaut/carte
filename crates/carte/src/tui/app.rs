@@ -58,6 +58,7 @@ pub enum Command {
     Unshare(UnshareRequest),
     Open(String),
     MouseCapture(bool),
+    Copy(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,22 @@ pub enum Connection {
     Connecting,
     Connected,
     Lost(String),
+}
+
+/// Log lines picked with the mouse, by sequence number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub anchor: u64,
+    pub cursor: u64,
+    pub dragged: bool,
+    /// The pane followed new lines before the selection held it still.
+    pub was_following: bool,
+}
+
+impl Selection {
+    pub fn contains(&self, seq: u64) -> bool {
+        (self.anchor.min(self.cursor)..=self.anchor.max(self.cursor)).contains(&seq)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +115,7 @@ pub struct App {
     pub tree_area: Rect,
     pub tree_offset: usize,
     pub logs_area: Rect,
+    pub selection: Option<Selection>,
     pub mouse: bool,
     pub quit: bool,
 }
@@ -123,6 +141,7 @@ impl App {
             tree_area: Rect::default(),
             tree_offset: 0,
             logs_area: Rect::default(),
+            selection: None,
             mouse: true,
             quit: false,
         }
@@ -137,7 +156,7 @@ impl App {
                     self.apply(intent, &mut commands);
                 }
             }
-            Event::Mouse(mouse) if self.mode == Mode::Normal => self.mouse(mouse),
+            Event::Mouse(mouse) if self.mode == Mode::Normal => self.mouse(mouse, &mut commands),
             Event::Mouse(_) | Event::Tick | Event::Redraw => {}
             Event::Snapshot(snapshot) => {
                 self.connection = Connection::Connected;
@@ -245,10 +264,68 @@ impl App {
     }
 
     /// The wheel scrolls the pane under the pointer; a click focuses a pane, selects a
-    /// tree row, or folds and unfolds the row that is already selected.
-    fn mouse(&mut self, event: MouseEvent) {
+    /// tree row, or folds and unfolds the row that is already selected. Dragging over
+    /// the logs selects lines and releasing copies them.
+    fn mouse(&mut self, event: MouseEvent, commands: &mut Vec<Command>) {
         let at = Position::new(event.column, event.row);
         match event.kind {
+            MouseEventKind::Down(MouseButton::Left) if self.logs_area.contains(at) => {
+                self.end_selection();
+                self.focus = Focus::Logs;
+                let top = self.logs_area.y + 1;
+                if at.y >= top
+                    && let Some(seq) = self.logs.seq_at(usize::from(at.y - top))
+                {
+                    self.selection = Some(Selection {
+                        anchor: seq,
+                        cursor: seq,
+                        dragged: false,
+                        was_following: self.logs.scroll == 0,
+                    });
+                    self.logs.hold = true;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.selection.is_some() => {
+                let top = self.logs_area.y + 1;
+                let bottom = top + self.logs.height as u16;
+                let row = if at.y < top {
+                    self.logs.scroll_by(1);
+                    0
+                } else if at.y >= bottom {
+                    self.logs.scroll_by(-1);
+                    self.logs.height.saturating_sub(1)
+                } else {
+                    usize::from(at.y - top)
+                };
+                if let Some(seq) = self.logs.seq_at(row)
+                    && let Some(selection) = &mut self.selection
+                {
+                    selection.cursor = seq;
+                    selection.dragged = true;
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(selection) = self.selection else {
+                    return;
+                };
+                if !selection.dragged {
+                    self.end_selection();
+                    return;
+                }
+                let (text, count) = self.logs.text_between(selection.anchor, selection.cursor);
+                commands.push(Command::Copy(text));
+                self.inform(&if count == 1 {
+                    "copied 1 line".to_string()
+                } else {
+                    format!("copied {count} lines")
+                });
+                self.release_hold(selection);
+                self.selection = Some(Selection {
+                    dragged: false,
+                    was_following: false,
+                    ..selection
+                });
+            }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = event.kind == MouseEventKind::ScrollUp;
                 if self.logs_area.contains(at) {
@@ -261,6 +338,7 @@ impl App {
                 if self.logs_area.contains(at) {
                     self.focus = Focus::Logs;
                 } else if self.tree_area.contains(at) {
+                    self.end_selection();
                     self.focus = Focus::Tree;
                     let first = self.tree_area.y + 2;
                     if at.y < first || at.y + 1 >= self.tree_area.bottom() {
@@ -275,6 +353,20 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Lets the logs move again, back to following if they did before.
+    fn release_hold(&mut self, selection: Selection) {
+        self.logs.hold = false;
+        if selection.was_following {
+            self.logs.follow();
+        }
+    }
+
+    fn end_selection(&mut self) {
+        if let Some(selection) = self.selection.take() {
+            self.release_hold(selection);
         }
     }
 
@@ -597,6 +689,7 @@ impl App {
             return None;
         }
         let prefix = self.log_prefix();
+        self.selection = None;
         let generation = self.logs.restart(wanted.clone(), prefix);
         let (Some(snapshot), Some(node)) = (&self.snapshot, self.selected_node()) else {
             return Some(Command::StopLogs);
@@ -773,6 +866,77 @@ mod tests {
         assert_eq!(app.cursor, 0);
         app.update(mouse(MouseEventKind::ScrollDown, 10, 5), now);
         assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn dragging_over_the_logs_copies_whole_lines() {
+        let (mut app, now) = connected();
+        app.tree_area = Rect::new(0, 0, 40, 20);
+        app.logs_area = Rect::new(40, 0, 40, 7);
+        app.logs.height = 5;
+        let push = |app: &mut App, i: u64| {
+            app.logs.push(
+                app.logs.generation,
+                LogLine {
+                    app: "nova-billing".into(),
+                    stack: "main".into(),
+                    process: "web".into(),
+                    at_ms: i,
+                    text: format!("line {i}"),
+                },
+            );
+        };
+        for i in 0..20 {
+            push(&mut app, i);
+        }
+        let left = MouseButton::Left;
+
+        assert!(
+            app.update(mouse(MouseEventKind::Down(left), 50, 2), now)
+                .is_empty()
+        );
+        assert!(
+            app.update(mouse(MouseEventKind::Up(left), 50, 2), now)
+                .is_empty()
+        );
+        assert_eq!(app.selection, None, "a click selects nothing");
+        assert_eq!(app.focus, Focus::Logs);
+
+        app.update(mouse(MouseEventKind::Down(left), 50, 2), now);
+        push(&mut app, 20);
+        app.update(mouse(MouseEventKind::Drag(left), 50, 4), now);
+        let commands = app.update(mouse(MouseEventKind::Up(left), 50, 4), now);
+        assert_eq!(
+            commands,
+            [Command::Copy(
+                "nova-billing@main/web line 16\nnova-billing@main/web line 17\nnova-billing@main/web line 18"
+                    .into()
+            )],
+            "the view held still while a line arrived"
+        );
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("copied 3 lines")
+        );
+        assert_eq!(app.logs.scroll, 0, "following again");
+        assert!(
+            app.update(mouse(MouseEventKind::Up(left), 50, 4), now)
+                .is_empty(),
+            "copies once"
+        );
+
+        app.update(mouse(MouseEventKind::Down(left), 50, 5), now);
+        app.update(mouse(MouseEventKind::Drag(left), 50, 0), now);
+        app.update(mouse(MouseEventKind::Drag(left), 50, 0), now);
+        let commands = app.update(mouse(MouseEventKind::Up(left), 50, 0), now);
+        let [Command::Copy(text)] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(
+            text.lines().count(),
+            7,
+            "dragging past the top scrolls and keeps selecting"
+        );
     }
 
     #[test]

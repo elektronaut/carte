@@ -82,6 +82,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "filter the focused pane"),
             ("esc", "clear the filter"),
             ("a", "show only running"),
+            ("drag", "copy log lines"),
             ("m", "mouse on or off"),
         ],
     ),

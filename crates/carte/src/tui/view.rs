@@ -601,7 +601,7 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
     app.logs.height = inner.height as usize;
     let logs = &app.logs;
 
-    let window = logs.window(inner.height as usize);
+    let window = logs.window_numbered(inner.height as usize);
     if window.is_empty() {
         let stopped = app
             .selected_node()
@@ -618,20 +618,25 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     let width = window
         .iter()
-        .filter_map(|line| logs.prefix.label(line))
+        .filter_map(|(_, line)| logs.prefix.label(line))
         .map(|label| label.chars().count())
         .max()
         .unwrap_or(0);
     let lines: Vec<Line> = window
         .iter()
-        .map(|line| {
+        .map(|(seq, line)| {
             let mut spans = Vec::new();
             if let Some(label) = logs.prefix.label(line) {
                 let color = PREFIX_COLORS[logs.color_index(&label) % PREFIX_COLORS.len()];
                 spans.push(Span::raw(format!("{label:width$} ")).fg(color));
             }
             spans.extend(highlight(&line.text, &logs.filter));
-            Line::from(spans)
+            let line = Line::from(spans);
+            if app.selection.is_some_and(|s| s.contains(*seq)) {
+                line.reversed()
+            } else {
+                line
+            }
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
@@ -1064,7 +1069,7 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Char('?'));
-        let screen = draw(&mut app, 100, 40);
+        let screen = draw(&mut app, 100, 41);
         assert_eq!(
             screen,
             "\
@@ -1081,6 +1086,7 @@ mod tests {
 │                        │ /            filter the focused pane           │                        │
 │                        │ esc          clear the filter                  │                        │
 │                        │ a            show only running                 │                        │
+│                        │ drag         copy log lines                    │                        │
 │                        │ m            mouse on or off                   │                        │
 │                        │                                                │                        │
 │                        │ Control the selection                          │                        │
