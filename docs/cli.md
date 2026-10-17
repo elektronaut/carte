@@ -96,7 +96,7 @@ An **Instance** is:
 | `checkout_path` | Where its code is |
 | `url`, `public_url` | `public_url` is null unless shared |
 | `state` | `stopped`, `starting`, `ready`, `stopping` or `crashed` |
-| `processes` | `[{ name, state, policy, temporary, pid, port, http, restarts, memory_bytes, cpu_percent }]`; `state` is `stopped`, `starting`, `running`, `stopping`, `exited` or `disabled`, and `policy` is `auto`, `pinned` or `disabled` |
+| `processes` | `[{ name, state, policy, temporary, pid, port, http, restarts, memory_bytes, cpu_percent }]`; `state` is `stopped`, `starting`, `running`, `stopping`, `exited`, `disabled` or `done` (a task that finished), and `policy` is `auto`, `pinned` or `disabled` |
 | `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent", … }` |
 | `idle_in_secs` | Until idle shutdown, when counting down |
 | `last_error`, `last_event` | Null when there's none |

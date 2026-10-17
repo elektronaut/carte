@@ -277,15 +277,26 @@ fn waiting_for(procs: &[Proc]) -> String {
     if procs.iter().all(|p| p.state == ProcessState::Stopped) {
         return "its environment".to_string();
     }
-    if let Some(http) = procs.iter().find(|p| p.spec.http) {
-        let name = &http.spec.name;
-        return match (&http.state, &http.spec.ready) {
-            (ProcessState::Starting, _) => format!("{name} to start"),
-            (_, Readiness::Http(path)) => format!("{name} to answer {path} on port {}", http.port),
-            (_, Readiness::Port) => format!("{name} to listen on port {}", http.port),
+    let waits: Vec<&Proc> = procs.iter().filter(|p| p.blocks() && !p.queued).collect();
+    let checked = waits
+        .iter()
+        .find(|p| p.state != ProcessState::Starting && (p.spec.http || p.spec.is_service()));
+    if let Some(proc) = checked {
+        let name = &proc.spec.name;
+        return match &proc.spec.ready {
+            Readiness::Http(path) => format!("{name} to answer {path} on port {}", proc.port),
+            Readiness::Port => format!("{name} to listen on port {}", proc.port),
         };
     }
-    let starting: Vec<&str> = procs
+    let tasks: Vec<&str> = waits
+        .iter()
+        .filter(|p| p.spec.is_task() && p.state != ProcessState::Starting)
+        .map(|p| p.spec.name.as_str())
+        .collect();
+    if !tasks.is_empty() {
+        return format!("{} to finish", tasks.join(", "));
+    }
+    let starting: Vec<&str> = waits
         .iter()
         .filter(|p| p.state == ProcessState::Starting)
         .map(|p| p.spec.name.as_str())

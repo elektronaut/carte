@@ -44,6 +44,7 @@ pub(crate) enum Internal {
     Ready {
         key: InstanceKey,
         run: u64,
+        idx: usize,
         result: Result<(), String>,
     },
     Tick,
@@ -99,6 +100,12 @@ pub(super) struct Proc {
     restart: bool,
     /// A checkout-scope process another instance runs; taken over when that stops.
     deferred: bool,
+    /// Its readiness check passed in the latest run.
+    ready: bool,
+    /// Part of the start under way, waiting for its turn.
+    pub queued: bool,
+    /// What a queued process runs, once its environment is built.
+    spawn: Option<SpawnSpec>,
 }
 
 impl Proc {
@@ -107,6 +114,25 @@ impl Proc {
             self.state,
             ProcessState::Starting | ProcessState::Running | ProcessState::Stopping
         )
+    }
+
+    /// Holds back what starts after it: still queued, or running and not yet done.
+    /// The HTTP process and services are done once ready, other processes once
+    /// started, and tasks once they have exited 0.
+    pub(super) fn blocks(&self) -> bool {
+        if self.queued {
+            return true;
+        }
+        if !self.is_running() {
+            return false;
+        }
+        if self.spec.is_task() {
+            true
+        } else if self.spec.http || self.spec.is_service() {
+            !self.ready
+        } else {
+            self.state != ProcessState::Running
+        }
     }
 }
 
@@ -158,6 +184,31 @@ impl Instance {
 
     fn label(&self) -> String {
         format!("{}@{}", self.key.app, self.key.stack.slug())
+    }
+
+    /// Stops what is running, services last: they get their signal once everything
+    /// else has exited. `mark` shows the processes as stopping.
+    fn signal_stop(&mut self, grace: Duration, mark: bool) {
+        for proc in &mut self.procs {
+            proc.queued = false;
+            proc.spawn = None;
+        }
+        let others = self
+            .procs
+            .iter()
+            .any(|p| !p.spec.is_service() && p.is_running());
+        for proc in &mut self.procs {
+            if others && proc.spec.is_service() {
+                continue;
+            }
+            if let Some(stop) = proc.stop.take() {
+                if mark {
+                    proc.state = ProcessState::Stopping;
+                }
+                proc.manual_stop = true;
+                let _ = stop.send(grace);
+            }
+        }
     }
 }
 
@@ -392,7 +443,12 @@ impl Actor {
                 idx,
                 event,
             } => self.proc_event(&key, run, idx, event),
-            Internal::Ready { key, run, result } => self.ready(&key, run, result),
+            Internal::Ready {
+                key,
+                run,
+                idx,
+                result,
+            } => self.ready(&key, run, idx, result),
             Internal::Tick => self.tick(),
         }
     }
@@ -524,10 +580,16 @@ impl Actor {
             inst.forced.insert(name.to_string());
         }
 
+        let grace = self.options.grace;
         let old_logs: HashMap<String, (Arc<Mutex<ProcLog>>, u32)> = inst
             .procs
             .drain(..)
-            .map(|p| (p.spec.name, (p.log, p.restarts)))
+            .map(|mut p| {
+                if let Some(stop) = p.stop.take() {
+                    let _ = stop.send(grace);
+                }
+                (p.spec.name, (p.log, p.restarts))
+            })
             .collect();
         let log_cap = self.world.machine.limits.log_buffer_bytes;
         let mut procs = Vec::new();
@@ -552,6 +614,9 @@ impl Actor {
                 manual_stop: false,
                 restart: false,
                 deferred: false,
+                ready: false,
+                queued: false,
+                spawn: None,
                 memory_bytes: 0,
                 cpu_percent: 0.0,
                 cpu_sample: None,
@@ -615,6 +680,9 @@ impl Actor {
         let inst = self.instances.get_mut(key).expect("instance");
         for &idx in &shared {
             inst.procs[idx].deferred = !to_run.contains(&idx);
+        }
+        for &idx in &to_run {
+            inst.procs[idx].queued = true;
         }
         inst.state = InstanceState::Starting;
         self.started_event(key, &why);
@@ -730,14 +798,19 @@ impl Actor {
         let specs = match result {
             Ok(specs) => specs,
             Err(message) => {
-                self.crash(key, None, message);
+                self.crash(key, None, None, message);
                 return;
             }
         };
         for (idx, spec) in specs {
-            self.spawn_proc(key, idx, spec);
+            let proc = &mut self.instances.get_mut(key).expect("instance").procs[idx];
+            if proc.queued {
+                proc.spawn = Some(spec);
+            } else {
+                self.spawn_proc(key, idx, spec);
+            }
         }
-        self.check_started(key);
+        self.advance(key);
     }
 
     fn spawn_proc(&mut self, key: &InstanceKey, idx: usize, spec: SpawnSpec) {
@@ -751,6 +824,7 @@ impl Actor {
         proc.run = run;
         proc.started_ms = Some(runner::now_ms());
         proc.manual_stop = false;
+        proc.ready = false;
         let label = LogLabel {
             project: key.project.clone(),
             app: key.app.clone(),
@@ -782,7 +856,7 @@ impl Actor {
                 }
             }
         });
-        if proc.spec.http {
+        if proc.spec.http || proc.spec.is_service() {
             let tx = self.tx.clone();
             let port = proc.port;
             let readiness = proc.spec.ready.clone();
@@ -792,28 +866,73 @@ impl Actor {
                 let _ = tx.send(Msg::Internal(Internal::Ready {
                     key: ready_key,
                     run,
+                    idx,
                     result,
+                }));
+            });
+        } else if proc.spec.is_task() {
+            let tx = self.tx.clone();
+            let ready_key = key.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(boot_timeout).await;
+                let _ = tx.send(Msg::Internal(Internal::Ready {
+                    key: ready_key,
+                    run,
+                    idx,
+                    result: Err(format!(
+                        "did not finish within {}",
+                        carte_core::duration::format(boot_timeout)
+                    )),
                 }));
             });
         }
         self.dirty = true;
     }
 
-    /// An instance without an HTTP process is ready once its processes have started.
-    fn check_started(&mut self, key: &InstanceKey) {
-        let Some(inst) = self.instances.get_mut(key) else {
+    /// Launches the queued processes whose turn has come: services first, then tasks,
+    /// then the rest, each tier once the one before is done, and within a tier after
+    /// the processes named in `after`. The instance is ready once nothing blocks.
+    fn advance(&mut self, key: &InstanceKey) {
+        let Some(inst) = self.instances.get(key) else {
             return;
         };
-        if inst.state != InstanceState::Starting || inst.http().is_some() {
+        if inst.state != InstanceState::Starting {
             return;
         }
-        if inst.procs.iter().all(|p| p.state != ProcessState::Starting) {
-            inst.state = InstanceState::Ready;
-            for waiter in inst.waiters.drain(..) {
-                let _ = waiter.send(Err(BootFailure::no_web_process(&key.app)));
-            }
-            self.ready_event(key);
+        let launch: Vec<usize> = inst
+            .procs
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.spawn.is_some()
+                    && !inst.procs.iter().any(|other| {
+                        other.blocks()
+                            && (other.spec.tier() < p.spec.tier()
+                                || p.spec.after.contains(&other.spec.name))
+                    })
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+        for idx in launch {
+            let proc = &mut self.instances.get_mut(key).expect("instance").procs[idx];
+            proc.queued = false;
+            let spec = proc.spawn.take().expect("queued process");
+            self.spawn_proc(key, idx, spec);
         }
+        let inst = self.instances.get_mut(key).expect("instance");
+        if inst.procs.iter().any(Proc::blocks) {
+            return;
+        }
+        inst.state = InstanceState::Ready;
+        inst.last_activity = Instant::now();
+        let result = match inst.http() {
+            Some(_) => Ok(inst.upstream().expect("http process")),
+            None => Err(BootFailure::no_web_process(&key.app)),
+        };
+        for waiter in inst.waiters.drain(..) {
+            let _ = waiter.send(result.clone());
+        }
+        self.ready_event(key);
     }
 
     fn ready_event(&mut self, key: &InstanceKey) {
@@ -848,7 +967,7 @@ impl Actor {
                 }
                 proc.pid = Some(pid);
                 self.groups.add(pid);
-                self.check_started(key);
+                self.advance(key);
             }
             runner::Event::SpawnFailed(message) => {
                 proc.state = ProcessState::Exited {
@@ -857,15 +976,13 @@ impl Actor {
                 };
                 proc.stop = None;
                 let name = proc.spec.name.clone();
-                let http = proc.spec.http;
                 proc.log
                     .lock()
                     .unwrap()
                     .push(format!("carte: {message}\n").as_bytes());
                 self.after_exit(
                     key,
-                    &name,
-                    http,
+                    idx,
                     false,
                     None,
                     format!("{name} couldn't start: {message}"),
@@ -879,6 +996,8 @@ impl Actor {
                 let manual = proc.manual_stop || inst.state == InstanceState::Stopping;
                 proc.state = if manual && inst.state != InstanceState::Crashed {
                     ProcessState::Stopped
+                } else if proc.spec.is_task() && code == Some(0) {
+                    ProcessState::Done
                 } else {
                     ProcessState::Exited { code, signal }
                 };
@@ -887,10 +1006,8 @@ impl Actor {
                     (None, Some(signal)) => format!("was killed by signal {signal}"),
                     (None, None) => "exited".to_string(),
                 };
-                let name = proc.spec.name.clone();
-                let http = proc.spec.http;
-                let message = format!("{name} {how}");
-                self.after_exit(key, &name, http, manual, code, message);
+                let message = format!("{} {how}", proc.spec.name);
+                self.after_exit(key, idx, manual, code, message);
             }
         }
     }
@@ -898,18 +1015,28 @@ impl Actor {
     fn after_exit(
         &mut self,
         key: &InstanceKey,
-        name: &str,
-        http: bool,
+        idx: usize,
         manual: bool,
         code: Option<i32>,
         message: String,
     ) {
+        let grace = self.options.grace;
         let Some(inst) = self.instances.get_mut(key) else {
             return;
         };
+        let proc = &inst.procs[idx];
+        let name = proc.spec.name.clone();
+        let name = name.as_str();
+        let http = proc.spec.http;
+        let boot_step = proc.spec.kind.is_some();
+        let done = proc.state == ProcessState::Done;
         match inst.state {
+            InstanceState::Starting | InstanceState::Ready if done => self.advance(key),
             InstanceState::Starting | InstanceState::Ready if http && !manual => {
-                self.crash(key, code, message);
+                self.crash(key, code, Some(idx), message);
+            }
+            InstanceState::Starting if boot_step && !manual => {
+                self.crash(key, code, Some(idx), message);
             }
             InstanceState::Starting | InstanceState::Ready => {
                 if !manual {
@@ -932,49 +1059,60 @@ impl Actor {
                 if restart {
                     let _ = self.start_process(key, name);
                 }
-                self.check_started(key);
+                self.advance(key);
             }
-            InstanceState::Stopping if !inst.any_running() => self.finish_stop(key),
-            _ => {}
+            InstanceState::Stopping => {
+                inst.signal_stop(grace, true);
+                if !inst.any_running() {
+                    self.finish_stop(key);
+                }
+            }
+            InstanceState::Crashed => inst.signal_stop(grace, false),
+            InstanceState::Stopped => {}
         }
     }
 
-    fn ready(&mut self, key: &InstanceKey, run: u64, result: Result<(), String>) {
+    /// A readiness check passed or failed, or a task ran out of time.
+    fn ready(&mut self, key: &InstanceKey, run: u64, idx: usize, result: Result<(), String>) {
         let Some(inst) = self.instances.get_mut(key) else {
             return;
         };
-        let Some(http) = inst.procs.iter().find(|p| p.spec.http) else {
+        let starting = inst.state == InstanceState::Starting;
+        let Some(proc) = inst.procs.get_mut(idx) else {
             return;
         };
-        if http.run != run || !http.is_running() {
+        if proc.run != run || !proc.is_running() {
             return;
         }
         match result {
-            Ok(()) if inst.state == InstanceState::Starting => {
-                inst.state = InstanceState::Ready;
-                inst.last_activity = Instant::now();
-                let upstream = inst.upstream().expect("http process");
-                for waiter in inst.waiters.drain(..) {
-                    let _ = waiter.send(Ok(upstream));
-                }
-                self.ready_event(key);
+            Ok(()) => {
+                proc.ready = true;
+                self.advance(key);
             }
-            Ok(()) => {}
-            Err(message) => {
-                let name = http.spec.name.clone();
-                self.crash(key, None, format!("{name} {message}"));
+            Err(message) if starting || proc.spec.http => {
+                let message = format!("{} {message}", proc.spec.name);
+                self.crash(key, None, Some(idx), message);
             }
+            Err(_) => {}
         }
     }
 
     // Stopping
 
-    fn crash(&mut self, key: &InstanceKey, code: Option<i32>, message: String) {
+    /// Fails the instance; `failed` is the process whose log explains it.
+    fn crash(
+        &mut self,
+        key: &InstanceKey,
+        code: Option<i32>,
+        failed: Option<usize>,
+        message: String,
+    ) {
         let Some(inst) = self.instances.get_mut(key) else {
             return;
         };
-        let log = inst
-            .http()
+        let log = failed
+            .and_then(|idx| inst.procs.get(idx))
+            .or(inst.http())
             .or(inst.procs.first())
             .map(|p| p.log.lock().unwrap().tail(40))
             .unwrap_or_default();
@@ -983,13 +1121,7 @@ impl Actor {
         let mut failure = BootFailure::new(format!("{} crashed", inst.label()), message.clone());
         failure.log = log;
         inst.fail_waiters(failure);
-        let grace = self.options.grace;
-        for proc in &mut inst.procs {
-            if let Some(stop) = proc.stop.take() {
-                proc.manual_stop = true;
-                let _ = stop.send(grace);
-            }
-        }
+        inst.signal_stop(self.options.grace, false);
         self.events.push_event(
             EventKind::Crashed,
             message,
@@ -1028,13 +1160,7 @@ impl Actor {
             inst.fail_waiters(failure);
         }
         inst.state = InstanceState::Stopping;
-        for proc in &mut inst.procs {
-            if let Some(stop) = proc.stop.take() {
-                proc.state = ProcessState::Stopping;
-                proc.manual_stop = true;
-                let _ = stop.send(grace);
-            }
-        }
+        inst.signal_stop(grace, true);
         if !inst.any_running() {
             self.finish_stop(key);
         }

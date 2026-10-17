@@ -248,6 +248,7 @@ fn symbol(state: State) -> (&'static str, Color) {
         State::Starting => ("◐", Color::Yellow),
         State::Stopping => ("◑", Color::Yellow),
         State::Stopped | State::Exited => ("○", Color::DarkGray),
+        State::Done => ("✓", Color::DarkGray),
         State::Crashed => ("✖", Color::Red),
         State::Disabled => ("⊘", Color::DarkGray),
     }
@@ -304,6 +305,7 @@ fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
         State::Crashed if process => Span::raw("exited").red(),
         State::Crashed => Span::raw("crashed").red(),
         State::Exited => Span::raw("exited").dark_gray(),
+        State::Done => Span::raw("done").dark_gray(),
         State::Disabled => Span::raw("disabled").dark_gray(),
         State::Stopped => Span::raw(""),
     }
@@ -373,6 +375,7 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
         State::Stopping => "stopping",
         State::Stopped => "stopped",
         State::Exited => "exited",
+        State::Done => "done",
         State::Crashed => "crashed",
         State::Disabled => "disabled",
     };
@@ -645,7 +648,7 @@ fn process_details(
         });
     }
     if let Some(error) = &instance.last_error
-        && !matches!(process.state, ProcessState::Running)
+        && !matches!(process.state, ProcessState::Running | ProcessState::Done)
     {
         lines.push(Line::from(error.clone()).red());
     }

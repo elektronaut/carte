@@ -183,7 +183,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     }
 
     shutdown.cancel();
-    let grace = Options::new(&paths).grace + Duration::from_secs(5);
+    let grace = Options::new(&paths).grace * 2 + Duration::from_secs(5);
     if tokio::time::timeout(grace, supervisor.shutdown())
         .await
         .is_err()

@@ -284,6 +284,8 @@ pub enum ProcessState {
         signal: Option<i32>,
     },
     Disabled,
+    /// A task that finished with exit code 0.
+    Done,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -554,6 +556,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(state, r#"{"state":"exited","code":1,"signal":null}"#);
+        let state = serde_json::to_string(&ProcessState::Done).unwrap();
+        assert_eq!(state, r#"{"state":"done"}"#);
     }
 
     #[test]
