@@ -40,6 +40,8 @@ pub enum Command {
         #[arg(long, short)]
         all: bool,
     },
+    /// Show the state of the app here, or of an address: URL, processes, errors.
+    Status(Target),
     /// Start an instance, a stack or a process (lazy start does this too).
     Up(Target),
     /// Stop an instance, a stack or a process.
@@ -238,6 +240,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Daemon => control::daemon(&paths),
         Command::Tui => crate::tui::run(&paths),
         Command::Ls { all } => control::ls(&paths, all, cli.json),
+        Command::Status(t) => control::status(&paths, t, cli.json),
         Command::Up(t) => control::control(&paths, t, carte_api::Action::Up, cli.json),
         Command::Down(t) => control::control(&paths, t, carte_api::Action::Down, cli.json),
         Command::Restart(t) => control::control(&paths, t, carte_api::Action::Restart, cli.json),

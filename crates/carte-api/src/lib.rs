@@ -212,6 +212,13 @@ pub struct InstanceStatus {
     pub env_changed: bool,
 }
 
+/// `carte status --json`: the instances an address names. An app's instance is listed
+/// even when stopped; a stack or project lists what is running or shared.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusResponse {
+    pub instances: Vec<InstanceStatus>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InstanceState {

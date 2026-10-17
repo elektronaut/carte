@@ -269,6 +269,29 @@ fn serves_https_with_the_local_ca() {
 }
 
 #[test]
+fn status_reports_an_app_before_and_after_it_starts() {
+    let daemon = Daemon::start();
+    let status = |args: &[&str]| -> carte_api::StatusResponse {
+        let mut all = vec!["status", "--json"];
+        all.extend_from_slice(args);
+        serde_json::from_slice(&daemon.run(&all).stdout).unwrap()
+    };
+    let before = status(&["web"]);
+    assert_eq!(before.instances.len(), 1);
+    assert_eq!(before.instances[0].state, carte_api::InstanceState::Stopped);
+    assert!(!before.instances[0].processes.is_empty());
+    assert!(status(&["--project", "acme"]).instances.is_empty());
+
+    daemon.run(&["up", "web"]);
+    eventually("web ready", || {
+        status(&["web"]).instances[0].state == carte_api::InstanceState::Ready
+    });
+    let text = stdout(&daemon.run(&["status", "web"]));
+    assert!(text.starts_with("acme-web  ready\n"), "{text}");
+    assert!(text.contains("processes"), "{text}");
+}
+
+#[test]
 fn up_and_down_by_address() {
     let daemon = Daemon::start();
     let up = stdout(&daemon.run(&["up", "web"]));

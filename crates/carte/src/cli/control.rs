@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::bail;
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Hold, InstanceState, InstanceStatus, LogLine,
-    LogsRequest, ProcessState, Snapshot, StopAllRequest, paths,
+    LogsRequest, ProcessState, Snapshot, StatusResponse, StopAllRequest, paths,
 };
 use carte_core::model::World;
 use carte_core::{address, discovery, naming};
@@ -62,6 +62,146 @@ pub fn ls(paths: &Paths, all: bool, json: bool) -> anyhow::Result<ExitCode> {
     }
     print!("{}", render_ls(&snapshot, all));
     Ok(ExitCode::SUCCESS)
+}
+
+pub fn status(paths: &Paths, target: Target, json: bool) -> anyhow::Result<ExitCode> {
+    let world = discovery::load_world(&paths.config_dir);
+    let resolved = resolve_locally(&world, &address(&target))?;
+    let snapshot: Snapshot =
+        runtime()?.block_on(Client::new(&paths.socket()).get(paths::SNAPSHOT))?;
+    let response = StatusResponse {
+        instances: select(&snapshot, &resolved).into_iter().cloned().collect(),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else if response.instances.is_empty() {
+        println!("Nothing is running in {}.", describe(&resolved));
+    } else {
+        print!("{}", render_status(&snapshot, &response.instances));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The instances a resolved address names: an app's instance in its stack (main when
+/// none is given) even when stopped, otherwise the running or shared ones.
+fn select<'a>(snapshot: &'a Snapshot, target: &address::Target) -> Vec<&'a InstanceStatus> {
+    let stack = target
+        .stack
+        .as_ref()
+        .map(|s| s.slug().to_string())
+        .or_else(|| target.app.as_ref().map(|_| "main".to_string()));
+    snapshot
+        .projects
+        .iter()
+        .filter(|p| p.name == target.project)
+        .flat_map(|p| &p.stacks)
+        .filter(|s| stack.as_ref().is_none_or(|name| s.name == *name))
+        .flat_map(|s| &s.instances)
+        .filter(|i| match &target.app {
+            Some(app) => i.app == *app,
+            None => i.state != InstanceState::Stopped || i.public_url.is_some(),
+        })
+        .collect()
+}
+
+fn describe(target: &address::Target) -> String {
+    match &target.stack {
+        Some(stack) => format!("{}@{}", target.project, stack.slug()),
+        None => target.project.clone(),
+    }
+}
+
+pub fn render_status(snapshot: &Snapshot, instances: &[InstanceStatus]) -> String {
+    let mut out = String::new();
+    for (i, inst) in instances.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&format!("{}  {}\n", instance_name(inst), state_word(inst)));
+        let mut rows: Vec<(&str, String)> = vec![("url", inst.url.clone())];
+        if let Some(url) = &inst.public_url {
+            let share = snapshot
+                .shares
+                .iter()
+                .find(|s| s.stack == inst.stack && s.apps.iter().any(|a| a.app == inst.app));
+            let mut public = url.clone();
+            if share.is_some_and(|s| s.auth) {
+                public.push_str(", password");
+            }
+            if let Some(secs) = share.and_then(|s| s.expires_in_secs) {
+                public.push_str(&format!(
+                    ", ends in {}",
+                    carte_core::duration::format(std::time::Duration::from_secs(secs))
+                ));
+            }
+            rows.push(("public", public));
+        }
+        let fallback = if inst.stack != "main" && inst.checkout == "main" {
+            " (main checkout)"
+        } else {
+            ""
+        };
+        rows.push((
+            "checkout",
+            format!("{}{fallback}", inst.checkout_path.display()),
+        ));
+        if !inst.processes.is_empty() {
+            let processes: Vec<String> = inst.processes.iter().map(process_word).collect();
+            rows.push(("processes", processes.join(", ")));
+        }
+        let holds: Vec<String> = inst.holds.iter().map(hold_word).collect();
+        if !holds.is_empty() {
+            rows.push(("held by", holds.join(", ")));
+        }
+        if let Some(secs) = inst.idle_in_secs {
+            rows.push((
+                "idle in",
+                carte_core::duration::format(std::time::Duration::from_secs(secs)),
+            ));
+        }
+        if let Some(error) = &inst.last_error {
+            rows.push(("last error", error.clone()));
+        }
+        if inst.env_changed {
+            rows.push(("env", "changed since it started; restart to use it".into()));
+        }
+        let width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+        for (key, value) in rows {
+            out.push_str(&format!("  {key:width$}  {value}\n"));
+        }
+    }
+    out
+}
+
+fn process_word(process: &carte_api::ProcessStatus) -> String {
+    let state = match process.state {
+        ProcessState::Stopped => "stopped".to_string(),
+        ProcessState::Starting => "starting".to_string(),
+        ProcessState::Running => "running".to_string(),
+        ProcessState::Stopping => "stopping".to_string(),
+        ProcessState::Exited {
+            code: Some(code), ..
+        } => format!("exited {code}"),
+        ProcessState::Exited {
+            signal: Some(signal),
+            ..
+        } => format!("killed by signal {signal}"),
+        ProcessState::Exited { .. } => "exited".to_string(),
+        ProcessState::Disabled => "disabled".to_string(),
+    };
+    match process.port {
+        Some(port) if process.pid.is_some() => format!("{} {state} :{port}", process.name),
+        _ => format!("{} {state}", process.name),
+    }
+}
+
+fn hold_word(hold: &Hold) -> String {
+    match hold {
+        Hold::Pinned => "pinned".into(),
+        Hold::Requests { count } => format!("{count} requests"),
+        Hold::Connections { count } => format!("{count} connections"),
+        Hold::Dependent { app } => app.clone(),
+    }
 }
 
 pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
@@ -401,6 +541,66 @@ pub fn unshare(paths: &Paths, target: Target, json: bool) -> anyhow::Result<Exit
 mod tests {
     use super::*;
     use crate::tui::fixtures::{instance, shared_sample};
+    use carte_core::model::Stack;
+
+    fn target(app: Option<&str>, stack: Option<&str>) -> address::Target {
+        address::Target {
+            project: "nova".into(),
+            app: app.map(Into::into),
+            stack: stack.map(|s| match s {
+                "main" => Stack::Main,
+                branch => Stack::Branch(branch.into()),
+            }),
+            process: None,
+        }
+    }
+
+    #[test]
+    fn status_shows_an_app_whether_running_or_not() {
+        let snapshot = shared_sample();
+        let names = |t| {
+            select(&snapshot, &t)
+                .iter()
+                .map(|i| instance_name(i))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(target(Some("nova-billing"), None)), ["nova-billing"]);
+        assert_eq!(
+            names(target(Some("nova-frontend"), Some("feature-x"))),
+            ["nova-frontend@feature-x"]
+        );
+        assert_eq!(names(target(None, None)), ["nova-billing"]);
+        assert!(names(target(None, Some("feature-x"))).is_empty());
+    }
+
+    #[test]
+    fn renders_status() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.processes[0].pid = Some(10);
+        billing.processes[0].port = Some(54321);
+        billing.processes[1].state = ProcessState::Exited {
+            code: Some(1),
+            signal: None,
+        };
+        billing.holds = vec![Hold::Connections { count: 2 }];
+        billing.idle_in_secs = Some(840);
+        billing.last_error = Some("worker exited with code 1".into());
+        let instances = vec![snapshot.projects[0].stacks[0].instances[0].clone()];
+        assert_eq!(
+            render_status(&snapshot, &instances),
+            "\
+nova-billing  ready
+  url         https://nova-billing.test
+  public      https://nova-billing--main--nova.demo.dev, password
+  checkout    /work/nova-billing
+  processes   web running :54321, worker exited 1
+  held by     2 connections
+  idle in     14m
+  last error  worker exited with code 1
+"
+        );
+    }
 
     #[test]
     fn lists_instances_by_address() {
