@@ -57,7 +57,7 @@ fn pane(title: Line<'static>, focused: bool) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(if focused {
-            Style::new().cyan()
+            Style::new().blue()
         } else {
             Style::new().dark_gray()
         })
@@ -197,6 +197,8 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     spans.push(match node.ids[0] {
         NodeId::Folder { .. } | NodeId::Project { .. } => label.bold(),
         _ if status.state == State::Disabled => label.dark_gray(),
+        NodeId::Stack { .. } => label.blue(),
+        NodeId::Process { .. } => label.dim(),
         _ => label,
     });
     spans.extend(badges(status, aggregate));
@@ -255,7 +257,7 @@ fn badges(status: &Status, aggregate: bool) -> Vec<Span<'static>> {
         spans.push(Span::raw(" main").dark_gray());
     }
     if let Some(source) = status.pinned {
-        spans.push(Span::raw(format!(" {}", marked("pin", source))).cyan());
+        spans.push(Span::raw(format!(" {}", marked("pin", source))).blue());
     }
     if let Some(source) = status.disabled {
         spans.push(Span::raw(format!(" {}", marked("off", source))).dark_gray());
@@ -727,7 +729,7 @@ fn footer_line(focus: Focus) -> Line<'static> {
     };
     let mut spans = vec![Span::raw(" ")];
     for (key, what) in keys {
-        spans.push(Span::raw(*key).cyan().bold());
+        spans.push(Span::raw(*key).blue().bold());
         spans.push(Span::raw(format!(" {what}  ")).dark_gray());
     }
     Line::from(spans)
@@ -773,7 +775,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         lines.push(Line::from(section.to_string()).bold());
         for (key, what) in keys.iter() {
             lines.push(Line::from(vec![
-                Span::raw(format!("{key:width$}  ")).cyan(),
+                Span::raw(format!("{key:width$}  ")).blue(),
                 Span::raw(what.to_string()),
             ]));
         }
@@ -858,9 +860,9 @@ fn render_confirm(frame: &mut Frame, area: Rect, app: &App, confirm: &Confirm) {
             Line::from(question),
             Line::default(),
             Line::from(vec![
-                Span::raw("y").cyan().bold(),
+                Span::raw("y").blue().bold(),
                 Span::raw(verb),
-                Span::raw("any other key").cyan().bold(),
+                Span::raw("any other key").blue().bold(),
                 Span::raw(" cancel"),
             ]),
         ],
