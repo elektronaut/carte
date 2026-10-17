@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::model::{AppSettings, ProcessSpec, Readiness, Scope};
+use crate::model::{AppSettings, ProcessKind, ProcessSpec, Readiness, Scope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessSource {
@@ -75,6 +75,20 @@ pub enum ProcfileError {
     MissingCommand { process: String },
     #[error("more than one process serves HTTP: {}", processes.join(", "))]
     MultipleHttp { processes: Vec<String> },
+    #[error("process {process:?} serves HTTP, so it can't have a kind")]
+    KindOnHttp { process: String },
+    #[error(
+        "process {process:?} is a {kind}, which runs per instance: remove scope = \"checkout\""
+    )]
+    CheckoutScopedKind { process: String, kind: &'static str },
+    #[error("process {process:?} starts after {after:?}, which isn't a process of the app")]
+    UnknownAfter { process: String, after: String },
+    #[error(
+        "process {process:?} can't start after {after:?}: `after` only orders processes of the same kind"
+    )]
+    AfterOtherTier { process: String, after: String },
+    #[error("processes start after each other in a cycle: {}", processes.join(" -> "))]
+    AfterCycle { processes: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -203,11 +217,13 @@ pub fn build(
                 });
                 command = rewritten;
             }
-            let scope = ov.scope.unwrap_or(if !http && is_watcher(&name, &command) {
-                Scope::Checkout
-            } else {
-                Scope::Instance
-            });
+            let scope = ov.scope.unwrap_or(
+                if !http && ov.kind.is_none() && is_watcher(&name, &command) {
+                    Scope::Checkout
+                } else {
+                    Scope::Instance
+                },
+            );
             ProcessSpec {
                 cwd: ov.cwd,
                 env: ov.env,
@@ -216,6 +232,8 @@ pub fn build(
                 scope,
                 pty: ov.pty.unwrap_or(true),
                 policy: ov.policy.or(settings.policy).unwrap_or_default(),
+                kind: ov.kind,
+                after: ov.after.unwrap_or_default(),
                 name,
                 command,
             }
@@ -230,11 +248,75 @@ pub fn build(
     if http.len() > 1 {
         return Err(ProcfileError::MultipleHttp { processes: http });
     }
+    check_kinds(&processes)?;
     Ok(ProcessList {
         source,
         processes,
         notices,
     })
+}
+
+fn check_kinds(processes: &[ProcessSpec]) -> Result<(), ProcfileError> {
+    for p in processes {
+        if p.http && p.kind.is_some() {
+            return Err(ProcfileError::KindOnHttp {
+                process: p.name.clone(),
+            });
+        }
+        if let Some(kind) = p.kind
+            && p.scope == Scope::Checkout
+        {
+            return Err(ProcfileError::CheckoutScopedKind {
+                process: p.name.clone(),
+                kind: match kind {
+                    ProcessKind::Service => "service",
+                    ProcessKind::Task => "task",
+                },
+            });
+        }
+        for after in &p.after {
+            let Some(other) = processes.iter().find(|o| o.name == *after) else {
+                return Err(ProcfileError::UnknownAfter {
+                    process: p.name.clone(),
+                    after: after.clone(),
+                });
+            };
+            if other.tier() != p.tier() {
+                return Err(ProcfileError::AfterOtherTier {
+                    process: p.name.clone(),
+                    after: after.clone(),
+                });
+            }
+        }
+    }
+    for start in processes {
+        if let Some(cycle) = find_cycle(processes, &mut vec![start.name.as_str()]) {
+            return Err(ProcfileError::AfterCycle { processes: cycle });
+        }
+    }
+    Ok(())
+}
+
+/// A cycle of `after` edges from the last process of `path` back to its first.
+fn find_cycle<'a>(processes: &'a [ProcessSpec], path: &mut Vec<&'a str>) -> Option<Vec<String>> {
+    let last = *path.last()?;
+    let current = processes.iter().find(|p| p.name == last)?;
+    for next in &current.after {
+        if *next == path[0] {
+            let mut cycle: Vec<String> = path.iter().map(|n| n.to_string()).collect();
+            cycle.push(next.clone());
+            return Some(cycle);
+        }
+        if path.contains(&next.as_str()) {
+            continue;
+        }
+        path.push(next);
+        if let Some(cycle) = find_cycle(processes, path) {
+            return Some(cycle);
+        }
+        path.pop();
+    }
+    None
 }
 
 /// Whether a process looks like a file watcher, which runs once per checkout.
@@ -610,5 +692,98 @@ mod tests {
         let list = load(dir.path(), &s).unwrap();
         assert_eq!(list.source, ProcessSource::Config);
         assert_eq!(names(&list), vec!["web"]);
+    }
+
+    fn with_kinds(entries: &[(&str, ProcessOverride)]) -> Result<ProcessList, ProcfileError> {
+        let base = vec![
+            ("web".into(), "bin/rails s".into()),
+            ("worker".into(), "bin/jobs".into()),
+        ];
+        build(ProcessSource::Procfile, base, &settings(false, entries))
+    }
+
+    fn kind(command: &str, kind: Option<ProcessKind>, after: &[&str]) -> ProcessOverride {
+        ProcessOverride {
+            command: Some(command.into()),
+            kind,
+            after: Some(after.iter().map(|a| a.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+
+    const SERVICE: Option<ProcessKind> = Some(ProcessKind::Service);
+    const TASK: Option<ProcessKind> = Some(ProcessKind::Task);
+
+    #[test]
+    fn processes_have_kinds_and_tiers() {
+        let list = with_kinds(&[
+            ("redis", kind("redis-server", SERVICE, &[])),
+            ("migrate", kind("bin/rails db:prepare", TASK, &[])),
+            ("seed", kind("bin/rails db:seed", TASK, &["migrate"])),
+            ("worker", kind("bin/jobs", None, &["web"])),
+        ])
+        .unwrap();
+        let tier = |name: &str| {
+            let p = list.processes.iter().find(|p| p.name == name).unwrap();
+            (p.kind, p.tier(), p.after.clone())
+        };
+        assert_eq!(tier("redis"), (SERVICE, 1, vec![]));
+        assert_eq!(tier("seed"), (TASK, 2, vec!["migrate".to_string()]));
+        assert_eq!(tier("web"), (None, 3, vec![]));
+        assert_eq!(tier("worker"), (None, 3, vec!["web".to_string()]));
+    }
+
+    #[test]
+    fn services_and_tasks_run_per_instance() {
+        let list = with_kinds(&[("watcher", kind("bin/watch --watch", SERVICE, &[]))]).unwrap();
+        let watcher = list.processes.iter().find(|p| p.name == "watcher").unwrap();
+        assert_eq!(watcher.scope, Scope::Instance);
+
+        let checkout = ProcessOverride {
+            scope: Some(Scope::Checkout),
+            ..kind("bin/rails db:prepare", TASK, &[])
+        };
+        let err = with_kinds(&[("migrate", checkout)]).unwrap_err();
+        assert!(
+            matches!(err, ProcfileError::CheckoutScopedKind { kind: "task", .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_http_process_has_no_kind() {
+        let web = ProcessOverride {
+            kind: SERVICE,
+            ..Default::default()
+        };
+        let err = with_kinds(&[("web", web)]).unwrap_err();
+        assert!(matches!(err, ProcfileError::KindOnHttp { .. }), "{err}");
+    }
+
+    #[test]
+    fn after_names_a_process_of_the_same_tier_without_cycles() {
+        let err = with_kinds(&[("worker", kind("bin/jobs", None, &["ghost"]))]).unwrap_err();
+        assert!(matches!(err, ProcfileError::UnknownAfter { .. }), "{err}");
+
+        let err = with_kinds(&[
+            ("redis", kind("redis-server", SERVICE, &[])),
+            ("worker", kind("bin/jobs", None, &["redis"])),
+        ])
+        .unwrap_err();
+        assert!(matches!(err, ProcfileError::AfterOtherTier { .. }), "{err}");
+
+        let err = with_kinds(&[
+            ("a", kind("a", TASK, &["b"])),
+            ("b", kind("b", TASK, &["c"])),
+            ("c", kind("c", TASK, &["a"])),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "processes start after each other in a cycle: a -> b -> c -> a"
+        );
+
+        let err = with_kinds(&[("worker", kind("bin/jobs", None, &["worker"]))]).unwrap_err();
+        assert!(matches!(err, ProcfileError::AfterCycle { .. }), "{err}");
     }
 }

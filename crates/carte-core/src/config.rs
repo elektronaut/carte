@@ -11,7 +11,8 @@ use thiserror::Error;
 
 use crate::model::{
     App, AppSettings, EnvProviderKind, EnvTemplate, Limits, MachineConfig, MemoryTarget, Policy,
-    Problem, ProcessConfig, ProcessOverride, Project, Readiness, Scheme, Scope, ShareConfig,
+    Problem, ProcessConfig, ProcessKind, ProcessOverride, Project, Readiness, Scheme, Scope,
+    ShareConfig,
 };
 use crate::{duration, slug};
 
@@ -315,6 +316,8 @@ fn merge_process(over: ProcessOverride, base: ProcessOverride) -> ProcessOverrid
         scope: over.scope.or(base.scope),
         pty: over.pty.or(base.pty),
         policy: over.policy.or(base.policy),
+        kind: over.kind.or(base.kind),
+        after: over.after.or(base.after),
     }
 }
 
@@ -330,6 +333,8 @@ struct RawProcess {
     scope: Option<Scope>,
     pty: Option<bool>,
     policy: Option<Policy>,
+    kind: Option<ProcessKind>,
+    after: Option<Vec<String>>,
 }
 
 fn process_table<'de, D: Deserializer<'de>>(
@@ -348,6 +353,8 @@ fn process_table<'de, D: Deserializer<'de>>(
                 scope: p.scope,
                 pty: p.pty,
                 policy: p.policy,
+                kind: p.kind,
+                after: p.after,
             };
             (name, ov)
         })
@@ -987,6 +994,44 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("invalid ready check"), "{err}");
+    }
+
+    #[test]
+    fn parses_process_kinds_and_order() {
+        let file = project(
+            r#"
+            [apps.foo.processes.redis]
+            command = "redis-server --port $PORT"
+            kind = "service"
+            [apps.foo.processes.migrate]
+            command = "bin/rails db:prepare"
+            kind = "task"
+            after = ["seed"]
+            "#,
+        )
+        .unwrap();
+        let processes = &file.apps["foo"].processes;
+        assert_eq!(processes["redis"].kind, Some(ProcessKind::Service));
+        assert_eq!(processes["migrate"].kind, Some(ProcessKind::Task));
+        assert_eq!(processes["migrate"].after, Some(vec!["seed".into()]));
+
+        let err = project("[apps.foo.processes.drop]\nkind = \"teardown\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown variant `teardown`"), "{err}");
+
+        let repo = parse_repo_config(
+            Path::new("carte.toml"),
+            "[processes.redis]\ncommand = \"redis-server\"\nkind = \"service\"\n",
+        )
+        .unwrap();
+        let merged = project("[apps.foo.processes.redis]\nafter = []\n")
+            .unwrap()
+            .apps["foo"]
+            .clone()
+            .merged_over(repo);
+        assert_eq!(merged.processes["redis"].kind, Some(ProcessKind::Service));
+        assert_eq!(merged.processes["redis"].after, Some(vec![]));
     }
 
     #[test]

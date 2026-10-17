@@ -174,6 +174,8 @@ pub struct ProcessOverride {
     pub scope: Option<Scope>,
     pub pty: Option<bool>,
     pub policy: Option<Policy>,
+    pub kind: Option<ProcessKind>,
+    pub after: Option<Vec<String>>,
 }
 
 /// A process ready to run in one checkout.
@@ -189,6 +191,41 @@ pub struct ProcessSpec {
     pub scope: Scope,
     pub pty: bool,
     pub policy: Policy,
+    /// `None` for an ordinary process.
+    #[serde(default)]
+    pub kind: Option<ProcessKind>,
+    /// Processes of the same tier this one starts after.
+    #[serde(default)]
+    pub after: Vec<String>,
+}
+
+impl ProcessSpec {
+    /// The start order: services, then tasks, then everything else.
+    pub fn tier(&self) -> u8 {
+        match self.kind {
+            Some(ProcessKind::Service) => 1,
+            Some(ProcessKind::Task) => 2,
+            None => 3,
+        }
+    }
+
+    pub fn is_service(&self) -> bool {
+        self.kind == Some(ProcessKind::Service)
+    }
+
+    pub fn is_task(&self) -> bool {
+        self.kind == Some(ProcessKind::Task)
+    }
+}
+
+/// The role a process plays in its instance's start and stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProcessKind {
+    /// Starts first; the rest waits until it's ready, and it stops last.
+    Service,
+    /// Runs to completion after the services and before everything else.
+    Task,
 }
 
 /// An env entry whose key and value may both contain `{{ }}` expressions.

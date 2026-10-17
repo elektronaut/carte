@@ -420,6 +420,8 @@ mod tests {
             scope: Scope::Instance,
             pty: true,
             policy: Policy::Auto,
+            kind: None,
+            after: Vec::new(),
         }
     }
 
