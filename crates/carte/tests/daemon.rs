@@ -468,7 +468,7 @@ fn env_shows_the_assigned_port_while_running() {
         env.vars
             .iter()
             .find(|v| v.key == key)
-            .map(|v| v.value.clone())
+            .and_then(|v| v.value.clone())
     };
     assert_eq!(value("PORT"), Some(port.to_string()));
     assert_eq!(value("CARTE_STATE_DIR"), None);

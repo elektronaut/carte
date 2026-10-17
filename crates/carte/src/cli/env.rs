@@ -16,7 +16,15 @@ use crate::exit::{Exit, Failure};
 use crate::paths::Paths;
 use crate::urls::StackUrls;
 
-pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode> {
+/// What masked values show instead.
+const MASK: &str = "••••";
+
+pub fn run(paths: &Paths, mut args: EnvArgs, json: bool) -> anyhow::Result<ExitCode> {
+    if args.key.is_none()
+        && let Some(typed) = args.target.address.take_if(|typed| looks_like_key(typed))
+    {
+        args.key = Some(typed);
+    }
     let world = discovery::load_world(&paths.config_dir);
     let typed = args.target.address.as_deref().unwrap_or("");
     let mut address: Address = typed.parse().map_err(Failure::from)?;
@@ -121,24 +129,42 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
     let env = core_env::build_env(&req, &daemon_env, &runner)?;
 
     let instance = format!("{}@{}/{}", app.name, key.stack.slug(), process.name);
+    if let Some(wanted) = &args.key
+        && !env.iter().any(|(key, _)| key == wanted)
+    {
+        return Err(Failure::new(
+            Exit::NotFound,
+            format!("{wanted} isn't in the env of {instance}"),
+        )
+        .into());
+    }
+    let reveal_all = args.values || args.key.is_some();
     let shown = |key: &str, value: &str, source: &Source| {
-        if key == "PORT" && *source == Source::Injected && port == 0 {
-            "<assigned at start>".to_string()
+        if !reveal_all && !revealed(source) {
+            None
+        } else if key == "PORT" && *source == Source::Injected && port == 0 {
+            Some("<assigned at start>".to_string())
         } else {
-            value.to_string()
+            Some(value.to_string())
         }
     };
+    let listed = |key: &str| args.key.as_deref().is_none_or(|wanted| wanted == key);
 
     if json {
         let response = EnvResponse {
             instance,
             vars: env
                 .iter()
-                .map(|(key, v)| EnvVar {
-                    key: key.to_string(),
-                    value: shown(key, &v.value, &v.source),
-                    source: v.source.to_string(),
-                    overrides: v.overrode.iter().map(|o| o.source.to_string()).collect(),
+                .filter(|(key, _)| listed(key))
+                .map(|(key, v)| {
+                    let value = shown(key, &v.value, &v.source);
+                    EnvVar {
+                        key: key.to_string(),
+                        masked: value.is_none(),
+                        value,
+                        source: v.source.to_string(),
+                        overrides: v.overrode.iter().map(|o| o.source.to_string()).collect(),
+                    }
                 })
                 .collect(),
         };
@@ -165,20 +191,31 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
         .map(|(_, v)| label(&v.source).len())
         .max()
         .unwrap_or(0);
-    for (key, v) in env.iter() {
+    let mut masked = false;
+    for (key, v) in env.iter().filter(|(key, _)| listed(key)) {
+        let value = shown(key, &v.value, &v.source);
+        masked |= value.is_none();
         println!(
             "{key:key_width$}  {:source_width$}  {}",
             label(&v.source),
-            shown(key, &v.value, &v.source)
+            value.as_deref().unwrap_or(MASK)
         );
         for old in v.overrode.iter().rev() {
+            let value = shown(key, &old.value, &old.source);
+            masked |= value.is_none();
             println!(
                 "{:key_width$}  ↳ overrode {}: {}",
                 "",
                 label(&old.source),
-                old.value
+                value.as_deref().unwrap_or(MASK)
             );
         }
+    }
+    if masked {
+        println!();
+        println!(
+            "Values from the environment and env files are hidden; `carte env <KEY>` or `--values` shows them."
+        );
     }
     if !list.notices.is_empty() {
         println!();
@@ -227,6 +264,19 @@ fn daemon_view(
     })
 }
 
+/// Values carte renders itself, which can't hold secrets from the environment.
+fn revealed(source: &Source) -> bool {
+    matches!(source, Source::Injected | Source::Template { .. })
+}
+
+/// An environment variable name rather than an address: addresses are lowercase.
+fn looks_like_key(typed: &str) -> bool {
+    typed.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+        && typed
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// A short name for a source; the JSON output has the full one.
 fn source_label(source: &Source, checkout: &Path) -> String {
     match source {
@@ -254,4 +304,26 @@ fn current_branch(checkout: &Path) -> String {
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tells_keys_from_addresses() {
+        for key in ["DATABASE_URL", "PORT", "_X", "S3_BUCKET"] {
+            assert!(looks_like_key(key), "{key}");
+        }
+        for address in [
+            "web",
+            "web@feature-x",
+            "@feature-x",
+            "web/worker",
+            "Web",
+            "",
+        ] {
+            assert!(!looks_like_key(address), "{address}");
+        }
+    }
 }

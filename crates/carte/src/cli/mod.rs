@@ -61,7 +61,7 @@ pub enum Command {
     Logs(LogsArgs),
     /// Open an instance in the browser.
     Open(Target),
-    /// Print the rendered env with the source of each value.
+    /// Print the rendered env with the source of each value; secrets stay hidden.
     Env(EnvArgs),
     /// Manage projects.
     #[command(subcommand)]
@@ -126,9 +126,14 @@ pub struct PolicyArgs {
 pub struct EnvArgs {
     #[command(flatten)]
     pub target: Target,
+    /// Show only this variable, with its value. Alone, `carte env KEY` means the app here.
+    pub key: Option<String>,
     /// The process whose env to show; defaults to the one serving HTTP.
     #[arg(long, short)]
     pub process: Option<String>,
+    /// Show every value; values from the environment and env files are hidden otherwise.
+    #[arg(long)]
+    pub values: bool,
 }
 
 #[derive(Args, Clone)]

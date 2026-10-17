@@ -343,8 +343,17 @@ fn prints_the_env_with_sources() {
         out.stdout
     );
     assert_eq!(line("GREETING"), "GREETING project template hello shop");
-    assert!(out.stdout.contains("↳ overrode .env:1: from-file"));
-    assert_eq!(line("SECRET"), "SECRET .env:2 s3cret");
+    assert!(
+        out.stdout.contains("↳ overrode .env:1: ••••"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(line("SECRET"), "SECRET .env:2 ••••");
+    assert!(
+        out.stdout.contains("`--values` shows them"),
+        "{}",
+        out.stdout
+    );
     assert_eq!(line("PORT"), "PORT carte <assigned at start>");
     assert_eq!(line("CARTE_URL"), "CARTE_URL carte https://shop.test");
     assert_eq!(line("CARTE_BRANCH"), "CARTE_BRANCH carte main");
@@ -377,7 +386,10 @@ fn prints_the_env_as_json() {
         "carte's own settings leaked into the app env"
     );
     let greeting = env.vars.iter().find(|v| v.key == "GREETING").unwrap();
-    assert_eq!(greeting.value, "hello shop");
+    assert_eq!(greeting.value.as_deref(), Some("hello shop"));
+    assert!(!greeting.masked);
+    let secret = env.vars.iter().find(|v| v.key == "SECRET").unwrap();
+    assert_eq!((secret.value.as_deref(), secret.masked), (None, true));
     assert!(
         greeting.source.starts_with("project ("),
         "{}",
@@ -387,6 +399,34 @@ fn prints_the_env_as_json() {
         greeting.overrides,
         [format!("{}:1", sb.root.join("shop/.env").display())]
     );
+}
+
+#[test]
+fn shows_hidden_values_by_name_or_with_values() {
+    let sb = Sandbox::new();
+    let repo = env_project(&sb);
+    let one = sb.run_in(&repo, &["env", "SECRET"]);
+    assert!(one.success, "{}", one.stderr);
+    assert_eq!(
+        one.stdout.lines().filter(|l| l.contains("s3cret")).count(),
+        1
+    );
+    assert!(!one.stdout.contains("GREETING"), "{}", one.stdout);
+
+    let named = sb.run(&["env", "shop", "GREETING", "--json"]);
+    let env: EnvResponse = serde_json::from_str(&named.stdout).unwrap();
+    assert_eq!(env.vars.len(), 1);
+
+    let all = sb.run(&["env", "shop", "--values"]);
+    assert!(all.stdout.contains("s3cret"), "{}", all.stdout);
+    assert!(
+        all.stdout.contains("↳ overrode .env:1: from-file"),
+        "{}",
+        all.stdout
+    );
+    assert!(!all.stdout.contains("••••"), "{}", all.stdout);
+
+    assert_eq!(sb.run_in(&repo, &["env", "NOPE"]).code, Some(4));
 }
 
 #[test]

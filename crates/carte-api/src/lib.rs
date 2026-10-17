@@ -357,7 +357,12 @@ pub struct EnvResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvVar {
     pub key: String,
-    pub value: String,
+    /// `None` when masked.
+    pub value: Option<String>,
+    /// The value is hidden: it comes from the environment or an env file, and wasn't
+    /// asked for by name or with `--values`.
+    #[serde(default)]
+    pub masked: bool,
     pub source: String,
     /// Sources this value replaced, earliest first.
     pub overrides: Vec<String>,
