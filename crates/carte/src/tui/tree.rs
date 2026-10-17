@@ -450,13 +450,40 @@ pub struct Row {
     pub expanded: bool,
 }
 
+/// Which instances the tree shows.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Show {
+    #[default]
+    All,
+    Running,
+    Shared,
+}
+
+impl Show {
+    pub fn next(self) -> Self {
+        match self {
+            Show::All => Show::Running,
+            Show::Running => Show::Shared,
+            Show::Shared => Show::All,
+        }
+    }
+
+    fn keeps(self, status: &Status) -> bool {
+        match self {
+            Show::All => true,
+            Show::Running => status.is_active(),
+            Show::Shared => status.shared,
+        }
+    }
+}
+
 /// What decides which rows show.
 #[derive(Debug, Default, Clone)]
 pub struct Fold {
     /// Explicit expand/collapse choices, keyed by the node's innermost id.
     pub expanded: HashMap<NodeId, bool>,
     pub filter: String,
-    pub running_only: bool,
+    pub show: Show,
 }
 
 impl Fold {
@@ -468,7 +495,8 @@ impl Fold {
     }
 
     /// The visible rows. A filter keeps matching nodes with their subtrees and opens
-    /// the ancestors of matches; "running only" hides inactive instances and groups.
+    /// the ancestors of matches; `show` hides instances and groups that are inactive
+    /// or not shared.
     pub fn rows(&self, roots: &[Node]) -> Vec<Row> {
         let filter = self.filter.to_lowercase();
         let mut rows = Vec::new();
@@ -488,7 +516,7 @@ impl Fold {
         out: &mut Vec<Row>,
     ) -> bool {
         let process = matches!(node.id(), NodeId::Process { .. });
-        if self.running_only && !process && !node.status.is_active() {
+        if !process && !self.show.keeps(&node.status) {
             return false;
         }
         let matched = matched_above || node.search.contains(filter);
@@ -753,7 +781,7 @@ mod tests {
     fn running_only_hides_stopped_instances_and_empty_groups() {
         let roots = big();
         let fold = Fold {
-            running_only: true,
+            show: Show::Running,
             ..Fold::default()
         };
         assert_eq!(
@@ -766,6 +794,40 @@ mod tests {
                 "    frontend"
             ]
         );
+    }
+
+    #[test]
+    fn shared_shows_shared_instances_whether_running_or_not() {
+        let mut snap = snapshot(vec![project(
+            "nova",
+            &["nova-billing", "nova-frontend"],
+            vec![
+                stack(
+                    "main",
+                    vec![
+                        instance("nova-billing", "main", "main", InstanceState::Ready),
+                        instance("nova-frontend", "main", "main", InstanceState::Stopped),
+                    ],
+                ),
+                stack(
+                    "feature-x",
+                    vec![instance(
+                        "nova-billing",
+                        "feature-x",
+                        "main",
+                        InstanceState::Ready,
+                    )],
+                ),
+            ],
+        )]);
+        snap.projects[0].stacks[0].instances[1].public_url =
+            Some("https://nova-frontend.example.com".into());
+        let roots = build(&snap);
+        let fold = Fold {
+            show: Show::Shared,
+            ..Fold::default()
+        };
+        assert_eq!(labels(&roots, &fold), ["nova", "  main", "    frontend"]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Ta
 use super::app::{App, Connection};
 use super::input::{Confirm, Focus, HELP, Mode};
 use super::target;
-use super::tree::{self, Node, NodeId, Source, State, Status};
+use super::tree::{self, Node, NodeId, Show, Source, State, Status};
 
 const PREFIX_COLORS: [Color; 6] = [
     Color::Cyan,
@@ -106,8 +106,10 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
         Span::raw(" carte "),
         Span::raw(format!("· {} running ", snapshot.running_instances)).dark_gray(),
     ];
-    if app.fold.running_only {
-        title.push(Span::raw("· running only ").dark_gray());
+    match app.fold.show {
+        Show::All => {}
+        Show::Running => title.push(Span::raw("· running only ").dark_gray()),
+        Show::Shared => title.push(Span::raw("· shared only ").dark_gray()),
     }
     if !snapshot.shares.is_empty()
         && let Some(tunnel) = &snapshot.tunnel
@@ -167,7 +169,7 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
     app.tree_area = area;
     app.tree_offset = state.offset();
     if app.rows.is_empty() {
-        let message = if app.fold.filter.is_empty() && !app.fold.running_only {
+        let message = if app.fold.filter.is_empty() && app.fold.show == Show::All {
             "No projects. Add one with `carte project add`."
         } else {
             "Nothing matches."
@@ -720,7 +722,7 @@ fn footer_line(focus: Focus) -> Line<'static> {
             ("p", "pin"),
             ("d", "disable"),
             ("/", "filter"),
-            ("a", "running only"),
+            ("a", "show"),
             ("tab", "logs"),
         ],
         Focus::Logs => &[
@@ -998,7 +1000,7 @@ mod tests {
 │                                                    ││                                                                │
 ╰────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────╯
 
- ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a running only  tab logs"
+ ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show  tab logs"
         );
     }
 
@@ -1097,7 +1099,7 @@ mod tests {
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
- ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a runni"
+ ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show"
         );
     }
 
@@ -1124,7 +1126,7 @@ mod tests {
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  reconnecting to the daemon…
- ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a runni"
+ ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show"
         );
     }
 
@@ -1149,7 +1151,7 @@ mod tests {
 │                        │ tab          switch between tree and logs      │                        │
 │                        │ /            filter the focused pane           │                        │
 │                        │ esc          clear the filter                  │                        │
-│                        │ a            show only running                 │                        │
+│                        │ a            show all, running or shared       │                        │
 │                        │ drag         copy log lines                    │                        │
 │                        │ m            mouse on or off                   │                        │
 │                        │                                                │                        │
@@ -1177,7 +1179,7 @@ mod tests {
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
- ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a running only  tab logs"
+ ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show  tab logs"
         );
     }
 }
