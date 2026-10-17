@@ -64,6 +64,8 @@ pub enum Intent {
     StopAll,
     Open,
     OpenPublic,
+    /// Add a marker with the time to the selection's logs.
+    Mark,
     /// Share or unshare the selected app; with `auth`, share it behind a password.
     Share {
         auth: bool,
@@ -89,6 +91,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("esc", "clear the filter"),
             ("a", "show all, running or shared"),
             ("drag", "copy log lines"),
+            ("-", "mark the logs with the time"),
             ("m", "mouse on or off"),
         ],
     ),
@@ -166,6 +169,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('S') => Some(Intent::Control(Control::Save)),
         KeyCode::Char('o') => Some(Intent::Open),
         KeyCode::Char('O') => Some(Intent::OpenPublic),
+        KeyCode::Char('-') => Some(Intent::Mark),
         KeyCode::Char('w') => Some(Intent::Share { auth: false }),
         KeyCode::Char('W') => Some(Intent::Share { auth: true }),
         KeyCode::Char('I') => Some(Intent::StopIdle),

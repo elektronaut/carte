@@ -585,6 +585,57 @@ async fn logs_since_the_latest_run_or_a_time() {
 }
 
 #[tokio::test]
+async fn markers_show_in_every_log_of_their_scope() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: FIXTURE_LINES=3 exec {fixture}\n");
+    setup.app("acme-api", WEB);
+    setup.project("");
+    let handle = setup.start();
+    let address = |address: &str| Address {
+        address: address.into(),
+        cwd: None,
+        project: None,
+    };
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+
+    let mut follow = handle.follow_logs();
+    let marker = handle.mark(address("web")).await.unwrap();
+    assert!(marker.marker);
+    assert_eq!(
+        (
+            marker.app.as_str(),
+            marker.stack.as_str(),
+            marker.process.as_str()
+        ),
+        ("acme-web", "main", "")
+    );
+    let followed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let line = follow.recv().await.unwrap();
+            if line.marker {
+                return line;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(followed, marker);
+
+    for scope in ["web", "web/web", "acme"] {
+        let (lines, filter) = handle.logs(request(&address(scope))).await.unwrap();
+        assert!(lines.contains(&marker), "{scope}: {lines:?}");
+        assert!(filter.matches(&marker), "{scope}");
+    }
+    let (lines, filter) = handle.logs(request(&address("api"))).await.unwrap();
+    assert!(!lines.contains(&marker), "{lines:?}");
+    assert!(!filter.matches(&marker));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn following_a_project_picks_up_instances_that_start_later() {
     let setup = Setup::new();
     setup.app("acme-web", "web: FIXTURE_LINES=3 exec {fixture}\n");

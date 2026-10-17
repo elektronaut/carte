@@ -202,6 +202,7 @@ fn broadcast_lines(tx: &broadcast::Sender<LogLine>, label: &LogLabel, lines: Vec
             process: label.process.clone(),
             at_ms,
             text,
+            marker: false,
         });
     }
 }

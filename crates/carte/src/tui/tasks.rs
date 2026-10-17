@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use carte_api::{ControlResponse, LogLine, ShareResponse, Snapshot, StopAllRequest, paths};
+use carte_api::{
+    ControlResponse, LogLine, MarkRequest, ShareResponse, Snapshot, StopAllRequest, paths,
+};
 use http::Method;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind, MouseButton,
@@ -102,6 +104,19 @@ impl Tasks {
                         .await
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Event::Unshared(result));
+                });
+            }
+            Command::Mark(target) => {
+                tokio::spawn(async move {
+                    let result = client
+                        .post::<_, LogLine>(paths::MARK, &MarkRequest { target })
+                        .await;
+                    if let Err(err) = result {
+                        let _ = tx.send(Event::ControlDone {
+                            verb: "marking",
+                            result: Err(format!("{err:#}")),
+                        });
+                    }
                 });
             }
             Command::MouseCapture(on) => set_mouse_capture(on),

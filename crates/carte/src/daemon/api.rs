@@ -9,8 +9,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use carte_api::{
-    Address, ControlRequest, ErrorBody, LogsRequest, Problem, ShareRequest, StopAllRequest,
-    UnshareRequest, paths,
+    Address, ControlRequest, ErrorBody, LogsRequest, MarkRequest, Problem, ShareRequest,
+    StopAllRequest, UnshareRequest, paths,
 };
 use carte_core::address;
 use serde::Serialize;
@@ -33,6 +33,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::CONTROL, post(control))
         .route(paths::STOP_ALL, post(stop_all))
         .route(paths::LOGS, post(logs))
+        .route(paths::MARK, post(mark))
         .route(paths::RELOAD, post(reload))
         .route(paths::ENV, get(daemon_env))
         .route(paths::SHARE, post(share))
@@ -132,6 +133,16 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
         }
     });
     stream(rx)
+}
+
+async fn mark(State(api): State<Api>, Json(request): Json<MarkRequest>) -> Response {
+    if let Some(response) = unresolved(&api, &request.target) {
+        return response;
+    }
+    match api.supervisor.mark(request.target).await {
+        Ok(marker) => Json(marker).into_response(),
+        Err(message) => error(StatusCode::BAD_REQUEST, message),
+    }
 }
 
 async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Response {

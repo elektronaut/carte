@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use anyhow::bail;
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Hold, InstanceState, InstanceStatus, LogLine,
-    LogsRequest, ProcessState, Snapshot, StartFailure, StatusResponse, StopAllRequest, paths,
+    LogsRequest, MarkRequest, ProcessState, Snapshot, StartFailure, StatusResponse, StopAllRequest,
+    paths,
 };
 use carte_core::model::World;
 use carte_core::{address, discovery, naming};
@@ -430,7 +431,23 @@ fn render_failures(failures: &[StartFailure]) -> String {
     out
 }
 
+/// Columns of the rule a marker prints as.
+const MARKER_WIDTH: usize = 60;
+
 pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCode> {
+    if args.mark {
+        let request = MarkRequest {
+            target: address(&args.target),
+        };
+        let marker: LogLine =
+            runtime()?.block_on(Client::new(&paths.socket()).post(paths::MARK, &request))?;
+        if json {
+            println!("{}", serde_json::to_string(&marker)?);
+        } else {
+            println!("{}", crate::logs::marker_rule(marker.at_ms, MARKER_WIDTH));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let since_ms = args
         .since
         .map(|since| crate::supervisor::runner::now_ms().saturating_sub(since.as_millis() as u64));
@@ -458,6 +475,14 @@ pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCod
                     stdout,
                     "{}",
                     serde_json::to_string(&line).unwrap_or_default()
+                );
+                return;
+            }
+            if line.marker {
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    crate::logs::marker_rule(line.at_ms, MARKER_WIDTH)
                 );
                 return;
             }

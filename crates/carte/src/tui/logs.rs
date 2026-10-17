@@ -16,6 +16,9 @@ pub enum Prefix {
 
 impl Prefix {
     pub fn label(self, line: &LogLine) -> Option<String> {
+        if line.marker {
+            return None;
+        }
         match self {
             Prefix::None => None,
             Prefix::Process => Some(line.process.clone()),
@@ -112,7 +115,8 @@ impl Logs {
     }
 
     fn matches(&self, line: &LogLine) -> bool {
-        self.filter.is_empty()
+        line.marker
+            || self.filter.is_empty()
             || line
                 .text
                 .to_lowercase()
@@ -166,6 +170,7 @@ impl Logs {
             .into_iter()
             .filter(|(seq, _)| range.contains(seq))
             .map(|(_, line)| match self.prefix.label(line) {
+                _ if line.marker => crate::logs::marker_rule(line.at_ms, 40),
                 Some(label) => format!("{label} {}", line.text),
                 None => line.text.clone(),
             })
@@ -208,11 +213,32 @@ mod tests {
             process: "web".into(),
             at_ms: 0,
             text: text.into(),
+            marker: false,
         }
     }
 
     fn texts(lines: Vec<&LogLine>) -> Vec<&str> {
         lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    #[test]
+    fn markers_stay_through_the_filter_and_have_no_label() {
+        let mut logs = Logs::default();
+        let generation = logs.restart(None, Prefix::Process);
+        logs.push(generation, line("GET /up"));
+        logs.push(
+            generation,
+            LogLine {
+                process: String::new(),
+                marker: true,
+                ..line("")
+            },
+        );
+        logs.filter = "nothing like it".into();
+        let visible = logs.visible();
+        assert_eq!(visible.len(), 1);
+        assert!(visible[0].marker);
+        assert_eq!(Prefix::Process.label(visible[0]), None);
     }
 
     #[test]

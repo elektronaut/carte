@@ -645,11 +645,17 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|(seq, line)| {
             let mut spans = Vec::new();
-            if let Some(label) = logs.prefix.label(line) {
+            if line.marker {
+                spans.push(
+                    Span::raw(crate::logs::marker_rule(line.at_ms, inner.width as usize)).bold(),
+                );
+            } else if let Some(label) = logs.prefix.label(line) {
                 let color = PREFIX_COLORS[logs.color_index(&label) % PREFIX_COLORS.len()];
                 spans.push(Span::raw(format!("{label:width$} ")).fg(color));
             }
-            spans.extend(highlight(&line.text, &logs.filter));
+            if !line.marker {
+                spans.extend(highlight(&line.text, &logs.filter));
+            }
             let line = Line::from(spans);
             if app.selection.is_some_and(|s| s.contains(*seq)) {
                 line.reversed()
@@ -952,6 +958,7 @@ mod tests {
                     process: process.into(),
                     at_ms: 0,
                     text: text.into(),
+                    marker: false,
                 },
             },
             app.now,
@@ -1002,6 +1009,39 @@ mod tests {
 
  ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show  tab logs"
         );
+    }
+
+    #[test]
+    fn renders_a_marker_as_a_rule_across_the_logs() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        let generation = app.logs.generation;
+        log(&mut app, generation, "web", "before");
+        let at_ms = 1_760_000_000_000;
+        app.update(
+            Event::Log {
+                generation,
+                line: LogLine {
+                    project: "nova".into(),
+                    app: "nova-billing".into(),
+                    stack: "main".into(),
+                    process: String::new(),
+                    at_ms,
+                    text: String::new(),
+                    marker: true,
+                },
+            },
+            now,
+        );
+        log(&mut app, generation, "web", "after");
+        let screen = draw(&mut app, 120, 18);
+        let rule = crate::logs::marker_rule(at_ms, 64);
+        let rows: Vec<&str> = screen.lines().collect();
+        let at = rows.iter().position(|r| r.contains(&rule)).expect(&screen);
+        assert!(rows[at - 1].contains("web before"), "{screen}");
+        assert!(rows[at + 1].contains("web after"), "{screen}");
     }
 
     #[test]
@@ -1140,19 +1180,19 @@ mod tests {
             screen,
             "\
 ╭ carte · 2 running · 1 problem (!) ───────────────────────────────────────────────────────────────╮
-│                                                                                       CPU   MEM  │
-│▾ ✖ nova !              ╭ keys ──────────────────────────────────────────╮                3%  412M│
-│  ▾ ✖ main              │ Navigate                                       │                3%  412M│
-│    ▸ ● billing pin*    │ ↑↓ j k       move                              │y               3%  412M│
-│      ✖ frontend !      │ ←→ h l       fold, unfold                      │hed                     │
-│  ▾ ● feature-x         │ enter space  fold or unfold                    │                0%    0B│
-│      ○ billing main    │ g G          top, bottom                       │                        │
-│      ● frontend !      │ PgUp PgDn    page                              │ in 14m         0%    0B│
-│                        │ tab          switch between tree and logs      │                        │
+│                        ╭ keys ──────────────────────────────────────────╮             CPU   MEM  │
+│▾ ✖ nova !              │ Navigate                                       │                3%  412M│
+│  ▾ ✖ main              │ ↑↓ j k       move                              │                3%  412M│
+│    ▸ ● billing pin*    │ ←→ h l       fold, unfold                      │y               3%  412M│
+│      ✖ frontend !      │ enter space  fold or unfold                    │hed                     │
+│  ▾ ● feature-x         │ g G          top, bottom                       │                0%    0B│
+│      ○ billing main    │ PgUp PgDn    page                              │                        │
+│      ● frontend !      │ tab          switch between tree and logs      │ in 14m         0%    0B│
 │                        │ /            filter the focused pane           │                        │
 │                        │ esc          clear the filter                  │                        │
 │                        │ a            show all, running or shared       │                        │
 │                        │ drag         copy log lines                    │                        │
+│                        │ -            mark the logs with the time       │                        │
 │                        │ m            mouse on or off                   │                        │
 │                        │                                                │                        │
 │                        │ Control the selection                          │                        │

@@ -112,6 +112,10 @@ pub(crate) enum Msg {
         request: LogsRequest,
         reply: oneshot::Sender<Result<(Vec<LogLine>, LogFilter), String>>,
     },
+    Mark {
+        target: Address,
+        reply: oneshot::Sender<Result<LogLine, String>>,
+    },
     Reload(World),
     RestartCheckout(PathBuf),
     EnvChanged(PathBuf),
@@ -142,6 +146,15 @@ pub struct LogFilter {
 
 impl LogFilter {
     pub fn matches(&self, line: &LogLine) -> bool {
+        if line.marker {
+            let overlaps = |wanted: &Option<String>, field: &str| {
+                field.is_empty() || wanted.as_deref().is_none_or(|w| w == field)
+            };
+            return self.project == line.project
+                && overlaps(&self.stack, &line.stack)
+                && overlaps(&self.app, &line.app)
+                && overlaps(&self.process, &line.process);
+        }
         self.project == line.project
             && self.stack.as_ref().is_none_or(|s| *s == line.stack)
             && self.app.as_ref().is_none_or(|a| *a == line.app)
@@ -216,6 +229,14 @@ impl Handle {
     pub async fn logs(&self, request: LogsRequest) -> Result<(Vec<LogLine>, LogFilter), String> {
         let (reply, rx) = oneshot::channel();
         self.send(Msg::Logs { request, reply });
+        rx.await
+            .unwrap_or_else(|_| Err("carte is shutting down".into()))
+    }
+
+    /// Adds a marker to the logs of a target and returns it.
+    pub async fn mark(&self, target: Address) -> Result<LogLine, String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::Mark { target, reply });
         rx.await
             .unwrap_or_else(|_| Err("carte is shutting down".into()))
     }

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -170,6 +170,8 @@ struct Actor {
     tx: mpsc::UnboundedSender<Msg>,
     snapshot_tx: watch::Sender<Arc<Snapshot>>,
     log_tx: broadcast::Sender<LogLine>,
+    /// Markers added to logs, oldest first.
+    markers: VecDeque<LogLine>,
     next_id: u64,
     ticks: u64,
     dirty: bool,
@@ -217,6 +219,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         tx: tx.clone(),
         snapshot_tx,
         log_tx: log_tx.clone(),
+        markers: VecDeque::new(),
         next_id: 0,
         ticks: 0,
         dirty: false,
@@ -277,6 +280,9 @@ impl Actor {
             }
             Msg::Logs { request, reply } => {
                 let _ = reply.send(self.logs(&request));
+            }
+            Msg::Mark { target, reply } => {
+                let _ = reply.send(self.mark(&target));
             }
             Msg::Reload(world) => self.reload(world),
             Msg::RestartCheckout(path) => self.restart_checkout(&path),
@@ -1671,6 +1677,7 @@ impl Actor {
             search: request.search.clone(),
         };
         let mut lines = Vec::new();
+        let mut earliest_start: Option<u64> = None;
         let keys = self.instances.keys().filter(|k| {
             k.project == resolved.project
                 && stack.as_ref().is_none_or(|s| *s == k.stack)
@@ -1688,7 +1695,10 @@ impl Actor {
                 }
                 let since = match (request.since_start, proc.started_ms) {
                     (false, _) => request.since_ms.unwrap_or(0),
-                    (true, Some(started)) => request.since_ms.unwrap_or(0).max(started),
+                    (true, Some(started)) => {
+                        earliest_start = Some(earliest_start.map_or(started, |e| e.min(started)));
+                        request.since_ms.unwrap_or(0).max(started)
+                    }
                     (true, None) => continue,
                 };
                 let log = proc.log.lock().unwrap();
@@ -1700,10 +1710,22 @@ impl Actor {
                         process: proc.spec.name.clone(),
                         at_ms: *at_ms,
                         text: text.clone(),
+                        marker: false,
                     });
                 }
             }
         }
+        let markers_since = match (request.since_start, earliest_start) {
+            (false, _) => request.since_ms.unwrap_or(0),
+            (true, Some(started)) => request.since_ms.unwrap_or(0).max(started),
+            (true, None) => u64::MAX,
+        };
+        lines.extend(
+            self.markers
+                .iter()
+                .filter(|marker| marker.at_ms >= markers_since)
+                .cloned(),
+        );
         lines.retain(|line| filter.matches(line));
         lines.sort_by_key(|line| line.at_ms);
         if let Some(query) = &request.rank {
@@ -1718,6 +1740,30 @@ impl Actor {
             .unwrap_or(if narrowed { usize::MAX } else { 100 });
         let skip = lines.len().saturating_sub(tail);
         Ok((lines.split_off(skip), filter))
+    }
+
+    fn mark(&mut self, target: &Address) -> Result<LogLine, String> {
+        let resolved = self.resolve(target)?;
+        let stack = match (&resolved.app, &resolved.stack) {
+            (_, Some(stack)) => Some(stack.slug().to_string()),
+            (Some(_), None) => Some(Stack::Main.slug().to_string()),
+            (None, None) => None,
+        };
+        let marker = LogLine {
+            project: resolved.project.clone(),
+            app: resolved.app.clone().unwrap_or_default(),
+            stack: stack.unwrap_or_default(),
+            process: resolved.process.clone().unwrap_or_default(),
+            at_ms: runner::now_ms(),
+            text: String::new(),
+            marker: true,
+        };
+        self.markers.push_back(marker.clone());
+        if self.markers.len() > 1000 {
+            self.markers.pop_front();
+        }
+        let _ = self.log_tx.send(marker.clone());
+        Ok(marker)
     }
 
     fn restart_checkout(&mut self, path: &Path) {

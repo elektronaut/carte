@@ -14,6 +14,8 @@ pub mod paths {
     pub const STOP_ALL: &str = "/v1/stop-all";
     /// Newline-delimited JSON `LogLine`s.
     pub const LOGS: &str = "/v1/logs";
+    /// Adds a marker to the logs of an address; answers with the marker line.
+    pub const MARK: &str = "/v1/logs/mark";
     /// The daemon's own environment, which apps build on.
     pub const ENV: &str = "/v1/env";
     pub const RELOAD: &str = "/v1/reload";
@@ -355,6 +357,15 @@ pub struct LogLine {
     pub at_ms: u64,
     /// The line with escape codes stripped.
     pub text: String,
+    /// A marker someone added at `at_ms`, with no text. Its app, stack and process
+    /// are empty when the marked scope didn't name them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub marker: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarkRequest {
+    pub target: Address,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

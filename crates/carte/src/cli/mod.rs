@@ -185,6 +185,12 @@ pub struct LogsArgs {
     /// How many lines --rank shows.
     #[arg(long, requires = "rank", default_value_t = 20)]
     pub top: usize,
+    /// Add a marker with the time to these logs instead of showing them.
+    #[arg(
+        long,
+        conflicts_with_all = ["follow", "lines", "search", "since", "since_start", "rank"]
+    )]
+    pub mark: bool,
 }
 
 fn parse_duration(value: &str) -> Result<std::time::Duration, String> {

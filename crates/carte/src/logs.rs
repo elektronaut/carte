@@ -109,6 +109,14 @@ pub fn clock(at_ms: u64) -> String {
     format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
+/// A rule `width` columns wide with a marker's local time in the middle.
+pub fn marker_rule(at_ms: u64, width: usize) -> String {
+    let time = format!(" {} ", clock(at_ms));
+    let rest = width.saturating_sub(time.chars().count());
+    let left = rest / 2;
+    format!("{}{time}{}", "─".repeat(left), "─".repeat(rest - left))
+}
+
 /// Strips terminal escape codes from a complete chunk of output.
 pub fn strip(data: &[u8]) -> String {
     let mut stripper = Stripper::default();
@@ -277,6 +285,15 @@ impl Stripper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_rules_centre_the_time() {
+        let rule = marker_rule(1_760_000_000_000, 30);
+        let time = clock(1_760_000_000_000);
+        assert_eq!(rule.chars().count(), 30, "{rule}");
+        assert_eq!(rule, format!("────────── {time} ──────────"));
+        assert_eq!(marker_rule(1_760_000_000_000, 4), format!(" {time} "));
+    }
 
     #[test]
     fn clock_shows_the_time_of_day() {

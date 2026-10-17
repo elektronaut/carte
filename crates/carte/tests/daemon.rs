@@ -237,6 +237,14 @@ fn boots_an_app_on_the_first_request_and_stops_it_on_sigterm() {
     let logs = stdout(&daemon.run(&["logs", "web", "-n", "50"]));
     assert!(logs.contains("acme-web@main/worker line 1"), "{logs}");
 
+    let marker = stdout(&daemon.run(&["logs", "web", "--mark"]));
+    assert_eq!(marker.trim_end().chars().count(), 60, "{marker}");
+    let logs = stdout(&daemon.run(&["logs", "web", "--since-start"]));
+    assert!(logs.ends_with(&marker), "{logs}");
+    let ranked = stdout(&daemon.run(&["logs", "web", "--rank", "worker line", "--top", "1"]));
+    assert_eq!(ranked.lines().count(), 1, "{ranked}");
+    assert!(ranked.contains(" acme-web@main/worker line "), "{ranked}");
+
     daemon.stop();
     for pid in pids {
         assert!(

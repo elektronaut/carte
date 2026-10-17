@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use carte_api::{
-    Action, ControlRequest, ControlResponse, Credentials, InstanceStatus, LogLine, LogsRequest,
-    ShareRequest, ShareResponse, Snapshot, UnshareRequest,
+    Action, Address, ControlRequest, ControlResponse, Credentials, InstanceStatus, LogLine,
+    LogsRequest, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
 };
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -57,6 +57,7 @@ pub enum Command {
     Share(ShareRequest),
     Unshare(UnshareRequest),
     Open(String),
+    Mark(Address),
     MouseCapture(bool),
     Copy(String),
 }
@@ -450,6 +451,7 @@ impl App {
             },
             (Intent::Open, _) => commands.extend(self.open()),
             (Intent::OpenPublic, _) => commands.extend(self.open_public()),
+            (Intent::Mark, _) => commands.extend(self.mark()),
             (Intent::Share { auth }, _) => commands.extend(self.share(auth)),
         }
     }
@@ -592,6 +594,15 @@ impl App {
             }
             Err(message) => self.warn(&message),
         }
+    }
+
+    fn mark(&mut self) -> Option<Command> {
+        let id = self.selected_node()?.id().clone();
+        if matches!(id, NodeId::Folder { .. }) {
+            self.warn("select a project to mark its logs");
+            return None;
+        }
+        Some(Command::Mark(target::address(&id)))
     }
 
     fn open(&mut self) -> Option<Command> {
@@ -837,6 +848,18 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_goes_to_the_selection() {
+        let (mut app, now) = connected();
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        let commands = press(&mut app, now, KeyCode::Char('-'));
+        let [Command::Mark(target)] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(target.address, "nova-billing@main");
+    }
+
+    #[test]
     fn saving_writes_the_temporary_pin() {
         let (mut app, now) = connected();
         press(&mut app, now, KeyCode::Down);
@@ -885,6 +908,7 @@ mod tests {
                     process: "web".into(),
                     at_ms: i,
                     text: format!("line {i}"),
+                    marker: false,
                 },
             );
         }
@@ -911,6 +935,7 @@ mod tests {
                     process: "web".into(),
                     at_ms: i,
                     text: format!("line {i}"),
+                    marker: false,
                 },
             );
         };
