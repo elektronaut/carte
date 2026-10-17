@@ -1204,6 +1204,72 @@ fn an_unreadable_stack_record_pauses_the_teardown() {
 }
 
 #[test]
+fn a_problem_with_the_project_pauses_the_teardown_and_names_it() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let daemon = start_with_teardown("2s", &format!("touch {}", marker.display()));
+    let dirs = run_in_feature_x(&daemon);
+
+    remove_feature_x(&daemon);
+    eventually("the scheduled teardown", || {
+        teardown_event(&daemon, EventKind::TeardownScheduled, false).is_some()
+    });
+    let project_file = daemon.root.join("config/projects/acme.toml");
+    let text = std::fs::read_to_string(&project_file).unwrap();
+    let missing = daemon.root.join("work/missing");
+    let text = text.replacen(
+        "repos = \"",
+        &format!("repos = [\"{}\", \"", missing.display()),
+        1,
+    );
+    let text = text.replacen("acme-*\"\n", "acme-*\"]\n", 1);
+    std::fs::write(&project_file, text).unwrap();
+    eventually("the paused teardown", || {
+        teardown_event(&daemon, EventKind::TeardownPaused, false).is_some()
+    });
+    let paused = teardown_event(&daemon, EventKind::TeardownPaused, false).unwrap();
+    assert!(
+        paused
+            .message
+            .contains("project acme has a problem: repos entry")
+            && paused.message.contains("work/missing"),
+        "{}",
+        paused.message
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(!marker.exists(), "the teardown ran");
+    assert!(dirs.state.is_dir());
+}
+
+#[test]
+fn a_worktree_named_main_doesnt_pause_other_teardowns() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let daemon = start_with_teardown("1s", &format!("touch {}", marker.display()));
+    let dirs = run_in_feature_x(&daemon);
+    git(
+        &daemon.root.join("work/acme-web"),
+        &["worktree", "add", "-q", "-b", "other", "../main/acme-web"],
+    );
+    eventually("the problem with the main worktree", || {
+        snapshot(&daemon)
+            .problems
+            .iter()
+            .any(|p| p.message.contains("would be named main"))
+    });
+
+    remove_feature_x(&daemon);
+    eventually("the teardown", || {
+        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
+    });
+    assert!(marker.exists());
+    assert!(teardown_event(&daemon, EventKind::TeardownPaused, false).is_none());
+    assert!(!dirs.state.exists());
+}
+
+#[test]
 fn switching_or_detaching_inside_a_worktree_keeps_its_stack() {
     let daemon = start_with_teardown("1s", "true");
     run_in_feature_x(&daemon);

@@ -292,13 +292,17 @@ fn known(paths: &Paths, world: &World, running: BTreeSet<InstanceKey>) -> (Known
 }
 
 /// Projects whose configuration or discovery has a problem, with the first one: their
-/// worktrees aren't known for sure, so nothing of theirs counts as gone.
+/// worktrees aren't known for sure, so nothing of theirs counts as gone. A problem
+/// with a single stack, such as a worktree named main, leaves the others known.
 pub fn troubled(world: &World) -> BTreeMap<String, String> {
     let mut troubled = BTreeMap::new();
     for problem in &world.problems {
         let Some(project) = &problem.project else {
             continue;
         };
+        if problem.stack.is_some() {
+            continue;
+        }
         let reason = match &problem.app {
             Some(app) => format!("{app}: {}", problem.message),
             None => problem.message.clone(),
@@ -379,6 +383,41 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
+
+    #[test]
+    fn problems_with_one_stack_leave_the_project_untroubled() {
+        let problem = |project: &str, app: Option<&str>, stack: Option<&str>, message: &str| {
+            carte_core::model::Problem {
+                project: Some(project.into()),
+                app: app.map(str::to_string),
+                stack: stack.map(str::to_string),
+                message: message.into(),
+            }
+        };
+        let world = World {
+            problems: vec![
+                problem("acme", Some("acme-web"), Some("main"), "named main"),
+                problem("acme", Some("acme-web"), Some("x"), "same name"),
+                problem("nova", Some("nova-api"), Some("x"), "named like an app"),
+                problem("nova", Some("nova-api"), None, "git worktree list failed"),
+                problem("wiki", None, None, "repos entry matches nothing"),
+            ],
+            ..World::default()
+        };
+        assert_eq!(
+            troubled(&world),
+            BTreeMap::from([
+                (
+                    "nova".to_string(),
+                    "nova-api: git worktree list failed".to_string()
+                ),
+                (
+                    "wiki".to_string(),
+                    "repos entry matches nothing".to_string()
+                ),
+            ])
+        );
+    }
 
     #[test]
     fn lists_directories_without_following_symlinks() {

@@ -440,5 +440,9 @@ impl World {
 pub struct Problem {
     pub project: Option<String>,
     pub app: Option<String>,
+    /// The one stack the problem concerns, which leaves the project's other stacks
+    /// known for sure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
     pub message: String,
 }
