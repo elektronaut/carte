@@ -1979,7 +1979,8 @@ async fn stopping_a_crashed_process_cancels_its_restart() {
     let setup = Setup::new();
     setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");
     setup.project("");
-    let handle = setup.start_with_backoff(Duration::from_millis(800));
+    let backoff = Duration::from_secs(2);
+    let handle = setup.start_with_backoff(backoff);
 
     handle
         .ensure_ready(key("acme-web", Stack::Main))
@@ -2000,7 +2001,7 @@ async fn stopping_a_crashed_process_cancels_its_restart() {
         .control(control("web/worker", Action::Down))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(1200)).await;
+    tokio::time::sleep(backoff * 3 / 2).await;
     let worker = process(&handle.snapshot(), "acme-web", "worker").clone();
     assert!(worker.pid.is_none(), "{worker:?}");
     assert_ne!(worker.state, ProcessState::Running);
