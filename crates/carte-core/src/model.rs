@@ -4,6 +4,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::procfile::ProcessList;
+
 /// Machine-wide settings from `~/.config/carte/config.toml`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MachineConfig {
@@ -313,6 +315,8 @@ pub struct ProjectState {
     pub project: Project,
     /// Linked worktrees per app name.
     pub worktrees: BTreeMap<String, Vec<Worktree>>,
+    /// Each checkout's process list as read at load, by checkout path.
+    pub processes: BTreeMap<PathBuf, Result<ProcessList, String>>,
 }
 
 impl ProjectState {
@@ -342,6 +346,11 @@ impl ProjectState {
         Checkout::Main {
             path: app.path.clone(),
         }
+    }
+
+    /// The process list of an app's checkout in a stack, as read at load.
+    pub fn process_list(&self, app: &App, stack: &Stack) -> Option<&Result<ProcessList, String>> {
+        self.processes.get(self.checkout(app, stack).path())
     }
 }
 
