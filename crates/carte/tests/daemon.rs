@@ -138,8 +138,8 @@ impl Daemon {
         command
             .args(args)
             .env("CARTE_CONFIG_DIR", self.root.join("config"))
-            .env("CARTE_STATE_DIR", self.root.join("state"))
-            .env("CARTE_RUNTIME_DIR", self.root.join("tmp"))
+            .env("CARTE_STATE_HOME", self.root.join("state"))
+            .env("CARTE_RUNTIME_HOME", self.root.join("tmp"))
             .env("NO_COLOR", "1")
             .env("CARTE_SKILL_REFRESH", "0")
             .current_dir(&self.root);
@@ -511,6 +511,9 @@ fn env_shows_the_assigned_port_while_running() {
         Some(dirs.state.display().to_string())
     );
     assert_eq!(value("CARTE_RUN_DIR"), Some(dirs.run.display().to_string()));
+    for own in ["CARTE_STATE_HOME", "CARTE_RUNTIME_HOME", "CARTE_CONFIG_DIR"] {
+        assert_eq!(value(own), None, "{own} leaked into the app env");
+    }
     assert!(dirs.state.is_dir());
     assert!(dirs.run.is_dir());
     let record = carte::instance_dirs::read_stack_record(dirs.state.parent().unwrap()).unwrap();

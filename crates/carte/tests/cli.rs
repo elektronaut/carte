@@ -40,8 +40,8 @@ impl Sandbox {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_carte"));
         cmd.args(args)
             .env("CARTE_CONFIG_DIR", self.root.join("config"))
-            .env("CARTE_STATE_DIR", self.root.join("state"))
-            .env("CARTE_RUNTIME_DIR", self.root.join("tmp"))
+            .env("CARTE_STATE_HOME", self.root.join("state"))
+            .env("CARTE_RUNTIME_HOME", self.root.join("tmp"))
             .env("HOME", &self.root)
             .env_remove("VISUAL")
             .env_remove("EDITOR")
@@ -382,10 +382,12 @@ fn prints_the_env_as_json() {
     assert!(out.success, "{}", out.stderr);
     let env: EnvResponse = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(env.instance, "shop@main/web");
-    assert!(
-        !env.vars.iter().any(|v| v.key == "CARTE_CONFIG_DIR"),
-        "carte's own settings leaked into the app env"
-    );
+    for own in ["CARTE_CONFIG_DIR", "CARTE_STATE_HOME", "CARTE_RUNTIME_HOME"] {
+        assert!(
+            !env.vars.iter().any(|v| v.key == own),
+            "{own} leaked into the app env"
+        );
+    }
     let greeting = env.vars.iter().find(|v| v.key == "GREETING").unwrap();
     assert_eq!(greeting.value.as_deref(), Some("hello shop"));
     assert!(!greeting.masked);

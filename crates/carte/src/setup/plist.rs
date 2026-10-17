@@ -59,7 +59,7 @@ impl Agent {
         line(&mut out, 1, "<dict>");
         key_string(&mut out, 2, "PATH", &self.path_var());
         key_string(&mut out, 2, "CARTE_CONFIG_DIR", &path(&self.config_dir));
-        key_string(&mut out, 2, "CARTE_STATE_DIR", &path(&self.state_dir));
+        key_string(&mut out, 2, "CARTE_STATE_HOME", &path(&self.state_dir));
         line(&mut out, 1, "</dict>");
         key(&mut out, 1, "KeepAlive");
         line(&mut out, 1, "<true/>");
@@ -141,7 +141,7 @@ mod tests {
             "<key>KeepAlive</key>\n  <true/>",
             "<key>RunAtLoad</key>\n  <true/>",
             "<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Users/me/.local/bin:/Users/me/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
-            "<key>CARTE_STATE_DIR</key>\n    <string>/Users/me/.local/state/R&amp;D &lt;carte&gt;</string>",
+            "<key>CARTE_STATE_HOME</key>\n    <string>/Users/me/.local/state/R&amp;D &lt;carte&gt;</string>",
             "<key>StandardErrorPath</key>\n  <string>/Users/me/.local/state/R&amp;D &lt;carte&gt;/carte.log</string>",
             "    <key>http</key>\n    <dict>\n      <key>SockNodeName</key>\n      <string>127.0.0.1</string>\n      \
              <key>SockServiceName</key>\n      <string>80</string>\n      <key>SockType</key>\n      \

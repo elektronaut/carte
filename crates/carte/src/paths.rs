@@ -1,6 +1,7 @@
 //! Where carte keeps configuration, state and its socket.
 
 use std::env;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -17,23 +18,27 @@ pub struct Paths {
 }
 
 impl Paths {
-    /// `CARTE_CONFIG_DIR` and `CARTE_STATE_DIR` win, then the XDG variables, then
-    /// `~/.config/carte` and `~/.local/state/carte`. `CARTE_RUNTIME_DIR` wins over
-    /// the platform's run root.
+    /// `CARTE_CONFIG_DIR` and `CARTE_STATE_HOME` win, then the XDG variables, then
+    /// `~/.config/carte` and `~/.local/state/carte`. `CARTE_RUNTIME_HOME` wins over
+    /// the platform's run root. `CARTE_STATE_DIR` is an instance's directory, not carte's.
     pub fn from_env() -> Self {
-        let home = env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        Self::from_vars(|name| env::var_os(name))
+    }
+
+    fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Self {
+        let home = var("HOME").map(PathBuf::from).unwrap_or_default();
         let dir = |own: &str, xdg: &str, fallback: &str| {
-            env::var_os(own)
+            var(own)
                 .map(PathBuf::from)
-                .or_else(|| env::var_os(xdg).map(|d| PathBuf::from(d).join("carte")))
+                .or_else(|| var(xdg).map(|d| PathBuf::from(d).join("carte")))
                 .unwrap_or_else(|| home.join(fallback).join("carte"))
         };
         Paths {
             config_dir: dir("CARTE_CONFIG_DIR", "XDG_CONFIG_HOME", ".config"),
-            state_dir: dir("CARTE_STATE_DIR", "XDG_STATE_HOME", ".local/state"),
-            run_root: env::var_os("CARTE_RUNTIME_DIR")
+            state_dir: dir("CARTE_STATE_HOME", "XDG_STATE_HOME", ".local/state"),
+            run_root: var("CARTE_RUNTIME_HOME")
                 .map(PathBuf::from)
-                .unwrap_or_else(platform_run_root),
+                .unwrap_or_else(|| platform_run_root(&var)),
         }
     }
 
@@ -110,7 +115,7 @@ impl Paths {
 
 /// `carte` in the per-user temp directory, from `confstr` rather than `$TMPDIR`.
 #[cfg(target_os = "macos")]
-fn platform_run_root() -> PathBuf {
+fn platform_run_root(_var: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
     let mut buf = vec![0u8; libc::PATH_MAX as usize];
     let len = unsafe {
         libc::confstr(
@@ -124,12 +129,12 @@ fn platform_run_root() -> PathBuf {
     }
     buf.truncate(len - 1);
     use std::os::unix::ffi::OsStringExt;
-    PathBuf::from(std::ffi::OsString::from_vec(buf)).join("carte")
+    PathBuf::from(OsString::from_vec(buf)).join("carte")
 }
 
 #[cfg(not(target_os = "macos"))]
-fn platform_run_root() -> PathBuf {
-    match env::var_os("XDG_RUNTIME_DIR") {
+fn platform_run_root(var: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
+    match var("XDG_RUNTIME_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("carte"),
         _ => PathBuf::from(format!("/tmp/carte-{}", unsafe { libc::getuid() })),
     }
@@ -151,7 +156,7 @@ mod tests {
 
     #[test]
     fn run_root_is_short_and_per_user() {
-        let root = platform_run_root();
+        let root = platform_run_root(&|_| None);
         assert!(root.is_absolute(), "{}", root.display());
         assert!(root.as_os_str().len() < 80, "{}", root.display());
         assert!(
@@ -160,6 +165,59 @@ mod tests {
             "{}",
             root.display()
         );
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
+        let pairs: Vec<(String, OsString)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), OsString::from(v)))
+            .collect();
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    #[test]
+    fn an_instances_state_dir_is_not_carte_s() {
+        let inside = vars(&[
+            ("HOME", "/Users/me"),
+            (
+                "CARTE_STATE_DIR",
+                "/Users/me/.local/state/carte/data/acme/main/web",
+            ),
+            ("CARTE_RUN_DIR", "/tmp/carte-501/abcdefgh"),
+        ]);
+        let paths = Paths::from_vars(inside);
+        assert_eq!(
+            paths.state_dir,
+            PathBuf::from("/Users/me/.local/state/carte")
+        );
+        assert_eq!(paths.config_dir, PathBuf::from("/Users/me/.config/carte"));
+        assert_eq!(paths.run_root, platform_run_root(&|_| None));
+    }
+
+    #[test]
+    fn own_overrides_win() {
+        let paths = Paths::from_vars(vars(&[
+            ("HOME", "/Users/me"),
+            ("XDG_STATE_HOME", "/x/state"),
+            ("CARTE_STATE_DIR", "/instance"),
+            ("CARTE_RUN_DIR", "/instance-run"),
+        ]));
+        assert_eq!(paths.state_dir, PathBuf::from("/x/state/carte"));
+        let paths = Paths::from_vars(vars(&[
+            ("HOME", "/Users/me"),
+            ("XDG_STATE_HOME", "/x/state"),
+            ("CARTE_STATE_HOME", "/s"),
+            ("CARTE_RUNTIME_HOME", "/r"),
+            ("CARTE_CONFIG_DIR", "/c"),
+        ]));
+        assert_eq!(paths.state_dir, PathBuf::from("/s"));
+        assert_eq!(paths.run_root, PathBuf::from("/r"));
+        assert_eq!(paths.config_dir, PathBuf::from("/c"));
     }
 
     #[test]
