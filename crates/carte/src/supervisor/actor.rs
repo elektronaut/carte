@@ -14,7 +14,7 @@ use carte_core::dirs::DirRoots;
 use carte_core::env::{self, Env, EnvRequest, SystemRunner};
 use carte_core::lifecycle::{self, Capacity, EvictionReason, Targets, Usage};
 use carte_core::model::{
-    App, Checkout, InstanceKey, Policy, ProcessSpec, ProjectState, Scope, Stack, World,
+    App, Checkout, InstanceKey, Policy, ProcessSpec, ProjectState, Restart, Scope, Stack, World,
 };
 use carte_core::{naming, procfile};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -49,7 +49,7 @@ pub(crate) enum Internal {
         idx: usize,
         result: Result<(), String>,
     },
-    RestartService {
+    RestartProcess {
         key: InstanceKey,
         run: u64,
         idx: usize,
@@ -121,10 +121,12 @@ pub(super) struct Proc {
     pub queued: bool,
     /// What a queued process runs, once its environment is built.
     spawn: Option<SpawnSpec>,
-    /// When a service crashed within the last minute.
+    /// When it crashed within the last minute.
     crashes: Vec<Instant>,
-    /// A crashed service waits to be restarted.
+    /// It crashed and waits to be restarted.
     pending_restart: bool,
+    /// It crashed too often and stays down until started again.
+    pub gave_up: bool,
 }
 
 impl Proc {
@@ -500,7 +502,7 @@ impl Actor {
                 idx,
                 result,
             } => self.ready(&key, run, idx, result),
-            Internal::RestartService { key, run, idx } => self.restart_service(&key, run, idx),
+            Internal::RestartProcess { key, run, idx } => self.restart_process(&key, run, idx),
             Internal::Tick => self.tick(),
             Internal::TeardownCheck(results) => self.teardown_checked(results),
             Internal::TeardownEnded(id) => {
@@ -699,6 +701,7 @@ impl Actor {
                 spawn: None,
                 crashes: Vec::new(),
                 pending_restart: false,
+                gave_up: false,
                 memory_bytes: 0,
                 cpu_percent: 0.0,
                 cpu_sample: None,
@@ -808,7 +811,11 @@ impl Actor {
             .iter()
             .position(|p| p.spec.name == name)
             .ok_or_else(|| format!("{} has no process named {name}", inst.label()))?;
-        inst.procs[idx].pending_restart = false;
+        let proc = &mut inst.procs[idx];
+        proc.pending_restart = false;
+        if std::mem::take(&mut proc.gave_up) {
+            proc.crashes.clear();
+        }
         if inst.procs[idx].is_running() {
             return Ok(());
         }
@@ -1119,7 +1126,7 @@ impl Actor {
         let name = name.as_str();
         let http = proc.spec.http;
         let boot_step = proc.spec.kind.is_some();
-        let service = proc.spec.is_service();
+        let on_failure = proc.spec.restart == Restart::OnFailure && code != Some(0);
         let done = proc.state == ProcessState::Done;
         let restarting = proc.restart;
         match inst.state {
@@ -1155,7 +1162,7 @@ impl Actor {
                 let ready = inst.state == InstanceState::Ready;
                 if restart {
                     let _ = self.start_process(key, name);
-                } else if service && ready && !manual {
+                } else if on_failure && ready && !manual {
                     self.schedule_restart(key, idx);
                 }
                 self.advance(key);
@@ -1171,7 +1178,7 @@ impl Actor {
         }
     }
 
-    /// Restarts a crashed service after a wait that doubles with each crash: 1, 2, 4
+    /// Restarts a crashed process after a wait that doubles with each crash: 1, 2, 4
     /// and 8 times the first; gives up at the fifth crash within a minute.
     fn schedule_restart(&mut self, key: &InstanceKey, idx: usize) {
         let backoff = self.options.restart_backoff;
@@ -1189,6 +1196,7 @@ impl Actor {
         let crashes = proc.crashes.len() as u32;
         let name = proc.spec.name.clone();
         if crashes >= 5 {
+            proc.gave_up = true;
             self.event(
                 EventKind::Crashed,
                 format!("{name} crashed {crashes} times within a minute; it stays down"),
@@ -1198,26 +1206,47 @@ impl Actor {
         }
         proc.pending_restart = true;
         let run = proc.run;
-        let delay = (backoff * 2u32.pow(crashes - 1)).min(backoff * 32);
+        let delay = backoff * 2u32.pow(crashes - 1);
         let tx = self.tx.clone();
         let key = key.clone();
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let _ = tx.send(Msg::Internal(Internal::RestartService { key, run, idx }));
+            let _ = tx.send(Msg::Internal(Internal::RestartProcess { key, run, idx }));
         });
     }
 
-    fn restart_service(&mut self, key: &InstanceKey, run: u64, idx: usize) {
-        let Some(inst) = self.instances.get_mut(key) else {
+    /// Restarts a crashed process once its wait is over, unless it was started or
+    /// stopped meanwhile; a checkout-scope process another instance started
+    /// meanwhile is left to that instance.
+    fn restart_process(&mut self, key: &InstanceKey, run: u64, idx: usize) {
+        let Some(inst) = self.instances.get(key) else {
             return;
         };
         if inst.state != InstanceState::Ready {
             return;
         }
-        let Some(proc) = inst.procs.get_mut(idx) else {
+        let Some(proc) = inst.procs.get(idx) else {
             return;
         };
         if proc.run != run || !proc.pending_restart || proc.is_running() {
+            return;
+        }
+        let checkout = inst.checkout.as_ref().map(Checkout::path);
+        let elsewhere = proc.spec.scope == Scope::Checkout
+            && self.instances.values().any(|other| {
+                other.key != *key
+                    && other.is_active()
+                    && other.checkout.as_ref().map(Checkout::path) == checkout
+                    && other
+                        .procs
+                        .iter()
+                        .any(|p| p.spec.name == proc.spec.name && p.is_running())
+            });
+        let proc = &mut self.instances.get_mut(key).expect("instance").procs[idx];
+        proc.pending_restart = false;
+        if elsewhere {
+            proc.deferred = true;
+            self.dirty = true;
             return;
         }
         proc.restarts += 1;
@@ -2621,6 +2650,8 @@ fn world_changes(old: &World, new: &World) -> Vec<(EventKind, String, Vec<EventS
     changes
 }
 
+/// Another active instance from the checkout runs the process, or ran it until it
+/// exited on its own: it restarts the process or leaves it down.
 fn self_runs_elsewhere(
     instances: &BTreeMap<InstanceKey, Instance>,
     key: &InstanceKey,
@@ -2631,10 +2662,10 @@ fn self_runs_elsewhere(
         inst.key != *key
             && inst.is_active()
             && inst.checkout.as_ref().is_some_and(|c| c.path() == checkout)
-            && inst
-                .procs
-                .iter()
-                .any(|p| p.spec.name == name && p.is_running())
+            && inst.procs.iter().any(|p| {
+                p.spec.name == name
+                    && (p.is_running() || matches!(p.state, ProcessState::Exited { .. }))
+            })
     })
 }
 

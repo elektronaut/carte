@@ -50,13 +50,17 @@ impl Setup {
     }
 
     fn start(&self) -> Handle {
+        self.start_with_backoff(Duration::from_millis(100))
+    }
+
+    fn start_with_backoff(&self, restart_backoff: Duration) -> Handle {
         let world = discovery::load_world(&self.paths.config_dir);
         assert!(world.problems.is_empty(), "{:?}", world.problems);
         let options = Options {
             grace: Duration::from_millis(500),
             boot_timeout: Duration::from_secs(10),
             tick: Duration::from_millis(100),
-            restart_backoff: Duration::from_millis(100),
+            restart_backoff,
             ..Options::new(&self.paths)
         };
         supervisor::start(
@@ -1594,16 +1598,15 @@ async fn a_crashed_service_restarts_on_its_own_port_until_stopped_by_hand() {
 }
 
 #[tokio::test]
-async fn a_service_that_keeps_crashing_stays_down() {
+async fn a_process_that_keeps_crashing_stays_down_until_started_by_hand() {
     let setup = Setup::new();
     let marker = setup.root.join("started");
     let path = setup.root.join("crashes.log");
     setup.app("acme-web", "web: exec {fixture}\n");
     setup.project(&format!(
         r#"
-[apps.acme-web.processes.redis]
+[apps.acme-web.processes.worker]
 command = 'if [ -e {marker} ]; then echo crash >> {log}; exit 1; fi; touch {marker}; exec {fixture}'
-kind = "service"
 "#,
         marker = marker.display(),
         log = path.display(),
@@ -1615,27 +1618,40 @@ kind = "service"
         .ensure_ready(key("acme-web", Stack::Main))
         .await
         .unwrap();
-    let pid = process(&handle.snapshot(), "acme-web", "redis")
+    let pid = process(&handle.snapshot(), "acme-web", "worker")
         .pid
         .unwrap();
     kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
     wait_for_events(&handle, "carte to give up", |lines| {
         lines.iter().any(|l| {
-            l == "acme-web/redis crashed: redis crashed 5 times within a minute; it stays down"
+            l == "acme-web/worker crashed: worker crashed 5 times within a minute; it stays down"
         })
     })
     .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(lines(&path), ["crash"; 4]);
     let snapshot = handle.snapshot();
-    assert!(matches!(
-        process(&snapshot, "acme-web", "redis").state,
-        ProcessState::Exited { code: Some(1), .. }
-    ));
+    let worker = process(&snapshot, "acme-web", "worker");
+    assert!(
+        matches!(worker.state, ProcessState::Exited { code: Some(1), .. }),
+        "{worker:?}"
+    );
+    assert!(worker.gave_up);
     assert_eq!(
         status(&snapshot, "acme-web", "main").state,
         InstanceState::Ready
     );
+
+    std::fs::remove_file(&marker).unwrap();
+    handle
+        .control(control("web/worker", Action::Up))
+        .await
+        .unwrap();
+    wait_for(&handle, "the worker to run again", |s| {
+        let p = process(s, "acme-web", "worker");
+        p.state == ProcessState::Running && !p.gave_up
+    })
+    .await;
     handle.shutdown().await;
 }
 
@@ -1757,5 +1773,222 @@ kind = "task"
         InstanceState::Crashed
     );
     assert_eq!(process(&snapshot, "acme-web", "web").pid, None);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_crashed_worker_comes_back_on_its_own_port() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");
+    setup.project("");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let before = process(&handle.snapshot(), "acme-web", "worker").clone();
+    let pid = before.pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "the worker to come back", |s| {
+        let p = process(s, "acme-web", "worker");
+        p.state == ProcessState::Running && p.pid.is_some_and(|p| p != pid)
+    })
+    .await;
+    let snapshot = handle.snapshot();
+    let after = process(&snapshot, "acme-web", "worker");
+    assert_eq!(after.port, before.port);
+    assert_eq!(after.restarts, before.restarts + 1);
+    assert!(!after.gave_up);
+    wait_for_events(&handle, "the restart", |lines| {
+        lines
+            .iter()
+            .any(|l| l == "acme-web/worker restarted: after a crash")
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_clean_exit_or_restart_never_keeps_a_process_down_after_it_exits() {
+    let setup = Setup::new();
+    let log = setup.root.join("runs.log");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: exec {{fixture}}\nonce: sleep 0.3; echo once >> {log}\nkept: exec {{fixture}}\n",
+            log = log.display()
+        ),
+    );
+    setup.project("[apps.acme-web.processes.kept]\nrestart = \"never\"\n");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "kept").pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "both to exit", |s| {
+        matches!(
+            process(s, "acme-web", "once").state,
+            ProcessState::Exited { code: Some(0), .. }
+        ) && matches!(
+            process(s, "acme-web", "kept").state,
+            ProcessState::Exited {
+                signal: Some(9),
+                ..
+            }
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let snapshot = handle.snapshot();
+    assert_eq!(lines(&log), ["once"]);
+    for name in ["once", "kept"] {
+        let p = process(&snapshot, "acme-web", name);
+        assert!(
+            matches!(p.state, ProcessState::Exited { .. }) && p.pid.is_none() && !p.gave_up,
+            "{p:?}"
+        );
+    }
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn stopping_a_crashed_process_cancels_its_restart() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");
+    setup.project("");
+    let handle = setup.start_with_backoff(Duration::from_millis(800));
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "worker")
+        .pid
+        .unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "the worker to exit", |s| {
+        matches!(
+            process(s, "acme-web", "worker").state,
+            ProcessState::Exited { .. }
+        )
+    })
+    .await;
+    handle
+        .control(control("web/worker", Action::Down))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let worker = process(&handle.snapshot(), "acme-web", "worker").clone();
+    assert!(worker.pid.is_none(), "{worker:?}");
+    assert_ne!(worker.state, ProcessState::Running);
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    let lines = event_lines(&events);
+    assert!(
+        !lines
+            .iter()
+            .any(|l| l == "acme-web/worker restarted: after a crash"),
+        "{lines:#?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_task_that_fails_after_the_start_isnt_restarted() {
+    let setup = Setup::new();
+    let marker = setup.root.join("migrated");
+    let log = setup.root.join("failures.log");
+    setup.app("acme-web", "web: exec {fixture}\n");
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.migrate]
+command = 'if [ -e {marker} ]; then echo fail >> {log}; exit 1; fi; touch {marker}'
+kind = "task"
+"#,
+        marker = marker.display(),
+        log = log.display()
+    ));
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    handle
+        .control(control("web/migrate", Action::Restart))
+        .await
+        .unwrap();
+    wait_for(&handle, "the task to fail", |s| {
+        matches!(
+            process(s, "acme-web", "migrate").state,
+            ProcessState::Exited { code: Some(1), .. }
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(lines(&log), ["fail"]);
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Ready
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_crashed_checkout_watcher_comes_back_once_in_the_instance_that_ran_it() {
+    let setup = Setup::new();
+    let web = setup.app("acme-web", WEB);
+    setup.app(
+        "acme-api",
+        "web: FIXTURE_NAME=api exec {fixture}\ncss: FIXTURE_NAME=css exec {fixture}\n",
+    );
+    git(
+        &web,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature-x",
+            "../acme-web-feature-x",
+        ],
+    );
+    setup.project("");
+    let handle = setup.start_with_backoff(Duration::from_millis(500));
+    let css = |s: &carte_api::Snapshot, stack: &str| {
+        status(s, "acme-api", stack)
+            .processes
+            .iter()
+            .find(|p| p.name == "css")
+            .cloned()
+            .unwrap()
+    };
+
+    handle
+        .ensure_ready(key("acme-api", Stack::Main))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-api", Stack::Branch("feature-x".into())))
+        .await
+        .unwrap();
+    wait_for(&handle, "css in main", |s| {
+        css(s, "main").state == ProcessState::Running
+    })
+    .await;
+    let pid = css(&handle.snapshot(), "main").pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "css to come back in main", |s| {
+        let main = css(s, "main");
+        main.state == ProcessState::Running && main.pid.is_some_and(|p| p != pid)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let snapshot = handle.snapshot();
+    assert_eq!(css(&snapshot, "main").restarts, 1);
+    assert!(css(&snapshot, "feature-x").pid.is_none());
     handle.shutdown().await;
 }

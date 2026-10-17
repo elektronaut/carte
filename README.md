@@ -145,6 +145,10 @@ policy = "disabled"
   `kind = "teardown"`, like `dropdb`, runs once in the main checkout
   when a branch's worktree has been gone for `teardown_delay` (10
   minutes), and then carte deletes the stack's data.
+- A process other than the web process and tasks that crashes after the
+  start is restarted on the same port, with a growing wait; carte gives
+  up at the fifth crash within a minute. `restart = "never"` leaves it
+  down.
 - `[processes.<name>]` declares a process for several apps at once, all
   of them or those in `apps`; an app's own `[apps.<app>.processes]`
   entry overrides it key by key. Its `provides` sets env on every process
