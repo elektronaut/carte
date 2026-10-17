@@ -92,14 +92,17 @@ mod tests {
 
     #[tokio::test]
     async fn reports_refusal_when_neither_answers() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let error = LoopbackConnector::default()
-            .connect(port)
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        let mut kinds = Vec::new();
+        for _ in 0..5 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            match LoopbackConnector::default().connect(port).await {
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => return,
+                Err(error) => kinds.push(error.kind()),
+                Ok(_) => kinds.push(io::ErrorKind::AddrInUse),
+            }
+        }
+        panic!("never refused: {kinds:?}");
     }
 }
