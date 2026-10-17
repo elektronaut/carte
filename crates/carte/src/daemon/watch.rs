@@ -23,7 +23,7 @@ pub enum Change {
 }
 
 /// What to watch for a world: the config directory recursively, and per app the
-/// git directory (new worktrees), each checkout's root (tool files, removal) and
+/// git directory (new worktrees), each checkout's root (tool and process files, removal) and
 /// its `tmp` (restart.txt).
 pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> {
     let mut set = BTreeSet::from([(config_dir.to_path_buf(), true)]);
@@ -76,6 +76,9 @@ pub fn classify(
     }
     let name = path.file_name()?.to_str()?;
     let parent = path.parent()?;
+    if matches!(name, "Procfile.dev" | "Procfile" | "config.ru") && checkouts.contains_key(parent) {
+        return Some(Change::Reload);
+    }
     if name == "restart.txt" && parent.file_name()? == "tmp" {
         let checkout = checkouts.get(parent.parent()?)?;
         return Some(Change::Restart(checkout.clone()));
@@ -251,6 +254,18 @@ mod tests {
         assert_eq!(
             classify(Path::new("/work/acme-web/.tool-versions"), config, &c),
             Some(Change::EnvChanged(PathBuf::from("/work/acme-web")))
+        );
+        assert_eq!(
+            classify(
+                Path::new("/work/acme-web-feature-x/Procfile.dev"),
+                config,
+                &c
+            ),
+            Some(Change::Reload)
+        );
+        assert_eq!(
+            classify(Path::new("/work/acme-web/app/Procfile"), config, &c),
+            None
         );
         assert_eq!(
             classify(Path::new("/work/acme-web/app/models/x.rb"), config, &c),
