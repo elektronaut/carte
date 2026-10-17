@@ -1,0 +1,227 @@
+name: Release
+# Runs after CI passes on a push to main, or by hand for a tag. A
+# workflow_run workflow runs from the default branch's copy of this file,
+# with the repository's secrets.
+#
+# Publishing doesn't depend on whether this run's release-please created
+# the release. Each run reads the version on main, and once its tag exists,
+# attaches whatever binaries the release lacks, publishes the crates
+# crates.io doesn't have, and updates the Homebrew formula unless the tap
+# already points at that tag. A run that finds everything done does
+# nothing, so any later run finishes a release an earlier one missed.
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, such as v0.2.0"
+        required: true
+        type: string
+# Runs queue rather than overlap, so two can't publish the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+permissions: {}
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  release-please:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+
+  # Works out the tag to publish and what it still lacks. The Homebrew job
+  # stays off until the HOMEBREW_TAP_TOKEN secret exists: a token with
+  # contents: write on the tap repository. Secrets can't appear in a job's
+  # `if`, so this job reports whether it is set.
+  check:
+    name: Check what to publish
+    needs: release-please
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' || needs.release-please.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      binaries: ${{ steps.check.outputs.binaries }}
+      crates: ${{ steps.check.outputs.crates }}
+      homebrew: ${{ steps.check.outputs.homebrew }}
+    steps:
+      - uses: actions/checkout@v6.1.0
+        with:
+          ref: ${{ inputs.tag || github.event.workflow_run.head_sha }}
+      - id: check
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          tag="v$version"
+          if [ -n "$INPUT_TAG" ] && [ "$INPUT_TAG" != "$tag" ]; then
+            echo "::error::$INPUT_TAG holds version $version, not ${INPUT_TAG#v}."
+            exit 1
+          fi
+          binaries=false
+          crates=""
+          homebrew=false
+          if [ -z "$(git ls-remote --tags origin "refs/tags/$tag")" ]; then
+            echo "$tag isn't tagged yet. Nothing to publish."
+          else
+            assets=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+            for target in aarch64-apple-darwin x86_64-apple-darwin; do
+              grep -qx "carte-$version-$target.tar.gz" <<< "$assets" || binaries=true
+            done
+            for crate in carte-api carte-core carte; do
+              status=$(curl -s -o /dev/null -w '%{http_code}' \
+                -A "carte release workflow (https://github.com/$GITHUB_REPOSITORY)" \
+                "https://crates.io/api/v1/crates/$crate/$version")
+              case "$status" in
+                200) echo "crates.io has $crate $version." ;;
+                404) crates="${crates:+$crates }$crate" ;;
+                *) echo "::error::crates.io answered $status for $crate $version."; exit 1 ;;
+              esac
+            done
+            if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+              echo "No HOMEBREW_TAP_TOKEN. Leaving the tap alone."
+            elif gh api repos/elektronaut/homebrew-tap/contents/Formula/carte.rb --jq .content 2>/dev/null |
+              base64 -d | grep -q "version \"$version\""; then
+              echo "The tap's formula is at $tag."
+            else
+              homebrew=true
+            fi
+          fi
+          echo "$tag: attach binaries $binaries, publish crates [${crates}], update Homebrew $homebrew" | tee -a "$GITHUB_STEP_SUMMARY"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "binaries=$binaries"
+            echo "crates=$crates"
+            echo "homebrew=$homebrew"
+          } >> "$GITHUB_OUTPUT"
+
+  # The x86_64 binary is cross-compiled on the arm64 runner.
+  binaries:
+    name: Build ${{ matrix.target }}
+    needs: check
+    if: needs.check.outputs.binaries == 'true'
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v6.1.0
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --package carte --target "$TARGET"
+      - name: Pack
+        run: |
+          name="carte-$VERSION-$TARGET"
+          mkdir "$RUNNER_TEMP/$name"
+          cp "target/$TARGET/release/carte" LICENSE "$RUNNER_TEMP/$name/"
+          [ -f README.md ] && cp README.md "$RUNNER_TEMP/$name/"
+          tar -czf "$name.tar.gz" -C "$RUNNER_TEMP/$name" .
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "NAME=$name" >> "$GITHUB_ENV"
+      - name: Check the binary runs
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          "target/$TARGET/release/carte" --version | grep -qx "carte $VERSION"
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" "$NAME.tar.gz" "$NAME.tar.gz.sha256" --clobber
+
+  # In dependency order; cargo waits for each to reach the index.
+  crates:
+    name: Publish crates
+    needs: check
+    if: needs.check.outputs.crates != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6.1.0
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CRATES: ${{ needs.check.outputs.crates }}
+        run: |
+          for crate in $CRATES; do
+            cargo publish --locked --package "$crate"
+          done
+
+  homebrew:
+    name: Homebrew formula
+    needs: [check, binaries]
+    if: >-
+      always() &&
+      needs.check.outputs.homebrew == 'true' &&
+      (needs.binaries.result == 'success' || needs.binaries.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+      HOMEBREW_TAP: elektronaut/homebrew-tap
+    steps:
+      - uses: actions/checkout@v6.1.0
+        with:
+          ref: ${{ needs.check.outputs.tag }}
+      - name: Update the tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.sha256' --dir "$RUNNER_TEMP/sums"
+          arm64=$(cut -d' ' -f1 "$RUNNER_TEMP/sums/carte-$VERSION-aarch64-apple-darwin.tar.gz.sha256")
+          x86_64=$(cut -d' ' -f1 "$RUNNER_TEMP/sums/carte-$VERSION-x86_64-apple-darwin.tar.gz.sha256")
+          tap="$RUNNER_TEMP/tap"
+          git clone --quiet "https://x-access-token:$HOMEBREW_TAP_TOKEN@github.com/$HOMEBREW_TAP.git" "$tap"
+          mkdir -p "$tap/Formula"
+          sed -e "s/@VERSION@/$VERSION/g" -e "s/@ARM64_SHA256@/$arm64/" -e "s/@X86_64_SHA256@/$x86_64/" \
+            -e '/^# The release workflow/,/^# placeholders/d' \
+            packaging/homebrew/carte.rb > "$tap/Formula/carte.rb"
+          git -C "$tap" config user.name "github-actions[bot]"
+          git -C "$tap" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$tap" add Formula/carte.rb
+          if git -C "$tap" diff --cached --quiet; then
+            echo "The tap's formula already matches."
+          else
+            git -C "$tap" commit --quiet -m "carte $VERSION"
+            git -C "$tap" push --quiet
+          fi

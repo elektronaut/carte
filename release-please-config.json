@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "carte",
+      "include-component-in-tag": false,
+      "bump-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.carte-core.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.dependencies.carte-api.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='carte' || @.name.value==='carte-core' || @.name.value==='carte-api' || @.name.value==='fixture-app')].version"
+        }
+      ]
+    }
+  }
+}
