@@ -14,7 +14,7 @@ use ratatui::layout::{Position, Rect};
 use super::input::{self, Confirm, Control, Focus, Intent, Mode};
 use super::logs::{self, Logs, Prefix};
 use super::target;
-use super::tree::{self, Fold, Node, NodeId, Row};
+use super::tree::{self, Fold, Node, NodeId, Row, Show};
 
 #[derive(Debug)]
 pub enum Event {
@@ -424,13 +424,13 @@ impl App {
                     "Mouse off: drag to select text, m turns it back on"
                 });
             }
-            (Intent::RunningOnly, _) => {
-                self.fold.running_only = !self.fold.running_only;
+            (Intent::CycleShow, _) => {
+                self.fold.show = self.fold.show.next();
                 self.refresh_rows();
-                self.inform(if self.fold.running_only {
-                    "showing only running instances"
-                } else {
-                    "showing every instance"
+                self.inform(match self.fold.show {
+                    Show::All => "showing every instance",
+                    Show::Running => "showing only running instances",
+                    Show::Shared => "showing only shared instances",
                 });
             }
             (Intent::Control(control), _) => commands.extend(self.control(control)),
@@ -1139,6 +1139,15 @@ mod tests {
         press(&mut app, now, KeyCode::Esc);
         assert_eq!(app.fold.filter, "");
         assert_eq!(app.rows.len(), 7);
+    }
+
+    #[test]
+    fn a_cycles_through_all_running_and_shared() {
+        let (mut app, now) = connected();
+        for show in [Show::Running, Show::Shared, Show::All] {
+            press(&mut app, now, KeyCode::Char('a'));
+            assert_eq!(app.fold.show, show);
+        }
     }
 
     #[test]
