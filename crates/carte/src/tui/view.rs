@@ -201,9 +201,9 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     let label = Span::raw(node.label.clone());
     spans.push(match node.ids[0] {
         NodeId::Folder { .. } => label.bold(),
-        NodeId::Project { .. } => label.blue().bold(),
+        NodeId::Project { .. } => label.bold(),
         _ if status.state == State::Disabled => label.dark_gray(),
-        NodeId::Stack { .. } => label.bold(),
+        NodeId::Stack { .. } => label.blue().bold(),
         _ => label,
     });
     spans.extend(badges(status, aggregate));
