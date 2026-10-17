@@ -1,5 +1,6 @@
 //! The `carte` command line.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -15,14 +16,19 @@ pub(crate) mod prompt;
 mod setup;
 
 #[derive(Parser)]
-#[command(name = "carte", version, about = "Runs your apps' processes on demand")]
+#[command(
+    name = "carte",
+    version,
+    about = "Runs your apps' processes on demand",
+    after_help = "Without a command, carte opens the terminal UI."
+)]
 pub struct Cli {
     /// Print machine-readable JSON.
     #[arg(long, global = true)]
     pub json: bool,
 
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -213,7 +219,14 @@ pub enum ProjectCommand {
 
 pub fn run(cli: Cli) -> ExitCode {
     let paths = Paths::from_env();
-    let result = match cli.command {
+    let Some(command) = cli.command else {
+        if !std::io::stdout().is_terminal() {
+            let _ = <Cli as clap::CommandFactory>::command().print_help();
+            return ExitCode::from(2);
+        }
+        return finish(crate::tui::run(&paths));
+    };
+    let result = match command {
         Command::Shim { fd, command } => {
             return ExitCode::from(crate::shim::run(fd, &command) as u8);
         }
@@ -259,6 +272,10 @@ pub fn run(cli: Cli) -> ExitCode {
             import::puma_dev(&paths, from, dry_run, yes)
         }
     };
+    finish(result)
+}
+
+fn finish(result: anyhow::Result<ExitCode>) -> ExitCode {
     match result {
         Ok(code) => code,
         Err(err) => {
