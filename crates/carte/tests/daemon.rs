@@ -527,6 +527,73 @@ fn env_shows_the_assigned_port_while_running() {
 }
 
 #[test]
+fn exec_gets_the_ports_of_running_services() {
+    let daemon = Daemon::start();
+    let fixture = fixture().display().to_string();
+    repo(
+        &daemon.root.join("other/shop"),
+        &format!("web: exec {fixture}\n"),
+    );
+    std::fs::write(
+        daemon.root.join("config/projects/shop.toml"),
+        format!(
+            "repos = \"{}/other/shop\"\nenv_provider = \"none\"\n\n\
+             [processes.cache]\ncommand = \"FIXTURE_NAME=cache exec {fixture}\"\nkind = \"service\"\n\
+             [processes.cache.provides]\nCACHE_URL = \"http://127.0.0.1:{{{{port}}}}\"\n",
+            daemon.root.display()
+        ),
+    )
+    .unwrap();
+    eventually("the shop project", || {
+        snapshot(&daemon).projects.iter().any(|p| p.name == "shop")
+    });
+    let exec = |args: &[&str]| {
+        daemon
+            .command(
+                &[
+                    &["exec", "shop"],
+                    args,
+                    &["--", "sh", "-c", "echo $CACHE_URL"],
+                ]
+                .concat(),
+            )
+            .output()
+            .unwrap()
+    };
+    let refused = exec(&[]);
+    assert_eq!(refused.status.code(), Some(5));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("carte up shop@main`"), "{stderr}");
+
+    daemon.run(&["up", "shop"]);
+    let port = snapshot(&daemon)
+        .projects
+        .iter()
+        .find(|p| p.name == "shop")
+        .unwrap()
+        .stacks[0]
+        .instances[0]
+        .processes
+        .iter()
+        .find(|p| p.name == "cache")
+        .and_then(|p| p.port)
+        .unwrap();
+    let out = exec(&[]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout(&out), format!("http://127.0.0.1:{port}\n"));
+
+    daemon.run(&["down", "shop/cache"]);
+    eventually("the cache to stop", || exec(&[]).status.code() == Some(5));
+    let stderr = String::from_utf8_lossy(&exec(&[]).stderr).into_owned();
+    assert!(stderr.contains("carte up shop@main/cache`"), "{stderr}");
+    assert!(exec(&["--no-check"]).status.success());
+}
+
+#[test]
 fn the_daemon_renders_a_process_env() {
     let daemon = Daemon::start();
     let socket = carte::paths::Paths::under(&daemon.root).socket();

@@ -221,6 +221,7 @@ carte restart billing/worker # restart one process
 carte logs -f billing        # follow logs
 carte pin billing --save     # keep it running, and save that
 carte open                   # open the app you're in
+carte exec -- bin/rails c    # a command with the app's env
 carte stop-all --idle        # stop what nobody is using
 carte prune                  # remove data of branches and apps that are gone
 ```

@@ -517,6 +517,106 @@ fn exit_codes_tell_failures_apart() {
     assert_eq!(sb.run(&["up", "--bogus"]).code, Some(2));
 }
 
+#[test]
+fn exec_runs_a_command_with_the_shared_env() {
+    let sb = Sandbox::new();
+    let repo = env_project(&sb);
+    fs::create_dir_all(repo.join("app/models")).unwrap();
+    let out = run(sb
+        .command(&[
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            "echo \"$GREETING|${PORT-unset}|$FROM_SHELL|$CARTE_WORKTREE\"; pwd",
+        ])
+        .current_dir(repo.join("app/models"))
+        .env("PORT", "1234")
+        .env("FROM_SHELL", "kept"));
+    assert!(out.success, "{}", out.stderr);
+    assert_eq!(
+        out.stdout,
+        format!(
+            "hello shop|unset|kept|{}\n{}\n",
+            repo.display(),
+            repo.join("app/models").display()
+        )
+    );
+
+    let out = sb.run(&["exec", "shop", "--", "pwd"]);
+    assert!(out.success, "{}", out.stderr);
+    assert_eq!(out.stdout, format!("{}\n", repo.display()));
+
+    let out = sb.run(&["exec", "shop/worker", "--", "sh", "-c", "exit 7"]);
+    assert_eq!(out.code, Some(7), "{}", out.stderr);
+
+    let out = sb.run(&["exec", "shop", "--", "no-such-command-here"]);
+    assert_eq!(out.code, Some(127), "{}", out.stderr);
+
+    assert_eq!(sb.run(&["exec", "shop"]).code, Some(2));
+    assert_eq!(sb.run(&["exec", "--", "true"]).code, Some(4));
+}
+
+#[test]
+fn exec_leaves_teardowns_out() {
+    let sb = Sandbox::new();
+    let repo = sb.repo("shop", &[("Procfile", "web: bin/serve\n")]);
+    sb.write_project(
+        "shop",
+        "repos = \"~/shop\"\nenv_provider = \"none\"\n\n\
+         [processes.drop-db]\ncommand = \"dropdb x\"\nkind = \"teardown\"\n\
+         [processes.drop-db.provides]\nDROPPED = \"yes\"\n",
+    );
+    let out = sb.run_in(&repo, &["exec", "--", "sh", "-c", "echo ${DROPPED-unset}"]);
+    assert!(out.success, "{}", out.stderr);
+    assert_eq!(out.stdout, "unset\n");
+
+    let out = sb.run_in(&repo, &["exec", "-p", "drop-db", "--", "true"]);
+    assert_eq!(out.code, Some(4), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("drop-db is a teardown process"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn exec_refuses_while_a_provider_is_down() {
+    let sb = Sandbox::new();
+    let repo = sb.repo(
+        "shop",
+        &[
+            ("Procfile", "web: bin/serve\n"),
+            (".env", "REDIS_URL=redis://localhost:6379\n"),
+        ],
+    );
+    sb.write_project(
+        "shop",
+        "repos = \"~/shop\"\nenv_provider = \"none\"\n\n\
+         [processes.redis]\ncommand = \"redis-server --port $PORT\"\nkind = \"service\"\n\
+         [processes.redis.provides]\nREDIS_URL = \"unix://{{run_dir}}/redis.sock\"\n\n\
+         [apps.shop]\nenv_files = [\".env\"]\n",
+    );
+    let echo = ["exec", "--", "sh", "-c", "echo $REDIS_URL"];
+    let out = sb.run_in(&repo, &echo);
+    assert_eq!(out.code, Some(3), "{}", out.stderr);
+    assert!(out.stdout.is_empty(), "{}", out.stdout);
+    for part in ["REDIS_URL", "redis", "carte up shop@main", "--no-check"] {
+        assert!(out.stderr.contains(part), "{part}: {}", out.stderr);
+    }
+
+    let out = sb.run_in(
+        &repo,
+        &["exec", "--no-check", "--", "sh", "-c", "echo $REDIS_URL"],
+    );
+    assert!(out.success, "{}", out.stderr);
+    let value = out.stdout.trim();
+    assert!(
+        value.starts_with("unix:///") && value.ends_with("/redis.sock"),
+        "{value}"
+    );
+}
+
 /// An `$EDITOR` that replaces the file with `$NEW_CONTENT`.
 fn editor(sb: &Sandbox) -> PathBuf {
     let path = sb.root.join("editor.sh");

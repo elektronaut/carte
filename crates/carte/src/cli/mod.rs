@@ -11,6 +11,7 @@ use crate::paths::Paths;
 
 mod control;
 mod env;
+mod exec;
 mod import;
 mod mcp;
 mod project;
@@ -67,6 +68,8 @@ pub enum Command {
     Open(Target),
     /// Print the rendered env with the source of each value; secrets stay hidden.
     Env(EnvArgs),
+    /// Run a command in the foreground with an app's env, like `bin/rails console`.
+    Exec(ExecArgs),
     /// Manage projects.
     #[command(subcommand)]
     Project(ProjectCommand),
@@ -147,6 +150,22 @@ pub struct EnvArgs {
     /// Show every value; values from the environment and env files are hidden otherwise.
     #[arg(long)]
     pub values: bool,
+}
+
+#[derive(Args, Clone)]
+pub struct ExecArgs {
+    #[command(flatten)]
+    pub target: Target,
+    /// Use this process's env, with its `PORT` while it runs; defaults to the env every
+    /// process of the app shares, without `PORT`.
+    #[arg(long, short)]
+    pub process: Option<String>,
+    /// Run even when a process that provides env, like a Redis service, isn't running.
+    #[arg(long)]
+    pub no_check: bool,
+    /// The command and its arguments, after `--`.
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    pub command: Vec<String>,
 }
 
 #[derive(Args, Clone)]
@@ -376,6 +395,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Share(args) => control::share(&paths, args, cli.json),
         Command::Unshare(t) => control::unshare(&paths, t, cli.json),
         Command::Env(args) => env::run(&paths, args, cli.json),
+        Command::Exec(args) => exec::run(&paths, args),
         Command::Project(cmd) => project::run(&paths, cmd, cli.json),
         Command::Prune(args) => prune::run(&paths, args, cli.json),
         Command::Setup(args) => setup::run(&paths, args),
