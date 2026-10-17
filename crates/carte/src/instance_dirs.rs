@@ -17,7 +17,7 @@ pub fn prepare(
 ) -> io::Result<InstanceDirs> {
     let dirs = roots.instance(key);
     create_run_root(&roots.run)?;
-    fs::create_dir_all(&dirs.run)?;
+    private_dir(&dirs.run)?;
     fs::create_dir_all(&dirs.state)?;
 
     let stack = key.stack.slug();
@@ -38,21 +38,38 @@ pub fn prepare(
 
 /// Creates the run root, owned by this user and closed to everyone else.
 fn create_run_root(root: &Path) -> io::Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(root)?;
-    let meta = fs::metadata(root)?;
-    if meta.uid() != unsafe { libc::getuid() } {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{} belongs to another user", root.display()),
-        ));
+    if let Some(parent) = root.parent() {
+        fs::create_dir_all(parent)?;
     }
+    let meta = private_dir(root)?;
     if meta.permissions().mode() & 0o777 != 0o700 {
         fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
+}
+
+/// Creates a directory only this user can enter, or checks the one already there:
+/// a directory rather than a symlink or a file, owned by this user.
+fn private_dir(path: &Path) -> io::Result<fs::Metadata> {
+    match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(err),
+    }
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} isn't a directory", path.display()),
+        ));
+    }
+    if meta.uid() != unsafe { libc::getuid() } {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} belongs to another user", path.display()),
+        ));
+    }
+    Ok(meta)
 }
 
 /// The record in a stack's folder; `None` when there is none.
@@ -148,6 +165,39 @@ mod tests {
         prepare(&roots, &key, &project_state(&[("web", "x")])).unwrap();
         let mode = fs::metadata(&roots.run).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[test]
+    fn refuses_run_directories_that_are_symlinks_or_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755)).unwrap();
+        let key = key("web", Stack::Branch("x".into()));
+        let state = project_state(&[("web", "x")]);
+        let roots = |run: PathBuf| DirRoots {
+            data: tmp.path().join("state/data"),
+            run,
+        };
+
+        let linked = roots(tmp.path().join("linked"));
+        std::os::unix::fs::symlink(&elsewhere, &linked.run).unwrap();
+        let err = prepare(&linked, &key, &state).unwrap_err();
+        assert!(err.to_string().contains("isn't a directory"), "{err}");
+        let mode = fs::metadata(&elsewhere).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+
+        let file = roots(tmp.path().join("file"));
+        fs::write(&file.run, "").unwrap();
+        assert!(prepare(&file, &key, &state).is_err());
+
+        let run = roots(tmp.path().join("run"));
+        let dirs = run.instance(&key);
+        fs::create_dir_all(&run.run).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &dirs.run).unwrap();
+        let err = prepare(&run, &key, &state).unwrap_err();
+        assert!(err.to_string().contains("isn't a directory"), "{err}");
     }
 
     #[test]
