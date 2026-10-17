@@ -687,3 +687,84 @@ fn sharing_without_a_share_section_explains_itself() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("sharing isn't set up"), "{stderr}");
 }
+
+/// Runs `carte mcp` in the app's checkout and sends it one request per line.
+fn mcp_session(
+    daemon: &Daemon,
+    extra: &[&str],
+    requests: &[serde_json::Value],
+) -> Vec<serde_json::Value> {
+    let mut args = vec!["mcp"];
+    args.extend_from_slice(extra);
+    let mut child = daemon
+        .command(&args)
+        .current_dir(daemon.root.join("work/acme-web"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for request in requests {
+        writeln!(stdin, "{request}").unwrap();
+    }
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn mcp_answers_from_the_checkout_it_runs_in() {
+    use serde_json::json;
+    let daemon = Daemon::start();
+    let call = |id: u32, name: &str, arguments: serde_json::Value| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+               "params": {"name": name, "arguments": arguments}})
+    };
+    let replies = mcp_session(
+        &daemon,
+        &[],
+        &[
+            json!({"jsonrpc": "2.0", "id": 0, "method": "initialize",
+                   "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                              "clientInfo": {"name": "test", "version": "1"}}}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            call(2, "status", json!({})),
+            call(3, "start", json!({})),
+        ],
+    );
+    assert_eq!(replies.len(), 4, "{replies:?}");
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "carte");
+    assert_eq!(replies[0]["result"]["protocolVersion"], "2025-06-18");
+    let tools: Vec<&str> = replies[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert!(
+        tools.contains(&"status") && !tools.contains(&"start"),
+        "{tools:?}"
+    );
+    assert_eq!(replies[2]["result"]["isError"], false);
+    let status: carte_api::StatusResponse =
+        serde_json::from_str(replies[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(status.instances.len(), 1);
+    assert_eq!(status.instances[0].app, "acme-web");
+    assert_eq!(replies[3]["error"]["code"], -32602);
+
+    let replies = mcp_session(&daemon, &["--control"], &[call(4, "start", json!({}))]);
+    assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
+    let ready: carte_api::StatusResponse =
+        serde_json::from_slice(&daemon.run(&["status", "web", "--json"]).stdout).unwrap();
+    assert_eq!(ready.instances[0].state, carte_api::InstanceState::Ready);
+}

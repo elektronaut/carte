@@ -22,7 +22,7 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
-fn address(target: &Target) -> Address {
+pub(crate) fn address(target: &Target) -> Address {
     Address {
         address: target.address.clone().unwrap_or_default(),
         cwd: std::env::current_dir()
@@ -66,13 +66,7 @@ pub fn ls(paths: &Paths, all: bool, json: bool) -> anyhow::Result<ExitCode> {
 }
 
 pub fn status(paths: &Paths, target: Target, json: bool) -> anyhow::Result<ExitCode> {
-    let world = discovery::load_world(&paths.config_dir);
-    let resolved = resolve_locally(&world, &address(&target))?;
-    let snapshot: Snapshot =
-        runtime()?.block_on(Client::new(&paths.socket()).get(paths::SNAPSHOT))?;
-    let response = StatusResponse {
-        instances: select(&snapshot, &resolved).into_iter().cloned().collect(),
-    };
+    let (snapshot, resolved, response) = status_of(paths, &target)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
     } else if response.instances.is_empty() {
@@ -81,6 +75,26 @@ pub fn status(paths: &Paths, target: Target, json: bool) -> anyhow::Result<ExitC
         print!("{}", render_status(&snapshot, &response.instances));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The status of what `target` names, with the snapshot and resolution it came from.
+fn status_of(
+    paths: &Paths,
+    target: &Target,
+) -> anyhow::Result<(Snapshot, address::Target, StatusResponse)> {
+    let world = discovery::load_world(&paths.config_dir);
+    let resolved = resolve_locally(&world, &address(target))?;
+    let snapshot: Snapshot =
+        runtime()?.block_on(Client::new(&paths.socket()).get(paths::SNAPSHOT))?;
+    let response = StatusResponse {
+        instances: select(&snapshot, &resolved).into_iter().cloned().collect(),
+    };
+    Ok((snapshot, resolved, response))
+}
+
+/// What `carte status --json` prints.
+pub(crate) fn status_response(paths: &Paths, target: &Target) -> anyhow::Result<StatusResponse> {
+    Ok(status_of(paths, target)?.2)
 }
 
 /// The instances a resolved address names: an app's instance in its stack (main when
@@ -361,13 +375,7 @@ pub fn control(
     wait: bool,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
-    let request = ControlRequest {
-        target: address(&target),
-        action,
-        wait,
-    };
-    let response: ControlResponse =
-        runtime()?.block_on(Client::new(&paths.socket()).post(paths::CONTROL, &request))?;
+    let response = send_control(paths, &target, action, wait)?;
     let code = if response.failures.is_empty() {
         Exit::Ok
     } else {
@@ -383,6 +391,20 @@ pub fn control(
     }
     eprint!("{}", render_failures(&response.failures));
     Ok(code.into())
+}
+
+pub(crate) fn send_control(
+    paths: &Paths,
+    target: &Target,
+    action: Action,
+    wait: bool,
+) -> anyhow::Result<ControlResponse> {
+    let request = ControlRequest {
+        target: address(target),
+        action,
+        wait,
+    };
+    runtime()?.block_on(Client::new(&paths.socket()).post(paths::CONTROL, &request))
 }
 
 fn render_control(response: &ControlResponse, action: Action, waited: bool) -> String {
@@ -434,6 +456,34 @@ fn render_failures(failures: &[StartFailure]) -> String {
 /// Columns of the rule a marker prints as.
 const MARKER_WIDTH: usize = 60;
 
+pub(crate) fn logs_request(args: LogsArgs) -> LogsRequest {
+    let since_ms = args
+        .since
+        .map(|since| crate::supervisor::runner::now_ms().saturating_sub(since.as_millis() as u64));
+    LogsRequest {
+        target: address(&args.target),
+        follow: args.follow,
+        tail: args.lines,
+        search: args.search,
+        since_ms,
+        since_start: args.since_start,
+        top: args.rank.is_some().then_some(args.top),
+        rank: args.rank,
+    }
+}
+
+/// The lines a request without `follow` returns.
+pub(crate) fn collect_logs(paths: &Paths, request: &LogsRequest) -> anyhow::Result<Vec<LogLine>> {
+    let mut lines = Vec::new();
+    runtime()?.block_on(Client::new(&paths.socket()).stream(
+        Method::POST,
+        paths::LOGS,
+        Some(request),
+        |line: LogLine| lines.push(line),
+    ))?;
+    Ok(lines)
+}
+
 pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCode> {
     if args.mark {
         let request = MarkRequest {
@@ -448,19 +498,7 @@ pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCod
         }
         return Ok(ExitCode::SUCCESS);
     }
-    let since_ms = args
-        .since
-        .map(|since| crate::supervisor::runner::now_ms().saturating_sub(since.as_millis() as u64));
-    let request = LogsRequest {
-        target: address(&args.target),
-        follow: args.follow,
-        tail: args.lines,
-        search: args.search,
-        since_ms,
-        since_start: args.since_start,
-        top: args.rank.is_some().then_some(args.top),
-        rank: args.rank,
-    };
+    let request = logs_request(args);
     let timed = request.rank.is_some();
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut stdout = std::io::stdout().lock();
@@ -511,17 +549,33 @@ pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCod
     Ok(ExitCode::SUCCESS)
 }
 
-pub fn events(paths: &Paths, args: EventsArgs, json: bool) -> anyhow::Result<ExitCode> {
+pub(crate) fn events_request(args: EventsArgs) -> EventsRequest {
     let target = Target {
         address: args.address,
         project: args.project,
     };
     let scoped = target.address.is_some() || target.project.is_some();
-    let request = EventsRequest {
+    EventsRequest {
         target: scoped.then(|| address(&target)),
         follow: args.follow,
         tail: Some(args.lines),
-    };
+    }
+}
+
+/// The events a request without `follow` returns.
+pub(crate) fn collect_events(paths: &Paths, request: &EventsRequest) -> anyhow::Result<Vec<Event>> {
+    let mut events = Vec::new();
+    runtime()?.block_on(Client::new(&paths.socket()).stream(
+        Method::POST,
+        paths::EVENTS,
+        Some(request),
+        |event: Event| events.push(event),
+    ))?;
+    Ok(events)
+}
+
+pub fn events(paths: &Paths, args: EventsArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let request = events_request(args);
     let mut stdout = std::io::stdout().lock();
     runtime()?.block_on(Client::new(&paths.socket()).stream(
         Method::POST,

@@ -7,11 +7,11 @@ use carte_core::address::{self, Address};
 use carte_core::discovery;
 use carte_core::env::{Source, TemplateOrigin};
 
-use super::EnvArgs;
 use super::prompt::tilde;
+use super::{EnvArgs, Target};
 use crate::exit::{Exit, Failure};
 use crate::paths::Paths;
-use crate::process_env::{self, DaemonState};
+use crate::process_env::{self, DaemonState, Rendered};
 
 /// What masked values show instead.
 const MASK: &str = "••••";
@@ -22,33 +22,7 @@ pub fn run(paths: &Paths, mut args: EnvArgs, json: bool) -> anyhow::Result<ExitC
     {
         args.key = Some(typed);
     }
-    let world = discovery::load_world(&paths.config_dir);
-    let typed = args.target.address.as_deref().unwrap_or("");
-    let mut address: Address = typed.parse().map_err(Failure::from)?;
-    if args.process.is_some() {
-        address.process = args.process;
-    }
-    let cwd = std::env::current_dir()?.canonicalize()?;
-    let target = match &args.target.project {
-        Some(project) => address::resolve_in_project(&world, project, &address, Some(&cwd)),
-        None => address::resolve(&world, &address, Some(&cwd)),
-    }
-    .map_err(Failure::from)?;
-    let Some(key) = target.instance() else {
-        bail!("{typed:?} names a whole project or stack; give an app, as in `carte env <app>`");
-    };
-    let daemon = daemon_state(paths, &key);
-    let rendered = process_env::render(
-        paths,
-        &world,
-        &key,
-        target.process.as_deref(),
-        daemon.as_ref().unwrap_or(&DaemonState {
-            env: crate::supervisor::base_env(),
-            ports: Default::default(),
-            shared: Default::default(),
-        }),
-    )?;
+    let (rendered, daemon) = render(paths, &args.target, args.process.clone())?;
 
     if let Some(wanted) = &args.key
         && rendered.env.get(wanted).is_none()
@@ -82,7 +56,7 @@ pub fn run(paths: &Paths, mut args: EnvArgs, json: bool) -> anyhow::Result<ExitC
         rendered.instance,
         tilde(checkout),
         rendered.provider,
-        if daemon.is_some() {
+        if daemon {
             ", as the daemon builds it"
         } else {
             "; the daemon isn't running, so this shell's environment stands in for it"
@@ -133,6 +107,42 @@ pub fn run(paths: &Paths, mut args: EnvArgs, json: bool) -> anyhow::Result<ExitC
         println!("note: {notice}");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The env of the process an address names, and whether the daemon's view was used.
+pub(crate) fn render(
+    paths: &Paths,
+    target: &Target,
+    process: Option<String>,
+) -> anyhow::Result<(Rendered, bool)> {
+    let world = discovery::load_world(&paths.config_dir);
+    let typed = target.address.as_deref().unwrap_or("");
+    let mut address: Address = typed.parse().map_err(Failure::from)?;
+    if process.is_some() {
+        address.process = process;
+    }
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let resolved = match &target.project {
+        Some(project) => address::resolve_in_project(&world, project, &address, Some(&cwd)),
+        None => address::resolve(&world, &address, Some(&cwd)),
+    }
+    .map_err(Failure::from)?;
+    let Some(key) = resolved.instance() else {
+        bail!("{typed:?} names a whole project or stack; give an app, as in `carte env <app>`");
+    };
+    let daemon = daemon_state(paths, &key);
+    let rendered = process_env::render(
+        paths,
+        &world,
+        &key,
+        resolved.process.as_deref(),
+        daemon.as_ref().unwrap_or(&DaemonState {
+            env: crate::supervisor::base_env(),
+            ports: Default::default(),
+            shared: Default::default(),
+        }),
+    )?;
+    Ok((rendered, daemon.is_some()))
 }
 
 /// The daemon's base env, ports and shares, when the daemon runs.

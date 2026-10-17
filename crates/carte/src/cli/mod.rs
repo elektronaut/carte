@@ -12,6 +12,7 @@ use crate::paths::Paths;
 mod control;
 mod env;
 mod import;
+mod mcp;
 mod project;
 pub(crate) mod prompt;
 mod setup;
@@ -86,6 +87,12 @@ pub enum Command {
     Tui,
     /// Run the daemon in the foreground.
     Daemon,
+    /// Serve the Model Context Protocol over stdio, for coding agents.
+    Mcp {
+        /// Also offer start, restart and stop.
+        #[arg(long)]
+        control: bool,
+    },
     /// Runs one process for the daemon; not for direct use.
     #[command(name = "__shim", hide = true)]
     Shim {
@@ -293,6 +300,7 @@ pub fn run(cli: Cli) -> ExitCode {
             return ExitCode::from(crate::shim::run(fd, &command) as u8);
         }
         Command::Daemon => control::daemon(&paths),
+        Command::Mcp { control } => mcp::run(&paths, control),
         Command::Tui => crate::tui::run(&paths),
         Command::Ls { all } => control::ls(&paths, all, cli.json),
         Command::Status(t) => control::status(&paths, t, cli.json),
