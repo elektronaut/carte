@@ -161,7 +161,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "$TAG" "$NAME.tar.gz" "$NAME.tar.gz.sha256" --clobber
 
-  # In dependency order; cargo waits for each to reach the index.
+  # In dependency order; cargo waits for each to reach the index. Each
+  # crate on crates.io trusts this workflow file (trusted publishing), which
+  # trades the job's OIDC token for a short-lived crates.io token.
   crates:
     name: Publish crates
     needs: check
@@ -170,13 +172,16 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v6.1.0
         with:
           ref: ${{ needs.check.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1.0.5
+        id: auth
       - env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
           CRATES: ${{ needs.check.outputs.crates }}
         run: |
           for crate in $CRATES; do
