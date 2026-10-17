@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{anyhow, bail};
-use carte_api::{EnvResponse, EnvVar, Snapshot};
+use carte_api::{EnvResponse, EnvVar, ProcessState, Snapshot};
 use carte_core::address;
 use carte_core::env::{self as core_env, Env, EnvRequest, Source, SystemRunner};
-use carte_core::model::{Checkout, InstanceKey, World};
+use carte_core::model::{Checkout, InstanceKey, ProcessKind, ProcessSpec, World};
 use carte_core::naming;
 use carte_core::procfile::{self, ProcessSource};
 
@@ -24,23 +24,32 @@ pub struct DaemonState {
     pub ports: BTreeMap<String, u16>,
     /// Apps of the instance's stack that are shared.
     pub shared: BTreeSet<String>,
+    /// The instance's processes that are running, by name.
+    pub running: BTreeSet<String>,
 }
 
 impl DaemonState {
     /// The ports and shares of `key`'s instance as a snapshot reports them.
     pub fn new(env: BTreeMap<String, String>, snapshot: &Snapshot, key: &InstanceKey) -> Self {
         let stack = key.stack.slug();
-        let ports = snapshot
-            .projects
-            .iter()
-            .filter(|p| p.name == key.project)
-            .flat_map(|p| &p.stacks)
-            .filter(|s| s.name == stack)
-            .flat_map(|s| &s.instances)
-            .filter(|i| i.app == key.app)
-            .flat_map(|i| &i.processes)
+        let processes = || {
+            snapshot
+                .projects
+                .iter()
+                .filter(|p| p.name == key.project)
+                .flat_map(|p| &p.stacks)
+                .filter(|s| s.name == stack)
+                .flat_map(|s| &s.instances)
+                .filter(|i| i.app == key.app)
+                .flat_map(|i| &i.processes)
+        };
+        let ports = processes()
             .filter(|p| p.pid.is_some())
             .filter_map(|p| Some((p.name.clone(), p.port?)))
+            .collect();
+        let running = processes()
+            .filter(|p| p.state == ProcessState::Running)
+            .map(|p| p.name.clone())
             .collect();
         let shared = snapshot
             .shares
@@ -48,19 +57,31 @@ impl DaemonState {
             .filter(|s| s.project == key.project && s.stack == stack)
             .flat_map(|s| s.apps.iter().map(|a| a.app.clone()))
             .collect();
-        DaemonState { env, ports, shared }
+        DaemonState {
+            env,
+            ports,
+            shared,
+            running,
+        }
     }
 }
 
 pub struct Rendered {
-    /// `app@stack/process`.
+    /// `app@stack/process`, or `app@stack` for a command's env.
     pub instance: String,
+    /// `app@stack`.
+    pub address: String,
+    /// Some process of the instance is running.
+    pub active: bool,
     pub checkout: PathBuf,
     pub provider: &'static str,
     pub env: Env,
     /// The process's port, 0 until it runs.
     pub port: u16,
     pub notices: Vec<String>,
+    /// Processes whose provided values are in the env but which aren't running, with
+    /// those variables. Tasks and teardowns are left out.
+    pub stopped_providers: BTreeMap<String, Vec<String>>,
 }
 
 impl Rendered {
@@ -106,12 +127,33 @@ pub fn revealed(source: &Source) -> bool {
     )
 }
 
+/// Whose env to render.
+#[derive(Clone, Copy)]
+pub enum Subject<'a> {
+    /// A process; `None` means the one serving HTTP.
+    Process(Option<&'a str>),
+    /// A command run in the instance, as `carte exec` runs it: a process's env with
+    /// `PORT` only while it has one, or without a process, what every process shares
+    /// (no process's own templates and no `PORT`).
+    Command(Option<&'a str>),
+}
+
 /// Renders the env of `process` of an instance, or of its HTTP process.
 pub fn render(
     paths: &Paths,
     world: &World,
     key: &InstanceKey,
     process: Option<&str>,
+    daemon: &DaemonState,
+) -> anyhow::Result<Rendered> {
+    render_subject(paths, world, key, Subject::Process(process), daemon)
+}
+
+pub fn render_subject(
+    paths: &Paths,
+    world: &World,
+    key: &InstanceKey,
+    subject: Subject,
     daemon: &DaemonState,
 ) -> anyhow::Result<Rendered> {
     let state = world
@@ -141,8 +183,23 @@ pub fn render(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let spec = match process {
-        Some(name) => list
+    if let Subject::Command(Some(name)) = subject
+        && list.teardown.iter().any(|p| p.name == name)
+    {
+        return Err(Failure::new(
+            Exit::NotFound,
+            format!(
+                "{name} is a teardown process of {}, which only runs once its stack is removed; \
+                 choose from {}, or leave out the process for the env they share",
+                app.name,
+                names()
+            ),
+        )
+        .into());
+    }
+    let shared_only;
+    let spec = match subject {
+        Subject::Process(Some(name)) | Subject::Command(Some(name)) => list
             .processes
             .iter()
             .find(|p| p.name == name)
@@ -156,13 +213,30 @@ pub fn render(
                     ),
                 )
             })?,
-        None => list.processes.iter().find(|p| p.http).ok_or_else(|| {
+        Subject::Process(None) => list.processes.iter().find(|p| p.http).ok_or_else(|| {
             anyhow!(
                 "no process of {} serves HTTP; choose one with --process: {}",
                 app.name,
                 names()
             )
         })?,
+        Subject::Command(None) => {
+            shared_only = ProcessSpec {
+                name: String::new(),
+                command: String::new(),
+                cwd: None,
+                env: Vec::new(),
+                http: false,
+                ready: Default::default(),
+                scope: Default::default(),
+                pty: false,
+                policy: Default::default(),
+                kind: None,
+                after: Vec::new(),
+                provides: Vec::new(),
+            };
+            &shared_only
+        }
     };
 
     let machine = &world.machine;
@@ -202,15 +276,42 @@ pub fn render(
         dirs: &dirs,
     };
     let runner = SystemRunner::from_env();
-    let env = core_env::build_env(&req, &daemon.env, &runner)?;
+    let mut env = core_env::build_env(&req, &daemon.env, &runner)?;
+    if matches!(subject, Subject::Command(_)) && port == 0 {
+        env.remove("PORT");
+    }
     let provider = core_env::detect_provider(state.project.env_provider, checkout.path(), &runner);
+    let mut stopped_providers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (var, value) in env.iter() {
+        if let Source::Provided { process } = &value.source
+            && !daemon.running.contains(process)
+            && list
+                .processes
+                .iter()
+                .any(|p| p.name == *process && matches!(p.kind, None | Some(ProcessKind::Service)))
+        {
+            stopped_providers
+                .entry(process.clone())
+                .or_default()
+                .push(var.to_string());
+        }
+    }
+    let address = format!("{}@{}", app.name, key.stack.slug());
+    let instance = if spec.name.is_empty() {
+        address.clone()
+    } else {
+        format!("{address}/{}", spec.name)
+    };
     Ok(Rendered {
-        instance: format!("{}@{}/{}", app.name, key.stack.slug(), spec.name),
+        instance,
+        address,
+        active: !daemon.running.is_empty(),
         checkout: checkout.path().to_path_buf(),
         provider: core_env::provider_name(provider),
         env,
         port,
         notices: list.notices.iter().map(ToString::to_string).collect(),
+        stopped_providers,
     })
 }
 

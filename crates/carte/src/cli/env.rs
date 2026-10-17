@@ -11,7 +11,7 @@ use super::prompt::tilde;
 use super::{EnvArgs, Target};
 use crate::exit::{Exit, Failure};
 use crate::paths::Paths;
-use crate::process_env::{self, DaemonState, Rendered};
+use crate::process_env::{self, DaemonState, Rendered, Subject};
 
 /// What masked values show instead.
 const MASK: &str = "••••";
@@ -115,6 +115,16 @@ pub(crate) fn render(
     target: &Target,
     process: Option<String>,
 ) -> anyhow::Result<(Rendered, bool)> {
+    render_for(paths, target, process, false)
+}
+
+/// Like [`render`]; with `command`, the env `carte exec` runs a command with.
+pub(crate) fn render_for(
+    paths: &Paths,
+    target: &Target,
+    process: Option<String>,
+    command: bool,
+) -> anyhow::Result<(Rendered, bool)> {
     let world = discovery::load_world(&paths.config_dir);
     let typed = target.address.as_deref().unwrap_or("");
     let mut address: Address = typed.parse().map_err(Failure::from)?;
@@ -131,15 +141,21 @@ pub(crate) fn render(
         bail!("{typed:?} names a whole project or stack; give an app, as in `carte env <app>`");
     };
     let daemon = daemon_state(paths, &key);
-    let rendered = process_env::render(
+    let process = resolved.process.as_deref();
+    let rendered = process_env::render_subject(
         paths,
         &world,
         &key,
-        resolved.process.as_deref(),
+        if command {
+            Subject::Command(process)
+        } else {
+            Subject::Process(process)
+        },
         daemon.as_ref().unwrap_or(&DaemonState {
             env: crate::supervisor::base_env(),
             ports: Default::default(),
             shared: Default::default(),
+            running: Default::default(),
         }),
     )?;
     Ok((rendered, daemon.is_some()))

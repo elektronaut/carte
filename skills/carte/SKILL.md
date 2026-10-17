@@ -67,6 +67,22 @@ once (`[processes.redis]`), so it isn't always in the repo's Procfile or
 process of the app, even while the service is down; `carte env` shows them
 as `provided by redis`. Use that value rather than `.env`'s.
 
+## Run commands with the app's env
+
+Run consoles, rake tasks, `rails runner`, migrations and scripts through
+`carte exec`, so they get the app's env instead of `.env`'s and reach the
+same Redis and services as its processes:
+
+```sh
+carte exec -- bin/rails runner 'puts Sidekiq::Queue.all.map(&:name)'
+carte exec -- bin/rake db:migrate
+carte exec -p worker -- bin/rails runner '…'   # one process's env, PORT included
+```
+
+If it refuses because a service isn't running, run the `carte up` it
+suggests, then retry. Don't use `--no-check` unless the command doesn't
+need the service.
+
 ## When something fails
 
 ```sh
@@ -102,7 +118,8 @@ On 3, tell the user; don't start the daemon or a server yourself.
 ## What you may do
 
 Without asking, for the app you're working on: `carte status`, `ls`, `up`,
-`restart`, `down`, `logs`, `events`, and `env` with hidden values.
+`restart`, `down`, `logs`, `events`, `env` with hidden values, and `exec`
+for commands you'd be allowed to run anyway.
 
 Ask the user first before:
 

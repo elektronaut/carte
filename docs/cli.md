@@ -1,7 +1,7 @@
 # Command line
 
 Every command talks to the daemon over its Unix socket, except `env`,
-`project`, `setup` and `import`, which also work without it. `carte` with
+`exec`, `project`, `setup` and `import`, which also work without it. `carte` with
 no command opens the terminal UI.
 
 ## Addresses
@@ -37,6 +37,7 @@ address inside it when given one.
 | `carte logs [address]` | Logs; see below |
 | `carte events [address] [-f] [-n N]` | What carte did and why: starts, stops, crashes, reloads, shares, teardowns |
 | `carte env [address] [KEY] [-p process] [--values]` | The environment a process gets, with where each value comes from |
+| `carte exec [address] [-p process] [--no-check] -- command…` | Run a command, like a console or a rake task, with the app's env |
 | `carte open [address]` | Open in the browser |
 | `carte share [address] [--apps a,b] [--ttl 2h] [--auth] [--pin] [--replace]` | Put apps on the public internet |
 | `carte unshare [address]` | End a share |
@@ -93,6 +94,38 @@ nothing, a failing `git worktree list`), and says so.
 templates and processes' `provides`) and hides values from the environment provider, the daemon's
 environment and env files, which can hold secrets. `carte env KEY` shows
 one variable with its value; `--values` shows them all.
+
+### Exec
+
+Commands you run yourself in a checkout, such as a Rails console, read
+`.env` rather than carte's env, so they can end up talking to another
+Redis than the app's workers. `carte exec` runs them with the env the
+app's processes get:
+
+```sh
+cd ~/work/acme-billing-feature-x
+carte exec -- bin/rails console
+carte exec billing@feature-x -- bin/rails runner 'ReportJob.perform_later'
+```
+
+- The env is what every process of the app shares: the provider, env
+  files, the project's and app's templates, every process's `provides`
+  and carte's variables, but no process's own `env` and no `PORT`.
+  `-p worker` (or `billing/worker`) gives that process's env instead,
+  with its `PORT` while it runs. Teardown processes have no env here:
+  `-p` refuses them, and their `provides` aren't set.
+- It's layered over your shell's environment, so `TERM` and the like
+  stay.
+- The command runs in the current directory when that's inside the
+  app's checkout, otherwise in the checkout's root.
+- carte replaces itself with the command, so signals, the terminal and
+  the exit code are the command's own.
+- When a process that provides env (a Redis service, say) isn't
+  running, `exec` refuses and suggests the `carte up` that starts it,
+  exiting with 3 when the daemon is down and 5 otherwise. `--no-check`
+  runs the command anyway. Apps without `provides` don't need to be
+  running.
+- It doesn't start the app or keep it from idling out.
 
 ## JSON output
 
@@ -172,4 +205,4 @@ before it was removed.
 | 2 | Invalid arguments |
 | 3 | The daemon isn't running |
 | 4 | The address names nothing or more than one thing, there's no app in the current directory, or a process or env key doesn't exist |
-| 5 | An app failed to start or didn't get ready in time |
+| 5 | An app failed to start or didn't get ready in time, or `exec` found a process that provides env not running |

@@ -311,6 +311,9 @@ REDIS_URL = "unix://{{run_dir}}/redis.sock"
   [Environment](#environment).
 - Names are plain variable names, not key templates.
 - `carte env` shows their source as `provided by redis`.
+- Run consoles, rake tasks and other commands with
+  [`carte exec`](cli.md#exec) so they get these values too, rather than
+  `.env`'s.
 
 ### Project-level processes
 
