@@ -1,6 +1,7 @@
 [package]
 name = "carte-core"
-version = "0.1.0"
+version.workspace = true
+description = "Configuration, naming and policies for carte; internal, no stability promises"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
