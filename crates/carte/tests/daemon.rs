@@ -1124,3 +1124,110 @@ fn a_worktree_that_comes_back_cancels_the_teardown() {
     assert!(!marker.exists(), "the teardown ran");
     assert!(dirs.state.is_dir());
 }
+
+#[test]
+fn a_worktree_that_comes_back_during_the_teardown_keeps_the_folders() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let started = marker.path().join("started");
+    let daemon = start_with_teardown("1s", &format!("touch {}; sleep 3", started.display()));
+    let dirs = run_in_feature_x(&daemon);
+
+    remove_feature_x(&daemon);
+    eventually("the teardown process", || started.exists());
+    git(
+        &daemon.root.join("work/acme-web"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "../acme-web-feature-x",
+            "feature-x",
+        ],
+    );
+    eventually("the cancelled teardown", || {
+        teardown_event(&daemon, EventKind::TeardownCancelled, false).is_some()
+    });
+    let cancelled = teardown_event(&daemon, EventKind::TeardownCancelled, false).unwrap();
+    assert_eq!(
+        cancelled.message,
+        "it has a worktree again; kept its folders"
+    );
+    assert!(teardown_event(&daemon, EventKind::TeardownFinished, false).is_none());
+    assert!(dirs.state.is_dir());
+    assert!(dirs.run.is_dir());
+}
+
+#[test]
+fn an_unreadable_stack_record_pauses_the_teardown() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let daemon = start_with_teardown("2s", &format!("touch {}", marker.display()));
+    let dirs = run_in_feature_x(&daemon);
+    let stack_dir = dirs.state.parent().unwrap().to_path_buf();
+
+    remove_feature_x(&daemon);
+    eventually("the scheduled teardown", || {
+        teardown_event(&daemon, EventKind::TeardownScheduled, false).is_some()
+    });
+    std::fs::write(stack_dir.join("stack.toml"), "not = [toml").unwrap();
+    eventually("the paused teardown", || {
+        teardown_event(&daemon, EventKind::TeardownPaused, false).is_some()
+    });
+    let paused = teardown_event(&daemon, EventKind::TeardownPaused, false).unwrap();
+    assert!(
+        paused.message.contains("couldn't read its stack.toml"),
+        "{}",
+        paused.message
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(teardown_event(&daemon, EventKind::TeardownCancelled, false).is_none());
+    let paused_events = events(&daemon)
+        .into_iter()
+        .filter(|e| e.kind == EventKind::TeardownPaused)
+        .count();
+    assert_eq!(paused_events, 1);
+    assert!(!marker.exists(), "the teardown ran");
+    assert!(dirs.state.is_dir());
+}
+
+#[test]
+fn a_kept_stack_is_not_checked_every_tick() {
+    let daemon = start_with_teardown("1s", "true");
+    run_in_feature_x(&daemon);
+    git(
+        &daemon.root.join("work/acme-web-feature-x"),
+        &["switch", "-q", "-c", "other"],
+    );
+    eventually("the switched worktree", || {
+        let snapshot = snapshot(&daemon);
+        let stacks = &snapshot.projects[0].stacks;
+        stacks.iter().any(|s| s.name == "other") && stacks.iter().all(|s| s.name != "feature-x")
+    });
+    std::thread::sleep(Duration::from_secs(1));
+
+    let real_git = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real_git = String::from_utf8(real_git.stdout).unwrap();
+    let calls = daemon.root.join("git-calls");
+    let wrapper = daemon.root.join("bin/git");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *show-ref*) echo \"$*\" >> {} ;; esac\nexec {} \"$@\"\n",
+            calls.display(),
+            real_git.trim()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    std::fs::remove_file(&wrapper).unwrap();
+
+    let checks = std::fs::read_to_string(&calls).unwrap_or_default();
+    assert!(checks.lines().count() <= 1, "{checks}");
+}

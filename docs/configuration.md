@@ -373,15 +373,20 @@ DATABASE = "billing_{{stack | snake}}"
   a `git switch` inside the worktree keeps the directory and the branch,
   so it never counts, however long it takes. The `main` stack is never
   removed, and a stack where no instance ever ran has nothing to tear
-  down.
+  down. carte checks when its worktrees change and every 30 seconds, so
+  a deleted branch can take that long to notice.
 - **Delay.** The stack must stay removed for `teardown_delay` (`"10m"`
   by default), so moving a worktree or adding it again doesn't tear
-  anything down; a worktree with the branch coming back cancels it.
-  carte only tears down stacks it saw with a worktree since the daemon
-  started, and keeps pending teardowns in memory: a daemon restart
-  forgets them.
+  anything down; a worktree with the branch coming back cancels it. If
+  it comes back while the teardown runs, the teardown processes that
+  already ran aren't undone, but the folders are kept. carte only tears
+  down stacks it saw with a worktree since the daemon started, and keeps
+  pending teardowns in memory: a daemon restart forgets them.
 - **Discovery.** Nothing is torn down in a project whose configuration
-  or discovery has a problem, such as a failing `git worktree list`.
+  or discovery has a problem, such as a failing `git worktree list`, or
+  whose `stack.toml` can't be read. A pending teardown then pauses
+  (`teardown-paused` in `carte events`): its delay keeps counting, but
+  it only runs once carte can tell again that the stack is removed.
 - **Where.** Instances still running in the stack, such as apps without
   a worktree running from their main checkout, are stopped first. Then
   each app with a teardown process runs it once, in the app's main

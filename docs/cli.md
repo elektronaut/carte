@@ -167,7 +167,7 @@ where `kind` is one of `started`, `ready`, `stopped`, `crashed`,
 `restarted`, `config-reloaded`, `config-error`, `worktree-added`,
 `worktree-removed`, `shared`, `unshared`, `share-expired`,
 `tunnel-connected`, `tunnel-failed`, `policy-changed`,
-`teardown-scheduled`, `teardown-cancelled`, `teardown-finished` and
+`teardown-scheduled`, `teardown-paused`, `teardown-cancelled`, `teardown-finished` and
 `teardown-failed`. A [teardown](configuration.md#teardown) has one
 `teardown-finished` or `teardown-failed` event per process, about
 `app@stack/process` and with its `exit_code`, and one about the stack

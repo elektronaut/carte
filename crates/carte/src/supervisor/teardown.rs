@@ -31,10 +31,16 @@ pub(super) struct Teardowns {
     pub seen: BTreeSet<StackId>,
     /// Removed stacks waiting out the delay, and since when.
     pub pending: BTreeMap<StackId, Instant>,
+    /// Pending teardowns waiting until carte can tell the stack is still removed.
+    pub paused: BTreeSet<StackId>,
     /// Teardowns under way.
     pub running: BTreeSet<StackId>,
     /// A check of the removed stacks is under way.
     pub checking: bool,
+    /// When every seen stack was last checked.
+    pub checked_all: Option<Instant>,
+    /// Discovery changed since that check.
+    pub stale: bool,
 }
 
 /// A stack that was seen and has no worktree now.
@@ -42,6 +48,8 @@ pub(super) struct Candidate {
     pub id: StackId,
     /// The project's stacks with a worktree; `None` when its discovery failed.
     pub stacks: Option<BTreeSet<String>>,
+    /// Why the project's worktrees aren't known for sure.
+    pub troubled: Option<String>,
     pub stack_dir: PathBuf,
     /// Each app's main checkout, by app name.
     pub repos: BTreeMap<String, PathBuf>,
@@ -51,6 +59,8 @@ pub(crate) enum Status {
     /// No record: no instance ever ran in the stack, so there's nothing to tear down.
     Unrecorded,
     Kept,
+    /// Its project has a problem or its record can't be read, so carte can't tell.
+    Unknown(String),
     Removed(StackRecord),
 }
 
@@ -63,8 +73,16 @@ pub(super) fn check(candidates: Vec<Candidate>) -> Vec<(StackId, Status)> {
             let record = match instance_dirs::read_stack_record(&candidate.stack_dir) {
                 Ok(Some(record)) => record,
                 Ok(None) => return (candidate.id, Status::Unrecorded),
-                Err(_) => return (candidate.id, Status::Kept),
+                Err(err) => {
+                    return (
+                        candidate.id,
+                        Status::Unknown(format!("couldn't read its stack.toml: {err}")),
+                    );
+                }
             };
+            if let Some(reason) = candidate.troubled {
+                return (candidate.id, Status::Unknown(reason));
+            }
             let removed = teardown::is_removed(
                 &candidate.id.1,
                 candidate.stacks.as_ref(),
@@ -138,7 +156,16 @@ impl Job {
             );
         } else {
             match self.remove_folders().await {
-                Ok(()) => {
+                Ok(false) => {
+                    info!("{project}@{stack} has a worktree again; its folders are kept");
+                    self.event(
+                        EventKind::TeardownCancelled,
+                        "it has a worktree again; kept its folders".into(),
+                        subject,
+                        None,
+                    );
+                }
+                Ok(true) => {
                     info!("tore down {project}@{stack}");
                     self.event(
                         EventKind::TeardownFinished,
@@ -401,16 +428,24 @@ impl Job {
     }
 
     /// Removes the stack's folder and its instances' run directories and pidfiles,
-    /// through the supervisor so no instance starts in between.
-    async fn remove_folders(&self) -> Result<(), String> {
+    /// through the supervisor so no instance starts in between. False when the stack
+    /// has a worktree again, and nothing was removed.
+    async fn remove_folders(&self) -> Result<bool, String> {
         let apps = self.state.project.apps.iter().map(|a| a.name.clone());
         let orphans = prune::stack_leftovers(&self.paths, &self.id.0, &self.id.1, apps);
         let count = orphans.len();
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Msg::Prune { orphans, reply })
+            .send(Msg::DetachStack {
+                project: self.id.0.clone(),
+                stack: self.id.1.clone(),
+                orphans,
+                reply,
+            })
             .map_err(|_| "carte is shutting down".to_string())?;
-        let detached = rx.await.unwrap_or_default();
+        let Some(detached) = rx.await.map_err(|_| "carte is shutting down".to_string())? else {
+            return Ok(false);
+        };
         if detached.len() != count {
             return Err("carte is shutting down".into());
         }
@@ -426,9 +461,69 @@ impl Job {
             .map(|kept| format!("{}: {}", kept.path.display(), kept.reason))
             .collect();
         if problems.is_empty() {
-            Ok(())
+            Ok(true)
         } else {
             Err(format!("couldn't remove {}", problems.join(", ")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn candidate(stack_dir: &Path, troubled: Option<&str>) -> Candidate {
+        Candidate {
+            id: ("acme".into(), "feature-x".into()),
+            stacks: troubled.is_none().then(BTreeSet::new),
+            troubled: troubled.map(str::to_string),
+            stack_dir: stack_dir.to_path_buf(),
+            repos: BTreeMap::new(),
+        }
+    }
+
+    fn record(stack_dir: &Path, worktree: &Path) {
+        instance_dirs::write_stack_record(
+            stack_dir,
+            &StackRecord {
+                branch: Some("feature-x".into()),
+                worktrees: BTreeMap::from([("web".to_string(), worktree.to_path_buf())]),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_troubled_project_or_unreadable_record_is_unknown() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack_dir = tmp.path().join("stack");
+        let gone = tmp.path().join("gone");
+        record(&stack_dir, &gone);
+
+        let results = check(vec![
+            candidate(&stack_dir, None),
+            candidate(&stack_dir, Some("git worktree list failed")),
+        ]);
+        assert!(matches!(results[0].1, Status::Removed(_)));
+        assert!(
+            matches!(&results[1].1, Status::Unknown(reason) if reason == "git worktree list failed")
+        );
+
+        fs::write(stack_dir.join("stack.toml"), "not = [toml").unwrap();
+        let results = check(vec![candidate(&stack_dir, None)]);
+        assert!(
+            matches!(&results[0].1, Status::Unknown(reason) if reason.starts_with("couldn't read its stack.toml")),
+        );
+    }
+
+    #[test]
+    fn a_worktree_that_still_exists_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stack_dir = tmp.path().join("stack");
+        record(&stack_dir, tmp.path());
+        let results = check(vec![candidate(&stack_dir, None)]);
+        assert!(matches!(results[0].1, Status::Kept));
     }
 }

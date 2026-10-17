@@ -148,6 +148,14 @@ pub(crate) enum Msg {
         orphans: Vec<Orphan>,
         reply: oneshot::Sender<Vec<(Orphan, prune::Detached)>>,
     },
+    /// Like `Prune`, for a torn-down stack: detaches nothing, and replies `None`, when
+    /// the stack has a worktree again.
+    DetachStack {
+        project: String,
+        stack: String,
+        orphans: Vec<Orphan>,
+        reply: oneshot::Sender<Option<Vec<(Orphan, prune::Detached)>>>,
+    },
     Internal(actor::Internal),
 }
 
