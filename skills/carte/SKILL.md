@@ -50,7 +50,9 @@ Processes with `kind = "service"` (a Redis server, say) start and get ready
 first and stop last; `kind = "task"` processes (such as
 `bin/rails db:prepare`) run to completion before the rest start, on every
 start of the app. A failing service or task fails the start, and its log is
-in the error. A finished task shows as `done`.
+in the error. A finished task shows as `done`. A service is ready once it
+accepts connections on `$PORT`, so it must listen there even when the app
+uses its unix socket (`redis-server --port $PORT --unixsocket ...`).
 
 Processes with `kind = "teardown"` never start with the app. When a
 branch's worktree is removed (or the branch deleted) and stays gone for

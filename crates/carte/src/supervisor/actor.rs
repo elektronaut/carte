@@ -1171,8 +1171,8 @@ impl Actor {
         }
     }
 
-    /// Restarts a crashed service after a wait that doubles with each crash, up to
-    /// 32 times the first; gives up at the fifth crash within a minute.
+    /// Restarts a crashed service after a wait that doubles with each crash: 1, 2, 4
+    /// and 8 times the first; gives up at the fifth crash within a minute.
     fn schedule_restart(&mut self, key: &InstanceKey, idx: usize) {
         let backoff = self.options.restart_backoff;
         let Some(proc) = self
