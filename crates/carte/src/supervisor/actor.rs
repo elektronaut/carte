@@ -82,6 +82,8 @@ pub(super) struct Instance {
     /// The pending restart has its `restarted` event.
     restart_announced: bool,
     forced: BTreeSet<String>,
+    /// Disabled processes the pending restart starts once.
+    restart_forced: BTreeSet<String>,
     /// When the latest start began.
     pub started_at: Instant,
 }
@@ -175,6 +177,7 @@ impl Instance {
             restart_pending: false,
             restart_announced: false,
             forced: BTreeSet::new(),
+            restart_forced: BTreeSet::new(),
             started_at: Instant::now(),
         }
     }
@@ -620,6 +623,9 @@ impl Actor {
             && inst.any_running()
         {
             inst.restart_pending = true;
+            if let Some(name) = force {
+                inst.restart_forced.insert(name.to_string());
+            }
             if inst.state == InstanceState::Crashed {
                 inst.state = InstanceState::Stopping;
                 inst.signal_stop(self.options.grace, true);
@@ -1408,9 +1414,11 @@ impl Actor {
         inst.in_flight = 0;
         inst.connections = 0;
         inst.forced.clear();
+        let restart_forced = std::mem::take(&mut inst.restart_forced);
         self.dirty = true;
         if inst.restart_pending {
             inst.restart_pending = false;
+            inst.forced = restart_forced;
             let why = if std::mem::take(&mut inst.restart_announced) {
                 Why::Restart
             } else {
