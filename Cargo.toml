@@ -3,14 +3,15 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/elektronaut/carte"
 
 [workspace.dependencies]
-carte-core = { path = "crates/carte-core" }
-carte-api = { path = "crates/carte-api" }
+carte-core = { path = "crates/carte-core", version = "0.1.0" }
+carte-api = { path = "crates/carte-api", version = "0.1.0" }
 anyhow = "1"
 base64 = "0.22"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }

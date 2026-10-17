@@ -1,6 +1,7 @@
 [package]
 name = "carte-api"
-version = "0.1.0"
+version.workspace = true
+description = "Types for carte's daemon socket and --json output; internal, no stability promises"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
