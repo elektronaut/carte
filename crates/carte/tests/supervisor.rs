@@ -1744,6 +1744,33 @@ kind = "service"
 }
 
 #[tokio::test]
+async fn a_disabled_process_started_while_stopping_starts_with_the_restart() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nworker: trap 'sleep 0.3; exit 0' TERM; while :; do sleep 0.05; done\nextra: exec {fixture}\n",
+    );
+    setup.project("[apps.acme-web.processes.extra]\npolicy = \"disabled\"\n");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    handle.control(control("web", Action::Down)).await.unwrap();
+    handle
+        .control(control("web/extra", Action::Up))
+        .await
+        .unwrap();
+    wait_for(&handle, "extra running after the restart", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Ready
+            && process(s, "acme-web", "extra").state == ProcessState::Running
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn restarting_a_task_while_starting_keeps_later_tiers_waiting() {
     let setup = Setup::new();
     let path = setup.root.join("order.log");
