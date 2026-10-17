@@ -248,7 +248,7 @@ three tiers, each once the one before is done:
 
 ```toml
 [apps.acme-billing.processes.redis]
-command = "redis-server --port $PORT --save ''"
+command = "redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --save ''"
 kind = "service"
 
 [apps.acme-billing.processes.migrate]
@@ -256,6 +256,12 @@ command = "bin/rails db:prepare"
 kind = "task"
 ```
 
+- A service is ready once it accepts connections on `$PORT`, or, with
+  `ready = "/path"`, once a GET of that path on `$PORT` answers without a
+  5xx. A service must listen on `$PORT` even when the app talks to it
+  through a socket: one that only listens on a unix socket never becomes
+  ready, and fails the start at the boot timeout. Redis can do both, as
+  above.
 - A service that exits or isn't ready within the boot timeout, or a task
   that exits non-zero or doesn't finish within it, fails the start like a
   crashing web process: the later tiers don't start, and the error and
@@ -274,9 +280,9 @@ kind = "task"
 - A disabled service or task is skipped, and nothing waits for it.
 - After the start, a service that exits on its own is restarted on the
   same port with the same env, so sockets and URLs other processes use
-  stay valid. carte waits 1s before the first restart and doubles the
-  wait each time, up to 32s; at the fifth crash within a minute it gives
-  up, and the service stays down while the instance keeps running.
+  stay valid. carte waits 1s, 2s, 4s and 8s before the first four
+  restarts; at the fifth crash within a minute it gives up, and the
+  service stays down while the instance keeps running.
   Restarts and the give-up show in `carte events`. Stopping it by hand
   doesn't trigger a restart. Other processes aren't restarted.
 - `after` orders processes within a tier: a task with
