@@ -100,7 +100,7 @@ pub struct Plan {
     /// Sorted by project, stack and kind; unattributed run directories last.
     pub orphans: Vec<Orphan>,
     /// Stack folders among the orphans, as (project, stack): their teardown never
-    /// succeeded, so their external resources may remain.
+    /// ran or failed, so their external resources may remain.
     pub stacks: Vec<(String, String)>,
     pub skipped: Vec<Skip>,
 }

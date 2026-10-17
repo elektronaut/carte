@@ -52,6 +52,15 @@ first and stop last; `kind = "task"` processes (such as
 start of the app. A failing service or task fails the start, and its log is
 in the error. A finished task shows as `done`.
 
+Processes with `kind = "teardown"` never start with the app. When a
+branch's worktree is removed (or the branch deleted) and stays gone for
+`teardown_delay` (10 minutes by default), carte runs them once in the main
+checkout with that stack's env, typically dropping the branch's database,
+and then deletes the stack's data. They are destructive: removing a
+worktree has consequences, and adding it back within the delay cancels
+them. `carte events` shows `teardown-scheduled`, `teardown-finished` and
+`teardown-failed`.
+
 A service may also be declared in the project file for several apps at
 once (`[processes.redis]`), so it isn't always in the repo's Procfile or
 `carte.toml`. Its `provides` sets variables such as `REDIS_URL` on every
@@ -102,6 +111,8 @@ Ask the user first before:
 - `carte stop-all`, or stopping apps you're not working on
 - `carte prune` without `--dry-run`: it deletes the data of stacks, apps
   and projects that are gone
+- removing a worktree or deleting a branch in a project with teardown
+  processes: after the delay, they destroy that stack's data
 - `--save` on `pin`, `unpin`, `disable` or `enable`, which edits project
   files
 - editing anything under `~/.config/carte`

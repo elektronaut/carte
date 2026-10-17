@@ -52,6 +52,7 @@ domain = "dev.example.com"
 | `https_port` | `443` | HTTPS |
 | `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` points to |
 | `idle_timeout` | `"15m"` | How long an app runs without traffic before it's stopped; projects can override it |
+| `teardown_delay` | `"10m"` | How long a stack's worktrees must stay gone before its [teardown](#teardown) runs; projects can override it |
 
 Changing `tld` or the ports means running `carte setup` again.
 
@@ -124,6 +125,7 @@ repos = ["~/work/acme-billing", "~/work/acme-frontend", "~/clients/acme/*"]
 | `requires` | none | Services that must be reachable before anything in the project starts: `tcp://host:port` or `unix:///path` |
 | `scheme` | `"https"` | The scheme of URLs carte injects. `"http"` for apps that misbehave behind HTTPS |
 | `idle_timeout` | machine's | Overrides the machine's idle timeout for this project |
+| `teardown_delay` | machine's | Overrides the machine's teardown delay for this project |
 | `apps` | none | Per-app settings, keyed by directory name. See [Apps](#apps) |
 | `processes` | none | Processes declared for many apps at once. See [Project-level processes](#project-level-processes) |
 
@@ -221,7 +223,7 @@ MAILCATCHER_SMTP = "1025"
 | `scope` | detected | `instance` runs per stack; `checkout` runs once per checkout and is shared by every stack running from it |
 | `pty` | `true` | Run under a pseudo-terminal. `false` uses pipes |
 | `policy` | the app's | See [Policies](#policies) |
-| `kind` | none | `"service"` or `"task"`, which start before the other processes. See [Services and tasks](#services-and-tasks) |
+| `kind` | none | `"service"` or `"task"`, which start before the other processes, or `"teardown"`, which runs once a stack is removed. See [Services and tasks](#services-and-tasks) and [Teardown](#teardown) |
 | `after` | none | Processes of the same kind this one starts after, like `["migrate"]` |
 | `provides` | none | Env templates set on every process of the instance, like a server's socket URL. See [Services and tasks](#services-and-tasks) |
 
@@ -280,6 +282,10 @@ kind = "task"
 
 The HTTP process can't have a `kind`, and services and tasks always run
 per instance, never with `scope = "checkout"`.
+
+A process with `kind = "teardown"` is in none of the tiers: it never
+starts with the instance and doesn't show among its processes. See
+[Teardown](#teardown).
 
 A service tells the other processes where to find it with `provides`, a
 table of env templates set on every process of its instance, itself
@@ -340,6 +346,61 @@ key by key, with `env` and `provides` merged entry by entry:
 4. The app's `[apps.<name>.processes]` in the project file
 
 `apps` is only valid here, not in an app's processes or `carte.toml`.
+
+### Teardown
+
+A process with `kind = "teardown"` cleans up after a stack once its
+worktrees are gone, such as dropping the branch's database. It's
+declared like any other process, in `[processes]`, an app's processes
+or `carte.toml`, with the same env and templates:
+
+```toml
+[processes.drop-db]
+apps = ["billing"]
+kind = "teardown"
+command = "dropdb --if-exists $DATABASE"
+
+[processes.drop-db.env]
+DATABASE = "billing_{{stack | snake}}"
+```
+
+- **When.** A stack counts as removed when no worktree has its branch
+  any more, and the worktrees carte last saw for it are gone: their
+  directories are deleted, or the branch is. A rebase (detached HEAD) or
+  a `git switch` inside the worktree keeps the directory and the branch,
+  so it never counts, however long it takes. The `main` stack is never
+  removed, and a stack where no instance ever ran has nothing to tear
+  down.
+- **Delay.** The stack must stay removed for `teardown_delay` (`"10m"`
+  by default), so moving a worktree or adding it again doesn't tear
+  anything down; a worktree with the branch coming back cancels it.
+  carte only tears down stacks it saw with a worktree since the daemon
+  started, and keeps pending teardowns in memory: a daemon restart
+  forgets them.
+- **Discovery.** Nothing is torn down in a project whose configuration
+  or discovery has a problem, such as a failing `git worktree list`.
+- **Where.** Instances still running in the stack, such as apps without
+  a worktree running from their main checkout, are stopped first. Then
+  each app with a teardown process runs it once, in the app's main
+  checkout (the worktree is gone), with the removed stack's environment:
+  `{{stack}}`, `CARTE_STACK`, `{{state_dir}}`, `CARTE_STATE_DIR` and the
+  rest are those of the app in that stack, `CARTE_BRANCH` is the
+  stack's branch, and the provider runs in the main checkout. Services
+  aren't running, so no `provides` are set. A process that doesn't
+  finish within 2 minutes is stopped and counts as failed. `http` and
+  `after` aren't allowed, and `scope` doesn't matter.
+- **Afterwards.** Each run shows in `carte events` (`teardown-finished`
+  or `teardown-failed`, with the exit code) and its output in
+  `carte logs -f` and the daemon's log. When every teardown succeeds, or
+  no app has one, carte deletes the stack's
+  [directories](#instance-directories) and pidfiles. When one fails, the
+  folders stay and the failure shows in `carte events`; it isn't run
+  again. [`carte prune`](cli.md#prune) later lists such stacks, and
+  removes their files without running any teardown.
+
+Teardown commands are destructive by design, so make them specific to
+the stack, with `{{stack}}` or `$CARTE_STACK`, and safe to run when
+there's nothing to remove.
 
 ### Node apps
 
@@ -456,8 +517,11 @@ The stack's folder, `<state>/data/<project>/<stack>`, also holds
 `stack.toml`, where carte records the stack's branch and each app's
 worktree.
 
-carte doesn't delete these directories when a worktree, app or project
-goes away. [`carte prune`](cli.md#prune) removes the leftovers.
+When a stack's worktrees are gone, its [teardown](#teardown) deletes
+its directories. carte doesn't delete them when an app or project goes
+away, when a teardown fails, or when the worktree went away while the
+daemon wasn't running; [`carte prune`](cli.md#prune) removes those
+leftovers.
 
 ### Env templates
 

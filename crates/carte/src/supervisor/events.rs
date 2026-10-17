@@ -122,6 +122,13 @@ pub(super) fn project(name: &str) -> EventSubject {
     }
 }
 
+pub(super) fn stack(project: &str, stack: &str) -> EventSubject {
+    EventSubject {
+        stack: Some(stack.to_string()),
+        ..self::project(project)
+    }
+}
+
 /// Which events a client wants: those about a project, stack, app or process and
 /// what's under it. An empty filter wants everything.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

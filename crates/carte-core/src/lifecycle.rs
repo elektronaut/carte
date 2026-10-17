@@ -210,6 +210,7 @@ mod tests {
             requires: vec![],
             scheme: Scheme::Https,
             idle_timeout: None,
+            teardown_delay: None,
             apps: deps
                 .iter()
                 .map(|(name, depends_on)| App {

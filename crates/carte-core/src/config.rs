@@ -104,6 +104,7 @@ struct RawMachine {
     https_port: Option<u16>,
     dns_port: Option<u16>,
     idle_timeout: Option<DurationValue>,
+    teardown_delay: Option<DurationValue>,
     #[serde(default)]
     limits: RawLimits,
     share: Option<RawShare>,
@@ -163,6 +164,7 @@ pub fn parse_machine_config(path: &Path, text: &str) -> Result<MachineConfig, Co
         https_port: raw.https_port.unwrap_or(defaults.https_port),
         dns_port: raw.dns_port.unwrap_or(defaults.dns_port),
         idle_timeout: raw.idle_timeout.map_or(defaults.idle_timeout, |d| d.0),
+        teardown_delay: raw.teardown_delay.map_or(defaults.teardown_delay, |d| d.0),
         limits: Limits {
             memory_target: raw
                 .limits
@@ -209,6 +211,7 @@ pub struct ProjectFile {
     pub requires: Vec<String>,
     pub scheme: Scheme,
     pub idle_timeout: Option<Duration>,
+    pub teardown_delay: Option<Duration>,
     /// `[apps.<full name>]` tables.
     pub apps: BTreeMap<String, AppConfig>,
     /// `[processes.<name>]` tables, declared for many apps at once.
@@ -237,6 +240,7 @@ struct RawProject {
     #[serde(default)]
     scheme: Scheme,
     idle_timeout: Option<DurationValue>,
+    teardown_delay: Option<DurationValue>,
     #[serde(default)]
     apps: BTreeMap<String, AppConfig>,
     #[serde(default, deserialize_with = "project_process_table")]
@@ -430,6 +434,7 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         requires: raw.requires,
         scheme: raw.scheme,
         idle_timeout: raw.idle_timeout.map(|d| d.0),
+        teardown_delay: raw.teardown_delay.map(|d| d.0),
         apps: raw.apps,
         processes: raw.processes,
     })
@@ -479,6 +484,7 @@ pub fn assemble_project(
         requires,
         scheme,
         idle_timeout,
+        teardown_delay,
         apps: mut app_tables,
         processes: project_processes,
         repos: _,
@@ -639,6 +645,7 @@ pub fn assemble_project(
         requires,
         scheme,
         idle_timeout,
+        teardown_delay,
         apps,
     };
     (project, problems)
@@ -926,6 +933,7 @@ mod tests {
             tld = "localhost"
             http_port = 8080
             idle_timeout = "30m"
+            teardown_delay = "1m"
 
             [limits]
             memory_target = "16GB"
@@ -944,6 +952,7 @@ mod tests {
         assert_eq!(config.http_port, 8080);
         assert_eq!(config.https_port, 443);
         assert_eq!(config.idle_timeout, Duration::from_secs(1800));
+        assert_eq!(config.teardown_delay, Duration::from_secs(60));
         assert_eq!(
             config.limits,
             Limits {
@@ -1010,6 +1019,7 @@ mod tests {
             requires = ["tcp://localhost:5432"]
             scheme = "http"
             idle_timeout = "1h"
+            teardown_delay = "30s"
 
             [env]
             "{{app.name | upper}}_URL" = "{{url:app}}"
@@ -1047,6 +1057,7 @@ mod tests {
         assert_eq!(file.env_provider, Some(EnvProviderKind::Mise));
         assert_eq!(file.scheme, Scheme::Http);
         assert_eq!(file.idle_timeout, Some(Duration::from_secs(3600)));
+        assert_eq!(file.teardown_delay, Some(Duration::from_secs(30)));
         assert_eq!(
             file.env,
             env(&[
@@ -1119,10 +1130,15 @@ mod tests {
         assert_eq!(processes["migrate"].kind, Some(ProcessKind::Task));
         assert_eq!(processes["migrate"].after, Some(vec!["seed".into()]));
 
-        let err = project("[apps.foo.processes.drop]\nkind = \"teardown\"\n")
+        let file = project("[apps.foo.processes.drop]\nkind = \"teardown\"\n").unwrap();
+        assert_eq!(
+            file.apps["foo"].processes["drop"].kind,
+            Some(ProcessKind::Teardown)
+        );
+        let err = project("[apps.foo.processes.drop]\nkind = \"cleanup\"\n")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("unknown variant `teardown`"), "{err}");
+        assert!(err.contains("unknown variant `cleanup`"), "{err}");
 
         let repo = parse_repo_config(
             Path::new("carte.toml"),

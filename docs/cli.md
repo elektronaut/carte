@@ -35,7 +35,7 @@ address inside it when given one.
 | `carte pin` / `unpin` `[address] [--save]` | Keep running through idle periods, or let it idle out again |
 | `carte disable` / `enable` `[address] [--save]` | Never start, or allow again |
 | `carte logs [address]` | Logs; see below |
-| `carte events [address] [-f] [-n N]` | What carte did and why: starts, stops, crashes, reloads, shares |
+| `carte events [address] [-f] [-n N]` | What carte did and why: starts, stops, crashes, reloads, shares, teardowns |
 | `carte env [address] [KEY] [-p process] [--values]` | The environment a process gets, with where each value comes from |
 | `carte open [address]` | Open in the browser |
 | `carte share [address] [--apps a,b] [--ttl 2h] [--auth] [--pin] [--replace]` | Put apps on the public internet |
@@ -62,8 +62,9 @@ and pidfiles that nothing that exists owns any more: those of stacks with
 no worktree (never `main`), of apps no longer in their project, and of
 projects whose file is gone. It lists them by project and stack with
 their sizes, then asks before removing them. It only removes files: it
-runs no commands and doesn't touch databases, so it names the stacks whose
-external resources may remain.
+never runs a [teardown](configuration.md#teardown) or touches databases,
+so it names the stacks whose teardown never ran or failed, whose external
+resources may remain.
 
 It leaves alone anything of a running instance, and every project whose
 configuration or discovery has a problem (a `repos` entry that matches
@@ -132,7 +133,12 @@ An **Instance** is:
 where `kind` is one of `started`, `ready`, `stopped`, `crashed`,
 `restarted`, `config-reloaded`, `config-error`, `worktree-added`,
 `worktree-removed`, `shared`, `unshared`, `share-expired`,
-`tunnel-connected`, `tunnel-failed` and `policy-changed`.
+`tunnel-connected`, `tunnel-failed`, `policy-changed`,
+`teardown-scheduled`, `teardown-cancelled`, `teardown-finished` and
+`teardown-failed`. A [teardown](configuration.md#teardown) has one
+`teardown-finished` or `teardown-failed` event per process, about
+`app@stack/process` and with its `exit_code`, and one about the stack
+when its folders are removed or kept.
 
 **`carte env --json`** prints `{ instance, vars: [{ key, value, masked, source, overrides }] }`;
 `value` is null when `masked` is true.
