@@ -264,8 +264,13 @@ kind = "task"
   everything else has exited, so a job worker can hand its unfinished
   jobs back to Redis.
 - A disabled service or task is skipped, and nothing waits for it.
-- After the start, a service that exits is reported like any other
-  process; the instance keeps running.
+- After the start, a service that exits on its own is restarted on the
+  same port with the same env, so sockets and URLs other processes use
+  stay valid. carte waits 1s before the first restart and doubles the
+  wait each time, up to 32s; at the fifth crash within a minute it gives
+  up, and the service stays down while the instance keeps running.
+  Restarts and the give-up show in `carte events`. Stopping it by hand
+  doesn't trigger a restart. Other processes aren't restarted.
 - `after` orders processes within a tier: a task with
   `after = ["migrate"]` starts once `migrate` has finished, a process
   after `web` once `web` is ready.

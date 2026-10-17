@@ -47,6 +47,11 @@ pub(crate) enum Internal {
         idx: usize,
         result: Result<(), String>,
     },
+    RestartService {
+        key: InstanceKey,
+        run: u64,
+        idx: usize,
+    },
     Tick,
 }
 
@@ -106,6 +111,10 @@ pub(super) struct Proc {
     pub queued: bool,
     /// What a queued process runs, once its environment is built.
     spawn: Option<SpawnSpec>,
+    /// When a service crashed within the last minute.
+    crashes: Vec<Instant>,
+    /// A crashed service waits to be restarted.
+    pending_restart: bool,
 }
 
 impl Proc {
@@ -449,6 +458,7 @@ impl Actor {
                 idx,
                 result,
             } => self.ready(&key, run, idx, result),
+            Internal::RestartService { key, run, idx } => self.restart_service(&key, run, idx),
             Internal::Tick => self.tick(),
         }
     }
@@ -617,6 +627,8 @@ impl Actor {
                 ready: false,
                 queued: false,
                 spawn: None,
+                crashes: Vec::new(),
+                pending_restart: false,
                 memory_bytes: 0,
                 cpu_percent: 0.0,
                 cpu_sample: None,
@@ -726,6 +738,7 @@ impl Actor {
             .iter()
             .position(|p| p.spec.name == name)
             .ok_or_else(|| format!("{} has no process named {name}", inst.label()))?;
+        inst.procs[idx].pending_restart = false;
         if inst.procs[idx].is_running() {
             return Ok(());
         }
@@ -1029,6 +1042,7 @@ impl Actor {
         let name = name.as_str();
         let http = proc.spec.http;
         let boot_step = proc.spec.kind.is_some();
+        let service = proc.spec.is_service();
         let done = proc.state == ProcessState::Done;
         match inst.state {
             InstanceState::Starting | InstanceState::Ready if done => self.advance(key),
@@ -1056,8 +1070,11 @@ impl Actor {
                     );
                     self.dirty = true;
                 }
+                let ready = inst.state == InstanceState::Ready;
                 if restart {
                     let _ = self.start_process(key, name);
+                } else if service && ready && !manual {
+                    self.schedule_restart(key, idx);
                 }
                 self.advance(key);
             }
@@ -1070,6 +1087,65 @@ impl Actor {
             InstanceState::Crashed => inst.signal_stop(grace, false),
             InstanceState::Stopped => {}
         }
+    }
+
+    /// Restarts a crashed service after a wait that doubles with each crash, up to
+    /// 32 times the first; gives up at the fifth crash within a minute.
+    fn schedule_restart(&mut self, key: &InstanceKey, idx: usize) {
+        let backoff = self.options.restart_backoff;
+        let Some(proc) = self
+            .instances
+            .get_mut(key)
+            .and_then(|inst| inst.procs.get_mut(idx))
+        else {
+            return;
+        };
+        let now = Instant::now();
+        proc.crashes
+            .retain(|at| now.duration_since(*at) < Duration::from_secs(60));
+        proc.crashes.push(now);
+        let crashes = proc.crashes.len() as u32;
+        let name = proc.spec.name.clone();
+        if crashes >= 5 {
+            self.event(
+                EventKind::Crashed,
+                format!("{name} crashed {crashes} times within a minute; it stays down"),
+                vec![events::process(key, &name)],
+            );
+            return;
+        }
+        proc.pending_restart = true;
+        let run = proc.run;
+        let delay = (backoff * 2u32.pow(crashes - 1)).min(backoff * 32);
+        let tx = self.tx.clone();
+        let key = key.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = tx.send(Msg::Internal(Internal::RestartService { key, run, idx }));
+        });
+    }
+
+    fn restart_service(&mut self, key: &InstanceKey, run: u64, idx: usize) {
+        let Some(inst) = self.instances.get_mut(key) else {
+            return;
+        };
+        if inst.state != InstanceState::Ready {
+            return;
+        }
+        let Some(proc) = inst.procs.get_mut(idx) else {
+            return;
+        };
+        if proc.run != run || !proc.pending_restart || proc.is_running() {
+            return;
+        }
+        proc.restarts += 1;
+        let name = proc.spec.name.clone();
+        self.event(
+            EventKind::Restarted,
+            "after a crash",
+            vec![events::process(key, &name)],
+        );
+        let _ = self.start_process(key, &name);
     }
 
     /// A readiness check passed or failed, or a task ran out of time.
@@ -1188,6 +1264,7 @@ impl Actor {
             self.stop(key, why);
             return Ok(());
         }
+        proc.pending_restart = false;
         let mut event = None;
         if let Some(stop) = proc.stop.take() {
             proc.state = ProcessState::Stopping;
