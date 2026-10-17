@@ -100,6 +100,10 @@ carte env -p worker                   # another process's env
 A request to an app that failed to boot gets an error page with the last
 log lines. `carte events` answers "why did it stop or restart?".
 
+A worker or service that crashes after the start is restarted on its
+own; at the fifth crash within a minute carte gives up, and `carte status`
+shows it as `gave up restarting`. Fix the cause, then `carte up /worker`.
+
 `carte env` hides values that come from the environment and env files,
 since they may be secrets. Don't reveal them without asking (see below).
 

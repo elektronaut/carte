@@ -199,6 +199,7 @@ fn stack_status(
                             port: Some(p.port),
                             http: p.spec.http,
                             restarts: p.restarts,
+                            gave_up: p.gave_up,
                             memory_bytes: p.memory_bytes,
                             cpu_percent: p.cpu_percent,
                         }
@@ -267,6 +268,7 @@ fn stopped_processes(
                 restarts: earlier.map_or(0, |p| p.restarts),
                 memory_bytes: 0,
                 cpu_percent: 0.0,
+                gave_up: false,
             }
         })
         .collect()

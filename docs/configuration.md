@@ -225,6 +225,7 @@ MAILCATCHER_SMTP = "1025"
 | `policy` | the app's | See [Policies](#policies) |
 | `kind` | none | `"service"` or `"task"`, which start before the other processes, or `"teardown"`, which runs once a stack is removed. See [Services and tasks](#services-and-tasks) and [Teardown](#teardown) |
 | `after` | none | Processes of the same kind this one starts after, like `["migrate"]` |
+| `restart` | `"on-failure"`; `"never"` for tasks | `"on-failure"` restarts the process when it crashes after the start; `"never"` leaves it down. Not allowed on the HTTP process or a teardown. See [Crashes](#crashes) |
 | `provides` | none | Env templates set on every process of the instance, like a server's socket URL. See [Services and tasks](#services-and-tasks) |
 
 Every process gets its own `PORT`. A fixed port in the HTTP process's
@@ -279,13 +280,8 @@ kind = "task"
   jobs back to Redis. The same holds when a crashed instance is started
   again: it starts once its old processes have exited.
 - A disabled service or task is skipped, and nothing waits for it.
-- After the start, a service that exits on its own is restarted on the
-  same port with the same env, so sockets and URLs other processes use
-  stay valid. carte waits 1s, 2s, 4s and 8s before the first four
-  restarts; at the fifth crash within a minute it gives up, and the
-  service stays down while the instance keeps running.
-  Restarts and the give-up show in `carte events`. Stopping it by hand
-  doesn't trigger a restart. Other processes aren't restarted.
+- After the start, a service that crashes is restarted; see
+  [Crashes](#crashes).
 - `after` orders processes within a tier: a task with
   `after = ["migrate"]` starts once `migrate` has finished, a process
   after `web` once `web` is ready.
@@ -326,6 +322,45 @@ REDIS_URL = "unix://{{run_dir}}/redis.sock"
 - Run consoles, rake tasks and other commands with
   [`carte exec`](cli.md#exec) so they get these values too, rather than
   `.env`'s.
+
+### Crashes
+
+Once an instance is ready, a process that crashes is restarted, unless
+it has `restart = "never"`:
+
+- A crash is a non-zero exit or death by a signal. A process that exits
+  with code 0 is done: it shows as `exited` and isn't restarted.
+- It's restarted on the same port with the same env, so sockets and
+  URLs other processes use stay valid. carte waits 1s, 2s, 4s and 8s
+  before the first four restarts; at the fifth crash within a minute it
+  gives up, and the process stays down while the instance keeps running.
+  `carte status` shows it as `gave up restarting`, `carte ls` as
+  `down: worker (gave up)`, and the terminal UI marks it `gave up`.
+  Starting it by hand (`carte up app/worker`) clears that and starts
+  counting again.
+- Restarts and the give-up show in `carte events`.
+- Stopping it by hand, disabling it, stopping the instance or an idle
+  stop never restart it, and cancel a restart that's waiting.
+- During the start, nothing is restarted: a service or task that fails
+  fails the start, as described in [Services and tasks](#services-and-tasks),
+  and another process that crashes stays down.
+- Tasks default to `restart = "never"`, and `"on-failure"` isn't allowed
+  on them: they run once per start. The HTTP process takes no
+  `restart`: its crash crashes the instance, and the next request starts
+  it again.
+- A process with `scope = "checkout"` is restarted by the instance
+  running it. Once it has exited, while it waits to restart or stays
+  down, the other instances sharing the checkout don't start their own
+  copy; when that instance stops, one of them takes it over.
+
+Before restart policies, only services were restarted; other processes
+stayed down after a crash. Set `restart = "never"` to keep that, for
+one process or, in the project's `[processes]`, for every app's:
+
+```toml
+[processes.worker]
+restart = "never"
+```
 
 ### Project-level processes
 

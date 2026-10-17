@@ -108,6 +108,9 @@ pub struct Status {
     pub cpu_percent: f32,
     pub memory_bytes: u64,
     pub problems: usize,
+    /// carte stopped restarting the process, or one of the instance's; a badge on
+    /// a running instance, the detail of a crashed process.
+    pub gave_up: bool,
 }
 
 impl Status {
@@ -125,6 +128,7 @@ impl Status {
             cpu_percent: 0.0,
             memory_bytes: 0,
             problems: 0,
+            gave_up: false,
         }
     }
 
@@ -333,6 +337,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
         held_by,
         cpu_percent: inst.cpu_percent,
         memory_bytes: inst.memory_bytes,
+        gave_up: inst.processes.iter().any(|p| p.gave_up),
         ..Status::new(state)
     };
     status.problems = snapshot
@@ -384,6 +389,7 @@ fn process_node(instance: &NodeId, process: &ProcessStatus) -> Node {
         disabled,
         cpu_percent: process.cpu_percent,
         memory_bytes: process.memory_bytes,
+        gave_up: process.gave_up,
         ..Status::new(state)
     };
     Node::leaf(

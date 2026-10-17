@@ -279,6 +279,9 @@ fn badges(status: &Status, aggregate: bool) -> Vec<Span<'static>> {
     if status.shared {
         spans.push(Span::raw(" shared").magenta());
     }
+    if status.gave_up && status.state != State::Crashed {
+        spans.push(Span::raw(" gave up").red());
+    }
     if status.problems > 0 {
         spans.push(Span::raw(" !").red().bold());
     }
@@ -302,6 +305,7 @@ fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
         },
         State::Starting => Span::raw("starting").yellow(),
         State::Stopping => Span::raw("stopping").yellow(),
+        State::Crashed if process && status.gave_up => Span::raw("gave up").red(),
         State::Crashed if process => Span::raw("exited").red(),
         State::Crashed => Span::raw("crashed").red(),
         State::Exited => Span::raw("exited").dark_gray(),
@@ -646,6 +650,14 @@ fn process_details(
         } else {
             line.red()
         });
+    }
+    if process.gave_up {
+        lines.push(
+            Line::from(
+                "it crashed too often, so carte stopped restarting it; start it to try again",
+            )
+            .red(),
+        );
     }
     if let Some(error) = &instance.last_error
         && !matches!(process.state, ProcessState::Running | ProcessState::Done)
@@ -1452,6 +1464,36 @@ mod tests {
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
  ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show"
+        );
+    }
+
+    #[test]
+    fn renders_a_process_carte_gave_up_on() {
+        let mut snapshot = sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.processes[1].state = ProcessState::Exited {
+            code: None,
+            signal: Some(9),
+        };
+        billing.processes[1].gave_up = true;
+        billing.processes[1].restarts = 4;
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Right] {
+            press(&mut app, now, code);
+        }
+        for _ in 0..2 {
+            press(&mut app, now, KeyCode::Down);
+        }
+        let screen = draw(&mut app, 120, 12);
+        assert!(screen.contains("● billing gave up"), "{screen}");
+        assert!(screen.contains("✖ worker        gave up"), "{screen}");
+        assert!(screen.contains("✖ crashed · 4 restarts"), "{screen}");
+        assert!(screen.contains("killed by signal 9"), "{screen}");
+        assert!(
+            screen.contains("it crashed too often, so carte stopped restarting it"),
+            "{screen}"
         );
     }
 

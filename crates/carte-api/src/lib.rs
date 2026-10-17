@@ -272,6 +272,9 @@ pub struct ProcessStatus {
     pub restarts: u32,
     pub memory_bytes: u64,
     pub cpu_percent: f32,
+    /// It crashed too often after the start, and carte stopped restarting it.
+    #[serde(default)]
+    pub gave_up: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

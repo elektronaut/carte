@@ -205,6 +205,11 @@ fn process_word(process: &carte_api::ProcessStatus) -> String {
         ProcessState::Disabled => "disabled".to_string(),
         ProcessState::Done => "done".to_string(),
     };
+    let state = if process.gave_up {
+        format!("{state}, gave up restarting")
+    } else {
+        state
+    };
     match process.port {
         Some(port) if process.pid.is_some() => format!("{} {state} :{port}", process.name),
         _ => format!("{} {state}", process.name),
@@ -307,7 +312,7 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
     if inst.stack != "main" && inst.checkout == "main" {
         parts.push("main checkout".to_string());
     }
-    let down: Vec<&str> = inst
+    let down: Vec<String> = inst
         .processes
         .iter()
         .filter(|p| {
@@ -316,7 +321,13 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
                 ProcessState::Running | ProcessState::Starting | ProcessState::Done
             )
         })
-        .map(|p| p.name.as_str())
+        .map(|p| {
+            if p.gave_up {
+                format!("{} (gave up)", p.name)
+            } else {
+                p.name.clone()
+            }
+        })
         .collect();
     if inst.state == InstanceState::Ready && !down.is_empty() {
         parts.push(format!("down: {}", down.join(", ")));
@@ -793,6 +804,27 @@ nova-billing  ready
   last error  worker exited with code 1
 "
         );
+    }
+
+    #[test]
+    fn shows_processes_carte_gave_up_on() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.processes[1].state = ProcessState::Exited {
+            code: None,
+            signal: Some(9),
+        };
+        billing.processes[1].gave_up = true;
+        let instances = vec![billing.clone()];
+        let status = render_status(&snapshot, &instances);
+        assert!(
+            status.contains(
+                "processes  web running, worker killed by signal 9, gave up restarting\n"
+            ),
+            "{status}"
+        );
+        let ls = render_ls(&snapshot, false);
+        assert!(ls.contains("down: worker (gave up)"), "{ls}");
     }
 
     #[test]
