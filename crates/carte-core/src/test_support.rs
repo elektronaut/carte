@@ -45,6 +45,7 @@ pub fn state(project: Project, worktrees: Vec<(&str, Vec<Worktree>)>) -> Project
             .into_iter()
             .map(|(app, wts)| (app.to_string(), wts))
             .collect::<BTreeMap<_, _>>(),
+        processes: BTreeMap::new(),
     }
 }
 

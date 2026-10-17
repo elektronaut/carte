@@ -348,6 +348,7 @@ mod tests {
                 .map(|project| crate::model::ProjectState {
                     project,
                     worktrees: Default::default(),
+                    processes: Default::default(),
                 })
                 .collect(),
             ..Default::default()

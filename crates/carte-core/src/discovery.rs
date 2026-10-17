@@ -9,6 +9,7 @@ use thiserror::Error;
 use crate::config::{self, DiscoveredApp, ProjectFile};
 use crate::model::{AppRef, Problem, ProjectState, Worktree, World};
 use crate::naming;
+use crate::procfile;
 use crate::slug::branch_slug;
 
 #[derive(Debug, Error)]
@@ -236,7 +237,29 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
             worktrees.insert(app.name.clone(), wts);
         }
     }
-    let state = ProjectState { project, worktrees };
+    let processes = project
+        .apps
+        .iter()
+        .filter(|a| !a.path.as_os_str().is_empty())
+        .flat_map(|app| {
+            let checkouts = std::iter::once(app.path.clone()).chain(
+                worktrees
+                    .get(&app.name)
+                    .into_iter()
+                    .flatten()
+                    .map(|wt| wt.path.clone()),
+            );
+            checkouts.map(|path| {
+                let list = procfile::load(&path, &app.settings).map_err(|err| err.to_string());
+                (path, list)
+            })
+        })
+        .collect();
+    let state = ProjectState {
+        project,
+        worktrees,
+        processes,
+    };
     problems.extend(naming::collisions(&state));
     (state, problems)
 }
@@ -442,6 +465,7 @@ fn find_elsewhere(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Policy, Stack};
 
     #[test]
     fn finds_apps_of_other_projects() {
@@ -749,6 +773,70 @@ prunable gitdir file points to non-existent location
             messages
                 .iter()
                 .any(|(p, m)| *p == Some("xy") && m.contains("project name \"xy\""))
+        );
+    }
+
+    #[test]
+    fn reads_each_checkouts_process_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let work = root.join("work");
+        repo(&work.join("shop"));
+        repo(&work.join("notes"));
+        git(
+            &work.join("shop"),
+            &["worktree", "add", "-q", "-b", "feature", "../shop-feature"],
+        );
+        std::fs::write(
+            work.join("shop/Procfile.dev"),
+            "web: rails s\nworker: jobs\n",
+        )
+        .unwrap();
+        std::fs::write(work.join("shop-feature/Procfile"), "web: rails s\n").unwrap();
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(config_dir.join("projects")).unwrap();
+        std::fs::write(
+            config_dir.join("projects/shop.toml"),
+            format!(
+                "repos = [\"{0}/shop\", \"{0}/notes\"]\n[apps.shop.processes.worker]\npolicy = \"disabled\"\n",
+                work.display()
+            ),
+        )
+        .unwrap();
+
+        let world = load_world(&config_dir);
+        let state = world.project("shop").unwrap();
+        let shop = state.project.app("shop").unwrap();
+        let names = |stack: &Stack| -> Vec<(String, Policy)> {
+            state
+                .process_list(shop, stack)
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .processes
+                .iter()
+                .map(|p| (p.name.clone(), p.policy))
+                .collect()
+        };
+        assert_eq!(
+            names(&Stack::Main),
+            [
+                ("web".to_string(), Policy::Auto),
+                ("worker".to_string(), Policy::Disabled)
+            ]
+        );
+        assert_eq!(
+            names(&Stack::Branch("feature".into())),
+            [("web".to_string(), Policy::Auto)]
+        );
+        let notes = state.project.app("notes").unwrap();
+        assert!(
+            state
+                .process_list(notes, &Stack::Main)
+                .unwrap()
+                .as_ref()
+                .unwrap_err()
+                .contains("no Procfile.dev")
         );
     }
 
