@@ -26,6 +26,7 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
         .enable_all()
         .build()?;
     let socket = paths.socket();
+    let start_at = here(paths);
     runtime.block_on(async move {
         let mut terminal = ratatui::try_init()?;
         let restore = std::panic::take_hook();
@@ -34,7 +35,7 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
             restore(info);
         }));
         tasks::set_mouse_capture(true);
-        let result = event_loop(&mut terminal, socket).await;
+        let result = event_loop(&mut terminal, socket, start_at).await;
         tasks::set_mouse_capture(false);
         ratatui::restore();
         result
@@ -42,13 +43,27 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The instance whose checkout holds the current directory.
+fn here(paths: &Paths) -> Option<tree::NodeId> {
+    let cwd = std::env::current_dir().ok()?.canonicalize().ok()?;
+    let world = carte_core::discovery::load_world(&paths.config_dir);
+    let location = carte_core::address::locate(&world, &cwd)?;
+    Some(tree::NodeId::Instance {
+        project: location.project,
+        stack: location.stack.slug().to_string(),
+        app: location.app,
+    })
+}
+
 async fn event_loop(
     terminal: &mut DefaultTerminal,
     socket: std::path::PathBuf,
+    start_at: Option<tree::NodeId>,
 ) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut tasks = tasks::Tasks::start(socket, tx);
     let mut app = app::App::new(Instant::now());
+    app.start_at = start_at;
     terminal.draw(|frame| view::render(frame, &mut app))?;
     while let Some(event) = rx.recv().await {
         let mut next = Some(event);

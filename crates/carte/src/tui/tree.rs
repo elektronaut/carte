@@ -544,6 +544,18 @@ impl Fold {
     }
 }
 
+/// The child indexes from the roots to the node that holds `id`.
+pub fn path_to(roots: &[Node], id: &NodeId) -> Option<Vec<usize>> {
+    roots.iter().enumerate().find_map(|(i, node)| {
+        if node.ids.contains(id) {
+            return Some(vec![i]);
+        }
+        let mut path = path_to(&node.children, id)?;
+        path.insert(0, i);
+        Some(path)
+    })
+}
+
 pub fn node<'a>(roots: &'a [Node], path: &[usize]) -> &'a Node {
     let (first, rest) = path.split_first().expect("a row has a path");
     rest.iter()
@@ -672,6 +684,26 @@ mod tests {
             ..Fold::default()
         };
         assert_eq!(labels(&roots, &filtered), ["agency/", "  marketplace"]);
+
+        let merged = NodeId::Instance {
+            project: "marketplace".into(),
+            stack: "main".into(),
+            app: "marketplace".into(),
+        };
+        assert_eq!(
+            path_to(&roots, &merged),
+            Some(vec![0, 1]),
+            "found in the project row it was merged into"
+        );
+        assert_eq!(
+            path_to(
+                &roots,
+                &NodeId::Project {
+                    project: "nope".into()
+                }
+            ),
+            None
+        );
     }
 
     #[test]

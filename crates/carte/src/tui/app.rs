@@ -138,6 +138,8 @@ pub struct App {
     pub logs_area: Rect,
     pub selection: Option<Selection>,
     pub env: Option<EnvView>,
+    /// Selected and revealed once the first snapshot arrives.
+    pub start_at: Option<NodeId>,
     pub mouse: bool,
     pub quit: bool,
 }
@@ -166,6 +168,7 @@ impl App {
             logs_area: Rect::default(),
             selection: None,
             env: None,
+            start_at: None,
             mouse: true,
             quit: false,
         }
@@ -264,6 +267,24 @@ impl App {
 
     fn rebuild(&mut self) {
         self.roots = self.snapshot.as_ref().map(tree::build).unwrap_or_default();
+        match self.start_at.take() {
+            Some(id) if self.snapshot.is_some() => self.reveal(id),
+            start_at => {
+                self.start_at = start_at;
+                self.refresh_rows();
+            }
+        }
+    }
+
+    /// Selects a node, unfolding everything above it.
+    fn reveal(&mut self, id: NodeId) {
+        if let Some(path) = tree::path_to(&self.roots, &id) {
+            for depth in 1..path.len() {
+                let ancestor = tree::node(&self.roots, &path[..depth]).id().clone();
+                self.fold.expanded.insert(ancestor, true);
+            }
+            self.selected = Some(id);
+        }
         self.refresh_rows();
     }
 
@@ -1351,6 +1372,36 @@ mod tests {
         press(&mut app, now, KeyCode::Esc);
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.env, None);
+    }
+
+    #[test]
+    fn starts_on_the_app_it_was_opened_in() {
+        let mut snapshot = sample();
+        snapshot.projects[0].folder = Some("clients".into());
+        let now = Instant::now();
+        let mut app = App::new(now);
+        let here = NodeId::Instance {
+            project: "nova".into(),
+            stack: "feature-x".into(),
+            app: "nova-frontend".into(),
+        };
+        app.start_at = Some(here.clone());
+        app.update(Event::Disconnected("not yet".into()), now);
+        assert_eq!(app.start_at, Some(here.clone()), "waits for a snapshot");
+
+        let commands = app.update(Event::Snapshot(Box::new(snapshot.clone())), now);
+        assert_eq!(app.selected, Some(here.clone()));
+        assert_eq!(follows(&commands), ["nova-frontend@feature-x"]);
+        assert!(
+            app.fold.is_expanded(&NodeId::Folder {
+                folder: "clients".into()
+            }),
+            "its folder opened"
+        );
+
+        press(&mut app, now, KeyCode::Up);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        assert_ne!(app.selected, Some(here), "only the first snapshot");
     }
 
     #[test]
