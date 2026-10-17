@@ -56,6 +56,7 @@ impl Setup {
             grace: Duration::from_millis(500),
             boot_timeout: Duration::from_secs(10),
             tick: Duration::from_millis(100),
+            restart_backoff: Duration::from_millis(100),
             ..Options::new(&self.paths)
         };
         supervisor::start(
@@ -1456,5 +1457,119 @@ kind = "service"
     })
     .await;
     assert_eq!(lines(&path), ["worker", "redis"]);
+    handle.shutdown().await;
+}
+
+/// The env a fixture on `port` echoes, once it answers.
+async fn echoed_env(port: u16) -> String {
+    for _ in 0..50 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            let body = http_get(port, "/");
+            return body.split_once("\"env\":").unwrap().1.to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("nothing answers on port {port}");
+}
+
+#[tokio::test]
+async fn a_crashed_service_restarts_on_its_own_port_until_stopped_by_hand() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\n");
+    setup.project(&format!(
+        "[apps.acme-web.processes.redis]\ncommand = 'FIXTURE_ENV=PORT,CARTE_RUN_DIR,CARTE_STATE_DIR exec {}'\nkind = \"service\"\n",
+        fixture().display()
+    ));
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let before = process(&handle.snapshot(), "acme-web", "redis").clone();
+    let env = echoed_env(before.port.unwrap()).await;
+    assert!(env.contains("\"CARTE_RUN_DIR\":\"/"), "{env}");
+    let pid = before.pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "redis to come back", |s| {
+        let p = process(s, "acme-web", "redis");
+        p.state == ProcessState::Running && p.pid.is_some_and(|p| p != pid)
+    })
+    .await;
+    let snapshot = handle.snapshot();
+    let after = process(&snapshot, "acme-web", "redis");
+    assert_eq!(after.port, before.port);
+    assert_eq!(after.restarts, before.restarts + 1);
+    assert_eq!(echoed_env(after.port.unwrap()).await, env);
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Ready
+    );
+    wait_for_events(&handle, "the restart", |lines| {
+        lines
+            .iter()
+            .any(|l| l == "acme-web/redis restarted: after a crash")
+    })
+    .await;
+
+    handle
+        .control(control("web/redis", Action::Down))
+        .await
+        .unwrap();
+    wait_for(&handle, "redis stopped", |s| {
+        process(s, "acme-web", "redis").state == ProcessState::Stopped
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        process(&handle.snapshot(), "acme-web", "redis").state,
+        ProcessState::Stopped
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_service_that_keeps_crashing_stays_down() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    let path = setup.root.join("crashes.log");
+    setup.app("acme-web", "web: exec {fixture}\n");
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.redis]
+command = 'if [ -e {marker} ]; then echo crash >> {log}; exit 1; fi; touch {marker}; exec {fixture}'
+kind = "service"
+"#,
+        marker = marker.display(),
+        log = path.display(),
+        fixture = fixture().display()
+    ));
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "redis")
+        .pid
+        .unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for_events(&handle, "carte to give up", |lines| {
+        lines.iter().any(|l| {
+            l == "acme-web/redis crashed: redis crashed 5 times within a minute; it stays down"
+        })
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(lines(&path), ["crash"; 4]);
+    let snapshot = handle.snapshot();
+    assert!(matches!(
+        process(&snapshot, "acme-web", "redis").state,
+        ProcessState::Exited { code: Some(1), .. }
+    ));
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Ready
+    );
     handle.shutdown().await;
 }
