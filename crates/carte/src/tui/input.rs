@@ -76,6 +76,10 @@ pub enum Intent {
     CopyPublicUrl,
     ShowEnv,
     StartJump,
+    /// Moves to the next older match of the logs search, or the next newer one.
+    FindMatch {
+        older: bool,
+    },
     /// Share or unshare the selected app; with `auth`, share it behind a password.
     Share {
         auth: bool,
@@ -97,8 +101,9 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("g G", "top, bottom"),
             ("PgUp PgDn", "page"),
             ("tab", "switch between tree and logs"),
-            ("/", "filter the focused pane"),
-            ("esc", "clear the filter"),
+            ("/", "filter the tree, search the logs"),
+            ("n N", "older, newer match in the logs"),
+            ("esc", "clear the filter or search"),
             ("a", "show all, running or shared"),
             ("e", "show logs or events"),
             ("drag", "copy log lines"),
@@ -228,6 +233,8 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         (Focus::Tree, KeyCode::Right | KeyCode::Char('l')) => Some(Intent::Expand),
         (Focus::Tree, KeyCode::Enter | KeyCode::Char(' ')) => Some(Intent::Toggle),
         (Focus::Logs, KeyCode::Left | KeyCode::Char('h')) => Some(Intent::SwitchFocus),
+        (Focus::Logs, KeyCode::Char('n')) => Some(Intent::FindMatch { older: true }),
+        (Focus::Logs, KeyCode::Char('N')) => Some(Intent::FindMatch { older: false }),
         _ => None,
     }
 }

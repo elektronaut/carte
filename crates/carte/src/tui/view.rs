@@ -670,8 +670,13 @@ fn problems_for<'a>(app: &'a App, id: &NodeId) -> Vec<&'a Problem> {
 fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
     let logs = &app.logs;
     let mut title = vec![Span::raw(if app.events { " events " } else { " logs " })];
-    if !logs.filter.is_empty() {
-        title.push(Span::raw(format!("/{} ", logs.filter)).yellow());
+    if !logs.search.is_empty() {
+        let seqs = logs.match_seqs();
+        let at = logs
+            .current
+            .and_then(|seq| seqs.iter().position(|&s| s == seq))
+            .map_or(String::new(), |i| format!("{}/", i + 1));
+        title.push(Span::raw(format!("/{} {at}{} ", logs.search, seqs.len())).yellow());
     }
     title.push(if logs.scroll > 0 {
         Span::raw(format!("↑{} ", logs.scroll)).yellow()
@@ -693,18 +698,17 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
         let message = match (&logs.ended, logs.is_empty()) {
             (Some(reason), _) if app.events => format!("No events: {reason}"),
             (Some(reason), _) => format!("No logs: {reason}"),
-            (None, false) => "No lines match the filter.".into(),
-            (None, true) if app.events => "Nothing has happened here yet.".into(),
-            (None, true) if logs.key.is_some() && stopped => "Not running; s starts it.".into(),
-            (None, true) if logs.key.is_some() => "No output yet.".into(),
-            (None, true)
+            (None, _) if app.events => "Nothing has happened here yet.".into(),
+            (None, _) if logs.key.is_some() && stopped => "Not running; s starts it.".into(),
+            (None, _) if logs.key.is_some() => "No output yet.".into(),
+            (None, _)
                 if app
                     .selected_node()
                     .is_some_and(|n| matches!(n.id(), NodeId::Folder { .. })) =>
             {
                 "A folder has no logs; select a project.".into()
             }
-            (None, true) => String::new(),
+            (None, _) => String::new(),
         };
         frame.render_widget(Paragraph::new(message.dark_gray()), inner);
         return;
@@ -728,7 +732,11 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
                 spans.push(Span::raw(format!("{label:width$} ")).fg(color));
             }
             if !line.marker {
-                spans.extend(highlight(&line.text, &logs.filter));
+                spans.extend(highlight(
+                    &line.text,
+                    &logs.search,
+                    logs.current == Some(*seq),
+                ));
             }
             let line = Line::from(spans);
             if app.selection.is_some_and(|s| s.contains(*seq)) {
@@ -741,34 +749,45 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// Marks the first match of the filter in a line.
-fn highlight(text: &str, filter: &str) -> Vec<Span<'static>> {
-    let found = (!filter.is_empty())
-        .then(|| text.to_ascii_lowercase().find(&filter.to_ascii_lowercase()))
-        .flatten();
-    match found {
-        Some(start) if text.is_char_boundary(start + filter.len()) => {
-            let end = start + filter.len();
-            vec![
-                Span::raw(text[..start].to_string()),
-                Span::raw(text[start..end].to_string()).black().on_yellow(),
-                Span::raw(text[end..].to_string()),
-            ]
-        }
-        _ => vec![Span::raw(text.to_string())],
+/// Marks every match of the search in a line: black on yellow on the current match's
+/// line, yellow elsewhere.
+fn highlight(text: &str, search: &str, current: bool) -> Vec<Span<'static>> {
+    if search.is_empty() {
+        return vec![Span::raw(text.to_string())];
     }
+    let lower = text.to_ascii_lowercase();
+    let needle = search.to_ascii_lowercase();
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find(&needle) {
+        let start = from + found;
+        let end = start + needle.len();
+        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+            break;
+        }
+        spans.push(Span::raw(text[from..start].to_string()));
+        let matched = Span::raw(text[start..end].to_string());
+        spans.push(if current {
+            matched.black().on_yellow()
+        } else {
+            matched.yellow().bold()
+        });
+        from = end;
+    }
+    spans.push(Span::raw(text[from..].to_string()));
+    spans
 }
 
 // Status, footer and popups
 
 fn status_line(app: &App) -> Line<'static> {
     if app.mode == Mode::Filter {
-        let (pane, filter) = match app.focus {
-            Focus::Tree => ("tree", &app.fold.filter),
-            Focus::Logs => ("logs", &app.logs.filter),
+        let (what, filter) = match app.focus {
+            Focus::Tree => ("filter tree", &app.fold.filter),
+            Focus::Logs => ("search logs", &app.logs.search),
         };
         return Line::from(vec![
-            Span::raw(format!(" filter {pane}: ")).dark_gray(),
+            Span::raw(format!(" {what}: ")).dark_gray(),
             Span::raw(format!("{filter}▏")).yellow(),
             Span::raw("  enter keeps · esc clears").dark_gray(),
         ]);
@@ -813,7 +832,8 @@ fn footer_line(focus: Focus, events: bool, width: u16) -> Line<'static> {
             ("↑↓", "scroll"),
             ("g", "top"),
             ("G", "follow"),
-            ("/", "filter"),
+            ("/", "search"),
+            ("n", "next match"),
             ("e", other),
             ("tab", "tree"),
         ],
@@ -1543,6 +1563,33 @@ mod tests {
             ],
             "{screen}"
         );
+    }
+
+    #[test]
+    fn highlights_every_match_and_counts_them() {
+        let mut app = busy_app();
+        let now = app.now;
+        let generation = app.logs.generation;
+        for text in ["GET /up", "Booting", "GET /a then get /b"] {
+            log(&mut app, generation, "web", text);
+        }
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Char('/'));
+        for c in "get".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        press(&mut app, now, KeyCode::Enter);
+        press(&mut app, now, KeyCode::Char('n'));
+        let screen = draw(&mut app, 80, 24);
+        assert!(screen.contains("╭ logs /get 1/2 ↑"), "{screen}");
+        assert!(screen.contains("Booting"), "every line stays\n{screen}");
+
+        let spans = highlight("GET /a then get /b", "get", true);
+        let texts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, ["", "GET", " /a then ", "get", " /b"]);
+        assert_eq!(spans[1].style, Style::new().black().on_yellow());
+        let spans = highlight("GET /up", "get", false);
+        assert_eq!(spans[1].style, Style::new().yellow().bold());
     }
 
     #[test]

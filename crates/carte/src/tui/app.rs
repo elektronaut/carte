@@ -526,6 +526,13 @@ impl App {
             (Intent::Mark, _) => commands.extend(self.mark()),
             (Intent::CopyUrl, _) => commands.extend(self.copy_url()),
             (Intent::ShowEnv, _) => commands.extend(self.show_env()),
+            (Intent::FindMatch { older }, _) => {
+                if self.logs.search.is_empty() {
+                    self.inform("/ searches the logs");
+                } else if !self.logs.find(older) {
+                    self.warn(&format!("no lines match {:?}", self.logs.search));
+                }
+            }
             (Intent::StartJump, _) => {
                 self.mode = Mode::Jump;
                 self.jump = Some(Jump::default());
@@ -619,9 +626,9 @@ impl App {
                 self.refresh_rows();
             }
             Focus::Logs => {
-                let mut filter = self.logs.filter.clone();
-                edit(&mut filter);
-                self.logs.set_filter(filter);
+                let mut search = self.logs.search.clone();
+                edit(&mut search);
+                self.logs.set_search(search);
             }
         }
     }
@@ -1487,6 +1494,56 @@ mod tests {
         press(&mut app, now, KeyCode::Esc);
         assert_eq!(app.mode, Mode::Normal);
         assert_eq!(app.jump, None);
+    }
+
+    #[test]
+    fn slash_searches_the_logs_and_n_steps_through_matches() {
+        let (mut app, now) = connected();
+        app.logs.height = 3;
+        for i in 0..12 {
+            let text = if i % 4 == 0 {
+                format!("Completed 500 in {i}ms")
+            } else {
+                format!("line {i}")
+            };
+            app.logs.push(
+                app.logs.generation,
+                LogLine {
+                    project: "nova".into(),
+                    app: "nova-billing".into(),
+                    stack: "main".into(),
+                    process: "web".into(),
+                    at_ms: i,
+                    text,
+                    marker: false,
+                },
+            );
+        }
+        assert!(press(&mut app, now, KeyCode::Char('n')).is_empty());
+        assert_eq!(app.notice, None, "n belongs to the logs");
+
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Char('n'));
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("/ searches the logs")
+        );
+        press(&mut app, now, KeyCode::Char('/'));
+        for c in "500".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        press(&mut app, now, KeyCode::Enter);
+        assert_eq!(app.logs.search, "500");
+        assert_eq!(app.logs.current, Some(8), "the newest match");
+        assert_eq!(app.logs.window(3).len(), 3, "every line stays");
+        press(&mut app, now, KeyCode::Char('n'));
+        assert_eq!(app.logs.current, Some(4));
+        press(&mut app, now, KeyCode::Char('N'));
+        assert_eq!(app.logs.current, Some(8));
+        press(&mut app, now, KeyCode::Esc);
+        assert_eq!(app.logs.search, "");
+        assert_eq!(app.logs.current, None);
+        assert_eq!(app.logs.scroll, 0, "following again");
     }
 
     #[test]
