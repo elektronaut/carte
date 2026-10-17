@@ -114,8 +114,13 @@ carte exec billing@feature-x -- bin/rails runner 'ReportJob.perform_later'
   `-p worker` (or `billing/worker`) gives that process's env instead,
   with its `PORT` while it runs. Teardown processes have no env here:
   `-p` refuses them, and their `provides` aren't set.
-- It's layered over your shell's environment, so `TERM` and the like
-  stay.
+- It's layered over your shell's environment, so `TERM`,
+  `SSH_AUTH_SOCK` and the like stay. The daemon's own environment, which
+  the app's processes start from, isn't part of it, nor are variables
+  the `shell` provider's login shell passes on unchanged from it; your
+  shell's values stand for those. What the provider sets or changes,
+  such as mise's variables or a `PATH` your profile extends, still wins
+  over your shell.
 - The command runs in the current directory when that's inside the
   app's checkout, otherwise in the checkout's root.
 - carte replaces itself with the command, so signals, the terminal and

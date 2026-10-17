@@ -7,8 +7,8 @@ use std::process::Command;
 use anyhow::{anyhow, bail};
 use carte_api::{EnvResponse, EnvVar, ProcessState, Snapshot};
 use carte_core::address;
-use carte_core::env::{self as core_env, Env, EnvRequest, Source, SystemRunner};
-use carte_core::model::{Checkout, InstanceKey, ProcessKind, ProcessSpec, World};
+use carte_core::env::{self as core_env, Env, EnvRequest, EnvValue, Source, SystemRunner};
+use carte_core::model::{Checkout, EnvProviderKind, InstanceKey, ProcessKind, ProcessSpec, World};
 use carte_core::naming;
 use carte_core::procfile::{self, ProcessSource};
 
@@ -277,8 +277,18 @@ pub fn render_subject(
     };
     let runner = SystemRunner::from_env();
     let mut env = core_env::build_env(&req, &daemon.env, &runner)?;
-    if matches!(subject, Subject::Command(_)) && port == 0 {
-        env.remove("PORT");
+    if matches!(subject, Subject::Command(_)) {
+        if port == 0 {
+            env.remove("PORT");
+        }
+        let inherited: Vec<String> = env
+            .iter()
+            .filter(|(key, value)| inherited(&daemon.env, key, value))
+            .map(|(key, _)| key.to_string())
+            .collect();
+        for key in inherited {
+            env.remove(&key);
+        }
     }
     let provider = core_env::detect_provider(state.project.env_provider, checkout.path(), &runner);
     let mut stopped_providers: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -315,6 +325,18 @@ pub fn render_subject(
     })
 }
 
+/// Whether a variable is the daemon's own, passed on unchanged rather than set for the
+/// instance: from the daemon's environment, or from a login shell that left it as is.
+fn inherited(daemon_env: &BTreeMap<String, String>, key: &str, value: &EnvValue) -> bool {
+    match value.source {
+        Source::Daemon => true,
+        Source::Provider {
+            provider: EnvProviderKind::Shell,
+        } => daemon_env.get(key) == Some(&value.value),
+        _ => false,
+    }
+}
+
 /// The env for an address the daemon was sent, rendered with the daemon's own env.
 pub fn for_address(
     paths: &Paths,
@@ -347,4 +369,89 @@ fn current_branch(checkout: &Path) -> String {
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use carte_core::model::Stack;
+
+    use super::*;
+
+    fn value(value: &str, source: Source) -> EnvValue {
+        EnvValue {
+            value: value.into(),
+            source,
+            overrode: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_command_leaves_out_what_the_daemon_passes_on_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let repo = root.join("work/shop");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("Procfile"), "web: bin/serve\n").unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q", "-b", "main"]);
+        let paths = Paths::under(&root);
+        std::fs::create_dir_all(paths.projects_dir()).unwrap();
+        std::fs::write(
+            paths.project_file("shop"),
+            format!(
+                "repos = \"{}\"\nenv_provider = \"none\"\n\n[apps.shop.env]\nTERM = \"from-template\"\n",
+                repo.display()
+            ),
+        )
+        .unwrap();
+        let world = carte_core::discovery::load_world(&paths.config_dir);
+        let key = InstanceKey {
+            project: "shop".into(),
+            app: "shop".into(),
+            stack: Stack::Main,
+        };
+        let daemon = DaemonState {
+            env: BTreeMap::from([
+                ("TERM".to_string(), "daemon-term".to_string()),
+                ("FROM_DAEMON".to_string(), "daemon".to_string()),
+            ]),
+            ports: BTreeMap::new(),
+            shared: BTreeSet::new(),
+            running: BTreeSet::new(),
+        };
+
+        let command =
+            render_subject(&paths, &world, &key, Subject::Command(None), &daemon).unwrap();
+        assert!(command.env.get("FROM_DAEMON").is_none());
+        assert_eq!(command.env.get("TERM").unwrap().value, "from-template");
+        assert_eq!(command.env.get("CARTE_APP").unwrap().value, "shop");
+
+        let process = render(&paths, &world, &key, None, &daemon).unwrap();
+        assert_eq!(process.env.get("FROM_DAEMON").unwrap().value, "daemon");
+    }
+
+    #[test]
+    fn shell_values_the_login_shell_left_alone_are_inherited() {
+        let daemon = BTreeMap::from([("TERM".to_string(), "xterm".to_string())]);
+        let shell = Source::Provider {
+            provider: EnvProviderKind::Shell,
+        };
+        assert!(inherited(&daemon, "TERM", &value("xterm", shell.clone())));
+        assert!(!inherited(&daemon, "TERM", &value("screen", shell.clone())));
+        assert!(!inherited(&daemon, "PATH", &value("/bin", shell)));
+        assert!(inherited(&daemon, "TERM", &value("xterm", Source::Daemon)));
+        let mise = Source::Provider {
+            provider: EnvProviderKind::Mise,
+        };
+        assert!(!inherited(&daemon, "TERM", &value("xterm", mise)));
+    }
 }
