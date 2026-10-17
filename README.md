@@ -141,7 +141,10 @@ policy = "disabled"
 - A process with `kind = "service"`, like a Redis server, starts and is
   ready before the others, and stops after them. One with
   `kind = "task"`, like `bin/rails db:prepare`, runs to completion
-  between the services and the rest, on every start.
+  between the services and the rest, on every start. One with
+  `kind = "teardown"`, like `dropdb`, runs once in the main checkout
+  when a branch's worktree has been gone for `teardown_delay` (10
+  minutes), and then carte deletes the stack's data.
 - `[processes.<name>]` declares a process for several apps at once, all
   of them or those in `apps`; an app's own `[apps.<app>.processes]`
   entry overrides it key by key. Its `provides` sets env on every process

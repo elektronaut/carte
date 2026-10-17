@@ -11,7 +11,7 @@ use carte_api::{
 };
 use carte_core::dirs::DirRoots;
 use carte_core::discovery;
-use carte_core::model::{InstanceKey, World};
+use carte_core::model::{InstanceKey, Stack, World};
 use carte_core::prune::{self, Known, KnownProject, Listing, Orphan, OrphanKind, Plan, Skip};
 
 use crate::paths::Paths;
@@ -81,6 +81,42 @@ pub fn select(
         }
     }
     (selected, kept)
+}
+
+/// A stack's folder, and the run directories and pidfiles of its instances: those of
+/// `apps` and of every app with a folder in it.
+pub fn stack_leftovers(
+    paths: &Paths,
+    project: &str,
+    stack: &str,
+    apps: impl IntoIterator<Item = String>,
+) -> Vec<Orphan> {
+    let roots = paths.dir_roots();
+    let stack_dir = roots.stack_dir(project, stack);
+    let mut apps: BTreeSet<String> = apps.into_iter().collect();
+    apps.extend(dirs_in(&stack_dir));
+    let orphan = |kind, app: Option<&String>, path| Orphan {
+        project: Some(project.to_string()),
+        stack: Some(stack.to_string()),
+        kind,
+        app: app.cloned(),
+        path,
+    };
+    let mut orphans = vec![orphan(OrphanKind::Stack, None, stack_dir.clone())];
+    for app in &apps {
+        let key = InstanceKey {
+            project: project.to_string(),
+            app: app.clone(),
+            stack: Stack::Branch(stack.to_string()),
+        };
+        orphans.push(orphan(
+            OrphanKind::RunDir,
+            Some(app),
+            roots.instance(&key).run,
+        ));
+        orphans.push(orphan(OrphanKind::Pidfile, Some(app), paths.pidfile(&key)));
+    }
+    orphans
 }
 
 #[derive(Debug)]
@@ -222,16 +258,7 @@ fn known(paths: &Paths, world: &World, running: BTreeSet<InstanceKey>) -> (Known
             },
         );
     }
-    for problem in &world.problems {
-        let Some(project) = &problem.project else {
-            continue;
-        };
-        let reason = match &problem.app {
-            Some(app) => format!("{app}: {}", problem.message),
-            None => problem.message.clone(),
-        };
-        known.skipped.entry(project.clone()).or_insert(reason);
-    }
+    known.skipped = troubled(world);
     let mut global = Vec::new();
     match discovery::project_files(&paths.projects_dir()) {
         Ok(files) => {
@@ -255,6 +282,23 @@ fn known(paths: &Paths, world: &World, running: BTreeSet<InstanceKey>) -> (Known
         }),
     }
     (known, global)
+}
+
+/// Projects whose configuration or discovery has a problem, with the first one: their
+/// worktrees aren't known for sure, so nothing of theirs counts as gone.
+pub fn troubled(world: &World) -> BTreeMap<String, String> {
+    let mut troubled = BTreeMap::new();
+    for problem in &world.problems {
+        let Some(project) = &problem.project else {
+            continue;
+        };
+        let reason = match &problem.app {
+            Some(app) => format!("{app}: {}", problem.message),
+            None => problem.message.clone(),
+        };
+        troubled.entry(project.clone()).or_insert(reason);
+    }
+    troubled
 }
 
 /// The directories in the data and run roots and the pidfiles, never through a symlink.

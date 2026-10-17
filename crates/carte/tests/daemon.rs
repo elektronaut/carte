@@ -47,6 +47,7 @@ impl Daemon {
         let share_port = free_port();
         let mut daemon = Self::start_configured(
             false,
+            "",
             &format!(
                 "\n[share]\nprovider = \"{provider}\"\ndomain = \"{domain}\"\nport = {share_port}\n"
             ),
@@ -58,10 +59,15 @@ impl Daemon {
     /// With `linked_config`, the config directory is reached through a symlink, like
     /// a config under `/tmp` on macOS.
     fn start_with(linked_config: bool) -> Self {
-        Self::start_configured(linked_config, "")
+        Self::start_configured(linked_config, "", "")
     }
 
-    fn start_configured(linked_config: bool, extra_config: &str) -> Self {
+    /// With `extra_project` added to the acme project file.
+    fn start_with_project(extra_project: &str) -> Self {
+        Self::start_configured(false, extra_project, "")
+    }
+
+    fn start_configured(linked_config: bool, extra_project: &str, extra_config: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let fixture = fixture().display().to_string();
@@ -90,7 +96,7 @@ impl Daemon {
         std::fs::write(
             config.join("projects/acme.toml"),
             format!(
-                "repos = \"{}/work/acme-*\"\nstrip_prefix = \"acme-\"\nenv_provider = \"none\"\n",
+                "repos = \"{}/work/acme-*\"\nstrip_prefix = \"acme-\"\nenv_provider = \"none\"\n{extra_project}",
                 root.display()
             ),
         )
@@ -888,4 +894,166 @@ fn prune_removes_leftovers_of_what_no_longer_exists() {
     let again = stdout(&daemon.run(&["prune", "--dry-run"]));
     assert!(again.starts_with("Nothing to prune.\n"), "{again}");
     assert!(again.contains("Skipped broken: "), "{again}");
+}
+
+/// The acme project with a teardown process for acme-web that runs `command`.
+fn start_with_teardown(delay: &str, command: &str) -> Daemon {
+    Daemon::start_with_project(&format!(
+        "teardown_delay = \"{delay}\"\n\n[apps.acme-web.processes.drop]\nkind = \"teardown\"\ncommand = '{command}'\n\n[apps.acme-web.processes.drop.env]\nDB = \"acme_{{{{stack | snake}}}}\"\n"
+    ))
+}
+
+fn events(daemon: &Daemon) -> Vec<carte_api::Event> {
+    stdout(&daemon.run(&["events", "--json", "-n", "200"]))
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The latest event of `kind` about the feature-x stack itself, or about a process.
+fn teardown_event(
+    daemon: &Daemon,
+    kind: carte_api::EventKind,
+    process: bool,
+) -> Option<carte_api::Event> {
+    events(daemon).into_iter().rev().find(|e| {
+        e.kind == kind
+            && e.subjects.first().is_some_and(|s| {
+                s.stack.as_deref() == Some("feature-x") && s.process.is_some() == process
+            })
+    })
+}
+
+/// Adds the feature-x worktree and starts acme-web in it.
+fn run_in_feature_x(daemon: &Daemon) -> carte_core::dirs::InstanceDirs {
+    git(
+        &daemon.root.join("work/acme-web"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature-x",
+            "../acme-web-feature-x",
+        ],
+    );
+    eventually("the feature-x stack", || {
+        snapshot(daemon).projects[0]
+            .stacks
+            .iter()
+            .any(|s| s.name == "feature-x")
+    });
+    let response = daemon.request("web.feature-x.acme.test", "/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let dirs = carte::paths::Paths::under(&daemon.root)
+        .dir_roots()
+        .instance(&carte_core::model::InstanceKey {
+            project: "acme".into(),
+            app: "acme-web".into(),
+            stack: carte_core::model::Stack::Branch("feature-x".into()),
+        });
+    assert!(dirs.state.is_dir() && dirs.run.is_dir());
+    dirs
+}
+
+fn remove_feature_x(daemon: &Daemon) {
+    git(
+        &daemon.root.join("work/acme-web"),
+        &["worktree", "remove", "--force", "../acme-web-feature-x"],
+    );
+}
+
+#[test]
+fn teardown_runs_once_the_worktree_is_gone_and_removes_the_folders() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let daemon = start_with_teardown(
+        "1s",
+        &format!(
+            "printf \"%s|%s|%s|%s|%s\\n\" \"$CARTE_STACK\" \"$CARTE_STATE_DIR\" \"$DB\" \"$CARTE_BRANCH\" \"$(pwd)\" >> {}",
+            marker.display()
+        ),
+    );
+    assert!(
+        daemon
+            .request("web.acme.test", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+    let dirs = run_in_feature_x(&daemon);
+    let stack_dir = dirs.state.parent().unwrap().to_path_buf();
+    assert!(!marker.exists(), "teardown ran with the instance");
+
+    remove_feature_x(&daemon);
+    eventually("the teardown", || {
+        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
+    });
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        format!(
+            "feature-x|{}|acme_feature_x|feature-x|{}\n",
+            dirs.state.display(),
+            daemon.root.join("work/acme-web").display()
+        )
+    );
+    let ran = teardown_event(&daemon, EventKind::TeardownFinished, true).unwrap();
+    assert_eq!(ran.subjects[0].process.as_deref(), Some("drop"));
+    assert_eq!(ran.exit_code, Some(0));
+    assert!(teardown_event(&daemon, EventKind::TeardownScheduled, false).is_some());
+    assert!(!stack_dir.exists(), "{} survived", stack_dir.display());
+    assert!(!dirs.run.exists(), "{} survived", dirs.run.display());
+    let main = carte::paths::Paths::under(&daemon.root)
+        .dir_roots()
+        .stack_dir("acme", "main");
+    assert!(main.is_dir());
+}
+
+#[test]
+fn a_failed_teardown_keeps_the_folders() {
+    use carte_api::EventKind;
+    let daemon = start_with_teardown("1s", "echo boom; exit 3");
+    let dirs = run_in_feature_x(&daemon);
+
+    remove_feature_x(&daemon);
+    eventually("the failed teardown", || {
+        teardown_event(&daemon, EventKind::TeardownFailed, false).is_some()
+    });
+    let failed = teardown_event(&daemon, EventKind::TeardownFailed, true).unwrap();
+    assert_eq!(failed.exit_code, Some(3));
+    assert_eq!(failed.message, "exited with code 3: boom");
+    assert!(dirs.state.is_dir());
+    assert!(teardown_event(&daemon, EventKind::TeardownFinished, false).is_none());
+
+    let listed = stdout(&daemon.run(&["prune", "--dry-run"]));
+    assert!(listed.contains("acme@feature-x"), "{listed}");
+}
+
+#[test]
+fn a_worktree_that_comes_back_cancels_the_teardown() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let daemon = start_with_teardown("3s", &format!("touch {}", marker.display()));
+    let dirs = run_in_feature_x(&daemon);
+
+    remove_feature_x(&daemon);
+    eventually("the scheduled teardown", || {
+        teardown_event(&daemon, EventKind::TeardownScheduled, false).is_some()
+    });
+    git(
+        &daemon.root.join("work/acme-web"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "../acme-web-feature-x",
+            "feature-x",
+        ],
+    );
+    eventually("the cancelled teardown", || {
+        teardown_event(&daemon, EventKind::TeardownCancelled, false).is_some()
+    });
+    std::thread::sleep(Duration::from_secs(5));
+    assert!(!marker.exists(), "the teardown ran");
+    assert!(dirs.state.is_dir());
 }

@@ -22,6 +22,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use super::events::{self, EventFilter, EventLog};
 use super::groups::GroupRecord;
 use super::runner::{self, LogLabel, ProcLog};
+use super::teardown::{self, StackId, Teardowns};
 use super::{Activity, BootFailure, Handle, LogFilter, Msg, Options, Upstream, share, snapshot};
 use crate::instance_dirs;
 use crate::paths::Paths;
@@ -54,6 +55,14 @@ pub(crate) enum Internal {
         idx: usize,
     },
     Tick,
+    TeardownCheck(Vec<(StackId, teardown::Status)>),
+    TeardownEnded(StackId),
+    Event {
+        kind: EventKind,
+        message: String,
+        subjects: Vec<EventSubject>,
+        exit_code: Option<i32>,
+    },
 }
 
 pub(super) struct Instance {
@@ -264,6 +273,7 @@ struct Actor {
     share_pins: BTreeSet<InstanceKey>,
     tunnel: Option<TunnelStatus>,
     events: EventLog,
+    teardowns: Teardowns,
 }
 
 pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Options) -> Handle {
@@ -314,6 +324,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         share_pins: BTreeSet::new(),
         tunnel,
         events: EventLog::new(event_tx.clone()),
+        teardowns: Teardowns::default(),
     };
     let tick_tx = tx.clone();
     let tick = actor.options.tick;
@@ -477,6 +488,20 @@ impl Actor {
             } => self.ready(&key, run, idx, result),
             Internal::RestartService { key, run, idx } => self.restart_service(&key, run, idx),
             Internal::Tick => self.tick(),
+            Internal::TeardownCheck(results) => self.teardown_checked(results),
+            Internal::TeardownEnded(id) => {
+                self.teardowns.running.remove(&id);
+            }
+            Internal::Event {
+                kind,
+                message,
+                subjects,
+                exit_code,
+            } => {
+                self.events
+                    .push_event(kind, message, subjects, |event| event.exit_code = exit_code);
+                self.dirty = true;
+            }
         }
     }
 
@@ -804,6 +829,8 @@ impl Actor {
                     c.available(self.world.machine.limits.pty_reserve as usize) >= indices.len()
                 })
                 .unwrap_or(true),
+            branch: None,
+            prepare: true,
         };
         let tx = self.tx.clone();
         let key = key.clone();
@@ -1450,6 +1477,156 @@ impl Actor {
         {
             self.dirty = true;
         }
+        self.check_teardowns();
+    }
+
+    // Teardown
+
+    /// Notes the stacks that have a worktree, cancels pending teardowns of those that
+    /// came back, and checks off the actor's thread whether the others are removed.
+    fn check_teardowns(&mut self) {
+        let mut present = BTreeSet::new();
+        for state in &self.world.projects {
+            for stack in state.stacks() {
+                present.insert((state.project.name.clone(), stack));
+            }
+        }
+        for id in &present {
+            if self.teardowns.pending.remove(id).is_some() {
+                self.event(
+                    EventKind::TeardownCancelled,
+                    "it has a worktree again",
+                    vec![events::stack(&id.0, &id.1)],
+                );
+            }
+        }
+        self.teardowns.seen.extend(present.iter().cloned());
+        if self.teardowns.checking {
+            return;
+        }
+        let troubled = prune::troubled(&self.world);
+        let roots = self.paths.dir_roots();
+        let candidates: Vec<teardown::Candidate> = self
+            .teardowns
+            .seen
+            .iter()
+            .filter(|id| !present.contains(*id) && !self.teardowns.running.contains(*id))
+            .map(|(project, stack)| {
+                let state = self
+                    .world
+                    .project(project)
+                    .filter(|_| !troubled.contains_key(project));
+                teardown::Candidate {
+                    id: (project.clone(), stack.clone()),
+                    stacks: state.map(ProjectState::stacks),
+                    stack_dir: roots.stack_dir(project, stack),
+                    repos: state
+                        .into_iter()
+                        .flat_map(|s| &s.project.apps)
+                        .map(|app| (app.name.clone(), app.path.clone()))
+                        .collect(),
+                }
+            })
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        self.teardowns.checking = true;
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let results = teardown::check(candidates);
+            let _ = tx.send(Msg::Internal(Internal::TeardownCheck(results)));
+        });
+    }
+
+    /// Schedules the teardown of stacks that are now removed, cancels it for those
+    /// that no longer are, and starts the ones whose delay has passed.
+    fn teardown_checked(&mut self, results: Vec<(StackId, teardown::Status)>) {
+        self.teardowns.checking = false;
+        let now = Instant::now();
+        for (id, status) in results {
+            if !self.teardowns.seen.contains(&id) || self.teardowns.running.contains(&id) {
+                continue;
+            }
+            let record = match status {
+                teardown::Status::Unrecorded => {
+                    self.teardowns.seen.remove(&id);
+                    self.teardowns.pending.remove(&id);
+                    continue;
+                }
+                teardown::Status::Kept => {
+                    if self.teardowns.pending.remove(&id).is_some() {
+                        self.event(
+                            EventKind::TeardownCancelled,
+                            "its worktree is back",
+                            vec![events::stack(&id.0, &id.1)],
+                        );
+                    }
+                    continue;
+                }
+                teardown::Status::Removed(record) => record,
+            };
+            let Some(state) = self.world.project(&id.0) else {
+                continue;
+            };
+            let delay = state
+                .project
+                .teardown_delay
+                .unwrap_or(self.world.machine.teardown_delay);
+            match self.teardowns.pending.get(&id) {
+                None => {
+                    self.teardowns.pending.insert(id.clone(), now);
+                    self.event(
+                        EventKind::TeardownScheduled,
+                        format!(
+                            "its worktrees are gone; runs in {}",
+                            carte_core::duration::format(delay)
+                        ),
+                        vec![events::stack(&id.0, &id.1)],
+                    );
+                }
+                Some(since) if now.duration_since(*since) >= delay => {
+                    self.start_teardown(id, record.branch.unwrap_or_default());
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// Stops what still runs in the stack and hands the rest to a teardown job.
+    fn start_teardown(&mut self, id: StackId, branch: String) {
+        let Some(state) = self.world.project(&id.0).cloned() else {
+            return;
+        };
+        self.teardowns.pending.remove(&id);
+        self.teardowns.seen.remove(&id);
+        self.teardowns.running.insert(id.clone());
+        let keys: Vec<InstanceKey> = self
+            .instances
+            .keys()
+            .filter(|key| key.project == id.0 && key.stack.slug() == id.1)
+            .cloned()
+            .collect();
+        for key in keys {
+            self.stop(&key, Some("its stack was removed"));
+        }
+        let job = teardown::Job {
+            id,
+            state,
+            machine: self.world.machine.clone(),
+            branch,
+            daemon_env: self.daemon_env.clone(),
+            paths: self.paths.clone(),
+            ca_bundle: self.options.ca_bundle.clone(),
+            ca_cert: self.options.ca_cert.clone(),
+            timeout: self.options.boot_timeout,
+            grace: self.options.grace,
+            spawner: self.spawner.clone(),
+            log_tx: self.log_tx.clone(),
+            log_cap: self.world.machine.limits.log_buffer_bytes,
+            tx: self.tx.clone(),
+        };
+        tokio::spawn(job.run());
     }
 
     /// Starts deferred checkout-scope processes whose running copy went away.
@@ -2273,6 +2450,7 @@ impl Actor {
         for (key, why) in gone {
             self.stop(&key, Some(why));
         }
+        self.check_teardowns();
         self.dirty = true;
     }
 }
@@ -2402,34 +2580,38 @@ fn total_ram() -> u64 {
     }
 }
 
-type BuiltEnv = (
+pub(super) type BuiltEnv = (
     Result<Vec<(usize, SpawnSpec)>, String>,
     Option<(PathBuf, Env)>,
 );
 
 /// Everything needed to render the env off the actor's thread.
-struct EnvInput {
-    state: ProjectState,
-    app: App,
-    key: InstanceKey,
-    checkout: Checkout,
-    machine: carte_core::model::MachineConfig,
-    procs: Vec<(usize, ProcessSpec, u16)>,
+pub(super) struct EnvInput {
+    pub state: ProjectState,
+    pub app: App,
+    pub key: InstanceKey,
+    pub checkout: Checkout,
+    pub machine: carte_core::model::MachineConfig,
+    pub procs: Vec<(usize, ProcessSpec, u16)>,
     /// Every process of the instance with its port, for their `provides`.
-    processes: Vec<(ProcessSpec, u16)>,
-    cached_provider: Option<Env>,
-    daemon_env: Arc<BTreeMap<String, String>>,
-    pidfile: PathBuf,
-    dir_roots: DirRoots,
-    ca_bundle: PathBuf,
-    ca_cert: PathBuf,
-    requires: Vec<String>,
-    shared: BTreeSet<String>,
-    ptys_free: bool,
+    pub processes: Vec<(ProcessSpec, u16)>,
+    pub cached_provider: Option<Env>,
+    pub daemon_env: Arc<BTreeMap<String, String>>,
+    pub pidfile: PathBuf,
+    pub dir_roots: DirRoots,
+    pub ca_bundle: PathBuf,
+    pub ca_cert: PathBuf,
+    pub requires: Vec<String>,
+    pub shared: BTreeSet<String>,
+    pub ptys_free: bool,
+    /// `CARTE_BRANCH` and `{{branch}}`; the checkout's branch when `None`.
+    pub branch: Option<String>,
+    /// Creates the instance's directories and records its stack's worktrees.
+    pub prepare: bool,
 }
 
 impl EnvInput {
-    fn build(self) -> BuiltEnv {
+    pub(super) fn build(self) -> BuiltEnv {
         let checkout_path = self.checkout.path().clone();
         if let Err(message) = check_requires(&self.requires) {
             return (Err(message), None);
@@ -2450,21 +2632,26 @@ impl EnvInput {
             Ok(files) => files,
             Err(err) => return (Err(err.to_string()), fresh),
         };
-        let branch = match &self.checkout {
-            Checkout::Worktree(wt) => wt.branch.clone(),
-            Checkout::Main { path } => current_branch(path),
+        let branch = match (&self.branch, &self.checkout) {
+            (Some(branch), _) => branch.clone(),
+            (None, Checkout::Worktree(wt)) => wt.branch.clone(),
+            (None, Checkout::Main { path }) => current_branch(path),
         };
-        if let Some(dir) = self.pidfile.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let dirs = match instance_dirs::prepare(&self.dir_roots, &self.key, &self.state) {
-            Ok(dirs) => dirs,
-            Err(err) => {
-                return (
-                    Err(format!("couldn't create the instance's directories: {err}")),
-                    fresh,
-                );
+        let dirs = if self.prepare {
+            if let Some(dir) = self.pidfile.parent() {
+                let _ = std::fs::create_dir_all(dir);
             }
+            match instance_dirs::prepare(&self.dir_roots, &self.key, &self.state) {
+                Ok(dirs) => dirs,
+                Err(err) => {
+                    return (
+                        Err(format!("couldn't create the instance's directories: {err}")),
+                        fresh,
+                    );
+                }
+            }
+        } else {
+            self.dir_roots.instance(&self.key)
         };
         let urls = StackUrls {
             machine: &self.machine,

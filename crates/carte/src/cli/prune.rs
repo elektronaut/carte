@@ -125,7 +125,7 @@ fn render_list(list: &PruneList) -> String {
             .collect();
         let _ = writeln!(
             out,
-            "External resources for these stacks (databases etc.) may remain: {}",
+            "Teardown never ran or failed for these stacks, so external resources (databases etc.) may remain: {}",
             stacks.join(", ")
         );
     }
@@ -226,7 +226,7 @@ nova @x
 run dirs of unknown instances
   run dir            0B  /r/abcdefgh
 Total: 2K in 4
-External resources for these stacks (databases etc.) may remain: nova@x
+Teardown never ran or failed for these stacks, so external resources (databases etc.) may remain: nova@x
 Skipped acme: git worktree list failed
 "
         );

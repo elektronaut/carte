@@ -111,6 +111,7 @@ mod tests {
                 requires: Vec::new(),
                 scheme: Scheme::Https,
                 idle_timeout: None,
+                teardown_delay: None,
                 apps: Vec::new(),
             },
             worktrees: map,

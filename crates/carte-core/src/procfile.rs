@@ -22,7 +22,10 @@ pub enum ProcessSource {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessList {
     pub source: ProcessSource,
+    /// What the instance starts.
     pub processes: Vec<ProcessSpec>,
+    /// Processes with `kind = "teardown"`, which never start with the instance.
+    pub teardown: Vec<ProcessSpec>,
     pub notices: Vec<Notice>,
 }
 
@@ -81,6 +84,8 @@ pub enum ProcfileError {
         "process {process:?} is a {kind}, which runs per instance: remove scope = \"checkout\""
     )]
     CheckoutScopedKind { process: String, kind: &'static str },
+    #[error("process {process:?} is a teardown, which runs on its own: remove `after`")]
+    TeardownAfter { process: String },
     #[error("process {process:?} starts after {after:?}, which isn't a process of the app")]
     UnknownAfter { process: String, after: String },
     #[error(
@@ -127,10 +132,29 @@ pub fn parse_procfile(text: &str) -> ParsedProcfile {
 
 /// Reads the base process list for a checkout and applies the app's config.
 pub fn load(checkout: &Path, settings: &AppSettings) -> Result<ProcessList, ProcfileError> {
+    let list = load_any(checkout, settings)?;
+    if list.processes.is_empty() && list.source != ProcessSource::RouteOnly {
+        return Err(ProcfileError::NotRunnable {
+            path: checkout.to_path_buf(),
+        });
+    }
+    Ok(list)
+}
+
+/// The teardown processes of an app in a checkout, which may have nothing else to run.
+pub fn teardowns(
+    checkout: &Path,
+    settings: &AppSettings,
+) -> Result<Vec<ProcessSpec>, ProcfileError> {
+    load_any(checkout, settings).map(|list| list.teardown)
+}
+
+fn load_any(checkout: &Path, settings: &AppSettings) -> Result<ProcessList, ProcfileError> {
     if settings.port.is_some() {
         return Ok(ProcessList {
             source: ProcessSource::RouteOnly,
             processes: Vec::new(),
+            teardown: Vec::new(),
             notices: Vec::new(),
         });
     }
@@ -168,11 +192,6 @@ pub fn load(checkout: &Path, settings: &AppSettings) -> Result<ProcessList, Proc
     let mut list = build(source, base, settings)?;
     notices.append(&mut list.notices);
     list.notices = notices;
-    if list.processes.is_empty() {
-        return Err(ProcfileError::NotRunnable {
-            path: checkout.to_path_buf(),
-        });
-    }
     Ok(list)
 }
 
@@ -250,9 +269,13 @@ pub fn build(
         return Err(ProcfileError::MultipleHttp { processes: http });
     }
     check_kinds(&processes)?;
+    let (teardown, processes) = processes
+        .into_iter()
+        .partition(|p| p.kind == Some(ProcessKind::Teardown));
     Ok(ProcessList {
         source,
         processes,
+        teardown,
         notices,
     })
 }
@@ -264,15 +287,22 @@ fn check_kinds(processes: &[ProcessSpec]) -> Result<(), ProcfileError> {
                 process: p.name.clone(),
             });
         }
-        if let Some(kind) = p.kind
+        if p.kind == Some(ProcessKind::Teardown) && !p.after.is_empty() {
+            return Err(ProcfileError::TeardownAfter {
+                process: p.name.clone(),
+            });
+        }
+        let kind = match p.kind {
+            Some(ProcessKind::Service) => Some("service"),
+            Some(ProcessKind::Task) => Some("task"),
+            Some(ProcessKind::Teardown) | None => None,
+        };
+        if let Some(kind) = kind
             && p.scope == Scope::Checkout
         {
             return Err(ProcfileError::CheckoutScopedKind {
                 process: p.name.clone(),
-                kind: match kind {
-                    ProcessKind::Service => "service",
-                    ProcessKind::Task => "task",
-                },
+                kind,
             });
         }
         for after in &p.after {
@@ -786,5 +816,48 @@ mod tests {
 
         let err = with_kinds(&[("worker", kind("bin/jobs", None, &["worker"]))]).unwrap_err();
         assert!(matches!(err, ProcfileError::AfterCycle { .. }), "{err}");
+    }
+
+    const TEARDOWN: Option<ProcessKind> = Some(ProcessKind::Teardown);
+
+    #[test]
+    fn teardowns_are_kept_apart_from_what_starts() {
+        let checkout = ProcessOverride {
+            scope: Some(Scope::Checkout),
+            ..kind("dropdb x", TEARDOWN, &[])
+        };
+        let list = with_kinds(&[("drop", checkout)]).unwrap();
+        assert_eq!(names(&list), vec!["web", "worker"]);
+        assert_eq!(list.teardown.len(), 1);
+        assert_eq!(list.teardown[0].name, "drop");
+        assert_eq!(list.teardown[0].tier(), 4);
+
+        let err = with_kinds(&[("drop", kind("dropdb x", TEARDOWN, &["web"]))]).unwrap_err();
+        assert!(matches!(err, ProcfileError::TeardownAfter { .. }), "{err}");
+        let err = with_kinds(&[
+            ("drop", kind("dropdb x", TEARDOWN, &[])),
+            ("worker", kind("bin/jobs", None, &["drop"])),
+        ])
+        .unwrap_err();
+        assert!(matches!(err, ProcfileError::AfterOtherTier { .. }), "{err}");
+        let web = ProcessOverride {
+            kind: TEARDOWN,
+            ..Default::default()
+        };
+        let err = with_kinds(&[("web", web)]).unwrap_err();
+        assert!(matches!(err, ProcfileError::KindOnHttp { .. }), "{err}");
+    }
+
+    #[test]
+    fn an_app_with_only_a_teardown_has_nothing_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = settings(false, &[("drop", kind("dropdb x", TEARDOWN, &[]))]);
+        assert!(matches!(
+            load(dir.path(), &s),
+            Err(ProcfileError::NotRunnable { .. })
+        ));
+        let teardowns = teardowns(dir.path(), &s).unwrap();
+        assert_eq!(teardowns.len(), 1);
+        assert_eq!(teardowns[0].command, "dropdb x");
     }
 }

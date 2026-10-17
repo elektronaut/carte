@@ -393,6 +393,7 @@ pub(crate) mod tests {
             requires: Vec::new(),
             scheme: Scheme::Https,
             idle_timeout: None,
+            teardown_delay: None,
             apps: vec![
                 app("nova-postcard-frontend"),
                 app("nova-postcard-api"),

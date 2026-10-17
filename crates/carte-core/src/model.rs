@@ -14,6 +14,8 @@ pub struct MachineConfig {
     pub https_port: u16,
     pub dns_port: u16,
     pub idle_timeout: Duration,
+    /// How long a stack stays removed before its teardown runs.
+    pub teardown_delay: Duration,
     pub limits: Limits,
     pub share: Option<ShareConfig>,
 }
@@ -39,6 +41,7 @@ impl Default for MachineConfig {
             https_port: 443,
             dns_port: 9253,
             idle_timeout: Duration::from_secs(15 * 60),
+            teardown_delay: Duration::from_secs(10 * 60),
             limits: Limits::default(),
             share: None,
         }
@@ -106,6 +109,7 @@ pub struct Project {
     pub requires: Vec<String>,
     pub scheme: Scheme,
     pub idle_timeout: Option<Duration>,
+    pub teardown_delay: Option<Duration>,
     pub apps: Vec<App>,
 }
 
@@ -205,12 +209,14 @@ pub struct ProcessSpec {
 }
 
 impl ProcessSpec {
-    /// The start order: services, then tasks, then everything else.
+    /// The start order: services, then tasks, then everything else. Teardowns
+    /// never start with the instance.
     pub fn tier(&self) -> u8 {
         match self.kind {
             Some(ProcessKind::Service) => 1,
             Some(ProcessKind::Task) => 2,
             None => 3,
+            Some(ProcessKind::Teardown) => 4,
         }
     }
 
@@ -231,6 +237,8 @@ pub enum ProcessKind {
     Service,
     /// Runs to completion after the services and before everything else.
     Task,
+    /// Runs once, in the app's main checkout, after the stack's worktrees are gone.
+    Teardown,
 }
 
 /// An env entry whose key and value may both contain `{{ }}` expressions.

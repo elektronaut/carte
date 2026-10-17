@@ -7,6 +7,7 @@ pub mod groups;
 pub mod runner;
 pub mod share;
 mod snapshot;
+mod teardown;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;

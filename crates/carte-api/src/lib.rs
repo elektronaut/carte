@@ -490,6 +490,10 @@ pub enum EventKind {
     TunnelConnected,
     TunnelFailed,
     PolicyChanged,
+    TeardownScheduled,
+    TeardownCancelled,
+    TeardownFinished,
+    TeardownFailed,
 }
 
 impl EventKind {
@@ -510,6 +514,10 @@ impl EventKind {
             EventKind::TunnelConnected => "tunnel connected",
             EventKind::TunnelFailed => "tunnel failed",
             EventKind::PolicyChanged => "policy changed",
+            EventKind::TeardownScheduled => "teardown scheduled",
+            EventKind::TeardownCancelled => "teardown cancelled",
+            EventKind::TeardownFinished => "teardown finished",
+            EventKind::TeardownFailed => "teardown failed",
         }
     }
 }
@@ -545,8 +553,8 @@ pub struct PruneList {
     /// Grouped by project and stack; unattributed run directories last.
     pub candidates: Vec<PruneCandidate>,
     pub total_bytes: u64,
-    /// Stacks whose folder is among the candidates: their teardown never succeeded,
-    /// so external resources such as databases may remain.
+    /// Stacks whose folder is among the candidates: their teardown never ran or
+    /// failed, so external resources such as databases may remain.
     pub stacks: Vec<PruneStack>,
     /// What was left alone, and why.
     pub skipped: Vec<PruneSkip>,

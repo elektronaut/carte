@@ -15,6 +15,7 @@ pub mod naming;
 pub mod procfile;
 pub mod prune;
 pub mod slug;
+pub mod teardown;
 pub mod template;
 
 #[cfg(test)]
