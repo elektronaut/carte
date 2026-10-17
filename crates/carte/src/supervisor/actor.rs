@@ -186,6 +186,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
     let (log_tx, _) = broadcast::channel(4096);
     let tunnel = world.machine.share.as_ref().map(|config| TunnelStatus {
         provider: config.provider.clone(),
+        single_host: config.single_host(),
         state: TunnelState::Idle,
         message: None,
     });
@@ -1361,6 +1362,8 @@ impl Actor {
         if apps.is_empty() {
             return Err("name the apps to share: an app address, or --apps".into());
         }
+        let before = share::routes(&self.shares);
+        let mut replaced = Vec::new();
         if config.single_host() {
             let one_at_a_time = format!("{} shares one app at a time", config.provider);
             if apps.len() > 1 {
@@ -1373,9 +1376,16 @@ impl Actor {
                 })
                 .map(|k| format!("{}@{}", k.app, k.stack.slug()))
                 .collect();
-            if !others.is_empty() {
+            if !others.is_empty() && request.replace {
+                self.shares.retain(|(project, stack_of), share| {
+                    project == &target.project
+                        && stack_of == &stack
+                        && share.apps.iter().all(|a| apps.contains(a))
+                });
+                replaced = others;
+            } else if !others.is_empty() {
                 return Err(format!(
-                    "{one_at_a_time}, and {} is shared: unshare it first",
+                    "{one_at_a_time}, and {} is shared: unshare it first, or share with --replace",
                     others.join(", ")
                 ));
             }
@@ -1385,7 +1395,6 @@ impl Actor {
             naming::public_url(&config, state, app, &stack).map_err(|e| e.to_string())?;
         }
 
-        let before = share::routes(&self.shares);
         let now = Instant::now();
         let entry = (target.project.clone(), stack.clone());
         let share = self
@@ -1407,6 +1416,9 @@ impl Actor {
         }
         let credentials = share.credentials.clone();
         let mut messages = Vec::new();
+        if !replaced.is_empty() {
+            messages.push(format!("stopped sharing {}", replaced.join(", ")));
+        }
         if state
             .project
             .apps

@@ -106,6 +106,7 @@ pub async fn run(config: ShareConfig, supervisor: Handle, spawner: Arc<Spawner>,
     let report = |state: TunnelState, message: Option<String>| {
         supervisor.tunnel_status(TunnelStatus {
             provider: config.provider.clone(),
+            single_host: config.single_host(),
             state,
             message,
         });
@@ -182,6 +183,7 @@ pub async fn run(config: ShareConfig, supervisor: Handle, spawner: Arc<Spawner>,
             let supervisor = supervisor.clone();
             let provider = provider.clone();
             let name = config.provider.clone();
+            let single_host = config.single_host();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(output).lines();
                 let mut announced = false;
@@ -190,6 +192,7 @@ pub async fn run(config: ShareConfig, supervisor: Handle, spawner: Arc<Spawner>,
                         announced = true;
                         supervisor.tunnel_status(TunnelStatus {
                             provider: name.clone(),
+                            single_host,
                             state: TunnelState::Connected,
                             message: None,
                         });

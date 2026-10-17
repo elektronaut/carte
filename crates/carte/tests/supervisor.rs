@@ -540,6 +540,7 @@ fn share_request(address: &str, pin: bool) -> carte_api::ShareRequest {
         ttl_secs: None,
         auth: false,
         pin,
+        replace: false,
     }
 }
 
@@ -603,6 +604,19 @@ async fn a_single_host_provider_shares_one_app_at_a_time() {
         "{refused}"
     );
     assert!(handle.share(share_request("web", false)).await.is_ok());
+
+    let replaced = handle
+        .share(carte_api::ShareRequest {
+            replace: true,
+            ..share_request("api", false)
+        })
+        .await
+        .unwrap();
+    assert_eq!(replaced.messages, ["stopped sharing acme-web@main"]);
+    assert_eq!(
+        handle.shared_routes().keys().cloned().collect::<Vec<_>>(),
+        [key("acme-api", Stack::Main)]
+    );
     handle.shutdown().await;
 }
 
