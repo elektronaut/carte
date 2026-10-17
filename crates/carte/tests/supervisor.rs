@@ -170,6 +170,32 @@ async fn lazy_start_serves_http_with_injected_env() {
 }
 
 #[tokio::test]
+async fn a_starting_instance_reports_what_it_waits_for() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: FIXTURE_BOOT_DELAY_MS=1500 exec {fixture}\nworker: exec {fixture}\n",
+    );
+    setup.project("[apps.acme-web.processes.web]\nready = \"/up\"\n");
+    let handle = setup.start();
+
+    handle.control(control("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the web process to be waited on", |s| {
+        status(s, "acme-web", "main")
+            .boot
+            .as_ref()
+            .is_some_and(|b| b.waiting_for.starts_with("web to answer /up on port "))
+    })
+    .await;
+    wait_for(&handle, "ready", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Ready
+    })
+    .await;
+    assert_eq!(status(&handle.snapshot(), "acme-web", "main").boot, None);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_crash_on_boot_fails_the_request_with_logs() {
     let setup = Setup::new();
     setup.app(

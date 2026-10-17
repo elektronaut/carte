@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use carte_api::{
-    AppInfo, Event, Hold, InstanceState, InstanceStatus, Policy as ApiPolicy, ProcessState,
-    ProcessStatus, ProjectStatus, Snapshot, StackStatus, TunnelStatus,
+    AppInfo, BootProgress, Event, Hold, InstanceState, InstanceStatus, Policy as ApiPolicy,
+    ProcessState, ProcessStatus, ProjectStatus, Snapshot, StackStatus, TunnelStatus,
 };
 use carte_core::lifecycle;
-use carte_core::model::{App, InstanceKey, Policy, ProjectState, Stack, World};
+use carte_core::model::{App, InstanceKey, Policy, ProjectState, Readiness, Stack, World};
 use carte_core::naming;
 
 use super::actor::{Instance, Overrides, Proc, effective_policy};
@@ -146,6 +146,7 @@ fn stack_status(
                     last_error: None,
                     env_changed: false,
                     last_event: latest.get(&key).cloned(),
+                    boot: None,
                 };
             };
             let mut holds = Vec::new();
@@ -220,6 +221,10 @@ fn stack_status(
                 last_error: inst.last_error.clone(),
                 env_changed: inst.env_changed,
                 last_event: latest.get(&key).cloned(),
+                boot: (inst.state == InstanceState::Starting).then(|| BootProgress {
+                    elapsed_ms: now.saturating_duration_since(inst.started_at).as_millis() as u64,
+                    waiting_for: waiting_for(&inst.procs),
+                }),
             }
         })
         .collect();
@@ -265,6 +270,27 @@ fn stopped_processes(
             }
         })
         .collect()
+}
+
+/// What a starting instance waits for, in words.
+fn waiting_for(procs: &[Proc]) -> String {
+    if procs.iter().all(|p| p.state == ProcessState::Stopped) {
+        return "its environment".to_string();
+    }
+    if let Some(http) = procs.iter().find(|p| p.spec.http) {
+        let name = &http.spec.name;
+        return match (&http.state, &http.spec.ready) {
+            (ProcessState::Starting, _) => format!("{name} to start"),
+            (_, Readiness::Http(path)) => format!("{name} to answer {path} on port {}", http.port),
+            (_, Readiness::Port) => format!("{name} to listen on port {}", http.port),
+        };
+    }
+    let starting: Vec<&str> = procs
+        .iter()
+        .filter(|p| p.state == ProcessState::Starting)
+        .map(|p| p.spec.name.as_str())
+        .collect();
+    format!("{} to start", starting.join(", "))
 }
 
 fn api_policy(policy: Policy) -> ApiPolicy {

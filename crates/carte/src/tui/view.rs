@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use carte_api::{Event, InstanceStatus, Policy, Problem, ProcessState, ProcessStatus, TunnelState};
+use carte_api::{
+    BootProgress, Event, InstanceStatus, Policy, Problem, ProcessState, ProcessStatus, TunnelState,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -304,6 +306,26 @@ fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
     }
 }
 
+/// `starting for 12s · waiting for web to answer /up · running: worker`
+fn boot_progress(app: &App, instance: &InstanceStatus, boot: &BootProgress) -> String {
+    let elapsed = Duration::from_millis(boot.elapsed_ms) + app.now.duration_since(app.snapshot_at);
+    let mut text = format!(
+        "starting for {} · waiting for {}",
+        duration(elapsed.as_secs()),
+        boot.waiting_for
+    );
+    let running: Vec<&str> = instance
+        .processes
+        .iter()
+        .filter(|p| !p.http && p.state == ProcessState::Running)
+        .map(|p| p.name.as_str())
+        .collect();
+    if !running.is_empty() {
+        text.push_str(&format!(" · running: {}", running.join(", ")));
+    }
+    text
+}
+
 fn duration(secs: u64) -> String {
     carte_core::duration::format(Duration::from_secs(secs))
 }
@@ -470,6 +492,9 @@ fn instance_details(
         Span::raw(" · "),
         Span::raw(instance.url.clone()).underlined(),
     ])];
+    if let Some(boot) = &instance.boot {
+        lines.push(Line::from(boot_progress(app, instance, boot)).yellow());
+    }
     lines.extend(share_details(app, project, instance));
     let checkout = if status.fallback {
         "main (no worktree for this stack)".to_string()
@@ -1204,6 +1229,32 @@ mod tests {
         assert!(screen.contains("╭ events following"), "{screen}");
         assert!(
             screen.contains("│14:32:05  nova-billing  stopped: idle for 15m"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn renders_how_far_a_start_has_come() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        let mut snapshot = sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.state = InstanceState::Starting;
+        billing.processes[0].state = ProcessState::Starting;
+        billing.boot = Some(carte_api::BootProgress {
+            elapsed_ms: 12_400,
+            waiting_for: "web to answer /up on port 4000".into(),
+        });
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        let later = now + std::time::Duration::from_secs(3);
+        app.update(Event::Tick, later);
+        let screen = draw(&mut app, 160, 24);
+        assert!(
+            screen.contains(
+                "starting for 15s · waiting for web to answer /up on port 4000 · running: worker"
+            ),
             "{screen}"
         );
     }

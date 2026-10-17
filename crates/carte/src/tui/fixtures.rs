@@ -61,6 +61,7 @@ pub fn instance(app: &str, stack: &str, checkout: &str, state: InstanceState) ->
         last_error: None,
         env_changed: false,
         last_event: None,
+        boot: None,
     }
 }
 

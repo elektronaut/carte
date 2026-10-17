@@ -217,6 +217,16 @@ pub struct InstanceStatus {
     /// The latest event about it or one of its processes.
     #[serde(default)]
     pub last_event: Option<Event>,
+    /// How far a start has come, while it is starting.
+    #[serde(default)]
+    pub boot: Option<BootProgress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootProgress {
+    pub elapsed_ms: u64,
+    /// What the start waits for: `web to answer /up on port 51234`.
+    pub waiting_for: String,
 }
 
 /// `carte status --json`: the instances an address names. An app's instance is listed
