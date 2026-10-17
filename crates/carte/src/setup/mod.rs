@@ -451,7 +451,7 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
         action: Action::Verify,
     });
 
-    if facts.daemon_running && !facts.agent_loaded {
+    if facts.daemon_running && !facts.agent_loaded && !facts.old_agent.loaded {
         plan.notes.push(format!(
             "a carte daemon is already running on {}; stop it first, or the LaunchAgent's daemon will refuse to start",
             tilde(&env.paths.socket())
@@ -794,10 +794,13 @@ mod tests {
                 plist: true,
                 loaded: true,
             },
+            daemon_running: true,
             ..fresh()
         };
+        let plan = plan_install(&env, &facts);
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
         assert_eq!(
-            commands(&plan_install(&env, &facts)),
+            commands(&plan),
             [
                 "launchctl bootout gui/501/carte.daemon",
                 "rm /r/home/Library/LaunchAgents/carte.daemon.plist",
