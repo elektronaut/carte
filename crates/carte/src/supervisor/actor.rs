@@ -1761,17 +1761,26 @@ impl Actor {
                 continue;
             };
             for proc in inst.procs.iter().filter(|p| p.deferred && !p.is_running()) {
-                if !self_runs_elsewhere(
-                    &self.instances,
-                    &inst.key,
-                    checkout.path(),
-                    &proc.spec.name,
-                ) {
-                    adopt.push((inst.key.clone(), proc.spec.name.clone()));
+                let taken = adopt
+                    .iter()
+                    .any(|(_, name, path)| *name == proc.spec.name && path == checkout.path());
+                if !taken
+                    && !self_runs_elsewhere(
+                        &self.instances,
+                        &inst.key,
+                        checkout.path(),
+                        &proc.spec.name,
+                    )
+                {
+                    adopt.push((
+                        inst.key.clone(),
+                        proc.spec.name.clone(),
+                        checkout.path().clone(),
+                    ));
                 }
             }
         }
-        for (key, name) in adopt {
+        for (key, name, _) in adopt {
             if let Some(proc) = self
                 .instances
                 .get_mut(&key)
@@ -2668,7 +2677,8 @@ fn world_changes(old: &World, new: &World) -> Vec<(EventKind, String, Vec<EventS
 }
 
 /// Another active instance from the checkout runs the process, or ran it until it
-/// exited on its own: it restarts the process or leaves it down.
+/// exited on its own without leaving it to another instance: it restarts the process
+/// or leaves it down.
 fn self_runs_elsewhere(
     instances: &BTreeMap<InstanceKey, Instance>,
     key: &InstanceKey,
@@ -2681,7 +2691,8 @@ fn self_runs_elsewhere(
             && inst.checkout.as_ref().is_some_and(|c| c.path() == checkout)
             && inst.procs.iter().any(|p| {
                 p.spec.name == name
-                    && (p.is_running() || matches!(p.state, ProcessState::Exited { .. }))
+                    && (p.is_running()
+                        || !p.deferred && matches!(p.state, ProcessState::Exited { .. }))
             })
     })
 }

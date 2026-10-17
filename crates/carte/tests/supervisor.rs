@@ -2111,3 +2111,83 @@ async fn a_crashed_checkout_watcher_comes_back_once_in_the_instance_that_ran_it(
     assert!(css(&snapshot, "feature-x").pid.is_none());
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn one_parked_copy_takes_over_a_checkout_watcher_when_its_owner_stops() {
+    let setup = Setup::new();
+    let web = setup.app("acme-web", WEB);
+    setup.app(
+        "acme-api",
+        "web: FIXTURE_NAME=api exec {fixture}\ncss: FIXTURE_NAME=css exec {fixture}\n",
+    );
+    for branch in ["feature-x", "feature-y"] {
+        git(
+            &web,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                branch,
+                &format!("../{branch}/acme-web"),
+            ],
+        );
+    }
+    setup.project("");
+    let backoff = Duration::from_millis(300);
+    let handle = setup.start_with_backoff(backoff);
+    let css = |s: &carte_api::Snapshot, stack: &str| {
+        status(s, "acme-api", stack)
+            .processes
+            .iter()
+            .find(|p| p.name == "css")
+            .cloned()
+            .unwrap()
+    };
+    let branches = ["feature-x", "feature-y"];
+
+    handle
+        .ensure_ready(key("acme-api", Stack::Main))
+        .await
+        .unwrap();
+    for branch in branches {
+        handle
+            .ensure_ready(key("acme-api", Stack::Branch(branch.into())))
+            .await
+            .unwrap();
+        handle
+            .control(control(&format!("api@{branch}/css"), Action::Up))
+            .await
+            .unwrap();
+    }
+    wait_for(&handle, "css in every stack", |s| {
+        ["main", "feature-x", "feature-y"]
+            .iter()
+            .all(|stack| css(s, stack).state == ProcessState::Running)
+    })
+    .await;
+    for branch in branches {
+        let pid = css(&handle.snapshot(), branch).pid.unwrap();
+        kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    }
+    tokio::time::sleep(backoff * 3).await;
+    let snapshot = handle.snapshot();
+    for branch in branches {
+        assert!(css(&snapshot, branch).pid.is_none());
+    }
+
+    handle
+        .control(control("api@main", Action::Down))
+        .await
+        .unwrap();
+    let running = |s: &carte_api::Snapshot| {
+        branches
+            .iter()
+            .filter(|branch| css(s, branch).state == ProcessState::Running)
+            .count()
+    };
+    wait_for(&handle, "css taken over", |s| running(s) > 0).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(running(&handle.snapshot()), 1);
+    handle.shutdown().await;
+}
