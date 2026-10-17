@@ -517,6 +517,120 @@ async fn running_processes_report_memory() {
 }
 
 #[tokio::test]
+async fn processes_show_and_take_policies_before_the_first_start() {
+    let setup = Setup::new();
+    let dir = setup.app("acme-web", WEB);
+    setup.project("[apps.acme-web.processes.worker]\npolicy = \"disabled\"\n");
+    let handle = setup.start();
+    let processes = |handle: &Handle| -> Vec<(String, ProcessState, carte_api::Policy, bool)> {
+        status(&handle.snapshot(), "acme-web", "main")
+            .processes
+            .iter()
+            .map(|p| (p.name.clone(), p.state, p.policy, p.temporary))
+            .collect()
+    };
+    let p = |name: &str, policy, temporary| {
+        (name.to_string(), ProcessState::Stopped, policy, temporary)
+    };
+    use carte_api::Policy::{Auto, Disabled};
+    assert_eq!(
+        processes(&handle),
+        [p("web", Auto, false), p("worker", Disabled, false)]
+    );
+
+    handle
+        .control(control("web/worker", Action::Enable { save: false }))
+        .await
+        .unwrap();
+    handle
+        .control(control("web/web", Action::Disable { save: false }))
+        .await
+        .unwrap();
+    assert_eq!(
+        processes(&handle),
+        [p("web", Disabled, true), p("worker", Auto, true)]
+    );
+    let error = handle
+        .control(control("web/clock", Action::Disable { save: false }))
+        .await
+        .unwrap_err();
+    assert!(error.contains("no process named clock"), "{error}");
+
+    handle
+        .control(control("web/worker", Action::Enable { save: true }))
+        .await
+        .unwrap();
+    wait_for(&handle, "the saved policy", |s| {
+        status(s, "acme-web", "main")
+            .processes
+            .iter()
+            .any(|p| p.name == "worker" && p.policy == Auto && !p.temporary)
+    })
+    .await;
+    std::fs::write(
+        dir.join("Procfile.dev"),
+        "web: exec {fixture}\nclock: exec {fixture}\n"
+            .replace("{fixture}", &fixture().display().to_string()),
+    )
+    .unwrap();
+    handle.reload(discovery::load_world(&setup.paths.config_dir));
+    wait_for(&handle, "the new process list", |s| {
+        status(s, "acme-web", "main")
+            .processes
+            .iter()
+            .any(|p| p.name == "clock")
+    })
+    .await;
+    assert_eq!(
+        processes(&handle),
+        [p("web", Disabled, true), p("clock", Auto, false)]
+    );
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Stopped
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn running_instances_keep_the_processes_they_started_with() {
+    let setup = Setup::new();
+    let dir = setup.app("acme-web", WEB);
+    setup.project("");
+    let handle = setup.start();
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+
+    std::fs::write(
+        dir.join("Procfile.dev"),
+        format!("web: exec {}\n", fixture().display()),
+    )
+    .unwrap();
+    let world = discovery::load_world(&setup.paths.config_dir);
+    handle.reload(world.clone());
+    while *handle.world() != world {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let names = |s: &carte_api::Snapshot| -> Vec<String> {
+        status(s, "acme-web", "main")
+            .processes
+            .iter()
+            .map(|p| p.name.clone())
+            .collect()
+    };
+    assert_eq!(names(&handle.snapshot()), ["web", "worker"]);
+
+    handle.control(control("web", Action::Down)).await.unwrap();
+    wait_for(&handle, "the new list once stopped", |s| {
+        names(s) == ["web"]
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn saved_policies_are_written_to_the_project_file() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);

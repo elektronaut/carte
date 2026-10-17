@@ -4,14 +4,14 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use carte_api::{
-    AppInfo, Hold, InstanceState, InstanceStatus, Policy as ApiPolicy, ProcessStatus,
+    AppInfo, Hold, InstanceState, InstanceStatus, Policy as ApiPolicy, ProcessState, ProcessStatus,
     ProjectStatus, Snapshot, StackStatus, TunnelStatus,
 };
 use carte_core::lifecycle;
-use carte_core::model::{InstanceKey, Policy, ProjectState, Stack, World};
+use carte_core::model::{App, InstanceKey, Policy, ProjectState, Stack, World};
 use carte_core::naming;
 
-use super::actor::{Instance, Overrides, effective_policy};
+use super::actor::{Instance, Overrides, Proc, effective_policy};
 use super::share::{self, Shares};
 
 pub(super) struct Input<'a> {
@@ -126,6 +126,7 @@ fn stack_status(
                     .flatten()
             });
             let Some(inst) = instances.get(&key) else {
+                let processes = stopped_processes(input, state, app, &stack, &key, &[]);
                 return InstanceStatus {
                     app: app.name.clone(),
                     stack: stack.slug().to_string(),
@@ -134,7 +135,7 @@ fn stack_status(
                     url,
                     public_url,
                     state: InstanceState::Stopped,
-                    processes: Vec::new(),
+                    processes,
                     holds: Vec::new(),
                     idle_in_secs: None,
                     memory_bytes: 0,
@@ -177,27 +178,17 @@ fn stack_status(
                         .as_secs()
                 });
             let checkout = inst.checkout.clone().unwrap_or(checkout);
-            InstanceStatus {
-                app: app.name.clone(),
-                stack: stack.slug().to_string(),
-                checkout: checkout.slug().to_string(),
-                checkout_path: checkout.path().clone(),
-                url,
-                public_url,
-                state: inst.state,
-                processes: inst
-                    .procs
+            let processes = if inst.state == InstanceState::Stopped && !inst.any_running() {
+                stopped_processes(input, state, app, &stack, &key, &inst.procs)
+            } else {
+                inst.procs
                     .iter()
                     .map(|p| {
                         let (policy, temporary) = effective_policy(overrides, &key, &p.spec);
                         ProcessStatus {
                             name: p.spec.name.clone(),
                             state: p.state,
-                            policy: match policy {
-                                Policy::Pinned => ApiPolicy::Pinned,
-                                Policy::Auto => ApiPolicy::Auto,
-                                Policy::Disabled => ApiPolicy::Disabled,
-                            },
+                            policy: api_policy(policy),
                             temporary,
                             pid: p.pid,
                             port: Some(p.port),
@@ -207,7 +198,17 @@ fn stack_status(
                             cpu_percent: p.cpu_percent,
                         }
                     })
-                    .collect(),
+                    .collect()
+            };
+            InstanceStatus {
+                app: app.name.clone(),
+                stack: stack.slug().to_string(),
+                checkout: checkout.slug().to_string(),
+                checkout_path: checkout.path().clone(),
+                url,
+                public_url,
+                state: inst.state,
+                processes,
                 holds,
                 idle_in_secs,
                 memory_bytes: inst.procs.iter().map(|p| p.memory_bytes).sum(),
@@ -224,5 +225,47 @@ fn stack_status(
             Stack::Branch(slug) => naming::stack_branch(state, slug).map(str::to_string),
         },
         instances,
+    }
+}
+
+/// The processes an instance would start, from the process list read at load,
+/// keeping ports and restart counts from an earlier run.
+fn stopped_processes(
+    input: &Input,
+    state: &ProjectState,
+    app: &App,
+    stack: &Stack,
+    key: &InstanceKey,
+    previous: &[Proc],
+) -> Vec<ProcessStatus> {
+    let Some(Ok(list)) = state.process_list(app, stack) else {
+        return Vec::new();
+    };
+    list.processes
+        .iter()
+        .map(|spec| {
+            let (policy, temporary) = effective_policy(input.overrides, key, spec);
+            let earlier = previous.iter().find(|p| p.spec.name == spec.name);
+            ProcessStatus {
+                name: spec.name.clone(),
+                state: ProcessState::Stopped,
+                policy: api_policy(policy),
+                temporary,
+                pid: None,
+                port: earlier.map(|p| p.port),
+                http: spec.http,
+                restarts: earlier.map_or(0, |p| p.restarts),
+                memory_bytes: 0,
+                cpu_percent: 0.0,
+            }
+        })
+        .collect()
+}
+
+fn api_policy(policy: Policy) -> ApiPolicy {
+    match policy {
+        Policy::Pinned => ApiPolicy::Pinned,
+        Policy::Auto => ApiPolicy::Auto,
+        Policy::Disabled => ApiPolicy::Disabled,
     }
 }

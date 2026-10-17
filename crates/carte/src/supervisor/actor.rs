@@ -123,7 +123,7 @@ impl Instance {
             .map(|port| Upstream { port })
     }
 
-    fn any_running(&self) -> bool {
+    pub(super) fn any_running(&self) -> bool {
         self.procs.iter().any(Proc::is_running)
     }
 
@@ -1206,6 +1206,24 @@ impl Actor {
         action: Action,
     ) -> Result<Option<String>, String> {
         let active = self.instances.get(key).is_some_and(Instance::is_active);
+        if let Some(name) = process
+            && matches!(
+                action,
+                Action::Pin { .. }
+                    | Action::Unpin { .. }
+                    | Action::Disable { .. }
+                    | Action::Enable { .. }
+            )
+            && self
+                .specs(key)
+                .is_some_and(|specs| !specs.iter().any(|s| s.name == name))
+        {
+            return Err(format!(
+                "{}@{} has no process named {name}",
+                key.app,
+                key.stack.slug()
+            ));
+        }
         match action {
             Action::Up => match process {
                 Some(name) if active => self.start_process(key, name).map(|_| None),
@@ -1521,12 +1539,12 @@ impl Actor {
 
     fn set_override(&mut self, key: &InstanceKey, process: Option<&str>, policy: Policy) {
         let entry = (key.clone(), process.map(str::to_string));
-        let configured = self.instances.get(key).and_then(|inst| {
+        let configured = self.specs(key).and_then(|specs| {
             let spec = match process {
-                Some(name) => inst.procs.iter().find(|p| p.spec.name == name),
-                None => inst.http(),
+                Some(name) => specs.into_iter().find(|s| s.name == name),
+                None => specs.into_iter().find(|s| s.http),
             }?;
-            Some(spec.spec.policy)
+            Some(spec.policy)
         });
         if configured == Some(policy) || (configured.is_none() && policy == Policy::Auto) {
             self.overrides.remove(&entry);
@@ -1534,6 +1552,16 @@ impl Actor {
             self.overrides.insert(entry, policy);
         }
         self.dirty = true;
+    }
+
+    /// An instance's processes: what it started with, else the list read at load.
+    fn specs(&self, key: &InstanceKey) -> Option<Vec<&ProcessSpec>> {
+        if let Some(inst) = self.instances.get(key).filter(|i| !i.procs.is_empty()) {
+            return Some(inst.procs.iter().map(|p| &p.spec).collect());
+        }
+        let (state, app) = self.lookup(key).ok()?;
+        let list = state.process_list(app, &key.stack)?.as_ref().ok()?;
+        Some(list.processes.iter().collect())
     }
 
     fn resolve(&self, address: &Address) -> Result<Target, String> {

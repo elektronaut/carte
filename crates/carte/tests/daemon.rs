@@ -297,6 +297,29 @@ fn up_and_down_by_address() {
 }
 
 #[test]
+fn lists_processes_before_the_first_start_and_follows_the_procfile() {
+    let daemon = Daemon::start();
+    let processes = || -> Vec<(String, carte_api::ProcessState)> {
+        snapshot(&daemon).projects[0].stacks[0].instances[0]
+            .processes
+            .iter()
+            .map(|p| (p.name.clone(), p.state))
+            .collect()
+    };
+    let stopped = |name: &str| (name.to_string(), carte_api::ProcessState::Stopped);
+    assert_eq!(processes(), [stopped("web"), stopped("worker")]);
+
+    std::fs::write(
+        daemon.root.join("work/acme-web/Procfile.dev"),
+        format!("web: exec {}\nclock: exec {0}\n", fixture().display()),
+    )
+    .unwrap();
+    eventually("the new process list", || {
+        processes() == [stopped("web"), stopped("clock")]
+    });
+}
+
+#[test]
 fn a_second_daemon_refuses_to_start() {
     let daemon = Daemon::start();
     let output = daemon.command(&["daemon"]).output().unwrap();
