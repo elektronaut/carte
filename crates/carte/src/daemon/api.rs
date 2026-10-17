@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use carte_api::{
     Address, ControlRequest, ErrorBody, EventsRequest, LogsRequest, MarkRequest, Problem,
-    ShareRequest, StopAllRequest, UnshareRequest, paths,
+    PruneRequest, ShareRequest, StopAllRequest, UnshareRequest, paths,
 };
 use carte_core::address;
 use serde::Serialize;
@@ -42,6 +42,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::PROCESS_ENV, post(process_env))
         .route(paths::SHARE, post(share))
         .route(paths::UNSHARE, post(unshare))
+        .route(paths::PRUNE, get(prune_list).post(prune))
         .with_state(api)
 }
 
@@ -206,6 +207,43 @@ async fn unshare(State(api): State<Api>, Json(request): Json<UnshareRequest>) ->
     match api.supervisor.unshare(request.target).await {
         Ok(apps) => Json(apps).into_response(),
         Err(message) => error(StatusCode::BAD_REQUEST, message),
+    }
+}
+
+async fn prune_list(State(api): State<Api>) -> Response {
+    let running = api.supervisor.running().await;
+    let paths = api.paths.clone();
+    match tokio::task::spawn_blocking(move || crate::prune::list(&paths, running)).await {
+        Ok(list) => Json(list).into_response(),
+        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+/// Removes the asked-for leftovers that still are leftovers once the configuration is
+/// read again, and that no running instance owns when the supervisor gets to them.
+async fn prune(State(api): State<Api>, Json(request): Json<PruneRequest>) -> Response {
+    let running = api.supervisor.running().await;
+    let paths = api.paths.clone();
+    let selected =
+        tokio::task::spawn_blocking(move || crate::prune::select(&paths, running, &request.paths))
+            .await;
+    let (selected, kept) = match selected {
+        Ok(selected) => selected,
+        Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    let sizes = selected
+        .iter()
+        .map(|(orphan, bytes)| (orphan.path.clone(), *bytes))
+        .collect();
+    let orphans: Vec<_> = selected.into_iter().map(|(orphan, _)| orphan).collect();
+    let count = orphans.len();
+    let detached = api.supervisor.prune(orphans).await;
+    if detached.len() != count {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "carte is shutting down");
+    }
+    match tokio::task::spawn_blocking(move || crate::prune::finish(detached, &sizes, kept)).await {
+        Ok(result) => Json(result).into_response(),
+        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
 

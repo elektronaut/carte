@@ -335,7 +335,7 @@ fn duration(secs: u64) -> String {
     carte_core::duration::format(Duration::from_secs(secs))
 }
 
-fn format_bytes(bytes: u64) -> String {
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
     match bytes {
         b if b < KB => format!("{b}B"),

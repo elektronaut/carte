@@ -13,6 +13,7 @@ pub mod lifecycle;
 pub mod model;
 pub mod naming;
 pub mod procfile;
+pub mod prune;
 pub mod slug;
 pub mod template;
 

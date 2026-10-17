@@ -8,7 +8,7 @@ pub mod runner;
 pub mod share;
 mod snapshot;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,11 +18,13 @@ use carte_api::{
     ShareRequest, ShareResponse, Snapshot, StartFailure, TunnelStatus,
 };
 use carte_core::model::{InstanceKey, World};
+use carte_core::prune::Orphan;
 pub use events::EventFilter;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::paths::Paths;
 use crate::process::Spawner;
+use crate::prune;
 
 /// Where a ready instance answers HTTP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +142,11 @@ pub(crate) enum Msg {
     ExternalRequest(InstanceKey, ExternalRequest),
     Tunnel(TunnelStatus),
     Shutdown(oneshot::Sender<()>),
+    Running(oneshot::Sender<BTreeSet<InstanceKey>>),
+    Prune {
+        orphans: Vec<Orphan>,
+        reply: oneshot::Sender<Vec<(Orphan, prune::Detached)>>,
+    },
     Internal(actor::Internal),
 }
 
@@ -333,6 +340,21 @@ impl Handle {
 
     pub fn reload(&self, world: World) {
         self.send(Msg::Reload(world));
+    }
+
+    /// Instances that are starting or ready, or still have processes running.
+    pub async fn running(&self) -> BTreeSet<InstanceKey> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::Running(reply));
+        rx.await.unwrap_or_default()
+    }
+
+    /// Takes leftovers out of the way, skipping any a running instance owns, without
+    /// an instance starting in between.
+    pub async fn prune(&self, orphans: Vec<Orphan>) -> Vec<(Orphan, prune::Detached)> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::Prune { orphans, reply });
+        rx.await.unwrap_or_default()
     }
 
     /// Stops every process and waits for them to exit.

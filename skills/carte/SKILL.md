@@ -100,6 +100,8 @@ Ask the user first before:
 - `carte share`: it puts the app on the public internet. Only share when
   the user asks for it.
 - `carte stop-all`, or stopping apps you're not working on
+- `carte prune` without `--dry-run`: it deletes the data of stacks, apps
+  and projects that are gone
 - `--save` on `pin`, `unpin`, `disable` or `enable`, which edits project
   files
 - editing anything under `~/.config/carte`

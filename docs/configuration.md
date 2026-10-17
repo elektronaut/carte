@@ -456,6 +456,9 @@ The stack's folder, `<state>/data/<project>/<stack>`, also holds
 `stack.toml`, where carte records the stack's branch and each app's
 worktree.
 
+carte doesn't delete these directories when a worktree, app or project
+goes away. [`carte prune`](cli.md#prune) removes the leftovers.
+
 ### Env templates
 
 Values in `env` tables can use `{{…}}` expressions:

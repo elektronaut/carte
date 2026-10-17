@@ -15,6 +15,7 @@ mod import;
 mod mcp;
 mod project;
 pub(crate) mod prompt;
+mod prune;
 mod setup;
 
 #[derive(Parser)]
@@ -78,6 +79,9 @@ pub enum Command {
         #[arg(long)]
         idle: bool,
     },
+    /// Remove state folders, run directories and pidfiles of stacks, apps and
+    /// projects that no longer exist.
+    Prune(PruneArgs),
     /// Set up this Mac: DNS resolver, CA trust and the daemon's LaunchAgent.
     Setup(SetupArgs),
     /// Create projects from another tool's setup.
@@ -222,6 +226,16 @@ pub struct EventsArgs {
 }
 
 #[derive(Args, Clone)]
+pub struct PruneArgs {
+    /// List what would be removed without removing it.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Don't ask; remove everything listed.
+    #[arg(long, short, conflicts_with = "dry_run")]
+    pub yes: bool,
+}
+
+#[derive(Args, Clone)]
 pub struct SetupArgs {
     /// Show the plan without changing anything.
     #[arg(long)]
@@ -363,6 +377,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Unshare(t) => control::unshare(&paths, t, cli.json),
         Command::Env(args) => env::run(&paths, args, cli.json),
         Command::Project(cmd) => project::run(&paths, cmd, cli.json),
+        Command::Prune(args) => prune::run(&paths, args, cli.json),
         Command::Setup(args) => setup::run(&paths, args),
         Command::Import(ImportCommand::PumaDev { dry_run, yes, from }) => {
             import::puma_dev(&paths, from, dry_run, yes)

@@ -11,6 +11,7 @@ pub mod paths;
 pub mod process;
 pub mod process_env;
 pub mod proxy;
+pub mod prune;
 pub mod pty;
 pub mod rank;
 pub mod setup;

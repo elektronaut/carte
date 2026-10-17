@@ -26,6 +26,7 @@ use super::{Activity, BootFailure, Handle, LogFilter, Msg, Options, Upstream, sh
 use crate::instance_dirs;
 use crate::paths::Paths;
 use crate::process::{IoMode, SpawnSpec, Spawner};
+use crate::prune;
 use crate::urls::StackUrls;
 
 pub(crate) enum Internal {
@@ -429,8 +430,24 @@ impl Actor {
                     self.stop(&key, None);
                 }
             }
+            Msg::Running(reply) => {
+                let _ = reply.send(self.running());
+            }
+            Msg::Prune { orphans, reply } => {
+                let running = self.running();
+                let _ = reply.send(prune::detach(orphans, &running, &self.paths.dir_roots()));
+            }
             Msg::Internal(internal) => self.internal(internal),
         }
+    }
+
+    /// Instances that are starting or ready, or still have processes running.
+    fn running(&self) -> BTreeSet<InstanceKey> {
+        self.instances
+            .values()
+            .filter(|inst| inst.is_active() || inst.any_running())
+            .map(|inst| inst.key.clone())
+            .collect()
     }
 
     fn internal(&mut self, internal: Internal) {
