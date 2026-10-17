@@ -335,6 +335,13 @@ pub struct LogsRequest {
     /// Only lines from each process's latest run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub since_start: bool,
+    /// The lines most relevant to these words, best first, instead of the latest
+    /// ones. Never followed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<String>,
+    /// How many ranked lines to send: 20 by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

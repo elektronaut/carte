@@ -97,6 +97,18 @@ impl LogBuffer {
     }
 }
 
+/// The local time of day of a timestamp in milliseconds since the Unix epoch, as
+/// `HH:MM:SS`.
+pub fn clock(at_ms: u64) -> String {
+    let secs = (at_ms / 1000) as libc::time_t;
+    // SAFETY: an all-zero `tm` is a valid value, and both pointers point at live locals.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return "--:--:--".into();
+    }
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
 /// Strips terminal escape codes from a complete chunk of output.
 pub fn strip(data: &[u8]) -> String {
     let mut stripper = Stripper::default();
@@ -265,6 +277,14 @@ impl Stripper {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_shows_the_time_of_day() {
+        let time = clock(1_760_000_000_000);
+        assert_eq!(time.len(), 8, "{time}");
+        assert_eq!(time.matches(':').count(), 2, "{time}");
+        assert_eq!(clock(1_760_000_000_999), time);
+    }
 
     #[test]
     fn buffer_keeps_everything_under_the_cap() {

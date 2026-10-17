@@ -179,6 +179,12 @@ pub struct LogsArgs {
     /// Only lines from each process's latest run.
     #[arg(long)]
     pub since_start: bool,
+    /// The lines most relevant to these words, best first, with their time.
+    #[arg(long, value_name = "WORDS", conflicts_with_all = ["follow", "lines"])]
+    pub rank: Option<String>,
+    /// How many lines --rank shows.
+    #[arg(long, requires = "rank", default_value_t = 20)]
+    pub top: usize,
 }
 
 fn parse_duration(value: &str) -> Result<std::time::Duration, String> {

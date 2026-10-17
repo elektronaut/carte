@@ -9,6 +9,7 @@ pub mod paths;
 pub mod process;
 pub mod proxy;
 pub mod pty;
+pub mod rank;
 pub mod setup;
 pub mod shim;
 pub mod supervisor;

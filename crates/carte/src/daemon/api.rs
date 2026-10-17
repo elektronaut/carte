@@ -103,7 +103,8 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
     if let Some(response) = unresolved(&api, &request.target) {
         return response;
     }
-    let mut follow = request.follow.then(|| api.supervisor.follow_logs());
+    let mut follow =
+        (request.follow && request.rank.is_none()).then(|| api.supervisor.follow_logs());
     let (lines, filter) = match api.supervisor.logs(request).await {
         Ok(result) => result,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),

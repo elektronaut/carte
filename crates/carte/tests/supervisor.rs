@@ -509,6 +509,15 @@ async fn logs_are_kept_and_filtered() {
         .await
         .unwrap();
     assert_eq!(lines.len(), 1, "{lines:?}");
+    let (ranked, _) = handle
+        .logs(LogsRequest {
+            rank: Some("2".into()),
+            top: Some(5),
+            ..request(&target)
+        })
+        .await
+        .unwrap();
+    assert!(ranked[0].text.contains("line 2"), "{ranked:?}");
     handle.shutdown().await;
 }
 

@@ -1706,6 +1706,12 @@ impl Actor {
         }
         lines.retain(|line| filter.matches(line));
         lines.sort_by_key(|line| line.at_ms);
+        if let Some(query) = &request.rank {
+            let texts: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
+            let order = crate::rank::rank(&texts, query, request.top.unwrap_or(20));
+            let ranked = order.into_iter().map(|i| lines[i].clone()).collect();
+            return Ok((ranked, filter));
+        }
         let narrowed = request.since_ms.is_some() || request.since_start;
         let tail = request
             .tail

@@ -441,7 +441,10 @@ pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCod
         search: args.search,
         since_ms,
         since_start: args.since_start,
+        top: args.rank.is_some().then_some(args.top),
+        rank: args.rank,
     };
+    let timed = request.rank.is_some();
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut stdout = std::io::stdout().lock();
     let mut labels: Vec<String> = Vec::new();
@@ -463,15 +466,20 @@ pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCod
                 labels.push(label.clone());
                 labels.len() - 1
             });
+            let time = if timed {
+                format!("{} ", crate::logs::clock(line.at_ms))
+            } else {
+                String::new()
+            };
             let _ = if color {
                 writeln!(
                     stdout,
-                    "\x1b[{}m{label}\x1b[0m {}",
+                    "{time}\x1b[{}m{label}\x1b[0m {}",
                     31 + index % 6,
                     line.text
                 )
             } else {
-                writeln!(stdout, "{label} {}", line.text)
+                writeln!(stdout, "{time}{label} {}", line.text)
             };
         },
     ))?;
