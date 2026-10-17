@@ -1383,12 +1383,16 @@ impl Actor {
         }
         proc.pending_restart = false;
         let mut event = None;
+        if inst.state == InstanceState::Starting
+            && proc.spec.kind.is_some()
+            && proc.restart
+            && proc.is_running()
+        {
+            proc.queued = true;
+        }
         if let Some(stop) = proc.stop.take() {
             proc.state = ProcessState::Stopping;
             proc.manual_stop = true;
-            if inst.state == InstanceState::Starting && proc.spec.kind.is_some() && proc.restart {
-                proc.queued = true;
-            }
             let _ = stop.send(grace);
             let kind = if proc.restart {
                 EventKind::Restarted
