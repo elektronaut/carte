@@ -222,6 +222,34 @@ Processes that look like file watchers default to `scope = "checkout"`:
 names containing `watch`, `css` and `js`, and commands with `-w`,
 `--watch` or a `:watch` task.
 
+### Node apps
+
+carte doesn't read `package.json`, so a Node app needs a `Procfile.dev`
+(or a `command` in the project file). Every process gets its port in
+`PORT`; dev servers that ignore it need it as a flag:
+
+```
+web: npx vite --port $PORT --strictPort
+```
+
+| Dev server | Command |
+| --- | --- |
+| Next.js | `next dev` reads `PORT` itself |
+| Vite | `vite --port $PORT --strictPort` |
+| Astro | `astro dev --port $PORT` |
+| Anything else | Check that it reads `PORT`, or pass it as a flag |
+
+A fixed port in the web command (`--port 5173`, `-p 3000`) is replaced
+with `$PORT` automatically.
+
+carte passes the `.test` hostname through to the app, and recent dev
+servers refuse hostnames they don't know:
+
+- **Vite** (and Astro, under `vite.server`): add the domain to
+  `server.allowedHosts`, as in `allowedHosts: [".test"]`.
+- **Next.js:** list the hostnames in `allowedDevOrigins` in
+  `next.config.js`, as in `["*.acme.test"]`, so hot reloading works.
+
 ### Policies
 
 | Policy | Starts with the app | Stops when idle |
