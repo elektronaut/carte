@@ -282,7 +282,8 @@ fn status_reports_an_app_before_and_after_it_starts() {
     assert!(!before.instances[0].processes.is_empty());
     assert!(status(&["--project", "acme"]).instances.is_empty());
 
-    daemon.run(&["up", "web"]);
+    let up = stdout(&daemon.run(&["up", "web", "--no-wait"]));
+    assert_eq!(up, "starting acme-web@main\n");
     eventually("web ready", || {
         status(&["web"]).instances[0].state == carte_api::InstanceState::Ready
     });
@@ -295,17 +296,9 @@ fn status_reports_an_app_before_and_after_it_starts() {
 fn up_and_down_by_address() {
     let daemon = Daemon::start();
     let up = stdout(&daemon.run(&["up", "web"]));
-    assert!(up.contains("starting acme-web@main"), "{up}");
-
-    let started = Instant::now();
-    loop {
-        let ls = stdout(&daemon.run(&["ls"]));
-        if ls.contains("ready") {
-            break;
-        }
-        assert!(started.elapsed() < Duration::from_secs(15), "{ls}");
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    assert_eq!(up, "ready acme-web@main\n");
+    let ls = stdout(&daemon.run(&["ls"]));
+    assert!(ls.contains("ready"), "{ls}");
 
     daemon.run(&["down", "web"]);
     let started = Instant::now();

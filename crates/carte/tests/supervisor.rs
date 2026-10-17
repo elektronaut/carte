@@ -117,6 +117,14 @@ fn control(address: &str, action: Action) -> ControlRequest {
             project: None,
         },
         action,
+        wait: false,
+    }
+}
+
+fn waiting(address: &str, action: Action) -> ControlRequest {
+    ControlRequest {
+        wait: true,
+        ..control(address, action)
     }
 }
 
@@ -182,6 +190,64 @@ async fn a_crash_on_boot_fails_the_request_with_logs() {
         status(&handle.snapshot(), "acme-web", "main").state,
         InstanceState::Crashed
     );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn waiting_up_answers_once_ready_or_failed() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.app(
+        "acme-broken",
+        "web: FIXTURE_LINES=2 FIXTURE_CRASH=3 exec {fixture}\n",
+    );
+    setup.app("acme-jobs", "worker: exec {fixture}\n");
+    setup.project("");
+    let handle = setup.start();
+
+    let response = handle.control(waiting("web", Action::Up)).await.unwrap();
+    assert!(response.failures.is_empty(), "{response:?}");
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Ready
+    );
+
+    let response = handle.control(waiting("jobs", Action::Up)).await.unwrap();
+    assert!(response.failures.is_empty(), "{response:?}");
+
+    let response = handle.control(waiting("broken", Action::Up)).await.unwrap();
+    assert_eq!(response.affected, ["acme-broken@main"]);
+    let [failure] = response.failures.as_slice() else {
+        panic!("{response:?}");
+    };
+    assert_eq!(failure.instance, "acme-broken@main");
+    assert!(failure.detail.contains("exited with code 3"), "{failure:?}");
+    assert!(!failure.log.is_empty(), "{failure:?}");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn waiting_restart_answers_with_the_new_process_ready() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    let pid = |handle: &Handle| status(&handle.snapshot(), "acme-web", "main").processes[0].pid;
+    let before = pid(&handle);
+    assert!(before.is_some());
+
+    let response = handle
+        .control(waiting("web", Action::Restart))
+        .await
+        .unwrap();
+    assert!(response.failures.is_empty(), "{response:?}");
+    wait_for(&handle, "the snapshot to catch up", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Ready
+    })
+    .await;
+    let after = pid(&handle);
+    assert!(after.is_some() && after != before, "{before:?} {after:?}");
     handle.shutdown().await;
 }
 

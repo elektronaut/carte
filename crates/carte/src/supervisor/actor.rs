@@ -390,12 +390,10 @@ impl Actor {
         if let Some(inst) = self.instances.get_mut(&key) {
             match inst.state {
                 InstanceState::Ready => {
-                    let _ = reply.send(inst.upstream().ok_or_else(|| {
-                        BootFailure::new(
-                            "No web process",
-                            format!("{} has no HTTP process", key.app),
-                        )
-                    }));
+                    let _ = reply.send(
+                        inst.upstream()
+                            .ok_or_else(|| BootFailure::no_web_process(&key.app)),
+                    );
                     return;
                 }
                 InstanceState::Starting => {
@@ -414,12 +412,10 @@ impl Actor {
             Ok(()) => {
                 let inst = self.instances.get_mut(&key).expect("started instance");
                 if inst.state == InstanceState::Ready {
-                    let _ = reply.send(inst.upstream().ok_or_else(|| {
-                        BootFailure::new(
-                            "No web process",
-                            format!("{} has no HTTP process", key.app),
-                        )
-                    }));
+                    let _ = reply.send(
+                        inst.upstream()
+                            .ok_or_else(|| BootFailure::no_web_process(&key.app)),
+                    );
                 } else {
                     inst.waiters.push(reply);
                 }
@@ -730,10 +726,7 @@ impl Actor {
         if inst.procs.iter().all(|p| p.state != ProcessState::Starting) {
             inst.state = InstanceState::Ready;
             for waiter in inst.waiters.drain(..) {
-                let _ = waiter.send(Err(BootFailure::new(
-                    "No web process",
-                    format!("{} has no HTTP process", key.app),
-                )));
+                let _ = waiter.send(Err(BootFailure::no_web_process(&key.app)));
             }
             self.dirty = true;
         }
@@ -1169,13 +1162,18 @@ impl Actor {
 
     // Control
 
-    fn control(&mut self, request: ControlRequest) -> Result<ControlResponse, String> {
+    fn control(
+        &mut self,
+        request: ControlRequest,
+    ) -> Result<(ControlResponse, Vec<InstanceKey>), String> {
         let target = self.resolve(&request.target)?;
         let keys = self.target_keys(&target, request.action)?;
         let mut response = ControlResponse {
             affected: Vec::new(),
             messages: Vec::new(),
+            failures: Vec::new(),
         };
+        let mut applied = Vec::new();
         let process = target.process.as_deref();
         for key in keys {
             let label = match process {
@@ -1187,8 +1185,12 @@ impl Actor {
                 Ok(Some(message)) => {
                     response.affected.push(label);
                     response.messages.push(message);
+                    applied.push(key);
                 }
-                Ok(None) => response.affected.push(label),
+                Ok(None) => {
+                    response.affected.push(label);
+                    applied.push(key);
+                }
                 Err(message) => response.messages.push(format!("{label}: {message}")),
             }
         }
@@ -1196,7 +1198,7 @@ impl Actor {
             return Err(response.messages.join("\n"));
         }
         self.dirty = true;
-        Ok(response)
+        Ok((response, applied))
     }
 
     fn apply(
@@ -1649,6 +1651,7 @@ impl Actor {
                 .map(|k| format!("{}@{}", k.app, k.stack.slug()))
                 .collect(),
             messages: Vec::new(),
+            failures: Vec::new(),
         }
     }
 

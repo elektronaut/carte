@@ -42,12 +42,13 @@ pub enum Command {
     },
     /// Show the state of the app here, or of an address: URL, processes, errors.
     Status(Target),
-    /// Start an instance, a stack or a process (lazy start does this too).
-    Up(Target),
+    /// Start an instance, a stack or a process, and wait until it's ready (lazy start
+    /// starts apps too).
+    Up(StartArgs),
     /// Stop an instance, a stack or a process.
     Down(Target),
-    /// Restart an instance, a stack or a process.
-    Restart(Target),
+    /// Restart an instance, a stack or a process, and wait until it's ready.
+    Restart(StartArgs),
     /// Keep a process running through idle periods.
     Pin(PolicyArgs),
     /// Let a pinned process idle out again.
@@ -101,6 +102,15 @@ pub struct Target {
     /// even when an app has the same name.
     #[arg(long, value_name = "NAME")]
     pub project: Option<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct StartArgs {
+    #[command(flatten)]
+    pub target: Target,
+    /// Return once the start is requested instead of waiting until the app is ready.
+    #[arg(long)]
+    pub no_wait: bool,
 }
 
 #[derive(Args, Clone)]
@@ -241,31 +251,47 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Tui => crate::tui::run(&paths),
         Command::Ls { all } => control::ls(&paths, all, cli.json),
         Command::Status(t) => control::status(&paths, t, cli.json),
-        Command::Up(t) => control::control(&paths, t, carte_api::Action::Up, cli.json),
-        Command::Down(t) => control::control(&paths, t, carte_api::Action::Down, cli.json),
-        Command::Restart(t) => control::control(&paths, t, carte_api::Action::Restart, cli.json),
+        Command::Up(s) => control::control(
+            &paths,
+            s.target,
+            carte_api::Action::Up,
+            !s.no_wait,
+            cli.json,
+        ),
+        Command::Down(t) => control::control(&paths, t, carte_api::Action::Down, false, cli.json),
+        Command::Restart(s) => control::control(
+            &paths,
+            s.target,
+            carte_api::Action::Restart,
+            !s.no_wait,
+            cli.json,
+        ),
         Command::Pin(p) => control::control(
             &paths,
             p.target,
             carte_api::Action::Pin { save: p.save },
+            false,
             cli.json,
         ),
         Command::Unpin(p) => control::control(
             &paths,
             p.target,
             carte_api::Action::Unpin { save: p.save },
+            false,
             cli.json,
         ),
         Command::Disable(p) => control::control(
             &paths,
             p.target,
             carte_api::Action::Disable { save: p.save },
+            false,
             cli.json,
         ),
         Command::Enable(p) => control::control(
             &paths,
             p.target,
             carte_api::Action::Enable { save: p.save },
+            false,
             cli.json,
         ),
         Command::Logs(args) => control::logs(&paths, args, cli.json),

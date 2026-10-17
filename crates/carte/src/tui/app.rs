@@ -534,6 +534,7 @@ impl App {
             request: ControlRequest {
                 target: target::address(node.id()),
                 action,
+                wait: false,
             },
             verb,
         })
@@ -560,6 +561,7 @@ impl App {
             [(id, action)] => ControlRequest {
                 target: target::address(id),
                 action: *action,
+                wait: false,
             },
             [] => {
                 self.inform("Nothing temporary to save here");
@@ -1173,6 +1175,7 @@ mod tests {
                 result: Ok(ControlResponse {
                     affected: vec!["nova-billing@main".into()],
                     messages: Vec::new(),
+                    failures: Vec::new(),
                 }),
             },
             now,

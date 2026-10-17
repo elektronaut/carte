@@ -279,6 +279,9 @@ pub enum Policy {
 pub struct ControlRequest {
     pub target: Address,
     pub action: Action,
+    /// For `up` and `restart`: answer once the instances are ready or have failed.
+    #[serde(default)]
+    pub wait: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,6 +301,19 @@ pub struct ControlResponse {
     /// `app@stack` or `app@stack/process` for everything the action touched.
     pub affected: Vec<String>,
     pub messages: Vec<String>,
+    /// Instances that failed to get ready, when the request waited.
+    #[serde(default)]
+    pub failures: Vec<StartFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartFailure {
+    /// `app@stack`.
+    pub instance: String,
+    pub title: String,
+    pub detail: String,
+    /// The last lines of its log.
+    pub log: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carte_api::{
-    Address, ControlRequest, ControlResponse, ExternalRequest, LogLine, ShareRequest,
-    ShareResponse, Snapshot, TunnelStatus,
+    Action, Address, ControlRequest, ControlResponse, ExternalRequest, LogLine, ShareRequest,
+    ShareResponse, Snapshot, StartFailure, TunnelStatus,
 };
 use carte_core::model::{InstanceKey, World};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -38,6 +38,8 @@ pub struct BootFailure {
     pub transient: bool,
 }
 
+const NO_WEB_PROCESS: &str = "No web process";
+
 impl BootFailure {
     fn new(title: impl Into<String>, detail: impl Into<String>) -> Self {
         BootFailure {
@@ -46,6 +48,15 @@ impl BootFailure {
             log: Vec::new(),
             transient: false,
         }
+    }
+
+    /// The instance is ready but has no HTTP process to forward to.
+    fn no_web_process(app: &str) -> Self {
+        BootFailure::new(NO_WEB_PROCESS, format!("{app} has no HTTP process"))
+    }
+
+    pub fn is_no_web_process(&self) -> bool {
+        self.title == NO_WEB_PROCESS
     }
 }
 
@@ -88,9 +99,10 @@ pub(crate) enum Msg {
         reply: oneshot::Sender<Result<Upstream, BootFailure>>,
     },
     Activity(InstanceKey, Activity),
+    /// Answers with the instances the action applied to.
     Control {
         request: ControlRequest,
-        reply: oneshot::Sender<Result<ControlResponse, String>>,
+        reply: oneshot::Sender<Result<(ControlResponse, Vec<InstanceKey>), String>>,
     },
     StopAll {
         idle_only: bool,
@@ -166,11 +178,30 @@ impl Handle {
         self.send(Msg::Activity(key, activity));
     }
 
+    /// Applies a control action; with `wait`, an `up` or `restart` answers once every
+    /// instance it started is ready or has failed.
     pub async fn control(&self, request: ControlRequest) -> Result<ControlResponse, String> {
+        let wait = request.wait && matches!(request.action, Action::Up | Action::Restart);
         let (reply, rx) = oneshot::channel();
         self.send(Msg::Control { request, reply });
-        rx.await
-            .unwrap_or_else(|_| Err("carte is shutting down".into()))
+        let (mut response, keys) = rx
+            .await
+            .unwrap_or_else(|_| Err("carte is shutting down".into()))?;
+        if wait {
+            for key in keys {
+                if let Err(failure) = self.ensure_ready(key.clone()).await
+                    && !failure.is_no_web_process()
+                {
+                    response.failures.push(StartFailure {
+                        instance: format!("{}@{}", key.app, key.stack.slug()),
+                        title: failure.title,
+                        detail: failure.detail,
+                        log: failure.log,
+                    });
+                }
+            }
+        }
+        Ok(response)
     }
 
     pub async fn stop_all(&self, idle_only: bool) -> ControlResponse {
@@ -179,6 +210,7 @@ impl Handle {
         rx.await.unwrap_or(ControlResponse {
             affected: vec![],
             messages: vec![],
+            failures: vec![],
         })
     }
 

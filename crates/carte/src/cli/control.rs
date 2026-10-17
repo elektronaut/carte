@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::bail;
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Hold, InstanceState, InstanceStatus, LogLine,
-    LogsRequest, ProcessState, Snapshot, StatusResponse, StopAllRequest, paths,
+    LogsRequest, ProcessState, Snapshot, StartFailure, StatusResponse, StopAllRequest, paths,
 };
 use carte_core::model::World;
 use carte_core::{address, discovery, naming};
@@ -12,7 +12,7 @@ use http::Method;
 
 use super::{LogsArgs, ShareArgs, Target};
 use crate::client::Client;
-use crate::exit::Failure;
+use crate::exit::{Exit, Failure};
 use crate::paths::Paths;
 
 fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
@@ -357,19 +357,37 @@ pub fn control(
     paths: &Paths,
     target: Target,
     action: Action,
+    wait: bool,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
     let request = ControlRequest {
         target: address(&target),
         action,
+        wait,
     };
     let response: ControlResponse =
         runtime()?.block_on(Client::new(&paths.socket()).post(paths::CONTROL, &request))?;
+    let code = if response.failures.is_empty() {
+        Exit::Ok
+    } else {
+        Exit::NotReady
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&response)?);
-        return Ok(ExitCode::SUCCESS);
+        return Ok(code.into());
     }
+    print!("{}", render_control(&response, action, wait));
+    for message in &response.messages {
+        eprintln!("{message}");
+    }
+    eprint!("{}", render_failures(&response.failures));
+    Ok(code.into())
+}
+
+fn render_control(response: &ControlResponse, action: Action, waited: bool) -> String {
     let verb = match action {
+        Action::Up if waited => "ready",
+        Action::Restart if waited => "restarted",
         Action::Up => "starting",
         Action::Down => "stopping",
         Action::Restart => "restarting",
@@ -379,15 +397,37 @@ pub fn control(
         Action::Enable { .. } => "enabled",
     };
     if response.affected.is_empty() {
-        println!("Nothing to do.");
+        return "Nothing to do.\n".into();
     }
-    for affected in &response.affected {
-        println!("{verb} {affected}");
+    let failed = |affected: &str| {
+        response.failures.iter().any(|f| {
+            affected == f.instance
+                || affected
+                    .strip_prefix(f.instance.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+    };
+    response
+        .affected
+        .iter()
+        .filter(|affected| !failed(affected))
+        .map(|affected| format!("{verb} {affected}\n"))
+        .collect()
+}
+
+fn render_failures(failures: &[StartFailure]) -> String {
+    let mut out = String::new();
+    for failure in failures {
+        out.push_str(&format!(
+            "{} didn't get ready: {}: {}\n",
+            failure.instance, failure.title, failure.detail
+        ));
+        let skip = failure.log.len().saturating_sub(20);
+        for line in &failure.log[skip..] {
+            out.push_str(&format!("  | {line}\n"));
+        }
     }
-    for message in &response.messages {
-        eprintln!("{message}");
-    }
-    Ok(ExitCode::SUCCESS)
+    out
 }
 
 pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCode> {
@@ -571,6 +611,33 @@ mod tests {
         );
         assert_eq!(names(target(None, None)), ["nova-billing"]);
         assert!(names(target(None, Some("feature-x"))).is_empty());
+    }
+
+    #[test]
+    fn waited_starts_report_ready_and_failures_with_their_log() {
+        let response = ControlResponse {
+            affected: vec!["nova-billing@main".into(), "nova-frontend@main/web".into()],
+            messages: Vec::new(),
+            failures: vec![StartFailure {
+                instance: "nova-frontend@main".into(),
+                title: "nova-frontend@main crashed".into(),
+                detail: "web exited with code 1".into(),
+                log: (1..=25).map(|i| format!("line {i}")).collect(),
+            }],
+        };
+        assert_eq!(
+            render_control(&response, Action::Up, true),
+            "ready nova-billing@main\n"
+        );
+        assert_eq!(
+            render_control(&response, Action::Up, false),
+            "starting nova-billing@main\n"
+        );
+        let failures = render_failures(&response.failures);
+        assert!(failures.starts_with(
+            "nova-frontend@main didn't get ready: nova-frontend@main crashed: web exited with code 1\n  | line 6\n"
+        ), "{failures}");
+        assert!(failures.ends_with("  | line 25\n"), "{failures}");
     }
 
     #[test]
