@@ -13,7 +13,7 @@
 //! 5. when the command exits, cleans up what is left of the group the same way
 //!    and exits with the command's status (re-raising its signal if it was killed).
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::io;
 use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -69,11 +69,11 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
     }
 
     let tty = unsafe { libc::isatty(0) } == 1;
-    let sh = c"/bin/sh";
+    let (sh, arg0) = shell();
     let command =
         CString::new(command).map_err(|_| io::Error::other("command contains a NUL byte"))?;
     let argv = [
-        sh.as_ptr(),
+        arg0.as_ptr(),
         c"-c".as_ptr(),
         command.as_ptr(),
         std::ptr::null(),
@@ -156,6 +156,16 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
 }
 
 /// Runs in the forked child; only async-signal-safe calls.
+/// The shell that runs commands, and its `argv[0]`: bash in POSIX mode, as macOS's
+/// `/bin/sh` is, wherever Linux has bash.
+fn shell() -> (&'static CStr, &'static CStr) {
+    if cfg!(target_os = "linux") && std::path::Path::new("/bin/bash").exists() {
+        (c"/bin/bash", c"sh")
+    } else {
+        (c"/bin/sh", c"/bin/sh")
+    }
+}
+
 unsafe fn exec_child(tty: bool, path: *const libc::c_char, argv: *const *const libc::c_char) -> ! {
     unsafe {
         libc::setpgid(0, 0);
