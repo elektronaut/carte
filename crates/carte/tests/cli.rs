@@ -99,6 +99,18 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 #[test]
+fn without_a_command_and_a_terminal_prints_help() {
+    let out = Sandbox::new().run(&[]);
+    assert!(!out.success);
+    assert!(out.stdout.contains("Usage: carte"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("opens the terminal UI"),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
 fn adds_a_single_repo() {
     let sb = Sandbox::new();
     let repo = sb.repo(
