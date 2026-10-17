@@ -10,6 +10,7 @@ use carte_api::{
     TunnelState, TunnelStatus,
 };
 use carte_core::address::{self, Target};
+use carte_core::dirs::DirRoots;
 use carte_core::env::{self, Env, EnvRequest, SystemRunner};
 use carte_core::lifecycle::{self, Capacity, EvictionReason, Targets, Usage};
 use carte_core::model::{
@@ -22,6 +23,7 @@ use super::events::{self, EventFilter, EventLog};
 use super::groups::GroupRecord;
 use super::runner::{self, LogLabel, ProcLog};
 use super::{Activity, BootFailure, Handle, LogFilter, Msg, Options, Upstream, share, snapshot};
+use crate::instance_dirs;
 use crate::paths::Paths;
 use crate::process::{IoMode, SpawnSpec, Spawner};
 use crate::urls::StackUrls;
@@ -689,6 +691,7 @@ impl Actor {
                 .cloned(),
             daemon_env: self.daemon_env.clone(),
             pidfile: self.paths.pidfile(key),
+            dir_roots: self.paths.dir_roots(),
             ca_bundle: self.options.ca_bundle.clone(),
             ca_cert: self.options.ca_cert.clone(),
             requires: state.project.requires.clone(),
@@ -2190,6 +2193,7 @@ struct EnvInput {
     cached_provider: Option<Env>,
     daemon_env: Arc<BTreeMap<String, String>>,
     pidfile: PathBuf,
+    dir_roots: DirRoots,
     ca_bundle: PathBuf,
     ca_cert: PathBuf,
     requires: Vec<String>,
@@ -2226,6 +2230,15 @@ impl EnvInput {
         if let Some(dir) = self.pidfile.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
+        let dirs = match instance_dirs::prepare(&self.dir_roots, &self.key, &self.state) {
+            Ok(dirs) => dirs,
+            Err(err) => {
+                return (
+                    Err(format!("couldn't create the instance's directories: {err}")),
+                    fresh,
+                );
+            }
+        };
         let urls = StackUrls {
             machine: &self.machine,
             state: &self.state,
@@ -2256,6 +2269,7 @@ impl EnvInput {
                 ca_bundle: &self.ca_bundle,
                 ca_cert: &self.ca_cert,
                 pidfile: &self.pidfile,
+                dirs: &dirs,
             };
             let env = match env::render_env(&request, provider.clone(), &files) {
                 Ok(env) => env,

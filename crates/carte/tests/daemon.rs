@@ -139,6 +139,7 @@ impl Daemon {
             .args(args)
             .env("CARTE_CONFIG_DIR", self.root.join("config"))
             .env("CARTE_STATE_DIR", self.root.join("state"))
+            .env("CARTE_RUNTIME_DIR", self.root.join("tmp"))
             .env("NO_COLOR", "1")
             .env("CARTE_SKILL_REFRESH", "0")
             .current_dir(&self.root);
@@ -498,7 +499,22 @@ fn env_shows_the_assigned_port_while_running() {
             .and_then(|v| v.value.clone())
     };
     assert_eq!(value("PORT"), Some(port.to_string()));
-    assert_eq!(value("CARTE_STATE_DIR"), None);
+    let dirs = carte::paths::Paths::under(&daemon.root)
+        .dir_roots()
+        .instance(&carte_core::model::InstanceKey {
+            project: "acme".into(),
+            app: "acme-web".into(),
+            stack: carte_core::model::Stack::Main,
+        });
+    assert_eq!(
+        value("CARTE_STATE_DIR"),
+        Some(dirs.state.display().to_string())
+    );
+    assert_eq!(value("CARTE_RUN_DIR"), Some(dirs.run.display().to_string()));
+    assert!(dirs.state.is_dir());
+    assert!(dirs.run.is_dir());
+    let record = carte::instance_dirs::read_stack_record(dirs.state.parent().unwrap()).unwrap();
+    assert_eq!(record, Some(Default::default()));
 }
 
 #[test]

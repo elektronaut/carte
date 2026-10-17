@@ -16,6 +16,7 @@ pub use provider::{
     load_provider, provider_name,
 };
 
+use crate::dirs::InstanceDirs;
 use crate::model::{App, Checkout, EnvProviderKind, EnvTemplate, ProcessSpec, Project, Stack};
 use crate::template::{Context, Template, TemplateError, TemplateErrorKind, UrlResolver};
 
@@ -204,6 +205,7 @@ pub struct EnvRequest<'a> {
     /// The carte CA alone.
     pub ca_cert: &'a Path,
     pub pidfile: &'a Path,
+    pub dirs: &'a InstanceDirs,
 }
 
 impl<'a> EnvRequest<'a> {
@@ -215,6 +217,8 @@ impl<'a> EnvRequest<'a> {
             stack: self.stack.slug(),
             branch: self.branch,
             port: self.port,
+            state_dir: &self.dirs.state,
+            run_dir: &self.dirs.run,
             urls: self.urls,
         }
     }
@@ -364,6 +368,8 @@ pub fn injected(req: &EnvRequest) -> Vec<(&'static str, String)> {
         ("CARTE_STACK", req.stack.slug().to_string()),
         ("CARTE_BRANCH", req.branch.to_string()),
         ("CARTE_WORKTREE", path(req.checkout.path())),
+        ("CARTE_STATE_DIR", path(&req.dirs.state)),
+        ("CARTE_RUN_DIR", path(&req.dirs.run)),
         ("CARTE_URL", req.urls.url(req.app)),
     ];
     if let Some(public) = req.urls.public_url(req.app) {
@@ -432,6 +438,7 @@ mod tests {
         stack: Stack,
         urls: Urls,
         share_domain: Option<&'static str>,
+        dirs: InstanceDirs,
     }
 
     impl Fixture {
@@ -446,6 +453,10 @@ mod tests {
                     shared: vec![],
                 },
                 share_domain: None,
+                dirs: InstanceDirs {
+                    state: "/state/data/nova/feature-x/nova-postcard-frontend".into(),
+                    run: "/run/carte/abcdefgh".into(),
+                },
             }
         }
 
@@ -465,6 +476,7 @@ mod tests {
                 ca_bundle: Path::new("/Users/alex/.local/state/carte/bundle.pem"),
                 ca_cert: Path::new("/Users/alex/.local/state/carte/ca.pem"),
                 pidfile: Path::new("/tmp/carte/nova-postcard-frontend@feature-x.pid"),
+                dirs: &self.dirs,
             }
         }
 
@@ -494,6 +506,11 @@ mod tests {
                 "CARTE_WORKTREE",
                 "/Users/alex/work/nova-postcard-frontend-feature-x",
             ),
+            (
+                "CARTE_STATE_DIR",
+                "/state/data/nova/feature-x/nova-postcard-frontend",
+            ),
+            ("CARTE_RUN_DIR", "/run/carte/abcdefgh"),
             ("CARTE_URL", "https://postcard-frontend.feature-x.nova.test"),
             (
                 "CARTE_PUBLIC_URL",
@@ -612,6 +629,13 @@ mod tests {
         assert_eq!(
             env.value("POSTCARD_API_HOST"),
             Some("postcard-api.feature-x:51234")
+        );
+
+        fx.project.env = vec![tpl("{{app.short | upper}}_DIR", "{{state_dir}}")];
+        let env = fx.render_empty();
+        assert_eq!(
+            env.value("BILLING_DIR"),
+            Some("/state/data/nova/feature-x/nova-postcard-frontend")
         );
     }
 

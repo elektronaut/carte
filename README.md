@@ -182,6 +182,10 @@ back to main.
 carte doesn't touch databases. Use `CARTE_CHECKOUT` in `database.yml` or
 similar if you want separate data per worktree.
 
+Each app in a stack gets a state directory, `CARTE_STATE_DIR`, for data
+that should persist, and a run directory, `CARTE_RUN_DIR`, with a path
+short enough for Unix sockets.
+
 ## Everyday use
 
 Most of the time you don't need the CLI: visiting an app starts it.

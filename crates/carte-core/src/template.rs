@@ -1,9 +1,11 @@
 //! The `{{ expr | filter }}` template language used in env templates.
 
 use std::fmt;
+use std::path::Path;
 
 use thiserror::Error;
 
+use crate::dirs;
 use crate::model::{App, Project};
 
 /// Resolves the URLs that `url:<app>` and `public_url:<app>` expand to,
@@ -16,7 +18,7 @@ pub trait UrlResolver {
 
 /// Everything a template can refer to. `app` is the app that `app.name`,
 /// `app.short` and `url:app` mean: the instance's own app, or the iterated
-/// app inside a key template.
+/// app inside a key template. `state_dir` and `run_dir` stay the instance's own.
 #[derive(Clone, Copy)]
 pub struct Context<'a> {
     pub project: &'a Project,
@@ -25,6 +27,8 @@ pub struct Context<'a> {
     pub stack: &'a str,
     pub branch: &'a str,
     pub port: u16,
+    pub state_dir: &'a Path,
+    pub run_dir: &'a Path,
     pub urls: &'a dyn UrlResolver,
 }
 
@@ -62,7 +66,7 @@ pub enum TemplateErrorKind {
     #[error("expected a filter name after |")]
     EmptyFilter,
     #[error(
-        "unknown variable {0:?} (expected app.name, app.short, project, checkout, stack, branch, port, url:<app> or public_url:<app>)"
+        "unknown variable {0:?} (expected app.name, app.short, project, checkout, stack, stack.id, branch, port, state_dir, run_dir, url:<app> or public_url:<app>)"
     )]
     UnknownVariable(String),
     #[error("unknown filter {0:?} (expected upper, snake or slug)")]
@@ -98,8 +102,11 @@ pub enum Expr {
     Project,
     Checkout,
     Stack,
+    StackId,
     Branch,
     Port,
+    StateDir,
+    RunDir,
     Url { app: AppRef, public: bool },
 }
 
@@ -276,8 +283,11 @@ fn parse_expr(text: &str) -> Result<Expr, (usize, TemplateErrorKind)> {
         "project" => Expr::Project,
         "checkout" => Expr::Checkout,
         "stack" => Expr::Stack,
+        "stack.id" => Expr::StackId,
         "branch" => Expr::Branch,
         "port" => Expr::Port,
+        "state_dir" => Expr::StateDir,
+        "run_dir" => Expr::RunDir,
         _ => return Err(unknown()),
     })
 }
@@ -289,8 +299,11 @@ fn eval(expr: &Expr, ctx: &Context) -> Result<String, TemplateErrorKind> {
         Expr::Project => ctx.project.name.clone(),
         Expr::Checkout => ctx.checkout.to_string(),
         Expr::Stack => ctx.stack.to_string(),
+        Expr::StackId => dirs::stack_id(&ctx.project.name, ctx.stack),
         Expr::Branch => ctx.branch.to_string(),
         Expr::Port => ctx.port.to_string(),
+        Expr::StateDir => ctx.state_dir.display().to_string(),
+        Expr::RunDir => ctx.run_dir.display().to_string(),
         Expr::Url { app, public } => {
             let app = match app {
                 AppRef::Current => ctx.app,
@@ -401,6 +414,8 @@ pub(crate) mod tests {
             stack: "feature-x",
             branch: "feature/X",
             port: 51234,
+            state_dir: Path::new("/state/data/nova/feature-x/nova-postcard-frontend"),
+            run_dir: Path::new("/run/abcdefgh"),
             urls: &urls,
         };
         f(&ctx)
@@ -423,6 +438,25 @@ pub(crate) mod tests {
             "nova/main/feature-x"
         );
         assert_eq!(ok("{{branch}}:{{port}}"), "feature/X:51234");
+        assert_eq!(
+            ok("{{state_dir}}/redis"),
+            "/state/data/nova/feature-x/nova-postcard-frontend/redis"
+        );
+        assert_eq!(
+            ok("unix://{{ run_dir }}/redis.sock"),
+            "unix:///run/abcdefgh/redis.sock"
+        );
+    }
+
+    #[test]
+    fn stack_id_is_the_stack_hash() {
+        assert_eq!(ok("{{stack.id}}"), dirs::stack_id("nova", "feature-x"));
+        assert_eq!(ok("{{stack.id}}").len(), 8);
+        assert_eq!(
+            ok("{{stack.id | upper}}"),
+            ok("{{stack.id}}").to_uppercase()
+        );
+        assert_eq!(ok("{{run_dir | slug}}"), "run-abcdefgh");
     }
 
     #[test]
@@ -482,6 +516,8 @@ pub(crate) mod tests {
             stack: "main",
             branch: "main",
             port: 3000,
+            state_dir: Path::new("/state/data/nova/main/nova-postcard-frontend"),
+            run_dir: Path::new("/run/abcdefgh"),
             urls: &urls,
         }
         .with_app(&project.apps[2]);

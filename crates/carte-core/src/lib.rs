@@ -5,6 +5,7 @@
 pub mod address;
 pub mod config;
 pub mod config_edit;
+pub mod dirs;
 pub mod discovery;
 pub mod duration;
 pub mod env;
