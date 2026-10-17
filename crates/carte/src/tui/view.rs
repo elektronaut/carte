@@ -61,6 +61,11 @@ fn pane(title: Line<'static>, focused: bool) -> Block<'static> {
         } else {
             Style::new().dark_gray()
         })
+        .title_style(if focused {
+            Style::new().blue()
+        } else {
+            Style::new().fg(Color::Reset)
+        })
         .title(title)
 }
 
@@ -195,10 +200,10 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     ];
     let label = Span::raw(node.label.clone());
     spans.push(match node.ids[0] {
-        NodeId::Folder { .. } | NodeId::Project { .. } => label.bold(),
+        NodeId::Folder { .. } => label.bold(),
+        NodeId::Project { .. } => label.blue().bold(),
         _ if status.state == State::Disabled => label.dark_gray(),
-        NodeId::Stack { .. } => label.blue(),
-        NodeId::Process { .. } => label.dim(),
+        NodeId::Stack { .. } => label.bold(),
         _ => label,
     });
     spans.extend(badges(status, aggregate));
