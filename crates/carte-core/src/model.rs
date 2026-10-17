@@ -311,8 +311,9 @@ pub enum EnvProviderKind {
 /// A linked worktree of an app (never the primary checkout).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
-    pub branch: String,
-    /// `slug::branch_slug(branch)`; the stack this worktree belongs to.
+    /// The checked-out branch; `None` on a detached HEAD.
+    pub branch: Option<String>,
+    /// The stack this worktree belongs to, from its folder name.
     pub slug: String,
     pub path: PathBuf,
 }
@@ -321,7 +322,7 @@ pub struct Worktree {
 #[serde(rename_all = "lowercase")]
 pub enum Stack {
     Main,
-    /// A branch slug.
+    /// A stack named after worktree folders.
     Branch(String),
 }
 
@@ -349,7 +350,7 @@ impl Checkout {
         }
     }
 
-    /// `main` or the worktree's branch slug (`CARTE_CHECKOUT`).
+    /// `main` or the worktree's stack name (`CARTE_CHECKOUT`).
     pub fn slug(&self) -> &str {
         match self {
             Checkout::Main { .. } => "main",
@@ -386,7 +387,7 @@ pub struct ProjectState {
 }
 
 impl ProjectState {
-    /// Branch slugs of every stack in the project.
+    /// The names of every stack in the project.
     pub fn stacks(&self) -> std::collections::BTreeSet<String> {
         self.worktrees
             .values()

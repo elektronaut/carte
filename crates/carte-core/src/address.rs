@@ -5,21 +5,19 @@ use std::str::FromStr;
 use thiserror::Error;
 
 use crate::model::{App, InstanceKey, ProjectState, Stack, World};
-use crate::slug::branch_slug;
+use crate::slug::slugify;
 
-/// A CLI address `app@branch/process` as typed, every part optional.
+/// A CLI address `app@stack/process` as typed, every part optional.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Address {
     pub app: Option<String>,
-    pub branch: Option<String>,
+    pub stack: Option<String>,
     pub process: Option<String>,
 }
 
 impl FromStr for Address {
     type Err = AddressError;
 
-    /// Branch names may contain `/`, so after `@` the process is whatever follows the
-    /// last `/`. `resolve` reads `@claude/fix-thing-123` as a branch when that stack exists.
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         let invalid = |reason| AddressError::Invalid {
             input: input.to_string(),
@@ -49,12 +47,15 @@ impl FromStr for Address {
                 if rest.contains('@') {
                     return Err(invalid("more than one @"));
                 }
-                match rest.rsplit_once('/') {
-                    Some((branch, process)) => {
-                        address.branch = part(branch, "empty branch after @")?;
+                match rest.split_once('/') {
+                    Some((stack, process)) => {
+                        if process.contains('/') {
+                            return Err(invalid("more than one /"));
+                        }
+                        address.stack = part(stack, "empty stack after @")?;
                         address.process = part(process, "empty process after /")?;
                     }
-                    None => address.branch = part(rest, "empty branch after @")?,
+                    None => address.stack = part(rest, "empty stack after @")?,
                 }
             }
             None => match app.split_once('/') {
@@ -63,7 +64,7 @@ impl FromStr for Address {
                         address.app = part(app, "empty app")?;
                     }
                     if process.contains('/') {
-                        return Err(invalid("more than one / without @branch"));
+                        return Err(invalid("more than one / without @stack"));
                     }
                     address.process = part(process, "empty process after /")?;
                 }
@@ -79,8 +80,8 @@ impl fmt::Display for Address {
         if let Some(app) = &self.app {
             f.write_str(app)?;
         }
-        if let Some(branch) = &self.branch {
-            write!(f, "@{branch}")?;
+        if let Some(stack) = &self.stack {
+            write!(f, "@{stack}")?;
         }
         if let Some(process) = &self.process {
             write!(f, "/{process}")?;
@@ -173,8 +174,8 @@ pub fn locate(world: &World, dir: &Path) -> Option<Location> {
 }
 
 /// Resolves an address against the world, filling omitted parts from `cwd`:
-/// the project always, the stack when no branch is given, and the app only when
-/// neither app nor branch is given (so `@feature-x` means the whole stack).
+/// the project always, the stack when no stack is given, and the app only when
+/// neither app nor stack is given (so `@feature-x` means the whole stack).
 pub fn resolve(
     world: &World,
     address: &Address,
@@ -192,22 +193,26 @@ pub fn resolve(
                 .project(&here.project)
                 .expect("located in a known project");
             let app = address
-                .branch
+                .stack
                 .is_none()
                 .then(|| state.project.app(&here.app))
                 .flatten();
             (Some(state), app)
         }
-        (None, None) if address.branch.is_some() => (None, None),
+        (None, None) if address.stack.is_some() => (None, None),
         (None, None) => return Err(AddressError::NoContext),
     };
 
-    let (state, stack, process) = match (&address.branch, state) {
-        (Some(branch), Some(state)) => {
-            let (stack, process) = find_stack(state, branch, address.process.as_deref())?;
-            (state, Some(stack), process)
+    let (state, stack, process) = match (&address.stack, state) {
+        (Some(name), Some(state)) => (
+            state,
+            Some(find_stack(state, name)?),
+            address.process.clone(),
+        ),
+        (Some(name), None) => {
+            let (state, stack) = find_stack_anywhere(world, name)?;
+            (state, Some(stack), address.process.clone())
         }
-        (Some(branch), None) => find_stack_anywhere(world, branch, address.process.as_deref())?,
         (None, Some(state)) => {
             let stack = app.map(|_| match &here {
                 Some(here) if here.project == state.project.name => here.stack.clone(),
@@ -215,7 +220,7 @@ pub fn resolve(
             });
             (state, stack, address.process.clone())
         }
-        (None, None) => unreachable!("no branch and no project returns NoContext"),
+        (None, None) => unreachable!("no stack and no project returns NoContext"),
     };
 
     Ok(Target {
@@ -226,8 +231,8 @@ pub fn resolve(
     })
 }
 
-/// Resolves an address inside the named project. Without an app or branch it addresses
-/// every stack of the project, wherever `cwd` is; an app without a branch takes the
+/// Resolves an address inside the named project. Without an app or stack it addresses
+/// every stack of the project, wherever `cwd` is; an app without a stack takes the
 /// current directory's stack when that is in the same project, `main` otherwise.
 pub fn resolve_in_project(
     world: &World,
@@ -250,11 +255,8 @@ pub fn resolve_in_project(
         Some(query) => Some(find_app_in(state, query)?),
         None => None,
     };
-    let (stack, process) = match &address.branch {
-        Some(branch) => {
-            let (stack, process) = find_stack(state, branch, address.process.as_deref())?;
-            (Some(stack), process)
-        }
+    let (stack, process) = match &address.stack {
+        Some(name) => (Some(find_stack(state, name)?), address.process.clone()),
         None => {
             let here = cwd
                 .and_then(|dir| locate(world, dir))
@@ -383,28 +385,16 @@ fn app_names(matches: &[(&ProjectState, &App)]) -> Vec<String> {
         .collect()
 }
 
-/// `main` is the main checkout; anything else is matched as a slug, exactly or as an
-/// unambiguous substring. A process part that completes a branch name containing `/`
-/// is folded back into the branch.
-fn find_stack(
-    state: &ProjectState,
-    branch: &str,
-    process: Option<&str>,
-) -> Result<(Stack, Option<String>), AddressError> {
+/// `main` is the main checkout; anything else is matched as a stack name, exactly
+/// (after slugging) or as an unambiguous substring.
+fn find_stack(state: &ProjectState, name: &str) -> Result<Stack, AddressError> {
+    if name.eq_ignore_ascii_case("main") {
+        return Ok(Stack::Main);
+    }
     let stacks = state.stacks();
-    if let Some(process) = process {
-        let joined = branch_slug(&format!("{branch}/{process}"));
-        if stacks.contains(&joined) {
-            return Ok((Stack::Branch(joined), None));
-        }
-    }
-    let process = process.map(Into::into);
-    if branch.eq_ignore_ascii_case("main") {
-        return Ok((Stack::Main, process));
-    }
-    let slug = branch_slug(branch);
+    let slug = slugify(name);
     if stacks.contains(&slug) {
-        return Ok((Stack::Branch(slug), process));
+        return Ok(Stack::Branch(slug));
     }
     let partial: Vec<String> = stacks
         .iter()
@@ -412,15 +402,15 @@ fn find_stack(
         .cloned()
         .collect();
     match partial.as_slice() {
-        [one] => Ok((Stack::Branch(one.clone()), process)),
+        [one] => Ok(Stack::Branch(one.clone())),
         [] => Err(AddressError::NoMatch {
             kind: "stack",
-            input: branch.to_string(),
+            input: name.to_string(),
             candidates: stacks.into_iter().collect(),
         }),
         _ => Err(AddressError::Ambiguous {
             kind: "stack",
-            input: branch.to_string(),
+            input: name.to_string(),
             candidates: partial,
         }),
     }
@@ -428,22 +418,18 @@ fn find_stack(
 
 fn find_stack_anywhere<'a>(
     world: &'a World,
-    branch: &str,
-    process: Option<&str>,
-) -> Result<(&'a ProjectState, Option<Stack>, Option<String>), AddressError> {
+    name: &str,
+) -> Result<(&'a ProjectState, Stack), AddressError> {
     let found: Vec<_> = world
         .projects
         .iter()
-        .filter_map(|state| {
-            let (stack, process) = find_stack(state, branch, process).ok()?;
-            Some((state, Some(stack), process))
-        })
+        .filter_map(|state| Some((state, find_stack(state, name).ok()?)))
         .collect();
     match found.len() {
         1 => Ok(found.into_iter().next().expect("one element")),
         0 => Err(AddressError::NoMatch {
             kind: "stack",
-            input: branch.to_string(),
+            input: name.to_string(),
             candidates: world
                 .projects
                 .iter()
@@ -457,13 +443,10 @@ fn find_stack_anywhere<'a>(
         }),
         _ => Err(AddressError::Ambiguous {
             kind: "stack",
-            input: branch.to_string(),
+            input: name.to_string(),
             candidates: found
                 .iter()
-                .map(|(state, stack, _)| {
-                    let slug = stack.as_ref().map_or("main", Stack::slug);
-                    format!("{slug} ({})", state.project.name)
-                })
+                .map(|(state, stack)| format!("{} ({})", stack.slug(), state.project.name))
                 .collect(),
         }),
     }
@@ -480,10 +463,10 @@ mod tests {
         input.parse().unwrap()
     }
 
-    fn address(app: Option<&str>, branch: Option<&str>, process: Option<&str>) -> Address {
+    fn address(app: Option<&str>, stack: Option<&str>, process: Option<&str>) -> Address {
         Address {
             app: app.map(Into::into),
-            branch: branch.map(Into::into),
+            stack: stack.map(Into::into),
             process: process.map(Into::into),
         }
     }
@@ -512,7 +495,7 @@ mod tests {
     }
 
     const FRONTEND_MAIN: &str = "/Users/dev/work/nova-postcard-frontend/app/models";
-    const FRONTEND_FEATURE_X: &str = "/Users/dev/work/nova-postcard-frontend-feature-x/app";
+    const FRONTEND_FEATURE_X: &str = "/Users/dev/work/feature-x/nova-postcard-frontend/app";
 
     #[test]
     fn parses_every_combination() {
@@ -536,19 +519,20 @@ mod tests {
                 Some("worker")
             )
         );
-        assert_eq!(
-            parse("nova-postcard-frontend@claude/fix-thing-123/web"),
-            address(
-                Some("nova-postcard-frontend"),
-                Some("claude/fix-thing-123"),
-                Some("web")
-            )
-        );
     }
 
     #[test]
     fn rejects_malformed_addresses() {
-        for input in ["@", "app@", "@x/", "/", "app/", "a@b@c", "app/web/extra"] {
+        for input in [
+            "@",
+            "app@",
+            "@x/",
+            "/",
+            "app/",
+            "a@b@c",
+            "app/web/extra",
+            "app@x/web/extra",
+        ] {
             assert!(
                 matches!(input.parse::<Address>(), Err(AddressError::Invalid { .. })),
                 "{input}"
@@ -720,7 +704,8 @@ mod tests {
 
     #[test]
     fn worktrees_inside_the_main_checkout_are_located() {
-        let cwd = "/Users/dev/work/nova-postcard-frontend/.claude/worktrees/fix-thing-123/app";
+        let cwd =
+            "/Users/dev/work/nova-postcard-frontend/.claude/worktrees/claude-fix-thing-123/app";
         assert_eq!(
             resolve_str("", Some(cwd)),
             Ok(target(
@@ -733,7 +718,7 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_without_an_app_addresses_the_stack() {
+    fn a_stack_without_an_app_addresses_the_stack() {
         assert_eq!(
             resolve_str("@feature-x/worker", Some(FRONTEND_MAIN)),
             Ok(target(
@@ -777,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn branches_match_by_name_slug_or_substring() {
+    fn stacks_match_by_name_slug_or_substring() {
         let expected = target(
             "nova",
             Some("nova-postcard-frontend"),
@@ -786,13 +771,13 @@ mod tests {
         );
         for input in [
             "postcard-f@claude-fix-thing-123",
-            "postcard-f@claude/fix-thing-123",
+            "postcard-f@Claude_Fix_Thing_123",
             "postcard-f@fix-thing",
         ] {
             assert_eq!(resolve_str(input, None), Ok(expected.clone()), "{input}");
         }
         assert_eq!(
-            resolve_str("postcard-f@claude/fix-thing-123/web", None),
+            resolve_str("postcard-f@claude-fix-thing-123/web", None),
             Ok(Target {
                 process: Some("web".into()),
                 ..expected
@@ -801,13 +786,13 @@ mod tests {
     }
 
     #[test]
-    fn branch_substrings_can_be_ambiguous() {
+    fn stack_substrings_can_be_ambiguous() {
         let mut world = world();
         world.projects[0].worktrees.insert(
             "nova-billing".into(),
             vec![worktree(
                 "feature-xyz",
-                "/Users/dev/work/nova-billing-feature-xyz",
+                "/Users/dev/work/feature-xyz/nova-billing",
             )],
         );
         assert_eq!(
@@ -830,7 +815,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_branches_list_stacks() {
+    fn unknown_stacks_list_stacks() {
         assert_eq!(
             resolve_str("billing@feature-y", None),
             Err(AddressError::NoMatch {
@@ -842,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_alone_searches_every_project() {
+    fn a_stack_alone_searches_every_project() {
         assert_eq!(
             resolve_str("@fix-thing", None),
             Ok(target(
@@ -962,7 +947,7 @@ mod tests {
         assert_eq!(
             locate(
                 &world,
-                Path::new("/Users/dev/clients/acme-api-feature-x/lib")
+                Path::new("/Users/dev/clients/feature-x/acme-api/lib")
             ),
             Some(Location {
                 project: "acme".into(),

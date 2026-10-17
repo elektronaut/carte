@@ -138,13 +138,38 @@ short names, project and stack:
 | | Hostname |
 | --- | --- |
 | On main | `billing.acme.test` |
-| On a branch | `billing.feature-x.acme.test` |
+| In a stack | `billing.feature-x.acme.test` |
 | An app whose short name is the project's | `acme.test`, `feature-x.acme.test` |
 | Shared | `billing--feature-x--acme.<share domain>` |
 
 Short names must be at least three characters and unique within the
-project. A branch can't be named like an app of its project: the app
-wins, and the stack is reported as unreachable.
+project.
+
+A stack's name comes from the folder names of its worktrees, not their
+branches:
+
+| Worktree of `acme-billing` | Stack |
+| --- | --- |
+| `~/worktrees/acme-billing/feature-x` | `feature-x` |
+| `~/work/acme-billing/.worktrees/feature-x` | `feature-x` |
+| `~/work/acme-billing-feature-x` | `acme-billing-feature-x` |
+| `~/work/workspaces/checkout-flow/acme-billing` | `checkout-flow` |
+
+- The folder name is lowercased, with anything outside `a-z`, `0-9` and
+  `-` turned into a dash.
+- A folder with the repo's own name gives way to the folder above it.
+- When two worktrees of the same repo would get the same name, both
+  take the name of the folder above, until they differ. Adding such a
+  worktree renames the existing one's stack, along with its hostnames,
+  state directory and `stack.id`.
+- Worktrees of different repos with the same name form one stack.
+- Worktrees with a detached HEAD count like any other.
+
+Problems are reported when two worktrees of a repo still have the same
+name at the top of the filesystem, and when a worktree's name is
+`main` (it's skipped). A stack can't be named like an app of its
+project either: the app wins, and the stack is reported as
+unreachable.
 
 ## Apps
 
@@ -406,7 +431,7 @@ aren't affected.
 ### Teardown
 
 A process with `kind = "teardown"` cleans up after a stack once its
-worktrees are gone, such as dropping the branch's database. It's
+worktrees are gone, such as dropping the stack's database. It's
 declared like any other process, in `[processes]`, an app's processes
 or `carte.toml`, with the same env and templates:
 
@@ -420,17 +445,19 @@ command = "dropdb --if-exists $DATABASE"
 DATABASE = "billing_{{stack | snake}}"
 ```
 
-- **When.** A stack counts as removed when no worktree has its branch
-  any more, and the worktrees carte last saw for it are gone: their
-  directories are deleted, or the branch is. A rebase (detached HEAD) or
-  a `git switch` inside the worktree keeps the directory and the branch,
-  so it never counts, however long it takes. The `main` stack is never
-  removed, and a stack where no instance ever ran has nothing to tear
-  down. carte checks when its worktrees change and every 30 seconds, so
-  a deleted branch can take that long to notice.
+- **When.** A stack counts as removed when no worktree has its name
+  any more, and the directories of the worktrees carte last saw for it
+  are gone. A rebase or a `git switch` inside the worktree keeps the
+  directory, so it never counts, however long it takes; neither does
+  deleting a branch. A worktree whose stack was renamed, because a
+  second worktree with the same folder name came along, keeps its
+  directory too, so its old stack isn't torn down; `carte prune` lists
+  it. The `main` stack is never removed, and a stack where no instance
+  ever ran has nothing to tear down. carte checks when its worktrees
+  change and every 30 seconds.
 - **Delay.** The stack must stay removed for `teardown_delay` (`"10m"`
   by default), so moving a worktree or adding it again doesn't tear
-  anything down; a worktree with the branch coming back cancels it. If
+  anything down; a worktree with the name coming back cancels it. If
   it comes back while the teardown runs, the teardown processes that
   already ran aren't undone, but the folders are kept. carte only tears
   down stacks it saw with a worktree since the daemon started, and keeps
@@ -445,8 +472,9 @@ DATABASE = "billing_{{stack | snake}}"
   each app with a teardown process runs it once, in the app's main
   checkout (the worktree is gone), with the removed stack's environment:
   `{{stack}}`, `CARTE_STACK`, `{{state_dir}}`, `CARTE_STATE_DIR` and the
-  rest are those of the app in that stack, `CARTE_BRANCH` is the
-  stack's branch, and the provider runs in the main checkout. Services
+  rest are those of the app in that stack, `CARTE_BRANCH` is the last
+  branch carte saw in the stack, and the provider runs in the main
+  checkout. Services
   aren't running, so no `provides` are set. A process that doesn't
   finish within 2 minutes is stopped and counts as failed. `http` and
   `after` aren't allowed, and `scope` doesn't matter.
@@ -524,9 +552,9 @@ Each process's environment is built in layers, later ones winning:
 | --- | --- |
 | `PORT` | The process's port |
 | `CARTE_APP`, `CARTE_PROJECT` | App and project names |
-| `CARTE_STACK` | `main`, or the branch slug of the stack |
-| `CARTE_CHECKOUT` | `main`, or the branch slug of the worktree the code runs from |
-| `CARTE_BRANCH`, `CARTE_WORKTREE` | The checkout's branch and path |
+| `CARTE_STACK` | `main`, or the stack's [name](#names-and-hostnames) |
+| `CARTE_CHECKOUT` | `main`, or the stack name of the worktree the code runs from |
+| `CARTE_BRANCH`, `CARTE_WORKTREE` | The checkout's branch (empty on a detached HEAD) and path |
 | `CARTE_STATE_DIR` | The instance's [state directory](#instance-directories) |
 | `CARTE_RUN_DIR` | The instance's [run directory](#instance-directories) |
 | `CARTE_URL` | The app's URL in this stack |
@@ -580,8 +608,8 @@ REDIS_URL = "unix://{{run_dir}}/redis.sock"
 ```
 
 The stack's folder, `<state>/data/<project>/<stack>`, also holds
-`stack.toml`, where carte records the stack's branch and each app's
-worktree.
+`stack.toml`, where carte records each app's worktree, and the last
+branch seen in them.
 
 When a stack's worktrees are gone, its [teardown](#teardown) deletes
 its directories. carte doesn't delete them when an app or project goes
@@ -604,7 +632,7 @@ BILLING_URL = "{{url:billing}}"
 | `app.name`, `app.short` | The app's full and short name |
 | `project` | The project's name |
 | `stack`, `checkout`, `branch` | As in `CARTE_STACK`, `CARTE_CHECKOUT` and `CARTE_BRANCH` |
-| `stack.id` | 8 lowercase letters and digits from a hash of project and stack; the same for a recreated branch and on every machine |
+| `stack.id` | 8 lowercase letters and digits from a hash of project and stack name; the same for a recreated worktree and on every machine |
 | `port` | The process's port |
 | `state_dir`, `run_dir` | The instance's [directories](#instance-directories), as in `CARTE_STATE_DIR` and `CARTE_RUN_DIR` |
 | `url:<app>` | Another app's URL in the same stack; `url:app` is the app itself |

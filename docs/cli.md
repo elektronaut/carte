@@ -6,7 +6,7 @@ no command opens the terminal UI.
 
 ## Addresses
 
-Commands that act on something take an address, `app@branch/process`,
+Commands that act on something take an address, `app@stack/process`,
 where every part is optional and inferred from the current directory:
 
 | Address | Means |
@@ -19,8 +19,8 @@ where every part is optional and inferred from the current directory:
 | `acme` | A project: every stack of it |
 
 `up` and `restart` on a stack start the apps that belong to it: on
-`@main` every app of the project, on a branch the apps with a worktree
-on it and what they depend on. `up` refuses a whole project; name an app
+`@main` every app of the project, on another stack the apps with a
+worktree in it and what they depend on. `up` refuses a whole project; name an app
 or a stack.
 
 Apps can be named by their full or short name, or any unambiguous part
@@ -152,6 +152,11 @@ kebab-case strings. Times are milliseconds since the Unix epoch.
 { projects: [{ name, folder, apps, stacks: [{ name, branch, instances: [Instance] }] }],
   problems, running_instances, memory_bytes, shares, tunnel }
 ```
+
+A stack's `name` comes from its worktrees' folder names
+([names](configuration.md#names-and-hostnames)). Its `branch` is the
+branch its worktrees have checked out, and null on `main`, when they are
+on different branches, or when one has a detached HEAD.
 
 **`carte status --json`** prints `{ instances: [Instance] }`.
 

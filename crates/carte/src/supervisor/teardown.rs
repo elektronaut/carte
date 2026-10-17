@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -22,7 +21,7 @@ use crate::paths::Paths;
 use crate::process::{SpawnSpec, Spawner};
 use crate::prune;
 
-/// A project and a stack slug.
+/// A project and a stack name.
 pub(super) type StackId = (String, String);
 
 #[derive(Default)]
@@ -51,8 +50,6 @@ pub(super) struct Candidate {
     /// Why the project's worktrees aren't known for sure.
     pub troubled: Option<String>,
     pub stack_dir: PathBuf,
-    /// Each app's main checkout, by app name.
-    pub repos: BTreeMap<String, PathBuf>,
 }
 
 pub(crate) enum Status {
@@ -64,8 +61,8 @@ pub(crate) enum Status {
     Removed(StackRecord),
 }
 
-/// Whether each candidate counts as removed, from its record, its worktree
-/// directories and its branch.
+/// Whether each candidate counts as removed, from its record and its worktree
+/// directories.
 pub(super) fn check(candidates: Vec<Candidate>) -> Vec<(StackId, Status)> {
     candidates
         .into_iter()
@@ -88,12 +85,6 @@ pub(super) fn check(candidates: Vec<Candidate>) -> Vec<(StackId, Status)> {
                 candidate.stacks.as_ref(),
                 &record,
                 Path::exists,
-                |app, branch| {
-                    candidate
-                        .repos
-                        .get(app)
-                        .is_none_or(|repo| branch_exists(repo, branch))
-                },
             );
             let status = if removed {
                 Status::Removed(record)
@@ -105,26 +96,12 @@ pub(super) fn check(candidates: Vec<Candidate>) -> Vec<(StackId, Status)> {
         .collect()
 }
 
-/// Whether the repo has the branch; true when git can't tell.
-fn branch_exists(repo: &Path, branch: &str) -> bool {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["show-ref", "--verify", "--quiet"])
-        .arg(format!("refs/heads/{branch}"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    !matches!(status, Ok(status) if status.code() == Some(1))
-}
-
 /// One stack's teardown, with what it needs from the supervisor.
 pub(super) struct Job {
     pub id: StackId,
     pub state: ProjectState,
     pub machine: MachineConfig,
-    /// The stack's branch, from its record.
+    /// The last branch seen in the stack, from its record.
     pub branch: String,
     pub daemon_env: Arc<BTreeMap<String, String>>,
     pub paths: Paths,
@@ -480,7 +457,6 @@ mod tests {
             stacks: troubled.is_none().then(BTreeSet::new),
             troubled: troubled.map(str::to_string),
             stack_dir: stack_dir.to_path_buf(),
-            repos: BTreeMap::new(),
         }
     }
 

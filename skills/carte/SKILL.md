@@ -9,7 +9,10 @@ carte runs the app for you. Every app in a carte project has a URL like
 `https://billing.acme.test`; the first request starts all of its processes
 (web, workers, asset watchers) and carte stops them again when idle. Each
 git worktree gets its own hostname, such as
-`https://billing.feature-x.acme.test`.
+`https://billing.feature-x.acme.test`. The stack name (`feature-x`) comes
+from the worktree's folder, not its branch; a folder named like the repo
+takes the name of the folder above. Worktrees of different repos with the
+same name form one stack.
 
 ## Don't start servers yourself
 
@@ -25,7 +28,7 @@ carte status --json     # url, state, processes, last error
 carte ls                # everything that's running
 ```
 
-Addresses look like `app@branch/process`; every part is optional and
+Addresses look like `app@stack/process`; every part is optional and
 inferred from the current directory. Run commands from inside the checkout
 and you rarely need one. `--project <name>` addresses a whole project.
 
@@ -55,12 +58,12 @@ accepts connections on `$PORT`, so it must listen there even when the app
 uses its unix socket (`redis-server --port $PORT --unixsocket ...`).
 
 Processes with `kind = "teardown"` never start with the app. When a
-branch's worktree is removed (or the branch deleted) and stays gone for
-`teardown_delay` (10 minutes by default), carte runs them once in the main
-checkout with that stack's env, typically dropping the branch's database,
-and then deletes the stack's data. They are destructive: removing a
-worktree has consequences, and adding it back within the delay cancels
-them. `carte events` shows `teardown-scheduled`, `teardown-paused` (the
+stack's worktrees are removed and stay gone for `teardown_delay` (10
+minutes by default), carte runs them once in the main checkout with that
+stack's env, typically dropping the stack's database, and then deletes the
+stack's data. Switching branches inside a worktree never triggers them.
+They are destructive: removing a worktree has consequences, and adding it
+back within the delay cancels them. `carte events` shows `teardown-scheduled`, `teardown-paused` (the
 project has a problem, so carte can't tell), `teardown-cancelled`,
 `teardown-finished` and `teardown-failed`.
 
@@ -135,8 +138,8 @@ Ask the user first before:
 - `carte stop-all`, or stopping apps you're not working on
 - `carte prune` without `--dry-run`: it deletes the data of stacks, apps
   and projects that are gone
-- removing a worktree or deleting a branch in a project with teardown
-  processes: after the delay, they destroy that stack's data
+- removing a worktree in a project with teardown processes: after the
+  delay, they destroy that stack's data
 - `--save` on `pin`, `unpin`, `disable` or `enable`, which edits project
   files
 - editing anything under `~/.config/carte`

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::model::{
     App, AppSettings, MachineConfig, Project, ProjectState, ShareConfig, Worktree, World,
 };
-use crate::slug::branch_slug;
+use crate::slug::slugify;
 
 pub fn app(name: &str, short: &str, path: &str) -> App {
     App {
@@ -15,10 +15,11 @@ pub fn app(name: &str, short: &str, path: &str) -> App {
     }
 }
 
+/// A worktree on `branch`, in a folder that names its stack `slugify(branch)`.
 pub fn worktree(branch: &str, path: &str) -> Worktree {
     Worktree {
-        branch: branch.into(),
-        slug: branch_slug(branch),
+        branch: Some(branch.into()),
+        slug: slugify(branch),
         path: PathBuf::from(path),
     }
 }
@@ -72,11 +73,11 @@ pub fn nova() -> ProjectState {
                 vec![
                     worktree(
                         "feature-x",
-                        "/Users/dev/work/nova-postcard-frontend-feature-x",
+                        "/Users/dev/work/feature-x/nova-postcard-frontend",
                     ),
                     worktree(
                         "claude/fix-thing-123",
-                        "/Users/dev/work/nova-postcard-frontend/.claude/worktrees/fix-thing-123",
+                        "/Users/dev/work/nova-postcard-frontend/.claude/worktrees/claude-fix-thing-123",
                     ),
                 ],
             ),
@@ -84,7 +85,7 @@ pub fn nova() -> ProjectState {
                 "nova-postcard-api",
                 vec![worktree(
                     "feature-x",
-                    "/Users/dev/work/nova-postcard-api-feature-x",
+                    "/Users/dev/work/feature-x/nova-postcard-api",
                 )],
             ),
         ],
@@ -101,7 +102,7 @@ pub fn eventportal() -> ProjectState {
             "eventportal",
             vec![worktree(
                 "feature-x",
-                "/Users/dev/code/eventportal-feature-x",
+                "/Users/dev/code/feature-x/eventportal",
             )],
         )],
     )
@@ -122,7 +123,7 @@ pub fn acme() -> ProjectState {
             "acme-api",
             vec![worktree(
                 "feature-x",
-                "/Users/dev/clients/acme-api-feature-x",
+                "/Users/dev/clients/feature-x/acme-api",
             )],
         )],
     )

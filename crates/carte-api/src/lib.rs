@@ -29,7 +29,7 @@ pub mod paths {
     pub const PRUNE: &str = "/v1/prune";
 }
 
-/// A CLI address (`app@branch/process`, any part optional) and the directory it was
+/// A CLI address (`app@stack/process`, any part optional) and the directory it was
 /// typed in, which fills in the omitted parts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Address {
@@ -183,15 +183,17 @@ pub struct ProjectSummary {
     pub config_path: PathBuf,
     /// Empty when the project file can't be read.
     pub apps: Vec<AppInfo>,
-    /// Branch slugs, sorted.
+    /// Stack names other than `main`, sorted.
     pub stacks: Vec<String>,
     pub problems: Vec<Problem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StackStatus {
-    /// `main` or the branch slug.
+    /// `main` or the stack's name, from its worktree folders.
     pub name: String,
+    /// The branch the stack's worktrees have checked out; `None` on main, when they
+    /// have different branches, or when any has a detached HEAD.
     pub branch: Option<String>,
     /// One entry per app in the project: what the app resolves to in this stack,
     /// running or not.
@@ -202,7 +204,7 @@ pub struct StackStatus {
 pub struct InstanceStatus {
     pub app: String,
     pub stack: String,
-    /// `main` or the worktree's branch slug; `main` inside a stack is a fallback.
+    /// `main` or the worktree's stack name; `main` inside a stack is a fallback.
     pub checkout: String,
     pub checkout_path: PathBuf,
     pub url: String,

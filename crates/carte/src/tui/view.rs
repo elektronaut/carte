@@ -1161,7 +1161,7 @@ mod tests {
         snapshot.problems.push(Problem {
             project: Some("nova".into()),
             app: Some("nova-frontend".into()),
-            message: "branch slug \"billing\" names an app".into(),
+            message: "stack \"billing\" names an app".into(),
         });
         let nova = &mut snapshot.projects[0];
         let billing = &mut nova.stacks[0].instances[0];
@@ -1468,7 +1468,7 @@ mod tests {
 │✖ crashed · https://nova-frontend.test                                        │
 │checkout main · /work/nova-frontend                                           │
 │web exited with code 1 before it was ready                                    │
-│! branch slug \"billing\" names an app                                          │
+│! stack \"billing\" names an app                                                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ logs following ──────────────────────────────────────────────────────────────╮
 │No output yet.                                                                │

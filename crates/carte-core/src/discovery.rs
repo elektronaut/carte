@@ -1,7 +1,7 @@
 //! Finding app checkouts and their worktrees on disk.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use thiserror::Error;
@@ -10,7 +10,7 @@ use crate::config::{self, DiscoveredApp, ProjectFile};
 use crate::model::{AppRef, Problem, ProjectState, Worktree, World};
 use crate::naming;
 use crate::procfile;
-use crate::slug::branch_slug;
+use crate::slug::slugify;
 
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
@@ -138,21 +138,75 @@ pub fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
     entries
 }
 
-/// The linked worktrees that can run: not the main worktree, not bare, on a branch,
-/// and not prunable (their directory is gone).
+/// The linked worktrees that can run: not the main worktree, not bare and not
+/// prunable (their directory is gone). Each is named by `stack_names`.
 pub fn linked_worktrees(entries: &[WorktreeEntry]) -> Vec<Worktree> {
-    entries
+    let repo = entries
+        .first()
+        .and_then(|e| e.path.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let linked: Vec<&WorktreeEntry> = entries
         .iter()
         .skip(1)
-        .filter(|e| !e.bare && !e.detached && !e.prunable)
-        .filter_map(|e| {
-            let branch = e.branch.clone()?;
-            Some(Worktree {
-                slug: branch_slug(&branch),
-                branch,
-                path: e.path.clone(),
-            })
+        .filter(|e| !e.bare && !e.prunable)
+        .collect();
+    let paths: Vec<&Path> = linked.iter().map(|e| e.path.as_path()).collect();
+    linked
+        .iter()
+        .zip(stack_names(&repo, &paths))
+        .map(|(e, slug)| Worktree {
+            branch: e.branch.clone(),
+            slug,
+            path: e.path.clone(),
         })
+        .collect()
+}
+
+/// The stack name of each of a repo's linked worktrees: its slugged folder name, or
+/// the nearest ancestor's when the folder is named like the repo itself, or when
+/// another of the repo's worktrees would get the same name. Worktrees that still
+/// share a name at the filesystem root keep it; discovery reports them.
+pub fn stack_names(repo: &str, paths: &[&Path]) -> Vec<String> {
+    let repo = slugify(repo);
+    let candidates: Vec<Vec<String>> = paths
+        .iter()
+        .map(|path| {
+            path.components()
+                .rev()
+                .filter_map(|c| match c {
+                    Component::Normal(name) => Some(slugify(&name.to_string_lossy())),
+                    _ => None,
+                })
+                .filter(|name| !name.is_empty() && *name != repo)
+                .collect()
+        })
+        .collect();
+    let mut depths = vec![0; paths.len()];
+    loop {
+        let names: Vec<Option<&String>> = candidates
+            .iter()
+            .zip(&depths)
+            .map(|(names, &depth)| names.get(depth))
+            .collect();
+        let bump: Vec<usize> = (0..names.len())
+            .filter(|&i| {
+                names[i].is_some()
+                    && depths[i] + 1 < candidates[i].len()
+                    && (0..names.len()).any(|j| j != i && names[j] == names[i])
+            })
+            .collect();
+        if bump.is_empty() {
+            break;
+        }
+        for i in bump {
+            depths[i] += 1;
+        }
+    }
+    candidates
+        .iter()
+        .zip(depths)
+        .map(|(names, depth)| names.get(depth).cloned().unwrap_or_else(|| repo.clone()))
         .collect()
 }
 
@@ -222,13 +276,26 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
                 continue;
             }
         };
+        let (wts, on_main): (Vec<Worktree>, Vec<Worktree>) =
+            wts.into_iter().partition(|wt| wt.slug != "main");
+        for wt in on_main {
+            problems.push(problem(
+                Some(&app.name),
+                format!(
+                    "worktree {} is skipped: its stack would be named main, like the main checkout's",
+                    wt.path.display()
+                ),
+            ));
+        }
         for (i, wt) in wts.iter().enumerate() {
             if let Some(other) = wts[..i].iter().find(|o| o.slug == wt.slug) {
                 problems.push(problem(
                     Some(&app.name),
                     format!(
-                        "branches {:?} and {:?} have the same name in hostnames ({})",
-                        other.branch, wt.branch, wt.slug
+                        "worktrees {} and {} have the same stack name ({}) all the way up their paths",
+                        other.path.display(),
+                        wt.path.display(),
+                        wt.slug
                     ),
                 ));
             }
@@ -557,13 +624,18 @@ prunable gitdir file points to non-existent location
             worktrees,
             vec![
                 Worktree {
-                    branch: "Feature/New_Thing".into(),
-                    slug: "feature-new-thing".into(),
+                    branch: Some("Feature/New_Thing".into()),
+                    slug: "app-feature".into(),
                     path: "/work/app-feature".into(),
                 },
                 Worktree {
-                    branch: "locked-branch".into(),
-                    slug: "locked-branch".into(),
+                    branch: None,
+                    slug: "app-detached".into(),
+                    path: "/work/app-detached".into(),
+                },
+                Worktree {
+                    branch: Some("locked-branch".into()),
+                    slug: "app-locked".into(),
                     path: "/work/app-locked".into(),
                 },
             ]
@@ -578,7 +650,80 @@ prunable gitdir file points to non-existent location
         assert!(entries[0].bare);
         let worktrees = linked_worktrees(&entries);
         assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].branch, "x");
+        assert_eq!(worktrees[0].branch.as_deref(), Some("x"));
+        assert_eq!(worktrees[0].slug, "app-x");
+    }
+
+    fn names(repo: &str, paths: &[&str]) -> Vec<String> {
+        let paths: Vec<&Path> = paths.iter().map(Path::new).collect();
+        stack_names(repo, &paths)
+    }
+
+    #[test]
+    fn stacks_are_named_after_worktree_folders() {
+        assert_eq!(
+            names("acme-billing", &["/w/acme-billing-feature-x"]),
+            ["acme-billing-feature-x"]
+        );
+        assert_eq!(
+            names(
+                "acme-billing",
+                &["/home/me/worktrees/acme-billing/feature-x"]
+            ),
+            ["feature-x"]
+        );
+        assert_eq!(
+            names("acme-billing", &["/w/acme-billing/.worktrees/feature-x"]),
+            ["feature-x"]
+        );
+        assert_eq!(names("acme-billing", &["/w/Feature_X.2"]), ["feature-x-2"]);
+    }
+
+    #[test]
+    fn folders_named_like_the_repo_take_the_parents_name() {
+        assert_eq!(
+            names(
+                "make-start",
+                &[
+                    "/Users/me/Dev/make/workspaces/checkout-flow/make-start",
+                    "/Users/me/Dev/make/workspaces/Hotfix/make-start",
+                ]
+            ),
+            ["checkout-flow", "hotfix"]
+        );
+        assert_eq!(
+            names("Make-Start", &["/w/make-start/make-start"]),
+            ["w"],
+            "every ancestor named like the repo is skipped"
+        );
+    }
+
+    #[test]
+    fn worktrees_sharing_a_name_walk_up_until_they_differ() {
+        assert_eq!(
+            names(
+                "app",
+                &["/w/one/feature", "/w/two/feature", "/w/three/other"]
+            ),
+            ["one", "two", "other"]
+        );
+        assert_eq!(
+            names("app", &["/w/a/x/feature", "/w/b/x/feature"]),
+            ["a", "b"]
+        );
+        assert_eq!(
+            names("app", &["/x/feature", "/y/x/feature"]),
+            ["x", "y"],
+            "the one that can't walk further keeps its name"
+        );
+    }
+
+    #[test]
+    fn names_that_still_collide_at_the_root_are_kept() {
+        assert_eq!(
+            names("app", &["/feature", "/Feature"]),
+            ["feature", "feature"]
+        );
     }
 
     #[test]
@@ -677,7 +822,7 @@ prunable gitdir file points to non-existent location
                 "-q",
                 "-b",
                 "feature/x",
-                "../nova-frontend-feature-x",
+                "../workspaces/Feature-X/nova-frontend",
             ],
         );
         git(
@@ -697,8 +842,8 @@ prunable gitdir file points to non-existent location
                 "add",
                 "-q",
                 "-b",
-                "Feature/X",
-                "../nova-billing-x",
+                "other",
+                "../workspaces/Feature-X/nova-billing",
             ],
         );
         std::fs::write(
@@ -746,17 +891,26 @@ prunable gitdir file points to non-existent location
         );
         assert_eq!(
             state.worktrees["nova-frontend"],
-            vec![Worktree {
-                branch: "feature/x".into(),
-                slug: "feature-x".into(),
-                path: work.join("nova-frontend-feature-x"),
-            }]
+            vec![
+                Worktree {
+                    branch: None,
+                    slug: "nova-frontend-detached".into(),
+                    path: work.join("nova-frontend-detached"),
+                },
+                Worktree {
+                    branch: Some("feature/x".into()),
+                    slug: "feature-x".into(),
+                    path: work.join("workspaces/Feature-X/nova-frontend"),
+                },
+            ]
         );
         assert_eq!(state.worktrees["nova-billing"][0].slug, "feature-x");
         assert_eq!(
             state.stacks().into_iter().collect::<Vec<_>>(),
-            vec!["feature-x"]
+            vec!["feature-x", "nova-frontend-detached"]
         );
+        assert_eq!(naming::stack_branch(state, "feature-x"), None);
+        assert_eq!(naming::stack_branch(state, "nova-frontend-detached"), None);
 
         let messages: Vec<_> = world
             .problems
@@ -826,7 +980,7 @@ prunable gitdir file points to non-existent location
             ]
         );
         assert_eq!(
-            names(&Stack::Branch("feature".into())),
+            names(&Stack::Branch("shop-feature".into())),
             [("web".to_string(), Policy::Auto)]
         );
         let notes = state.project.app("notes").unwrap();
@@ -841,14 +995,18 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
-    fn reports_branch_named_like_an_app() {
+    fn reports_stacks_named_like_an_app_or_main() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         repo(&root.join("acme-web"));
         repo(&root.join("acme-api"));
         git(
             &root.join("acme-web"),
-            &["worktree", "add", "-q", "-b", "api", "../acme-web-api"],
+            &["worktree", "add", "-q", "-b", "x", "../wt/api/acme-web"],
+        );
+        git(
+            &root.join("acme-web"),
+            &["worktree", "add", "-q", "-b", "y", "../wt/Main/acme-web"],
         );
         let file = config::parse_project(
             &root.join("acme.toml"),
@@ -860,9 +1018,17 @@ prunable gitdir file points to non-existent location
         .unwrap();
         let (state, problems) = discover_project(file);
         assert_eq!(state.project.apps.len(), 2);
-        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(problems.len(), 3, "{problems:?}");
         assert!(problems[0].message.contains("\"") && problems[0].message.contains("missing"));
-        assert!(problems[1].message.contains("same name as app acme-api"));
+        assert!(
+            problems[1]
+                .message
+                .contains("its stack would be named main"),
+            "{}",
+            problems[1].message
+        );
+        assert!(problems[2].message.contains("same name as app acme-api"));
+        assert_eq!(state.stacks().into_iter().collect::<Vec<_>>(), vec!["api"]);
     }
 
     #[test]

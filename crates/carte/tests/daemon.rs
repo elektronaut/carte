@@ -445,7 +445,7 @@ fn new_worktrees_become_stacks() {
             "-q",
             "-b",
             "feature-x",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
         ],
     );
     eventually("the feature-x stack", || {
@@ -1012,7 +1012,7 @@ fn run_in_feature_x(daemon: &Daemon) -> carte_core::dirs::InstanceDirs {
             "-q",
             "-b",
             "feature-x",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
         ],
     );
     eventually("the feature-x stack", || {
@@ -1037,7 +1037,7 @@ fn run_in_feature_x(daemon: &Daemon) -> carte_core::dirs::InstanceDirs {
 fn remove_feature_x(daemon: &Daemon) {
     git(
         &daemon.root.join("work/acme-web"),
-        &["worktree", "remove", "--force", "../acme-web-feature-x"],
+        &["worktree", "remove", "--force", "../feature-x/acme-web"],
     );
 }
 
@@ -1124,7 +1124,7 @@ fn a_worktree_that_comes_back_cancels_the_teardown() {
             "worktree",
             "add",
             "-q",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
             "feature-x",
         ],
     );
@@ -1152,7 +1152,7 @@ fn a_worktree_that_comes_back_during_the_teardown_keeps_the_folders() {
             "worktree",
             "add",
             "-q",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
             "feature-x",
         ],
     );
@@ -1204,41 +1204,36 @@ fn an_unreadable_stack_record_pauses_the_teardown() {
 }
 
 #[test]
-fn a_kept_stack_is_not_checked_every_tick() {
+fn switching_or_detaching_inside_a_worktree_keeps_its_stack() {
     let daemon = start_with_teardown("1s", "true");
     run_in_feature_x(&daemon);
-    git(
-        &daemon.root.join("work/acme-web-feature-x"),
-        &["switch", "-q", "-c", "other"],
-    );
-    eventually("the switched worktree", || {
-        let snapshot = snapshot(&daemon);
-        let stacks = &snapshot.projects[0].stacks;
-        stacks.iter().any(|s| s.name == "other") && stacks.iter().all(|s| s.name != "feature-x")
+    let worktree = daemon.root.join("work/feature-x/acme-web");
+    let branch = |daemon: &Daemon| {
+        snapshot(daemon).projects[0]
+            .stacks
+            .iter()
+            .find(|s| s.name == "feature-x")
+            .map(|s| s.branch.clone())
+    };
+    git(&worktree, &["switch", "-q", "-c", "other"]);
+    eventually("the switched branch", || {
+        branch(&daemon) == Some(Some("other".into()))
     });
-    std::thread::sleep(Duration::from_secs(1));
-
-    let real_git = Command::new("sh")
-        .args(["-c", "command -v git"])
-        .output()
+    git(&worktree, &["switch", "-q", "--detach"]);
+    eventually("the detached worktree", || branch(&daemon) == Some(None));
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(teardown_event(&daemon, carte_api::EventKind::TeardownScheduled, false).is_none());
+    assert_eq!(branch(&daemon), Some(None));
+    let snapshot = snapshot(&daemon);
+    let stack = snapshot.projects[0]
+        .stacks
+        .iter()
+        .find(|s| s.name == "feature-x")
         .unwrap();
-    let real_git = String::from_utf8(real_git.stdout).unwrap();
-    let calls = daemon.root.join("git-calls");
-    let wrapper = daemon.root.join("bin/git");
-    std::fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\ncase \"$*\" in *show-ref*) echo \"$*\" >> {} ;; esac\nexec {} \"$@\"\n",
-            calls.display(),
-            real_git.trim()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::thread::sleep(Duration::from_secs(4));
-    std::fs::remove_file(&wrapper).unwrap();
-
-    let checks = std::fs::read_to_string(&calls).unwrap_or_default();
-    assert!(checks.lines().count() <= 1, "{checks}");
+    let web = stack
+        .instances
+        .iter()
+        .find(|i| i.app == "acme-web")
+        .unwrap();
+    assert_eq!(web.state, carte_api::InstanceState::Ready, "still running");
 }

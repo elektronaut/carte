@@ -110,7 +110,7 @@ mod tests {
 
     fn worktree(app: &str, slug: &str) -> Worktree {
         Worktree {
-            branch: format!("feature/{slug}"),
+            branch: Some(format!("feature/{slug}")),
             slug: slug.into(),
             path: PathBuf::from("/w").join(format!("{app}-{slug}")),
         }
