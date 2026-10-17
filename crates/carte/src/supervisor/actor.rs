@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, InstanceState, LogLine, ProcessState,
-    ShareRequest, ShareResponse, Snapshot, TunnelState, TunnelStatus,
+    Action, Address, ControlRequest, ControlResponse, InstanceState, LogLine, LogsRequest,
+    ProcessState, ShareRequest, ShareResponse, Snapshot, TunnelState, TunnelStatus,
 };
 use carte_core::address::{self, Target};
 use carte_core::env::{self, Env, EnvRequest, SystemRunner};
@@ -74,6 +74,8 @@ pub(super) struct Proc {
     pub cpu_percent: f32,
     cpu_sample: Option<(Instant, Duration)>,
     run: u64,
+    /// When the latest run started, in milliseconds since the Unix epoch.
+    pub started_ms: Option<u64>,
     manual_stop: bool,
     restart: bool,
     /// A checkout-scope process another instance runs; taken over when that stops.
@@ -273,13 +275,8 @@ impl Actor {
             Msg::StopAll { idle_only, reply } => {
                 let _ = reply.send(self.stop_all(idle_only));
             }
-            Msg::Logs {
-                target,
-                tail,
-                search,
-                reply,
-            } => {
-                let _ = reply.send(self.logs(&target, tail, search));
+            Msg::Logs { request, reply } => {
+                let _ = reply.send(self.logs(&request));
             }
             Msg::Reload(world) => self.reload(world),
             Msg::RestartCheckout(path) => self.restart_checkout(&path),
@@ -486,6 +483,7 @@ impl Actor {
                 log,
                 restarts,
                 run: 0,
+                started_ms: None,
                 manual_stop: false,
                 restart: false,
                 deferred: false,
@@ -666,6 +664,7 @@ impl Actor {
         proc.stop = Some(stop_tx);
         proc.state = ProcessState::Starting;
         proc.run = run;
+        proc.started_ms = Some(runner::now_ms());
         proc.manual_stop = false;
         let label = LogLabel {
             project: key.project.clone(),
@@ -1657,13 +1656,8 @@ impl Actor {
 
     // Logs and config
 
-    fn logs(
-        &self,
-        target: &Address,
-        tail: usize,
-        search: Option<String>,
-    ) -> Result<(Vec<LogLine>, LogFilter), String> {
-        let resolved = self.resolve(target)?;
+    fn logs(&self, request: &LogsRequest) -> Result<(Vec<LogLine>, LogFilter), String> {
+        let resolved = self.resolve(&request.target)?;
         let stack = match (&resolved.app, &resolved.stack) {
             (_, Some(stack)) => Some(stack.clone()),
             (Some(_), None) => Some(Stack::Main),
@@ -1674,7 +1668,7 @@ impl Actor {
             stack: stack.as_ref().map(|s| s.slug().to_string()),
             app: resolved.app.clone(),
             process: resolved.process.clone(),
-            search: search.clone(),
+            search: request.search.clone(),
         };
         let mut lines = Vec::new();
         let keys = self.instances.keys().filter(|k| {
@@ -1692,8 +1686,13 @@ impl Actor {
                 {
                     continue;
                 }
+                let since = match (request.since_start, proc.started_ms) {
+                    (false, _) => request.since_ms.unwrap_or(0),
+                    (true, Some(started)) => request.since_ms.unwrap_or(0).max(started),
+                    (true, None) => continue,
+                };
                 let log = proc.log.lock().unwrap();
-                for (at_ms, text) in log.lines() {
+                for (at_ms, text) in log.lines().filter(|(at_ms, _)| *at_ms >= since) {
                     lines.push(LogLine {
                         project: key.project.clone(),
                         app: key.app.clone(),
@@ -1707,6 +1706,10 @@ impl Actor {
         }
         lines.retain(|line| filter.matches(line));
         lines.sort_by_key(|line| line.at_ms);
+        let narrowed = request.since_ms.is_some() || request.since_start;
+        let tail = request
+            .tail
+            .unwrap_or(if narrowed { usize::MAX } else { 100 });
         let skip = lines.len().saturating_sub(tail);
         Ok((lines.split_off(skip), filter))
     }

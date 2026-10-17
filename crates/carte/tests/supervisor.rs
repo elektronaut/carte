@@ -6,7 +6,7 @@ use std::time::Duration;
 use carte::paths::Paths;
 use carte::process::Spawner;
 use carte::supervisor::{self, Handle, Options};
-use carte_api::{Action, Address, ControlRequest, InstanceState, ProcessState};
+use carte_api::{Action, Address, ControlRequest, InstanceState, LogsRequest, ProcessState};
 use carte_core::discovery;
 use carte_core::model::{InstanceKey, Stack};
 use common::{fixture, git, http_get, repo};
@@ -498,14 +498,80 @@ async fn logs_are_kept_and_filtered() {
         cwd: None,
         project: None,
     };
-    let (lines, filter) = handle.logs(target.clone(), 100, None).await.unwrap();
+    let (lines, filter) = handle.logs(request(&target)).await.unwrap();
     assert!(lines.iter().any(|l| l.text.contains("ready")), "{lines:?}");
     assert!(lines.iter().all(|l| filter.matches(l)));
     let (lines, _) = handle
-        .logs(target, 100, Some("line 2".into()))
+        .logs(LogsRequest {
+            search: Some("line 2".into()),
+            ..request(&target)
+        })
         .await
         .unwrap();
     assert_eq!(lines.len(), 1, "{lines:?}");
+    handle.shutdown().await;
+}
+
+fn request(target: &Address) -> LogsRequest {
+    LogsRequest {
+        target: target.clone(),
+        ..LogsRequest::default()
+    }
+}
+
+#[tokio::test]
+async fn logs_since_the_latest_run_or_a_time() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: FIXTURE_LINES=3 exec {fixture}\n");
+    setup.project("");
+    let handle = setup.start();
+    let target = Address {
+        address: "web".into(),
+        cwd: None,
+        project: None,
+    };
+    let count =
+        |lines: &[carte_api::LogLine]| lines.iter().filter(|l| l.text.contains("line 2")).count();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    handle
+        .control(control("web", Action::Restart))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let mut all = Vec::new();
+    for _ in 0..50 {
+        (all, _) = handle.logs(request(&target)).await.unwrap();
+        if count(&all) == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(count(&all), 2, "{all:?}");
+
+    let (latest, _) = handle
+        .logs(LogsRequest {
+            since_start: true,
+            ..request(&target)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count(&latest), 1, "{latest:?}");
+
+    let (none, _) = handle
+        .logs(LogsRequest {
+            since_ms: Some(all.last().unwrap().at_ms + 1),
+            ..request(&target)
+        })
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "{none:?}");
     handle.shutdown().await;
 }
 
@@ -523,7 +589,7 @@ async fn following_a_project_picks_up_instances_that_start_later() {
         cwd: None,
         project: None,
     };
-    let (lines, filter) = handle.logs(target, 100, None).await.unwrap();
+    let (lines, filter) = handle.logs(request(&target)).await.unwrap();
     assert!(lines.is_empty(), "{lines:?}");
     handle
         .ensure_ready(key("acme-web", Stack::Main))

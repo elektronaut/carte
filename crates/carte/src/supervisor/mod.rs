@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, ExternalRequest, LogLine, ShareRequest,
-    ShareResponse, Snapshot, StartFailure, TunnelStatus,
+    Action, Address, ControlRequest, ControlResponse, ExternalRequest, LogLine, LogsRequest,
+    ShareRequest, ShareResponse, Snapshot, StartFailure, TunnelStatus,
 };
 use carte_core::model::{InstanceKey, World};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -109,9 +109,7 @@ pub(crate) enum Msg {
         reply: oneshot::Sender<ControlResponse>,
     },
     Logs {
-        target: Address,
-        tail: usize,
-        search: Option<String>,
+        request: LogsRequest,
         reply: oneshot::Sender<Result<(Vec<LogLine>, LogFilter), String>>,
     },
     Reload(World),
@@ -215,19 +213,9 @@ impl Handle {
     }
 
     /// Buffered lines for a target, oldest first, and the filter for following it.
-    pub async fn logs(
-        &self,
-        target: Address,
-        tail: usize,
-        search: Option<String>,
-    ) -> Result<(Vec<LogLine>, LogFilter), String> {
+    pub async fn logs(&self, request: LogsRequest) -> Result<(Vec<LogLine>, LogFilter), String> {
         let (reply, rx) = oneshot::channel();
-        self.send(Msg::Logs {
-            target,
-            tail,
-            search,
-            reply,
-        });
+        self.send(Msg::Logs { request, reply });
         rx.await
             .unwrap_or_else(|_| Err("carte is shutting down".into()))
     }

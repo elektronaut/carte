@@ -431,11 +431,16 @@ fn render_failures(failures: &[StartFailure]) -> String {
 }
 
 pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let since_ms = args
+        .since
+        .map(|since| crate::supervisor::runner::now_ms().saturating_sub(since.as_millis() as u64));
     let request = LogsRequest {
         target: address(&args.target),
         follow: args.follow,
-        tail: Some(args.lines),
+        tail: args.lines,
         search: args.search,
+        since_ms,
+        since_start: args.since_start,
     };
     let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none();
     let mut stdout = std::io::stdout().lock();

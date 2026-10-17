@@ -104,12 +104,7 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
         return response;
     }
     let mut follow = request.follow.then(|| api.supervisor.follow_logs());
-    let tail = request.tail.unwrap_or(100);
-    let (lines, filter) = match api
-        .supervisor
-        .logs(request.target, tail, request.search)
-        .await
-    {
+    let (lines, filter) = match api.supervisor.logs(request).await {
         Ok(result) => result,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };

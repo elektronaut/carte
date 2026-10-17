@@ -321,13 +321,20 @@ pub struct StopAllRequest {
     pub idle_only: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LogsRequest {
     pub target: Address,
     pub follow: bool,
-    /// Lines from the buffer to send before following.
+    /// Lines from the buffer to send before following: 100 by default, every line
+    /// when `since_ms` or `since_start` narrows them.
     pub tail: Option<usize>,
     pub search: Option<String>,
+    /// Only lines from this time on, in milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<u64>,
+    /// Only lines from each process's latest run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub since_start: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

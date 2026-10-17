@@ -735,6 +735,7 @@ impl App {
                 follow: true,
                 tail: Some(1000),
                 search: None,
+                ..Default::default()
             },
         })
     }

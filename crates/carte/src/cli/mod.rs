@@ -166,12 +166,23 @@ pub struct LogsArgs {
     /// Keep printing new lines.
     #[arg(short, long)]
     pub follow: bool,
-    /// Lines from the buffer to show first.
-    #[arg(short = 'n', long, default_value_t = 100)]
-    pub lines: usize,
+    /// Lines from the buffer to show first [default: 100, or all with --since or
+    /// --since-start]
+    #[arg(short = 'n', long)]
+    pub lines: Option<usize>,
     /// Only lines containing this text.
     #[arg(long)]
     pub search: Option<String>,
+    /// Only lines from this long ago on, like `5m` or `1h30m`.
+    #[arg(long, value_parser = parse_duration)]
+    pub since: Option<std::time::Duration>,
+    /// Only lines from each process's latest run.
+    #[arg(long)]
+    pub since_start: bool,
+}
+
+fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
+    carte_core::duration::parse(value).map_err(|err| err.to_string())
 }
 
 #[derive(Args, Clone)]
