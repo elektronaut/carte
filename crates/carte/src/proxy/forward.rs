@@ -4,10 +4,11 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use http::header::{CONNECTION, CONTENT_TYPE, HOST, HeaderName, UPGRADE};
-use http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
+use http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HOST, HeaderName, UPGRADE};
+use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::Empty;
 use hyper::body::Incoming;
+use hyper::ext::Protocol;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio_util::sync::CancellationToken;
@@ -104,10 +105,18 @@ async fn forward(
     mut request: Request<Incoming>,
 ) -> Response<ProxyBody> {
     let request_headers = request.headers().clone();
-    let upgrade = is_upgrade(request.headers());
+    let h2_websocket = is_h2_websocket(&request);
+    let upgrade = h2_websocket || is_upgrade(request.headers());
     let downstream = upgrade.then(|| hyper::upgrade::on(&mut request));
 
     strip_hop_by_hop(request.headers_mut(), upgrade);
+    if h2_websocket {
+        websocket_over_http1(&mut request);
+    }
+    if request.version() == Version::HTTP_2 {
+        join_cookies(request.headers_mut());
+        *request.version_mut() = Version::HTTP_11;
+    }
     add_forwarded_headers(request.headers_mut(), inbound, route_request);
     if !request.headers().contains_key(HOST)
         && let Ok(host) = HeaderValue::from_str(route_request.host)
@@ -131,7 +140,11 @@ async fn forward(
 
     if let (Some(downstream), StatusCode::SWITCHING_PROTOCOLS) = (downstream, response.status()) {
         let upstream = hyper::upgrade::on(&mut response);
-        strip_hop_by_hop(response.headers_mut(), true);
+        strip_hop_by_hop(response.headers_mut(), !h2_websocket);
+        if h2_websocket {
+            *response.status_mut() = StatusCode::OK;
+            response.headers_mut().remove("sec-websocket-accept");
+        }
         guard.long_lived();
         let shutdown = inbound.shutdown.clone();
         inbound.tracker.spawn(async move {
@@ -198,6 +211,53 @@ fn connection_tokens(headers: &HeaderMap) -> impl Iterator<Item = String> + '_ {
 
 fn is_upgrade(headers: &HeaderMap) -> bool {
     headers.contains_key(UPGRADE) && connection_tokens(headers).any(|token| token == "upgrade")
+}
+
+/// An HTTP/2 extended CONNECT for a WebSocket (RFC 8441).
+fn is_h2_websocket<B>(request: &Request<B>) -> bool {
+    request.method() == Method::CONNECT
+        && request
+            .extensions()
+            .get::<Protocol>()
+            .is_some_and(|protocol| protocol.as_str().eq_ignore_ascii_case("websocket"))
+}
+
+/// Turns an HTTP/2 WebSocket CONNECT into the HTTP/1.1 upgrade an app expects.
+fn websocket_over_http1<B>(request: &mut Request<B>) {
+    *request.method_mut() = Method::GET;
+    request.extensions_mut().remove::<Protocol>();
+    let headers = request.headers_mut();
+    headers.insert(CONNECTION, HeaderValue::from_static("upgrade"));
+    headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+    headers.insert("sec-websocket-key", websocket_key());
+}
+
+/// A fresh `Sec-WebSocket-Key`: 16 bytes, base64-encoded.
+fn websocket_key() -> HeaderValue {
+    use base64::Engine;
+    use std::hash::BuildHasher;
+
+    let state = std::collections::hash_map::RandomState::new();
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&state.hash_one(1u8).to_le_bytes());
+    bytes[8..].copy_from_slice(&state.hash_one(2u8).to_le_bytes());
+    let key = base64::engine::general_purpose::STANDARD.encode(bytes);
+    HeaderValue::from_str(&key).expect("base64 is a valid header value")
+}
+
+/// HTTP/2 may split `Cookie` into several fields; HTTP/1.1 needs one.
+fn join_cookies(headers: &mut HeaderMap) {
+    let values: Vec<&str> = headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+    if values.len() < 2 {
+        return;
+    }
+    if let Ok(joined) = HeaderValue::from_str(&values.join("; ")) {
+        headers.insert(COOKIE, joined);
+    }
 }
 
 fn is_event_stream(headers: &HeaderMap) -> bool {
@@ -343,6 +403,36 @@ mod tests {
             "Text/Event-Stream; charset=utf-8"
         )])));
         assert!(!is_event_stream(&headers(&[("content-type", "text/html")])));
+    }
+
+    #[test]
+    fn joins_cookies_split_by_http2() {
+        let mut split = headers(&[("cookie", "a=1"), ("cookie", "b=2")]);
+        join_cookies(&mut split);
+        assert_eq!(
+            split.get_all(COOKIE).iter().collect::<Vec<_>>(),
+            ["a=1; b=2"]
+        );
+    }
+
+    #[test]
+    fn turns_http2_websocket_connects_into_upgrades() {
+        let mut request = Request::connect("https://app.test/cable")
+            .version(Version::HTTP_2)
+            .body(())
+            .unwrap();
+        assert!(!is_h2_websocket(&request));
+        request
+            .extensions_mut()
+            .insert(Protocol::from_static("websocket"));
+        assert!(is_h2_websocket(&request));
+
+        websocket_over_http1(&mut request);
+        assert_eq!(request.method(), Method::GET);
+        assert!(is_upgrade(request.headers()));
+        let key = request.headers()["sec-websocket-key"].to_str().unwrap();
+        assert_eq!(key.len(), 24);
+        assert_ne!(key, websocket_key().to_str().unwrap());
     }
 
     #[test]

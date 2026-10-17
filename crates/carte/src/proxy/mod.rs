@@ -1,6 +1,6 @@
-//! The reverse proxy: accepts HTTP(S) on loopback, asks a [`Router`] where each
-//! request goes, and forwards it to an app on `127.0.0.1` or `::1`, including
-//! WebSocket upgrades.
+//! The reverse proxy: accepts HTTP(S) on loopback (HTTP/2 over TLS when the
+//! client offers it), asks a [`Router`] where each request goes, and forwards it
+//! as HTTP/1.1 to an app on `127.0.0.1` or `::1`, including WebSocket upgrades.
 
 mod body;
 mod cookies;

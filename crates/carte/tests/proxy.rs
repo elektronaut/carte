@@ -11,14 +11,14 @@ use carte::proxy::{
     RouteRequest, Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use http::header::{ACCEPT, CONNECTION, CONTENT_TYPE, HOST, RETRY_AFTER, SET_COOKIE};
-use http::{HeaderMap, Request, Response, StatusCode};
+use http::header::{ACCEPT, CONNECTION, CONTENT_TYPE, COOKIE, HOST, RETRY_AFTER, SET_COOKIE};
+use http::{HeaderMap, Request, Response, StatusCode, Version};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty, Full, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc};
@@ -465,6 +465,112 @@ fn self_signed(host: &str) -> (Arc<rustls::ServerConfig>, rustls::RootCertStore)
     (Arc::new(config), roots)
 }
 
+async fn tls_connect(
+    addr: SocketAddr,
+    roots: rustls::RootCertStore,
+    alpn: &[&[u8]],
+) -> tokio_rustls::client::TlsStream<TcpStream> {
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let stream = TcpStream::connect(addr).await.unwrap();
+    connector
+        .connect("app.test".try_into().unwrap(), stream)
+        .await
+        .unwrap()
+}
+
+async fn h2_sender(
+    addr: SocketAddr,
+    roots: rustls::RootCertStore,
+) -> hyper::client::conn::http2::SendRequest<Empty<Bytes>> {
+    let stream = tls_connect(addr, roots, &[b"h2", b"http/1.1"]).await;
+    assert_eq!(stream.get_ref().1.alpn_protocol(), Some(&b"h2"[..]));
+    let (sender, connection) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(stream))
+            .await
+            .unwrap();
+    tokio::spawn(connection);
+    sender
+}
+
+#[tokio::test]
+async fn serves_http2_and_forwards_http1() {
+    let port = echo_upstream("127.0.0.1:0").await;
+    let router = Arc::new(TestRouter::default().with("app.test", Target::Port(port)));
+    let (server_config, roots) = self_signed("app.test");
+    let proxy = start(router.clone(), ListenerOptions::local().tls(server_config)).await;
+
+    let mut sender = h2_sender(proxy.addr, roots).await;
+    let request = Request::get("https://app.test/a?b=c")
+        .header(COOKIE, "a=1")
+        .header(COOKIE, "b=2")
+        .body(Empty::new())
+        .unwrap();
+    let response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.version(), Version::HTTP_2);
+    assert_eq!(response.status(), StatusCode::OK);
+    let echoed = body_text(response).await;
+    assert!(echoed.starts_with("GET /a?b=c\n"), "{echoed}");
+    assert!(echoed.contains("\nhost: app.test\n"), "{echoed}");
+    assert!(echoed.contains("\ncookie: a=1; b=2\n"), "{echoed}");
+    assert!(echoed.contains("\nx-forwarded-proto: https\n"), "{echoed}");
+    assert_eq!(
+        router.seen.lock().unwrap().as_slice(),
+        [("app.test".to_string(), true, ListenerKind::Local)]
+    );
+}
+
+#[tokio::test]
+async fn carries_websockets_over_http2() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        while let Some(Ok(message)) = socket.next().await {
+            if message.is_text() {
+                socket.send(message).await.unwrap();
+            }
+        }
+    });
+    let router = Arc::new(TestRouter::default().with("app.test", Target::Port(port)));
+    let (server_config, roots) = self_signed("app.test");
+    let proxy = start(router.clone(), ListenerOptions::local().tls(server_config)).await;
+
+    let mut sender = h2_sender(proxy.addr, roots).await;
+    let mut request = Request::connect("https://app.test/cable")
+        .version(Version::HTTP_2)
+        .header("sec-websocket-version", "13")
+        .body(Empty::new())
+        .unwrap();
+    request
+        .extensions_mut()
+        .insert(hyper::ext::Protocol::from_static("websocket"));
+    let mut response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let upgraded = hyper::upgrade::on(&mut response).await.unwrap();
+    let mut socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        TokioIo::new(upgraded),
+        tokio_tungstenite::tungstenite::protocol::Role::Client,
+        None,
+    )
+    .await;
+    assert_eq!(router.activity.counts(), (0, 1));
+
+    for text in ["ping", "pong"] {
+        socket.send(Message::text(text)).await.unwrap();
+        let echoed = socket.next().await.unwrap().unwrap();
+        assert_eq!(echoed.into_text().unwrap().as_str(), text);
+    }
+
+    socket.close(None).await.unwrap();
+    drop(socket);
+    eventually("the tunnel to close", || router.activity.counts() == (0, 0)).await;
+}
+
 #[tokio::test]
 async fn terminates_tls() {
     let port = echo_upstream("127.0.0.1:0").await;
@@ -472,16 +578,7 @@ async fn terminates_tls() {
     let (server_config, roots) = self_signed("app.test");
     let proxy = start(router.clone(), ListenerOptions::local().tls(server_config)).await;
 
-    let mut client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    client_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
-    let stream = TcpStream::connect(proxy.addr).await.unwrap();
-    let stream = connector
-        .connect("app.test".try_into().unwrap(), stream)
-        .await
-        .unwrap();
+    let stream = tls_connect(proxy.addr, roots, &[b"http/1.1"]).await;
     assert_eq!(stream.get_ref().1.alpn_protocol(), Some(&b"http/1.1"[..]));
 
     let response = send_on(stream, get("app.test", "/").body(Empty::new()).unwrap()).await;

@@ -4,9 +4,9 @@ use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyper::server::conn::http1;
+use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -44,11 +44,11 @@ impl ListenerOptions {
         }
     }
 
-    /// Terminates TLS with `config`. The proxy only speaks HTTP/1.1 and replaces
-    /// the config's ALPN protocols accordingly.
+    /// Terminates TLS with `config`, offering HTTP/2 and HTTP/1.1 through ALPN in
+    /// place of the config's own protocols.
     pub fn tls(mut self, config: Arc<ServerConfig>) -> Self {
         let mut config = Arc::unwrap_or_clone(config);
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         self.tls = Some(Arc::new(config));
         self
     }
@@ -153,7 +153,11 @@ async fn serve_connection(
             Err(_) => return,
         },
     };
-    serve_http(TokioIo::new(stream), inbound, shared).await;
+    if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
+        serve_h2(TokioIo::new(stream), inbound, shared).await;
+    } else {
+        serve_http(TokioIo::new(stream), inbound, shared).await;
+    }
 }
 
 async fn serve_http<I>(io: I, inbound: Arc<Inbound>, shared: Arc<Shared>)
@@ -168,6 +172,27 @@ where
             .serve_connection(io, service)
             .with_upgrades()
     );
+    let result = tokio::select! {
+        result = connection.as_mut() => result,
+        () = shutdown.cancelled() => {
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    };
+    if let Err(error) = result {
+        tracing::debug!(%error, "connection ended with an error");
+    }
+}
+
+async fn serve_h2<I>(io: I, inbound: Arc<Inbound>, shared: Arc<Shared>)
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let shutdown = inbound.shutdown.clone();
+    let service = service_fn(move |request| handle(shared.clone(), inbound.clone(), request));
+    let mut builder = http2::Builder::new(TokioExecutor::new());
+    builder.timer(TokioTimer::new()).enable_connect_protocol();
+    let mut connection = pin!(builder.serve_connection(io, service));
     let result = tokio::select! {
         result = connection.as_mut() => result,
         () = shutdown.cancelled() => {
