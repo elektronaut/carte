@@ -77,6 +77,9 @@ pub struct ExternalRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TunnelStatus {
     pub provider: String,
+    /// The provider carries one shared app at a time.
+    #[serde(default)]
+    pub single_host: bool,
     pub state: TunnelState,
     /// The provider's last words, for when it fails.
     pub message: Option<String>,
@@ -104,6 +107,10 @@ pub struct ShareRequest {
     pub auth: bool,
     #[serde(default)]
     pub pin: bool,
+    /// When the provider carries one app at a time, end the current share instead of
+    /// refusing.
+    #[serde(default)]
+    pub replace: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

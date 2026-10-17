@@ -436,12 +436,18 @@ impl App {
             (Intent::Control(control), _) => commands.extend(self.control(control)),
             (Intent::StopIdle, _) => commands.push(Command::StopAll { idle_only: true }),
             (Intent::StopAll, _) => self.mode = Mode::Confirm(Confirm::StopAll),
-            (Intent::Yes, _) => {
-                if self.mode == Mode::Confirm(Confirm::StopAll) {
-                    commands.push(Command::StopAll { idle_only: false });
+            (Intent::Yes, _) => match std::mem::replace(&mut self.mode, Mode::Normal) {
+                Mode::Confirm(Confirm::StopAll) => {
+                    commands.push(Command::StopAll { idle_only: false })
                 }
-                self.mode = Mode::Normal;
-            }
+                Mode::Confirm(Confirm::ReplaceShare { request, .. }) => {
+                    commands.push(Command::Share(ShareRequest {
+                        replace: true,
+                        ..request
+                    }))
+                }
+                _ => {}
+            },
             (Intent::Open, _) => commands.extend(self.open()),
             (Intent::OpenPublic, _) => commands.extend(self.open_public()),
             (Intent::Share { auth }, _) => commands.extend(self.share(auth)),
@@ -626,7 +632,8 @@ impl App {
     }
 
     /// Shares the selected app, or ends its stack's share. With `auth` it shares, or
-    /// adds a password to the share.
+    /// adds a password to the share. When the provider carries one app at a time and
+    /// another app has it, asks before taking its place.
     fn share(&mut self, auth: bool) -> Option<Command> {
         let snapshot = self.snapshot.as_ref()?;
         let Some((id, instance)) = self.selected_instance() else {
@@ -634,17 +641,38 @@ impl App {
             return None;
         };
         let target = target::address(snapshot, &id);
-        Some(if instance.public_url.is_some() && !auth {
-            Command::Unshare(UnshareRequest { target })
-        } else {
-            Command::Share(ShareRequest {
-                target,
-                apps: Vec::new(),
-                ttl_secs: None,
-                auth,
-                pin: false,
+        if instance.public_url.is_some() && !auth {
+            return Some(Command::Unshare(UnshareRequest { target }));
+        }
+        let request = ShareRequest {
+            target,
+            apps: Vec::new(),
+            ttl_secs: None,
+            auth,
+            pin: false,
+            replace: false,
+        };
+        let single_host = snapshot.tunnel.as_ref().is_some_and(|t| t.single_host);
+        let (project, stack, app): (&str, &str, &str) =
+            (id.project(), &instance.stack, &instance.app);
+        let others: Vec<String> = snapshot
+            .shares
+            .iter()
+            .flat_map(|share| {
+                share.apps.iter().filter_map(move |a| {
+                    let same = share.project == project && share.stack == stack && a.app == app;
+                    (!same).then(|| format!("{}@{}", a.app, share.stack))
+                })
             })
-        })
+            .collect();
+        if single_host && !others.is_empty() {
+            self.mode = Mode::Confirm(Confirm::ReplaceShare {
+                request,
+                shared: others.join(", "),
+            });
+            return None;
+        }
+        Some(Command::Share(request))
     }
 
     fn shared(&mut self, result: Result<ShareResponse, String>) {
@@ -1041,6 +1069,33 @@ mod tests {
         press(&mut app, now, KeyCode::Right);
         let commands = press(&mut app, now, KeyCode::Down);
         assert_eq!(follows(&commands), ["make"]);
+    }
+
+    #[test]
+    fn a_one_app_provider_asks_before_switching_the_share() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        let mut snapshot = shared_sample();
+        snapshot.tunnel.as_mut().unwrap().single_host = true;
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        for _ in 0..3 {
+            press(&mut app, now, KeyCode::Down);
+        }
+        assert!(press(&mut app, now, KeyCode::Char('w')).is_empty());
+        let Mode::Confirm(Confirm::ReplaceShare { shared, .. }) = &app.mode else {
+            panic!("{:?}", app.mode);
+        };
+        assert_eq!(shared, "make-billing@main");
+        assert!(press(&mut app, now, KeyCode::Char('n')).is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+
+        press(&mut app, now, KeyCode::Char('w'));
+        let commands = press(&mut app, now, KeyCode::Char('y'));
+        let [Command::Share(request)] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(request.target.address, "make-frontend@main");
+        assert!(request.replace);
     }
 
     #[test]

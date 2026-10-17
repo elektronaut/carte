@@ -48,7 +48,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match &app.mode {
         Mode::Help => render_help(frame, main),
         Mode::Problems => render_problems(frame, main, app),
-        Mode::Confirm(Confirm::StopAll) => render_confirm(frame, main, app),
+        Mode::Confirm(confirm) => render_confirm(frame, main, app, confirm),
         Mode::Normal | Mode::Filter => {}
     }
 }
@@ -824,20 +824,42 @@ fn render_problems(frame: &mut Frame, area: Rect, app: &App) {
     popup(frame, area, "problems", lines);
 }
 
-fn render_confirm(frame: &mut Frame, area: Rect, app: &App) {
-    let running = app.snapshot.as_ref().map_or(0, |s| s.running_instances);
+fn render_confirm(frame: &mut Frame, area: Rect, app: &App, confirm: &Confirm) {
+    let (title, question, verb) = match confirm {
+        Confirm::StopAll => {
+            let running = app.snapshot.as_ref().map_or(0, |s| s.running_instances);
+            (
+                "stop everything",
+                format!("Stop all {running} running instances, pinned ones too?"),
+                " stop   ",
+            )
+        }
+        Confirm::ReplaceShare { request, shared } => {
+            let provider = app
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.tunnel.as_ref())
+                .map_or("the provider", |t| t.provider.as_str());
+            (
+                "share",
+                format!(
+                    "{provider} shares one app at a time. Stop sharing {shared} and share {} instead?",
+                    request.target.address
+                ),
+                " switch   ",
+            )
+        }
+    };
     popup(
         frame,
         area,
-        "stop everything",
+        title,
         vec![
-            Line::from(format!(
-                "Stop all {running} running instances, pinned ones too?"
-            )),
+            Line::from(question),
             Line::default(),
             Line::from(vec![
                 Span::raw("y").cyan().bold(),
-                Span::raw(" stop   "),
+                Span::raw(verb),
                 Span::raw("any other key").cyan().bold(),
                 Span::raw(" cancel"),
             ]),

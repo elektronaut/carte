@@ -1,5 +1,6 @@
 //! Keybindings: which key means what in each mode.
 
+use carte_api::ShareRequest;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,9 +19,14 @@ pub enum Mode {
     Problems,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirm {
     StopAll,
+    /// The provider carries one app at a time and `shared` has it.
+    ReplaceShare {
+        request: ShareRequest,
+        shared: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

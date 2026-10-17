@@ -125,6 +125,10 @@ pub struct ShareArgs {
     /// Keep the apps running while shared, so visitors never wait for a boot.
     #[arg(long)]
     pub pin: bool,
+    /// With a provider that carries one app at a time (ngrok), stop sharing the
+    /// current app instead of refusing.
+    #[arg(long)]
+    pub replace: bool,
 }
 
 #[derive(Args, Clone)]

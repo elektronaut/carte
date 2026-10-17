@@ -133,6 +133,7 @@ pub fn shared_sample() -> Snapshot {
     });
     snapshot.tunnel = Some(carte_api::TunnelStatus {
         provider: "cloudflare".into(),
+        single_host: false,
         state: carte_api::TunnelState::Connected,
         message: None,
     });

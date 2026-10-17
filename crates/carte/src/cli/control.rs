@@ -335,6 +335,7 @@ pub fn share(paths: &Paths, args: ShareArgs, json: bool) -> anyhow::Result<ExitC
         ttl_secs,
         auth: args.auth,
         pin: args.pin,
+        replace: args.replace,
     };
     let client = Client::new(&paths.socket());
     let runtime = runtime()?;
