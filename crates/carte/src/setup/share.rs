@@ -274,7 +274,7 @@ mod tests {
                 "/opt/homebrew/bin/cloudflared tunnel login",
                 "/opt/homebrew/bin/cloudflared tunnel create carte",
                 "/opt/homebrew/bin/cloudflared tunnel route dns --overwrite-dns carte '*.demo.dev'",
-                "launchctl kickstart -k gui/501/carte.daemon",
+                "launchctl kickstart -k gui/501/no.elektronaut.carte",
             ]
         );
         let written = plan.steps.iter().find_map(|s| match &s.action {
@@ -361,7 +361,7 @@ mod tests {
         let plan = plan(&env, &ngrok(true), "alex.ngrok-free.app", "carte").unwrap();
         assert_eq!(
             commands(&plan),
-            ["launchctl kickstart -k gui/501/carte.daemon"]
+            ["launchctl kickstart -k gui/501/no.elektronaut.carte"]
         );
         let written = plan.steps.iter().find_map(|s| match &s.action {
             Action::WriteFile { contents, .. } => Some(contents.clone()),
