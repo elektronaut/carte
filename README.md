@@ -113,7 +113,8 @@ depends_on = ["billing", "accounts"]
 policy = "disabled"
 ```
 
-- `repos` is a glob or a list. New repos that match join the project.
+- `repos` is a path, a glob, or a list of them. New repos that match a
+  glob join the project.
 - `strip_prefix` shortens hostnames: `acme-billing` is
   `billing.acme.test`. An app named like its project is just
   `acme.test`.
@@ -133,6 +134,8 @@ as an `[apps.<name>]` table. The project file wins.
 
 Project files can live in subdirectories of `projects/`, which show as
 folders in the terminal UI.
+
+[docs/configuration.md](docs/configuration.md) describes every setting.
 
 ### Environment
 
