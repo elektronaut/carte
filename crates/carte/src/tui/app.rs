@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, Credentials, EventsRequest, InstanceStatus,
-    LogLine, LogsRequest, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
+    Action, Address, ControlRequest, ControlResponse, Credentials, EnvResponse, EventsRequest,
+    InstanceStatus, LogLine, LogsRequest, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
 };
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -38,6 +38,7 @@ pub enum Event {
     },
     Shared(Result<ShareResponse, String>),
     Unshared(Result<Vec<String>, String>),
+    Env(Result<EnvResponse, String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +66,7 @@ pub enum Command {
     Mark(Address),
     MouseCapture(bool),
     Copy(String),
+    FetchEnv(Address),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +90,17 @@ impl Selection {
     pub fn contains(&self, seq: u64) -> bool {
         (self.anchor.min(self.cursor)..=self.anchor.max(self.cursor)).contains(&seq)
     }
+}
+
+/// The env popup: what it shows, and how far it's scrolled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvView {
+    pub title: String,
+    /// None while the daemon renders it.
+    pub env: Option<Result<EnvResponse, String>>,
+    pub scroll: usize,
+    /// Rows the popup showed last time it was drawn.
+    pub height: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +137,7 @@ pub struct App {
     pub tree_offset: usize,
     pub logs_area: Rect,
     pub selection: Option<Selection>,
+    pub env: Option<EnvView>,
     pub mouse: bool,
     pub quit: bool,
 }
@@ -151,6 +165,7 @@ impl App {
             tree_offset: 0,
             logs_area: Rect::default(),
             selection: None,
+            env: None,
             mouse: true,
             quit: false,
         }
@@ -192,6 +207,11 @@ impl App {
                 self.inform(&format!("no longer shared: {}", apps.join(", ")))
             }
             Event::Unshared(Err(message)) => self.warn(&message),
+            Event::Env(result) => {
+                if let Some(view) = &mut self.env {
+                    view.env = Some(result);
+                }
+            }
         }
         if let Some(notice) = &self.notice {
             let lasts = Duration::from_secs(if notice.error { 10 } else { 5 });
@@ -385,6 +405,9 @@ impl App {
 
     fn apply(&mut self, intent: Intent, commands: &mut Vec<Command>) {
         let page = |height: usize| height.saturating_sub(1).max(1) as isize;
+        if self.mode == Mode::Env {
+            return self.env_key(intent);
+        }
         match (intent, self.focus) {
             (Intent::Quit, _) => self.quit = true,
             (Intent::Help, _) => self.mode = Mode::Help,
@@ -469,12 +492,52 @@ impl App {
             (Intent::OpenPublic, _) => commands.extend(self.public_url("open").map(Command::Open)),
             (Intent::Mark, _) => commands.extend(self.mark()),
             (Intent::CopyUrl, _) => commands.extend(self.copy_url()),
+            (Intent::ShowEnv, _) => commands.extend(self.show_env()),
             (Intent::CopyPublicUrl, _) => commands.extend(self.public_url("copy").map(|url| {
                 self.inform(&format!("copied {url}"));
                 Command::Copy(url)
             })),
             (Intent::Share { auth }, _) => commands.extend(self.share(auth)),
         }
+    }
+
+    fn env_key(&mut self, intent: Intent) {
+        let Some(view) = &mut self.env else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        let page = view.height.saturating_sub(1).max(1) as isize;
+        let delta = match intent {
+            Intent::Move(delta) => delta,
+            Intent::PageDown => page,
+            Intent::PageUp => -page,
+            Intent::Top => isize::MIN / 2,
+            Intent::Bottom => isize::MAX / 2,
+            _ => {
+                self.mode = Mode::Normal;
+                self.env = None;
+                return;
+            }
+        };
+        view.scroll = view.scroll.saturating_add_signed(delta);
+    }
+
+    /// Asks the daemon for the env of the selected process, or of the selected app's
+    /// HTTP process.
+    fn show_env(&mut self) -> Option<Command> {
+        let id = self.selected_node()?.id().clone();
+        if !matches!(id, NodeId::Instance { .. } | NodeId::Process { .. }) {
+            self.warn("select an app or a process to see its env");
+            return None;
+        }
+        self.mode = Mode::Env;
+        self.env = Some(EnvView {
+            title: target::label(&id),
+            env: None,
+            scroll: 0,
+            height: 0,
+        });
+        Some(Command::FetchEnv(target::address(&id)))
     }
 
     fn edit_filter(&mut self, edit: impl FnOnce(&mut String)) {
@@ -1250,6 +1313,44 @@ mod tests {
             app.notice.as_ref().map(|n| n.text.as_str()),
             Some("not shared; w shares it")
         );
+    }
+
+    #[test]
+    fn v_shows_the_selected_process_env() {
+        let (mut app, now) = connected();
+        assert!(press(&mut app, now, KeyCode::Char('v')).is_empty());
+        assert_eq!(app.mode, Mode::Normal, "a project has no env");
+
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        let commands = press(&mut app, now, KeyCode::Char('v'));
+        let [Command::FetchEnv(target)] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(target.address, "nova-billing@main");
+        assert_eq!(target.project.as_deref(), Some("nova"));
+        assert_eq!(app.mode, Mode::Env);
+
+        app.update(
+            Event::Env(Ok(EnvResponse {
+                instance: "nova-billing@main/web".into(),
+                vars: Vec::new(),
+            })),
+            now,
+        );
+        assert!(matches!(
+            app.env.as_ref().and_then(|v| v.env.as_ref()),
+            Some(Ok(_))
+        ));
+        assert!(
+            press(&mut app, now, KeyCode::Char('j')).is_empty(),
+            "j scrolls the popup"
+        );
+        assert_eq!(app.env.as_ref().map(|v| v.scroll), Some(1));
+        assert_eq!(app.cursor, 2, "the tree stays put");
+        press(&mut app, now, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.env, None);
     }
 
     #[test]

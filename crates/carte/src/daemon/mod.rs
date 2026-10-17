@@ -147,6 +147,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let config_dir = paths.config_dir.clone();
     let api = api::Api {
         supervisor: supervisor.clone(),
+        paths: paths.clone(),
         reload: Arc::new(move || {
             let world = discovery::load_world(&config_dir);
             let problems = world

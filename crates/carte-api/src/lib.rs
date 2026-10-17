@@ -18,6 +18,8 @@ pub mod paths {
     pub const MARK: &str = "/v1/logs/mark";
     /// The daemon's own environment, which apps build on.
     pub const ENV: &str = "/v1/env";
+    /// The env a process of an `Address` gets, as an `EnvResponse`.
+    pub const PROCESS_ENV: &str = "/v1/process-env";
     pub const RELOAD: &str = "/v1/reload";
     pub const SHARE: &str = "/v1/share";
     pub const UNSHARE: &str = "/v1/unshare";

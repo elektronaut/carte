@@ -501,6 +501,48 @@ fn env_shows_the_assigned_port_while_running() {
 }
 
 #[test]
+fn the_daemon_renders_a_process_env() {
+    let daemon = Daemon::start();
+    let socket = carte::paths::Paths::under(&daemon.root).socket();
+    let request = |address: &str| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(
+            carte::client::Client::new(&socket).post::<_, carte_api::EnvResponse>(
+                carte_api::paths::PROCESS_ENV,
+                &carte_api::Address {
+                    address: address.into(),
+                    cwd: None,
+                    project: Some("acme".into()),
+                },
+            ),
+        )
+    };
+    let env = request("web@main/worker").unwrap();
+    assert_eq!(env.instance, "acme-web@main/worker");
+    let var = |key: &str| env.vars.iter().find(|v| v.key == key);
+    assert_eq!(
+        var("CARTE_APP").and_then(|v| v.value.as_deref()),
+        Some("acme-web")
+    );
+    assert_eq!(var("CARTE_APP").map(|v| v.source.as_str()), Some("carte"));
+    assert_eq!(
+        var("PORT").and_then(|v| v.value.as_deref()),
+        Some("<assigned at start>")
+    );
+
+    let env = request("web@main").unwrap();
+    assert_eq!(
+        env.instance, "acme-web@main/web",
+        "an app means its HTTP process"
+    );
+    let err = request("@main").unwrap_err();
+    assert!(format!("{err:#}").contains("select an app"), "{err:#}");
+}
+
+#[test]
 fn config_changes_are_seen_through_a_symlinked_config_dir() {
     let daemon = Daemon::start_with(true);
     std::fs::remove_file(daemon.root.join("config/projects/acme.toml")).unwrap();

@@ -8,6 +8,7 @@ pub mod logs;
 pub mod metrics;
 pub mod paths;
 pub mod process;
+pub mod process_env;
 pub mod proxy;
 pub mod pty;
 pub mod rank;

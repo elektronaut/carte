@@ -17,6 +17,8 @@ pub enum Mode {
     Confirm(Confirm),
     Help,
     Problems,
+    /// The selected process's env.
+    Env,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +72,7 @@ pub enum Intent {
     Mark,
     CopyUrl,
     CopyPublicUrl,
+    ShowEnv,
     /// Share or unshare the selected app; with `auth`, share it behind a password.
     Share {
         auth: bool,
@@ -114,6 +117,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("W", "share behind a password"),
             ("O", "open the shared address"),
             ("y Y", "copy the address, the shared address"),
+            ("v", "view the env"),
         ],
     ),
     (
@@ -139,6 +143,15 @@ pub fn intent(mode: &Mode, focus: Focus, key: KeyEvent) -> Option<Intent> {
             _ => Intent::Close,
         }),
         Mode::Help | Mode::Problems => Some(Intent::Close),
+        Mode::Env => Some(match key.code {
+            KeyCode::Down | KeyCode::Char('j') => Intent::Move(1),
+            KeyCode::Up | KeyCode::Char('k') => Intent::Move(-1),
+            KeyCode::PageDown | KeyCode::Char(' ') => Intent::PageDown,
+            KeyCode::PageUp => Intent::PageUp,
+            KeyCode::Home | KeyCode::Char('g') => Intent::Top,
+            KeyCode::End | KeyCode::Char('G') => Intent::Bottom,
+            _ => Intent::Close,
+        }),
         Mode::Normal => normal(focus, key),
     }
 }
@@ -178,6 +191,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('-') => Some(Intent::Mark),
         KeyCode::Char('y') => Some(Intent::CopyUrl),
         KeyCode::Char('Y') => Some(Intent::CopyPublicUrl),
+        KeyCode::Char('v') => Some(Intent::ShowEnv),
         KeyCode::Char('w') => Some(Intent::Share { auth: false }),
         KeyCode::Char('W') => Some(Intent::Share { auth: true }),
         KeyCode::Char('I') => Some(Intent::StopIdle),

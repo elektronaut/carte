@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carte_api::{
-    ControlResponse, Event as DaemonEvent, LogLine, MarkRequest, ShareResponse, Snapshot,
-    StopAllRequest, paths,
+    ControlResponse, EnvResponse, Event as DaemonEvent, LogLine, MarkRequest, ShareResponse,
+    Snapshot, StopAllRequest, paths,
 };
 use http::Method;
 use ratatui::crossterm::event::{
@@ -150,6 +150,15 @@ impl Tasks {
                             result: Err(format!("{err:#}")),
                         });
                     }
+                });
+            }
+            Command::FetchEnv(target) => {
+                tokio::spawn(async move {
+                    let result = client
+                        .post::<_, EnvResponse>(paths::PROCESS_ENV, &target)
+                        .await
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Event::Env(result));
                 });
             }
             Command::MouseCapture(on) => set_mouse_capture(on),

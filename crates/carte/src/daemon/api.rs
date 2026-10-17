@@ -17,11 +17,13 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::paths::Paths;
 use crate::supervisor::Handle;
 
 #[derive(Clone)]
 pub struct Api {
     pub supervisor: Handle,
+    pub paths: Paths,
     /// Reloads the configuration from disk and returns its problems.
     pub reload: std::sync::Arc<dyn Fn() -> Vec<Problem> + Send + Sync>,
 }
@@ -37,6 +39,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::EVENTS, post(events))
         .route(paths::RELOAD, post(reload))
         .route(paths::ENV, get(daemon_env))
+        .route(paths::PROCESS_ENV, post(process_env))
         .route(paths::SHARE, post(share))
         .route(paths::UNSHARE, post(unshare))
         .with_state(api)
@@ -211,6 +214,21 @@ async fn daemon_env() -> Response {
         vars: crate::supervisor::base_env(),
     })
     .into_response()
+}
+
+async fn process_env(State(api): State<Api>, Json(target): Json<Address>) -> Response {
+    let world = api.supervisor.world();
+    let snapshot = api.supervisor.snapshot();
+    let paths = api.paths.clone();
+    let rendered = tokio::task::spawn_blocking(move || {
+        crate::process_env::for_address(&paths, &world, &snapshot, &target)
+    })
+    .await;
+    match rendered {
+        Ok(Ok(response)) => Json(response).into_response(),
+        Ok(Err(err)) => error(StatusCode::BAD_REQUEST, format!("{err:#}")),
+        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
 }
 
 async fn reload(State(api): State<Api>) -> Response {

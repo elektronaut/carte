@@ -51,6 +51,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Help => render_help(frame, main),
         Mode::Problems => render_problems(frame, main, app),
         Mode::Confirm(confirm) => render_confirm(frame, main, app, confirm),
+        Mode::Env => render_env(frame, main, app),
         Mode::Normal | Mode::Filter => {}
     }
 }
@@ -881,6 +882,87 @@ fn render_help(frame: &mut Frame, area: Rect) {
     popup(frame, area, "keys", lines);
 }
 
+/// The selected process's env, one variable per line with where it came from, in a
+/// popup that fills most of the screen and scrolls.
+fn render_env(frame: &mut Frame, area: Rect, app: &mut App) {
+    let Some(view) = &mut app.env else {
+        return;
+    };
+    let rect = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(2),
+    };
+    let title = match &view.env {
+        Some(Ok(env)) => &env.instance,
+        _ => &view.title,
+    };
+    let block = pane(Line::from(format!(" env · {title} ")).bold(), true)
+        .padding(ratatui::widgets::Padding::horizontal(1))
+        .title_bottom(Line::from(" ↑↓ scroll · esc closes ").dark_gray());
+    let inner = block.inner(rect);
+    let width = usize::from(inner.width).max(1);
+    let lines: Vec<Line> = match &view.env {
+        None => vec![Line::from("Rendering…".dark_gray())],
+        Some(Err(message)) => vec![Line::from(message.clone()).red()],
+        Some(Ok(env)) => {
+            let key_width = env.vars.iter().map(|v| v.key.len()).max().unwrap_or(0);
+            env.vars
+                .iter()
+                .flat_map(|var| {
+                    wrap(
+                        vec![
+                            (format!("{:key_width$}  ", var.key), Style::new().bold()),
+                            (var.value.clone().unwrap_or_default(), Style::new()),
+                            (format!("  {}", var.source), Style::new().dark_gray()),
+                        ],
+                        width,
+                        (key_width + 2).min(width / 2),
+                    )
+                })
+                .collect()
+        }
+    };
+    view.height = usize::from(inner.height);
+    view.scroll = view.scroll.min(lines.len().saturating_sub(view.height));
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((u16::try_from(view.scroll).unwrap_or(u16::MAX), 0))
+            .block(block),
+        rect,
+    );
+}
+
+/// Breaks styled text into rows of at most `width` characters, indenting the rows
+/// after the first by `indent`.
+fn wrap(parts: Vec<(String, Style)>, width: usize, indent: usize) -> Vec<Line<'static>> {
+    let mut rows = Vec::new();
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for (text, style) in parts {
+        let mut chunk = String::new();
+        for c in text.chars() {
+            if used == width {
+                if !chunk.is_empty() {
+                    row.push(Span::styled(std::mem::take(&mut chunk), style));
+                }
+                rows.push(Line::from(std::mem::take(&mut row)));
+                row.push(Span::raw(" ".repeat(indent)));
+                used = indent;
+            }
+            chunk.push(c);
+            used += 1;
+        }
+        if !chunk.is_empty() {
+            row.push(Span::styled(chunk, style));
+        }
+    }
+    rows.push(Line::from(row));
+    rows
+}
+
 fn render_problems(frame: &mut Frame, area: Rect, app: &App) {
     let problems: Vec<&Problem> = app.snapshot.iter().flat_map(|s| &s.problems).collect();
     let tunnel = app
@@ -1329,6 +1411,63 @@ mod tests {
 ╰──────────────────────────────────────────────────────────────────────────────╯
  reconnecting to the daemon…
  ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show"
+        );
+    }
+
+    #[test]
+    fn renders_an_env_that_wraps_and_scrolls() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Char('v'));
+        let var = |key: &str, value: &str, source: &str| carte_api::EnvVar {
+            key: key.into(),
+            value: Some(value.into()),
+            masked: false,
+            source: source.into(),
+            overrides: Vec::new(),
+        };
+        app.update(
+            Event::Env(Ok(carte_api::EnvResponse {
+                instance: "nova-billing@main/web".into(),
+                vars: vec![
+                    var("CARTE_APP", "nova-billing", "carte"),
+                    var(
+                        "PATH",
+                        "/Users/alex/.local/share/mise/installs/ruby/3.4/bin:/usr/local/bin:/usr/bin:/bin",
+                        "mise",
+                    ),
+                    var("PORT", "<assigned at start>", "carte"),
+                ],
+            })),
+            now,
+        );
+        let screen = draw(&mut app, 60, 14);
+        let popup: Vec<&str> = screen.lines().skip(1).take(10).collect();
+        assert_eq!(
+            popup,
+            [
+                "│ ╭ env · nova-billing@main/web ─────────────────────────╮ │",
+                "│▾│ CARTE_APP  nova-billing  carte                       │M│",
+                "│ │ PATH       /Users/alex/.local/share/mise/installs/ru │M│",
+                "│ │            by/3.4/bin:/usr/local/bin:/usr/bin:/bin   │M│",
+                "╰─│            mise                                      │─╯",
+                "╭ │ PORT       <assigned at start>  carte                │─╮",
+                "╰─│                                                      │─╯",
+                "╭ │                                                      │─╮",
+                "│N│                                                      │ │",
+                "│ ╰ ↑↓ scroll · esc closes ──────────────────────────────╯ │",
+            ],
+            "{screen}"
+        );
+
+        press(&mut app, now, KeyCode::Char('G'));
+        let screen = draw(&mut app, 60, 10);
+        assert!(screen.contains("PORT"), "{screen}");
+        assert!(
+            !screen.contains("CARTE_APP"),
+            "scrolled to the end\n{screen}"
         );
     }
 
