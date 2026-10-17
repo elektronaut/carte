@@ -25,6 +25,7 @@ fn address(target: &Target) -> Address {
         cwd: std::env::current_dir()
             .ok()
             .map(|dir| dir.canonicalize().unwrap_or(dir)),
+        project: target.project.clone(),
     }
 }
 
@@ -284,7 +285,11 @@ pub fn open(paths: &Paths, target: Target) -> anyhow::Result<ExitCode> {
     let world = discovery::load_world(&paths.config_dir);
     let address = address(&target);
     let parsed: address::Address = address.address.parse()?;
-    let resolved = address::resolve(&world, &parsed, address.cwd.as_deref())?;
+    let cwd = address.cwd.as_deref();
+    let resolved = match &address.project {
+        Some(project) => address::resolve_in_project(&world, project, &parsed, cwd)?,
+        None => address::resolve(&world, &parsed, cwd)?,
+    };
     let Some(key) = resolved.instance() else {
         bail!("name an app to open");
     };

@@ -400,6 +400,14 @@ fn picks_the_process_from_the_address_or_flag() {
     let env: EnvResponse = serde_json::from_str(&out.stdout).unwrap();
     assert_eq!(env.instance, "shop@main/worker");
 
+    let out = sb.run(&["env", "--project", "shop", "shop/worker", "--json"]);
+    let env: EnvResponse = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(env.instance, "shop@main/worker");
+
+    let out = sb.run(&["env", "--project", "shop"]);
+    assert!(!out.success);
+    assert!(out.stderr.contains("whole project"), "{}", out.stderr);
+
     let out = sb.run(&["env", "shop/nope"]);
     assert!(!out.success);
     assert!(

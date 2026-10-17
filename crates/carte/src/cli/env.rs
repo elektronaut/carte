@@ -23,7 +23,10 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
         address.process = args.process;
     }
     let cwd = std::env::current_dir()?.canonicalize()?;
-    let target = address::resolve(&world, &address, Some(&cwd))?;
+    let target = match &args.target.project {
+        Some(project) => address::resolve_in_project(&world, project, &address, Some(&cwd))?,
+        None => address::resolve(&world, &address, Some(&cwd))?,
+    };
     let Some(key) = target.instance() else {
         bail!("{typed:?} names a whole project or stack; give an app, as in `carte env <app>`");
     };

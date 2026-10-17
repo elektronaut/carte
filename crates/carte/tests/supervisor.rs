@@ -114,6 +114,7 @@ fn control(address: &str, action: Action) -> ControlRequest {
         target: Address {
             address: address.into(),
             cwd: None,
+            project: None,
         },
         action,
     }
@@ -345,6 +346,44 @@ async fn control_starts_and_stops_by_address() {
 }
 
 #[tokio::test]
+async fn a_named_project_is_addressed_apart_from_its_namesake_app() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.app("acme-acme", WEB);
+    setup.project("");
+    let handle = setup.start();
+
+    for app in ["web", "acme"] {
+        handle.control(control(app, Action::Up)).await.unwrap();
+    }
+    wait_for(&handle, "both ready", |s| {
+        ["acme-web", "acme-acme"]
+            .iter()
+            .all(|app| status(s, app, "main").state == InstanceState::Ready)
+    })
+    .await;
+
+    let response = handle.control(control("acme", Action::Down)).await.unwrap();
+    assert_eq!(response.affected, vec!["acme-acme@main"]);
+
+    let mut whole = control("", Action::Down);
+    whole.target.project = Some("acme".into());
+    let response = handle.control(whole).await.unwrap();
+    assert!(
+        response.affected.contains(&"acme-web@main".to_string()),
+        "{:?}",
+        response.affected
+    );
+    wait_for(&handle, "both stopped", |s| {
+        ["acme-web", "acme-acme"]
+            .iter()
+            .all(|app| status(s, app, "main").state == InstanceState::Stopped)
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn disabled_processes_stay_down_until_started_by_hand() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);
@@ -391,6 +430,7 @@ async fn logs_are_kept_and_filtered() {
     let target = Address {
         address: "web".into(),
         cwd: None,
+        project: None,
     };
     let (lines, filter) = handle.logs(target.clone(), 100, None).await.unwrap();
     assert!(lines.iter().any(|l| l.text.contains("ready")), "{lines:?}");
@@ -415,6 +455,7 @@ async fn following_a_project_picks_up_instances_that_start_later() {
     let target = Address {
         address: "acme".into(),
         cwd: None,
+        project: None,
     };
     let (lines, filter) = handle.logs(target, 100, None).await.unwrap();
     assert!(lines.is_empty(), "{lines:?}");
@@ -571,6 +612,7 @@ fn share_request(address: &str, pin: bool) -> carte_api::ShareRequest {
         target: Address {
             address: address.into(),
             cwd: None,
+            project: None,
         },
         apps: Vec::new(),
         ttl_secs: None,
@@ -612,6 +654,7 @@ async fn sharing_a_running_app_restarts_it_with_its_public_url() {
         .unshare(Address {
             address: "web".into(),
             cwd: None,
+            project: None,
         })
         .await
         .unwrap();
@@ -680,6 +723,7 @@ async fn pinned_shares_start_and_hold_their_apps() {
         .unshare(Address {
             address: "web".into(),
             cwd: None,
+            project: None,
         })
         .await
         .unwrap();

@@ -325,8 +325,7 @@ fn render_selection(frame: &mut Frame, area: Rect, app: &mut App) {
         render_logs(frame, area, app);
         return;
     };
-    let snapshot = app.snapshot.as_ref().expect("a snapshot to draw");
-    let title = format!(" {} ", target::address(snapshot, node.id()).address);
+    let title = format!(" {} ", target::label(node.id()));
     let lines = details(app, node);
     let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
     let [top, bottom] =
