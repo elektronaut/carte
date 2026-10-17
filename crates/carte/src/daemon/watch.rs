@@ -62,10 +62,10 @@ pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> 
 /// knows them by.
 pub fn classify(
     path: &Path,
-    config_dir: &Path,
+    config_dirs: &[PathBuf],
     checkouts: &BTreeMap<PathBuf, PathBuf>,
 ) -> Option<Change> {
-    if path.starts_with(config_dir) {
+    if config_dirs.iter().any(|dir| path.starts_with(dir)) {
         return Some(Change::Reload);
     }
     if path.components().any(|c| c.as_os_str() == ".git") {
@@ -88,9 +88,9 @@ pub fn classify(
     None
 }
 
-/// Every checkout, keyed by its canonical path.
+/// Every checkout, keyed by its configured path and by its canonical path.
 fn checkouts(world: &World) -> BTreeMap<PathBuf, PathBuf> {
-    world
+    let paths = world
         .projects
         .iter()
         .flat_map(|state| {
@@ -101,8 +101,13 @@ fn checkouts(world: &World) -> BTreeMap<PathBuf, PathBuf> {
                 .map(|app| app.path.clone())
                 .chain(state.worktrees.values().flatten().map(|wt| wt.path.clone()))
         })
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| (canonical(&p), p))
+        .filter(|p| !p.as_os_str().is_empty());
+    keyed(paths)
+}
+
+fn keyed(paths: impl Iterator<Item = PathBuf>) -> BTreeMap<PathBuf, PathBuf> {
+    paths
+        .flat_map(|p| [(canonical(&p), p.clone()), (p.clone(), p)])
         .collect()
 }
 
@@ -140,7 +145,7 @@ pub fn run(
 
     let mut watched = BTreeSet::new();
     let mut world = supervisor.world();
-    let real_config_dir = canonical(&config_dir);
+    let config_dirs = vec![canonical(&config_dir), config_dir.clone()];
     let mut known = checkouts(&world);
     update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
     Some(async move {
@@ -151,10 +156,10 @@ pub fn run(
             let mut changes = BTreeSet::new();
             tokio::select! {
                 Some(path) = rx.recv() => {
-                    changes.extend(classify(&path, &real_config_dir, &known));
+                    changes.extend(classify(&path, &config_dirs, &known));
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     while let Ok(path) = rx.try_recv() {
-                        changes.extend(classify(&path, &real_config_dir, &known));
+                        changes.extend(classify(&path, &config_dirs, &known));
                     }
                 }
                 _ = interval.tick() => {
@@ -221,7 +226,7 @@ mod tests {
 
     #[test]
     fn classifies_changes() {
-        let config = Path::new("/config");
+        let config = &[PathBuf::from("/config")];
         let c = checkouts();
         assert_eq!(
             classify(Path::new("/config/projects/acme.toml"), config, &c),
@@ -264,14 +269,18 @@ mod tests {
         std::fs::create_dir_all(real.join("work/app/tmp")).unwrap();
         std::os::unix::fs::symlink(real.join("work"), real.join("link")).unwrap();
         let configured = real.join("link/app");
-        let map: BTreeMap<PathBuf, PathBuf> = [(canonical(&configured), configured.clone())].into();
-        assert_eq!(
-            classify(
-                &real.join("work/app/tmp/restart.txt"),
-                &real.join("config"),
-                &map
-            ),
-            Some(Change::Restart(configured))
-        );
+        let map = keyed([configured.clone()].into_iter());
+        let config = &[real.join("config")];
+        for event in [
+            real.join("work/app/tmp/restart.txt"),
+            configured.join("tmp/restart.txt"),
+        ] {
+            assert_eq!(
+                classify(&event, config, &map),
+                Some(Change::Restart(configured.clone())),
+                "{}",
+                event.display()
+            );
+        }
     }
 }
