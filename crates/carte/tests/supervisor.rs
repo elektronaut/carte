@@ -1039,3 +1039,153 @@ async fn pinned_shares_start_and_hold_their_apps() {
     .await;
     handle.shutdown().await;
 }
+
+fn event_lines(events: &[carte_api::Event]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| format!("{} {}", e.subject_label(), e.summary()))
+        .collect()
+}
+
+async fn wait_for_events(handle: &Handle, what: &str, check: impl Fn(&[String]) -> bool) {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (events, _) = handle.events(None, 100).await.unwrap();
+            if check(&event_lines(&events)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(
+        result.is_ok(),
+        "timed out waiting for {what}: {:#?}",
+        event_lines(&events)
+    );
+}
+
+#[tokio::test]
+async fn events_tell_what_happened_and_why() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.app(
+        "acme-api",
+        "web: FIXTURE_NAME=api exec {fixture}\nworker: FIXTURE_CRASH=4 exec {fixture}\n",
+    );
+    setup.project("[apps.acme-web]\ndepends_on = [\"api\"]\n");
+    let handle = setup.start();
+    let mut follow = handle.follow_events();
+
+    let web = key("acme-web", Stack::Main);
+    handle.ensure_ready(web.clone()).await.unwrap();
+    wait_for_events(&handle, "both ready and the worker crash", |lines| {
+        lines.iter().any(|l| l.starts_with("acme-web ready: in "))
+            && lines.iter().any(|l| l.starts_with("acme-api ready: in "))
+            && lines
+                .iter()
+                .any(|l| l == "acme-api/worker crashed: worker exited with code 4")
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    let lines = event_lines(&events);
+    assert_eq!(lines[0], "acme-web started: on request");
+    assert_eq!(lines[1], "acme-api started: for acme-web");
+    assert_eq!(
+        events[1].subjects.len(),
+        2,
+        "a dependency's start is about both apps"
+    );
+    let crash = events
+        .iter()
+        .find(|e| e.kind == carte_api::EventKind::Crashed)
+        .unwrap();
+    assert_eq!(crash.exit_code, Some(4));
+    assert!(events.iter().any(|e| e.boot_ms.is_some()));
+    assert_eq!(follow.recv().await.unwrap(), events[0]);
+
+    handle
+        .control(control("web", Action::Restart))
+        .await
+        .unwrap();
+    handle
+        .control(control("web", Action::Pin { save: false }))
+        .await
+        .unwrap();
+    handle.control(control("api", Action::Down)).await.unwrap();
+    wait_for_events(&handle, "the manual actions", |lines| {
+        let has = |line: &str| lines.iter().any(|l| l == line);
+        has("acme-web restarted: by hand")
+            && has("acme-web policy changed: pinned until the daemon restarts")
+            && has("acme-api stopped: by hand")
+    })
+    .await;
+
+    let api = Address {
+        address: "api".into(),
+        cwd: None,
+        project: None,
+    };
+    let (api_events, filter) = handle.events(Some(api), 100).await.unwrap();
+    assert_eq!(filter.app.as_deref(), Some("acme-api"));
+    let api_lines = event_lines(&api_events);
+    assert!(
+        api_lines.iter().all(|l| l.starts_with("acme-api")
+            || l == "acme-web started: on request"
+            || l.starts_with("acme-web ")),
+        "{api_lines:#?}"
+    );
+    assert!(
+        !api_lines.iter().any(|l| l == "acme-web restarted: by hand"),
+        "{api_lines:#?}"
+    );
+    let latest = status(&handle.snapshot(), "acme-api", "main")
+        .last_event
+        .clone()
+        .unwrap();
+    assert_eq!(latest.summary(), "stopped: by hand");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn idle_stops_and_config_changes_are_events() {
+    let setup = Setup::new();
+    let web = setup.app("acme-web", WEB);
+    setup.project("idle_timeout = \"1s\"\n");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    wait_for_events(&handle, "the idle stop", |lines| {
+        lines.iter().any(|l| l == "acme-web stopped: idle for 1s")
+    })
+    .await;
+
+    git(
+        &web,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature-x",
+            "../acme-web-feature-x",
+        ],
+    );
+    setup.project("idle_timeout = \"2s\"\n");
+    handle.reload(discovery::load_world(&setup.paths.config_dir));
+    wait_for_events(&handle, "the reload", |lines| {
+        lines
+            .iter()
+            .any(|l| l == "acme config reloaded: project file")
+            && lines.iter().any(|l| {
+                l.starts_with("acme-web@feature-x worktree added: ")
+                    && l.ends_with("acme-web-feature-x")
+            })
+    })
+    .await;
+    handle.shutdown().await;
+}

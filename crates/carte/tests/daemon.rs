@@ -406,6 +406,24 @@ fn touching_restart_txt_restarts_the_instance() {
     eventually("a new web process", || {
         web_pid(&daemon).is_some_and(|pid| pid != before)
     });
+
+    let events = stdout(&daemon.run(&["events", "web"]));
+    let lines: Vec<&str> = events.lines().collect();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.ends_with("  acme-web  restarted: tmp/restart.txt")),
+        "{events}"
+    );
+    assert!(
+        lines[0].ends_with("  acme-web  started: on request"),
+        "{events}"
+    );
+    eventually("ready again after the restart", || {
+        let json = stdout(&daemon.run(&["events", "--json", "-n", "1"]));
+        let last: carte_api::Event = serde_json::from_str(json.trim()).unwrap();
+        last.kind == carte_api::EventKind::Ready
+    });
 }
 
 #[test]

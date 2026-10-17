@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod client;
+pub mod clock;
 pub mod daemon;
 pub mod dns;
 pub mod exit;

@@ -21,6 +21,8 @@ pub mod paths {
     pub const RELOAD: &str = "/v1/reload";
     pub const SHARE: &str = "/v1/share";
     pub const UNSHARE: &str = "/v1/unshare";
+    /// Newline-delimited JSON `Event`s.
+    pub const EVENTS: &str = "/v1/events";
 }
 
 /// A CLI address (`app@branch/process`, any part optional) and the directory it was
@@ -212,6 +214,9 @@ pub struct InstanceStatus {
     /// Its tool versions changed since it started; a restart picks them up.
     #[serde(default)]
     pub env_changed: bool,
+    /// The latest event about it or one of its processes.
+    #[serde(default)]
+    pub last_event: Option<Event>,
 }
 
 /// `carte status --json`: the instances an address names. An app's instance is listed
@@ -369,6 +374,131 @@ pub struct MarkRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventsRequest {
+    /// Events about this and everything under it; `None` for every event.
+    pub target: Option<Address>,
+    pub follow: bool,
+    /// Events from the buffer to send before following.
+    pub tail: Option<usize>,
+}
+
+/// Something that happened in the daemon: an instance starting or stopping, a config
+/// reload, a share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    /// Increases by one per event while the daemon runs.
+    pub seq: u64,
+    /// Milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    pub kind: EventKind,
+    /// The details, like why an instance stopped.
+    pub message: String,
+    /// What the event is about, the main one first; empty for the whole machine.
+    pub subjects: Vec<EventSubject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+impl Event {
+    /// What the event concerns: `acme-web@feature-x/worker`, a project, or `carte`
+    /// for the whole machine.
+    pub fn subject_label(&self) -> String {
+        self.subjects
+            .first()
+            .map_or_else(|| "carte".to_string(), EventSubject::label)
+    }
+
+    /// The kind and the details: `stopped: idle for 15m`.
+    pub fn summary(&self) -> String {
+        if self.message.is_empty() {
+            self.kind.words().to_string()
+        } else {
+            format!("{}: {}", self.kind.words(), self.message)
+        }
+    }
+}
+
+/// A project, or a stack, app or process in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventSubject {
+    pub project: String,
+    /// The stack's slug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+}
+
+impl EventSubject {
+    /// `app@stack/process` as the CLI takes it, `@main` left out; the project name
+    /// when no app is involved.
+    pub fn label(&self) -> String {
+        let Some(app) = &self.app else {
+            return match &self.stack {
+                Some(stack) if stack != "main" => format!("@{stack} ({})", self.project),
+                _ => self.project.clone(),
+            };
+        };
+        let mut label = app.clone();
+        if let Some(stack) = self.stack.as_ref().filter(|s| *s != "main") {
+            label.push('@');
+            label.push_str(stack);
+        }
+        if let Some(process) = &self.process {
+            label.push('/');
+            label.push_str(process);
+        }
+        label
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EventKind {
+    Started,
+    Ready,
+    Stopped,
+    Crashed,
+    Restarted,
+    ConfigReloaded,
+    ConfigError,
+    WorktreeAdded,
+    WorktreeRemoved,
+    Shared,
+    Unshared,
+    ShareExpired,
+    TunnelConnected,
+    TunnelFailed,
+    PolicyChanged,
+}
+
+impl EventKind {
+    pub fn words(self) -> &'static str {
+        match self {
+            EventKind::Started => "started",
+            EventKind::Ready => "ready",
+            EventKind::Stopped => "stopped",
+            EventKind::Crashed => "crashed",
+            EventKind::Restarted => "restarted",
+            EventKind::ConfigReloaded => "config reloaded",
+            EventKind::ConfigError => "config error",
+            EventKind::WorktreeAdded => "worktree added",
+            EventKind::WorktreeRemoved => "worktree removed",
+            EventKind::Shared => "shared",
+            EventKind::Unshared => "unshared",
+            EventKind::ShareExpired => "share expired",
+            EventKind::TunnelConnected => "tunnel connected",
+            EventKind::TunnelFailed => "tunnel failed",
+            EventKind::PolicyChanged => "policy changed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonEnv {
     pub vars: std::collections::BTreeMap<String, String>,
 }
@@ -412,5 +542,26 @@ mod tests {
         })
         .unwrap();
         assert_eq!(state, r#"{"state":"exited","code":1,"signal":null}"#);
+    }
+
+    #[test]
+    fn event_subjects_read_like_addresses() {
+        let subject =
+            |stack: Option<&str>, app: Option<&str>, process: Option<&str>| EventSubject {
+                project: "acme".into(),
+                stack: stack.map(Into::into),
+                app: app.map(Into::into),
+                process: process.map(Into::into),
+            };
+        assert_eq!(subject(None, None, None).label(), "acme");
+        assert_eq!(subject(Some("x"), None, None).label(), "@x (acme)");
+        assert_eq!(
+            subject(Some("main"), Some("acme-web"), None).label(),
+            "acme-web"
+        );
+        assert_eq!(
+            subject(Some("x"), Some("acme-web"), Some("worker")).label(),
+            "acme-web@x/worker"
+        );
     }
 }

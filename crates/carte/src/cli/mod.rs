@@ -59,6 +59,8 @@ pub enum Command {
     Enable(PolicyArgs),
     /// Show logs.
     Logs(LogsArgs),
+    /// Show what carte did and why: starts, stops, crashes, reloads, shares.
+    Events(EventsArgs),
     /// Open an instance in the browser.
     Open(Target),
     /// Print the rendered env with the source of each value; secrets stay hidden.
@@ -198,6 +200,21 @@ fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
 }
 
 #[derive(Args, Clone)]
+pub struct EventsArgs {
+    /// `app@branch/process` or a project; without one (or --project), every event.
+    pub address: Option<String>,
+    /// Events about this project, or resolve the address inside it.
+    #[arg(long, value_name = "NAME")]
+    pub project: Option<String>,
+    /// Keep printing new events.
+    #[arg(short, long)]
+    pub follow: bool,
+    /// Events from the buffer to show first.
+    #[arg(short = 'n', long, default_value_t = 50)]
+    pub lines: usize,
+}
+
+#[derive(Args, Clone)]
 pub struct SetupArgs {
     /// Show the plan without changing anything.
     #[arg(long)]
@@ -323,6 +340,7 @@ pub fn run(cli: Cli) -> ExitCode {
             cli.json,
         ),
         Command::Logs(args) => control::logs(&paths, args, cli.json),
+        Command::Events(args) => control::events(&paths, args, cli.json),
         Command::Open(t) => control::open(&paths, t),
         Command::StopAll { idle } => control::stop_all(&paths, idle, cli.json),
         Command::Share(args) => control::share(&paths, args, cli.json),

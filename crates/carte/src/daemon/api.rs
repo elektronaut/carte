@@ -9,8 +9,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use carte_api::{
-    Address, ControlRequest, ErrorBody, LogsRequest, MarkRequest, Problem, ShareRequest,
-    StopAllRequest, UnshareRequest, paths,
+    Address, ControlRequest, ErrorBody, EventsRequest, LogsRequest, MarkRequest, Problem,
+    ShareRequest, StopAllRequest, UnshareRequest, paths,
 };
 use carte_core::address;
 use serde::Serialize;
@@ -34,6 +34,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::STOP_ALL, post(stop_all))
         .route(paths::LOGS, post(logs))
         .route(paths::MARK, post(mark))
+        .route(paths::EVENTS, post(events))
         .route(paths::RELOAD, post(reload))
         .route(paths::ENV, get(daemon_env))
         .route(paths::SHARE, post(share))
@@ -143,6 +144,46 @@ async fn mark(State(api): State<Api>, Json(request): Json<MarkRequest>) -> Respo
         Ok(marker) => Json(marker).into_response(),
         Err(message) => error(StatusCode::BAD_REQUEST, message),
     }
+}
+
+async fn events(State(api): State<Api>, Json(request): Json<EventsRequest>) -> Response {
+    if let Some(response) = request
+        .target
+        .as_ref()
+        .and_then(|target| unresolved(&api, target))
+    {
+        return response;
+    }
+    let mut follow = request.follow.then(|| api.supervisor.follow_events());
+    let tail = request.tail.unwrap_or(100);
+    let (events, filter) = match api.supervisor.events(request.target, tail).await {
+        Ok(result) => result,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let last = events.last().map_or(0, |e| e.seq);
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        for event in &events {
+            if tx.send(ndjson(event)).await.is_err() {
+                return;
+            }
+        }
+        let Some(follow) = follow.as_mut() else {
+            return;
+        };
+        loop {
+            match follow.recv().await {
+                Ok(event) if event.seq > last && filter.matches(&event) => {
+                    if tx.send(ndjson(&event)).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+    stream(rx)
 }
 
 async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Response {

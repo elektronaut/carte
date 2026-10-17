@@ -5,18 +5,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, InstanceState, LogLine, LogsRequest,
-    ProcessState, ShareRequest, ShareResponse, Snapshot, TunnelState, TunnelStatus,
+    Action, Address, ControlRequest, ControlResponse, Event, EventKind, EventSubject,
+    InstanceState, LogLine, LogsRequest, ProcessState, ShareRequest, ShareResponse, Snapshot,
+    TunnelState, TunnelStatus,
 };
 use carte_core::address::{self, Target};
 use carte_core::env::{self, Env, EnvRequest, SystemRunner};
-use carte_core::lifecycle::{self, Capacity, Targets, Usage};
+use carte_core::lifecycle::{self, Capacity, EvictionReason, Targets, Usage};
 use carte_core::model::{
     App, Checkout, InstanceKey, Policy, ProcessSpec, ProjectState, Scope, Stack, World,
 };
 use carte_core::{naming, procfile};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use super::events::{self, EventFilter, EventLog};
 use super::groups::GroupRecord;
 use super::runner::{self, LogLabel, ProcLog};
 use super::{Activity, BootFailure, Handle, LogFilter, Msg, Options, Upstream, share, snapshot};
@@ -59,7 +61,22 @@ pub(super) struct Instance {
     pub last_error: Option<String>,
     pub env_changed: bool,
     restart_pending: bool,
+    /// The pending restart has its `restarted` event.
+    restart_announced: bool,
     forced: BTreeSet<String>,
+    /// When the latest start began.
+    pub started_at: Instant,
+}
+
+/// Why an instance starts, for its `started` event.
+enum Why {
+    Request,
+    Manual,
+    /// A restart, which already has its `restarted` event.
+    Restart,
+    /// An instance that depends on it started.
+    Dependency(InstanceKey),
+    Share,
 }
 
 pub(super) struct Proc {
@@ -107,7 +124,9 @@ impl Instance {
             last_error: None,
             env_changed: false,
             restart_pending: false,
+            restart_announced: false,
             forced: BTreeSet::new(),
+            started_at: Instant::now(),
         }
     }
 
@@ -181,6 +200,7 @@ struct Actor {
     /// Instances a share pinned, so unsharing unpins only those.
     share_pins: BTreeSet<InstanceKey>,
     tunnel: Option<TunnelStatus>,
+    events: EventLog,
 }
 
 pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Options) -> Handle {
@@ -188,6 +208,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
     let world = Arc::new(world);
     let (world_tx, world_rx) = watch::channel(world.clone());
     let (log_tx, _) = broadcast::channel(4096);
+    let (event_tx, _) = broadcast::channel(256);
     let tunnel = world.machine.share.as_ref().map(|config| TunnelStatus {
         provider: config.provider.clone(),
         single_host: config.single_host(),
@@ -200,6 +221,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         overrides: &BTreeMap::new(),
         shares: &BTreeMap::new(),
         tunnel: tunnel.as_ref(),
+        latest: &BTreeMap::new(),
         now: Instant::now(),
     }));
     let (snapshot_tx, snapshot_rx) = watch::channel(initial);
@@ -228,6 +250,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         shared_tx,
         share_pins: BTreeSet::new(),
         tunnel,
+        events: EventLog::new(event_tx.clone()),
     };
     let tick_tx = tx.clone();
     let tick = actor.options.tick;
@@ -248,6 +271,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         world: world_rx,
         shared: shared_rx,
         logs: log_tx,
+        events: event_tx,
     }
 }
 
@@ -284,6 +308,13 @@ impl Actor {
             Msg::Mark { target, reply } => {
                 let _ = reply.send(self.mark(&target));
             }
+            Msg::Events {
+                target,
+                tail,
+                reply,
+            } => {
+                let _ = reply.send(self.recent_events(target.as_ref(), tail));
+            }
             Msg::Reload(world) => self.reload(world),
             Msg::RestartCheckout(path) => self.restart_checkout(&path),
             Msg::Share { request, reply } => {
@@ -302,6 +333,20 @@ impl Actor {
                 }
             }
             Msg::Tunnel(status) => {
+                let before = self.tunnel.as_ref().map(|t| t.state);
+                if before != Some(status.state) {
+                    let message = status.message.clone().unwrap_or_default();
+                    match status.state {
+                        TunnelState::Connected => {
+                            self.events
+                                .push(EventKind::TunnelConnected, &status.provider, vec![])
+                        }
+                        TunnelState::Failed => {
+                            self.events.push(EventKind::TunnelFailed, message, vec![])
+                        }
+                        TunnelState::Idle | TunnelState::Starting => {}
+                    }
+                }
                 self.tunnel = Some(status);
                 self.dirty = true;
             }
@@ -319,7 +364,7 @@ impl Actor {
                 self.shutdown = Some(reply);
                 let keys: Vec<_> = self.instances.keys().cloned().collect();
                 for key in keys {
-                    self.stop(&key);
+                    self.stop(&key, None);
                 }
             }
             Msg::Internal(internal) => self.internal(internal),
@@ -357,9 +402,15 @@ impl Actor {
             overrides: &self.overrides,
             shares: &self.shares,
             tunnel: self.tunnel.as_ref(),
+            latest: self.events.latest(),
             now: Instant::now(),
         });
         self.snapshot_tx.send_replace(Arc::new(snapshot));
+    }
+
+    fn event(&mut self, kind: EventKind, message: impl Into<String>, subjects: Vec<EventSubject>) {
+        self.events.push(kind, message, subjects);
+        self.dirty = true;
     }
 
     fn next_id(&mut self) -> u64 {
@@ -411,7 +462,7 @@ impl Actor {
                 InstanceState::Stopped | InstanceState::Crashed => {}
             }
         }
-        match self.start(&key, None) {
+        match self.start(&key, None, Why::Request) {
             Ok(()) => {
                 let inst = self.instances.get_mut(&key).expect("started instance");
                 if inst.state == InstanceState::Ready {
@@ -430,7 +481,12 @@ impl Actor {
     }
 
     /// Starts an instance and its dependencies. `force` starts a disabled process once.
-    fn start(&mut self, key: &InstanceKey, force: Option<&str>) -> Result<(), BootFailure> {
+    fn start(
+        &mut self,
+        key: &InstanceKey,
+        force: Option<&str>,
+        why: Why,
+    ) -> Result<(), BootFailure> {
         let running = self.instances.values().filter(|i| i.is_active()).count();
         if !lifecycle::under_ceiling(running, self.world.machine.limits.hard_ceiling) {
             return Err(BootFailure::new(
@@ -457,7 +513,8 @@ impl Actor {
             Err(failure) => {
                 inst.state = InstanceState::Crashed;
                 inst.last_error = Some(failure.detail.clone());
-                self.dirty = true;
+                let message = failure.detail.clone();
+                self.event(EventKind::Crashed, message, vec![events::instance(key)]);
                 return Err(failure);
             }
         };
@@ -504,12 +561,15 @@ impl Actor {
         inst.last_error = None;
         inst.env_changed = false;
         inst.last_activity = Instant::now();
+        inst.started_at = Instant::now();
         inst.restart_pending = false;
+        inst.restart_announced = false;
         self.dirty = true;
 
         if let Some(port) = route_port {
             inst.route_port = Some(port);
             inst.state = InstanceState::Ready;
+            self.started_event(key, &why);
             return Ok(());
         }
         inst.route_port = None;
@@ -555,6 +615,7 @@ impl Actor {
             inst.procs[idx].deferred = !to_run.contains(&idx);
         }
         inst.state = InstanceState::Starting;
+        self.started_event(key, &why);
         self.build_env(key, boot, to_run);
 
         for dep_key in deps {
@@ -563,10 +624,25 @@ impl Actor {
                 .get(&dep_key)
                 .is_some_and(Instance::is_active)
             {
-                let _ = self.start(&dep_key, None);
+                let _ = self.start(&dep_key, None, Why::Dependency(key.clone()));
             }
         }
         Ok(())
+    }
+
+    fn started_event(&mut self, key: &InstanceKey, why: &Why) {
+        let mut subjects = vec![events::instance(key)];
+        let message = match why {
+            Why::Request => "on request".to_string(),
+            Why::Manual => "by hand".to_string(),
+            Why::Restart => return,
+            Why::Dependency(dependent) => {
+                subjects.push(events::instance(dependent));
+                format!("for {}", events::instance(dependent).label())
+            }
+            Why::Share => "to keep a pinned share running".to_string(),
+        };
+        self.event(EventKind::Started, message, subjects);
     }
 
     /// Starts one process of a running instance.
@@ -651,7 +727,7 @@ impl Actor {
         let specs = match result {
             Ok(specs) => specs,
             Err(message) => {
-                self.crash(key, message);
+                self.crash(key, None, message);
                 return;
             }
         };
@@ -733,8 +809,22 @@ impl Actor {
             for waiter in inst.waiters.drain(..) {
                 let _ = waiter.send(Err(BootFailure::no_web_process(&key.app)));
             }
-            self.dirty = true;
+            self.ready_event(key);
         }
+    }
+
+    fn ready_event(&mut self, key: &InstanceKey) {
+        let Some(inst) = self.instances.get(key) else {
+            return;
+        };
+        let boot = inst.started_at.elapsed();
+        self.events.push_event(
+            EventKind::Ready,
+            format!("in {:.1}s", boot.as_secs_f64()),
+            vec![events::instance(key)],
+            |event| event.boot_ms = Some(boot.as_millis() as u64),
+        );
+        self.dirty = true;
     }
 
     fn proc_event(&mut self, key: &InstanceKey, run: u64, idx: usize, event: runner::Event) {
@@ -774,6 +864,7 @@ impl Actor {
                     &name,
                     http,
                     false,
+                    None,
                     format!("{name} couldn't start: {message}"),
                 );
             }
@@ -796,7 +887,7 @@ impl Actor {
                 let name = proc.spec.name.clone();
                 let http = proc.spec.http;
                 let message = format!("{name} {how}");
-                self.after_exit(key, &name, http, manual, message);
+                self.after_exit(key, &name, http, manual, code, message);
             }
         }
     }
@@ -807,6 +898,7 @@ impl Actor {
         name: &str,
         http: bool,
         manual: bool,
+        code: Option<i32>,
         message: String,
     ) {
         let Some(inst) = self.instances.get_mut(key) else {
@@ -814,17 +906,26 @@ impl Actor {
         };
         match inst.state {
             InstanceState::Starting | InstanceState::Ready if http && !manual => {
-                self.crash(key, message);
+                self.crash(key, code, message);
             }
             InstanceState::Starting | InstanceState::Ready => {
                 if !manual {
-                    inst.last_error = Some(message);
+                    inst.last_error = Some(message.clone());
                 }
                 let restart = inst
                     .procs
                     .iter_mut()
                     .find(|p| p.spec.name == name)
                     .is_some_and(|p| std::mem::take(&mut p.restart));
+                if !manual {
+                    self.events.push_event(
+                        EventKind::Crashed,
+                        message,
+                        vec![events::process(key, name)],
+                        |event| event.exit_code = code,
+                    );
+                    self.dirty = true;
+                }
                 if restart {
                     let _ = self.start_process(key, name);
                 }
@@ -853,19 +954,19 @@ impl Actor {
                 for waiter in inst.waiters.drain(..) {
                     let _ = waiter.send(Ok(upstream));
                 }
-                self.dirty = true;
+                self.ready_event(key);
             }
             Ok(()) => {}
             Err(message) => {
                 let name = http.spec.name.clone();
-                self.crash(key, format!("{name} {message}"));
+                self.crash(key, None, format!("{name} {message}"));
             }
         }
     }
 
     // Stopping
 
-    fn crash(&mut self, key: &InstanceKey, message: String) {
+    fn crash(&mut self, key: &InstanceKey, code: Option<i32>, message: String) {
         let Some(inst) = self.instances.get_mut(key) else {
             return;
         };
@@ -876,7 +977,7 @@ impl Actor {
             .unwrap_or_default();
         inst.state = InstanceState::Crashed;
         inst.last_error = Some(message.clone());
-        let mut failure = BootFailure::new(format!("{} crashed", inst.label()), message);
+        let mut failure = BootFailure::new(format!("{} crashed", inst.label()), message.clone());
         failure.log = log;
         inst.fail_waiters(failure);
         let grace = self.options.grace;
@@ -886,10 +987,18 @@ impl Actor {
                 let _ = stop.send(grace);
             }
         }
+        self.events.push_event(
+            EventKind::Crashed,
+            message,
+            vec![events::instance(key)],
+            |event| event.exit_code = code,
+        );
         self.dirty = true;
     }
 
-    fn stop(&mut self, key: &InstanceKey) {
+    /// Stops an instance. `why` names the reason for its `stopped` or, with a restart
+    /// pending, `restarted` event; `None` records nothing.
+    fn stop(&mut self, key: &InstanceKey, why: Option<&str>) {
         let grace = self.options.grace;
         let Some(inst) = self.instances.get_mut(key) else {
             return;
@@ -897,6 +1006,16 @@ impl Actor {
         if !inst.is_active() && !inst.any_running() {
             return;
         }
+        if let Some(why) = why {
+            let kind = if inst.restart_pending {
+                inst.restart_announced = true;
+                EventKind::Restarted
+            } else {
+                EventKind::Stopped
+            };
+            self.events.push(kind, why, vec![events::instance(key)]);
+        }
+        let inst = self.instances.get_mut(key).expect("instance");
         if inst.state == InstanceState::Starting {
             let mut failure = BootFailure::new(
                 format!("{} was stopped", inst.label()),
@@ -919,7 +1038,13 @@ impl Actor {
         self.dirty = true;
     }
 
-    fn stop_process(&mut self, key: &InstanceKey, name: &str) -> Result<(), String> {
+    /// Stops one process; `why` as for [`Actor::stop`].
+    fn stop_process(
+        &mut self,
+        key: &InstanceKey,
+        name: &str,
+        why: Option<&str>,
+    ) -> Result<(), String> {
         let grace = self.options.grace;
         let inst = self
             .instances
@@ -931,15 +1056,26 @@ impl Actor {
             .find(|p| p.spec.name == name)
             .ok_or_else(|| format!("{} has no process named {name}", key.app))?;
         if proc.spec.http {
-            self.stop(key);
+            self.stop(key, why);
             return Ok(());
         }
+        let mut event = None;
         if let Some(stop) = proc.stop.take() {
             proc.state = ProcessState::Stopping;
             proc.manual_stop = true;
             let _ = stop.send(grace);
+            let kind = if proc.restart {
+                EventKind::Restarted
+            } else {
+                EventKind::Stopped
+            };
+            event = why.map(|why| (kind, why));
         }
         inst.forced.remove(name);
+        if let Some((kind, why)) = event {
+            self.events
+                .push(kind, why, vec![events::process(key, name)]);
+        }
         self.dirty = true;
         Ok(())
     }
@@ -955,8 +1091,13 @@ impl Actor {
         self.dirty = true;
         if inst.restart_pending {
             inst.restart_pending = false;
+            let why = if std::mem::take(&mut inst.restart_announced) {
+                Why::Restart
+            } else {
+                Why::Request
+            };
             let waiters = std::mem::take(&mut inst.waiters);
-            let result = self.start(key, None);
+            let result = self.start(key, None, why);
             let inst = self.instances.get_mut(key).expect("instance");
             for waiter in waiters {
                 match &result {
@@ -1034,7 +1175,7 @@ impl Actor {
         self.adopt_shared_processes();
         self.expire_shares(now);
         let usages = self.usages();
-        let mut to_stop = Vec::new();
+        let mut to_stop = BTreeMap::new();
         for usage in &usages {
             let Some(state) = self.world.project(&usage.key.project) else {
                 continue;
@@ -1046,7 +1187,8 @@ impl Actor {
             if self.instances[&usage.key].state == InstanceState::Ready
                 && lifecycle::idle_deadline(usage, timeout).is_some_and(|deadline| now >= deadline)
             {
-                to_stop.push(usage.key.clone());
+                let why = format!("idle for {}", carte_core::duration::format(timeout));
+                to_stop.insert(usage.key.clone(), why);
             }
         }
         let limits = &self.world.machine.limits;
@@ -1061,12 +1203,17 @@ impl Actor {
                 instances: limits.instance_target,
                 pty_reserve: limits.pty_reserve,
             };
-            for (key, _reason) in lifecycle::evictions(&usages, targets, capacity) {
-                to_stop.push(key);
+            for (key, reason) in lifecycle::evictions(&usages, targets, capacity) {
+                let why = match reason {
+                    EvictionReason::Memory => "evicted: memory is over its target",
+                    EvictionReason::InstanceCount => "evicted: too many instances are running",
+                    EvictionReason::Ptys => "evicted: ptys are running out",
+                };
+                to_stop.entry(key).or_insert_with(|| why.to_string());
             }
         }
-        for key in to_stop {
-            self.stop(&key);
+        for (key, why) in to_stop {
+            self.stop(&key, Some(&why));
         }
         if self
             .instances
@@ -1231,20 +1378,24 @@ impl Actor {
                 key.stack.slug()
             ));
         }
+        let by_hand = Some("by hand");
         match action {
             Action::Up => match process {
                 Some(name) if active => self.start_process(key, name).map(|_| None),
                 Some(name) => self
-                    .start(key, Some(name))
+                    .start(key, Some(name), Why::Manual)
                     .map(|_| None)
                     .map_err(|f| f.detail),
                 None if active => Ok(None),
-                None => self.start(key, None).map(|_| None).map_err(|f| f.detail),
+                None => self
+                    .start(key, None, Why::Manual)
+                    .map(|_| None)
+                    .map_err(|f| f.detail),
             },
             Action::Down => match process {
-                Some(name) => self.stop_process(key, name).map(|_| None),
+                Some(name) => self.stop_process(key, name, by_hand).map(|_| None),
                 None => {
-                    self.stop(key);
+                    self.stop(key, by_hand);
                     Ok(None)
                 }
             },
@@ -1256,25 +1407,30 @@ impl Actor {
                         Some(proc) if proc.spec.http => inst.restart_pending = true,
                         _ => return self.start_process(key, name).map(|_| None),
                     }
-                    self.stop_process(key, name).map(|_| None)
+                    self.stop_process(key, name, by_hand).map(|_| None)
                 }
                 Some(name) => self
-                    .start(key, Some(name))
+                    .start(key, Some(name), Why::Manual)
                     .map(|_| None)
                     .map_err(|f| f.detail),
                 None if active => {
                     if let Some(inst) = self.instances.get_mut(key) {
                         inst.restart_pending = true;
                     }
-                    self.stop(key);
+                    self.stop(key, by_hand);
                     Ok(None)
                 }
-                None => self.start(key, None).map(|_| None).map_err(|f| f.detail),
+                None => self
+                    .start(key, None, Why::Manual)
+                    .map(|_| None)
+                    .map_err(|f| f.detail),
             },
             Action::Pin { save } => {
                 self.set_override(key, process, Policy::Pinned);
+                self.policy_event(key, process, "pinned", save);
                 if !active {
-                    self.start(key, process).map_err(|f| f.detail)?;
+                    self.start(key, process, Why::Manual)
+                        .map_err(|f| f.detail)?;
                 } else if let Some(name) = process {
                     self.start_process(key, name)?;
                 }
@@ -1282,24 +1438,40 @@ impl Actor {
             }
             Action::Unpin { save } => {
                 self.set_override(key, process, Policy::Auto);
+                self.policy_event(key, process, "unpinned", save);
                 self.maybe_save(save, key, process, None)
             }
             Action::Disable { save } => {
                 self.set_override(key, process, Policy::Disabled);
+                self.policy_event(key, process, "disabled", save);
                 match process {
                     Some(name) if active => {
-                        let _ = self.stop_process(key, name);
+                        let _ = self.stop_process(key, name, Some("disabled"));
                     }
                     Some(_) => {}
-                    None => self.stop(key),
+                    None => self.stop(key, Some("disabled")),
                 }
                 self.maybe_save(save, key, process, Some(Policy::Disabled))
             }
             Action::Enable { save } => {
                 self.set_override(key, process, Policy::Auto);
+                self.policy_event(key, process, "enabled", save);
                 self.maybe_save(save, key, process, None)
             }
         }
+    }
+
+    fn policy_event(&mut self, key: &InstanceKey, process: Option<&str>, what: &str, save: bool) {
+        let subject = match process {
+            Some(name) => events::process(key, name),
+            None => events::instance(key),
+        };
+        let message = if save {
+            format!("{what}, saved to the project file")
+        } else {
+            format!("{what} until the daemon restarts")
+        };
+        self.event(EventKind::PolicyChanged, message, vec![subject]);
     }
 
     /// Writes the policy to the project file, applies it to every running instance
@@ -1456,7 +1628,7 @@ impl Actor {
                     .to_string(),
             );
         }
-        self.apply_shares(&before);
+        self.apply_shares(&before, EventKind::Unshared);
         let status = share::status(&self.world, &config, &entry, &self.shares[&entry], now);
         Ok(ShareResponse {
             share: status,
@@ -1479,7 +1651,7 @@ impl Actor {
                 entry.1.slug()
             ));
         };
-        self.apply_shares(&before);
+        self.apply_shares(&before, EventKind::Unshared);
         Ok(share.apps.into_iter().collect())
     }
 
@@ -1488,27 +1660,51 @@ impl Actor {
         self.shares
             .retain(|_, share| share.expires.is_none_or(|at| at > now));
         if before.len() != share::routes(&self.shares).len() {
-            self.apply_shares(&before);
+            self.apply_shares(&before, EventKind::ShareExpired);
         }
     }
 
     /// Publishes the shared routes, restarts running instances whose public URL
-    /// appeared or went away, and keeps pinned shares running.
-    fn apply_shares(&mut self, before: &share::SharedRoutes) {
+    /// appeared or went away, and keeps pinned shares running. Apps no longer shared
+    /// get an `ended` event.
+    fn apply_shares(&mut self, before: &share::SharedRoutes, ended: EventKind) {
         let after = share::routes(&self.shares);
         self.shared_tx.send_replace(Arc::new(after.clone()));
-        let changed: Vec<InstanceKey> = before
+        let removed: Vec<InstanceKey> = before
             .keys()
             .filter(|k| !after.contains_key(*k))
-            .chain(after.keys().filter(|k| !before.contains_key(*k)))
             .cloned()
             .collect();
-        for key in changed {
-            if self.instances.get(&key).is_some_and(Instance::is_active) {
-                if let Some(inst) = self.instances.get_mut(&key) {
+        let added: Vec<InstanceKey> = after
+            .keys()
+            .filter(|k| !before.contains_key(*k))
+            .cloned()
+            .collect();
+        for key in &removed {
+            self.events.push(ended, "", vec![events::instance(key)]);
+        }
+        for key in &added {
+            let url = self.world.machine.share.as_ref().and_then(|config| {
+                let state = self.world.project(&key.project)?;
+                let app = state.project.app(&key.app)?;
+                naming::public_url(config, state, app, &key.stack).ok()
+            });
+            self.events.push(
+                EventKind::Shared,
+                url.unwrap_or_default(),
+                vec![events::instance(key)],
+            );
+        }
+        let changed = removed
+            .iter()
+            .map(|k| (k, "share ended"))
+            .chain(added.iter().map(|k| (k, "share started")));
+        for (key, why) in changed {
+            if self.instances.get(key).is_some_and(Instance::is_active) {
+                if let Some(inst) = self.instances.get_mut(key) {
                     inst.restart_pending = true;
                 }
-                self.stop(&key);
+                self.stop(key, Some(why));
             }
         }
 
@@ -1538,7 +1734,7 @@ impl Actor {
                 self.overrides.insert((key.clone(), None), Policy::Pinned);
             }
             if !self.instances.get(&key).is_some_and(Instance::is_active) {
-                let _ = self.start(&key, None);
+                let _ = self.start(&key, None, Why::Share);
             }
         }
         self.dirty = true;
@@ -1647,8 +1843,13 @@ impl Actor {
             .filter(|i| i.is_active() && !busy.contains(&i.key))
             .map(|i| i.key.clone())
             .collect();
+        let why = if idle_only {
+            "stop-all --idle"
+        } else {
+            "stop-all"
+        };
         for key in &keys {
-            self.stop(key);
+            self.stop(key, Some(why));
         }
         ControlResponse {
             affected: keys
@@ -1766,6 +1967,31 @@ impl Actor {
         Ok(marker)
     }
 
+    fn recent_events(
+        &self,
+        target: Option<&Address>,
+        tail: usize,
+    ) -> Result<(Vec<Event>, EventFilter), String> {
+        let filter = match target {
+            None => EventFilter::default(),
+            Some(target) => {
+                let resolved = self.resolve(target)?;
+                let stack = match (&resolved.app, &resolved.stack) {
+                    (_, Some(stack)) => Some(stack.slug().to_string()),
+                    (Some(_), None) => Some("main".to_string()),
+                    (None, None) => None,
+                };
+                EventFilter {
+                    project: Some(resolved.project),
+                    stack,
+                    app: resolved.app,
+                    process: resolved.process,
+                }
+            }
+        };
+        Ok((self.events.recent(&filter, tail), filter))
+    }
+
     fn restart_checkout(&mut self, path: &Path) {
         let keys: Vec<InstanceKey> = self
             .instances
@@ -1777,7 +2003,7 @@ impl Actor {
             if let Some(inst) = self.instances.get_mut(&key) {
                 inst.restart_pending = true;
             }
-            self.stop(&key);
+            self.stop(&key, Some("tmp/restart.txt"));
         }
     }
 
@@ -1788,31 +2014,119 @@ impl Actor {
         if *self.world == world {
             return;
         }
+        for (kind, message, subjects) in world_changes(&self.world, &world) {
+            self.events.push(kind, message, subjects);
+        }
         self.world = Arc::new(world);
         self.world_tx.send_replace(self.world.clone());
         self.providers.clear();
-        let gone: Vec<InstanceKey> = self
-            .instances
-            .values()
-            .filter(|inst| inst.is_active() || inst.any_running())
-            .filter(|inst| {
-                let Some(state) = self.world.project(&inst.key.project) else {
-                    return true;
-                };
-                let Some(app) = state.project.app(&inst.key.app) else {
-                    return true;
-                };
-                inst.checkout
-                    .as_ref()
-                    .is_some_and(|c| *c != state.checkout(app, &inst.key.stack))
-            })
-            .map(|inst| inst.key.clone())
-            .collect();
-        for key in gone {
-            self.stop(&key);
+        let gone: Vec<(InstanceKey, &'static str)> =
+            self.instances
+                .values()
+                .filter(|inst| inst.is_active() || inst.any_running())
+                .filter_map(|inst| {
+                    let why = match self.world.project(&inst.key.project) {
+                        None => "its project is gone",
+                        Some(state) => match state.project.app(&inst.key.app) {
+                            None => "its app is gone",
+                            Some(app)
+                                if inst.checkout.as_ref().is_some_and(|c| {
+                                    *c != state.checkout(app, &inst.key.stack)
+                                }) =>
+                            {
+                                "its checkout moved"
+                            }
+                            Some(_) => return None,
+                        },
+                    };
+                    Some((inst.key.clone(), why))
+                })
+                .collect();
+        for (key, why) in gone {
+            self.stop(&key, Some(why));
         }
         self.dirty = true;
     }
+}
+
+/// Events for what changed between two views of config and disk: config files,
+/// worktrees and new problems.
+fn world_changes(old: &World, new: &World) -> Vec<(EventKind, String, Vec<EventSubject>)> {
+    let mut changes = Vec::new();
+    if old.machine != new.machine {
+        changes.push((
+            EventKind::ConfigReloaded,
+            "machine config".to_string(),
+            vec![],
+        ));
+    }
+    for state in &new.projects {
+        let name = &state.project.name;
+        let Some(before) = old.project(name) else {
+            changes.push((
+                EventKind::ConfigReloaded,
+                "project added".to_string(),
+                vec![events::project(name)],
+            ));
+            continue;
+        };
+        if before.project != state.project {
+            changes.push((
+                EventKind::ConfigReloaded,
+                "project file".to_string(),
+                vec![events::project(name)],
+            ));
+        }
+        let worktrees = |state: &ProjectState| -> BTreeSet<(String, String, PathBuf)> {
+            state
+                .worktrees
+                .iter()
+                .flat_map(|(app, wts)| {
+                    wts.iter()
+                        .map(|wt| (app.clone(), wt.slug.clone(), wt.path.clone()))
+                })
+                .collect()
+        };
+        let (was, is) = (worktrees(before), worktrees(state));
+        let subject = |(app, slug, _): &(String, String, PathBuf)| EventSubject {
+            project: name.clone(),
+            stack: Some(slug.clone()),
+            app: Some(app.clone()),
+            process: None,
+        };
+        for added in is.difference(&was) {
+            changes.push((
+                EventKind::WorktreeAdded,
+                added.2.display().to_string(),
+                vec![subject(added)],
+            ));
+        }
+        for removed in was.difference(&is) {
+            changes.push((
+                EventKind::WorktreeRemoved,
+                removed.2.display().to_string(),
+                vec![subject(removed)],
+            ));
+        }
+    }
+    for state in &old.projects {
+        if new.project(&state.project.name).is_none() {
+            changes.push((
+                EventKind::ConfigReloaded,
+                "project removed".to_string(),
+                vec![events::project(&state.project.name)],
+            ));
+        }
+    }
+    for problem in new.problems.iter().filter(|p| !old.problems.contains(p)) {
+        let message = match &problem.app {
+            Some(app) => format!("{app}: {}", problem.message),
+            None => problem.message.clone(),
+        };
+        let subjects = problem.project.iter().map(|p| events::project(p)).collect();
+        changes.push((EventKind::ConfigError, message, subjects));
+    }
+    changes
 }
 
 fn self_runs_elsewhere(

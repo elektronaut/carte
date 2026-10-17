@@ -3,15 +3,15 @@ use std::process::ExitCode;
 
 use anyhow::bail;
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, Hold, InstanceState, InstanceStatus, LogLine,
-    LogsRequest, MarkRequest, ProcessState, Snapshot, StartFailure, StatusResponse, StopAllRequest,
-    paths,
+    Action, Address, ControlRequest, ControlResponse, Event, EventsRequest, Hold, InstanceState,
+    InstanceStatus, LogLine, LogsRequest, MarkRequest, ProcessState, Snapshot, StartFailure,
+    StatusResponse, StopAllRequest, paths,
 };
 use carte_core::model::World;
 use carte_core::{address, discovery, naming};
 use http::Method;
 
-use super::{LogsArgs, ShareArgs, Target};
+use super::{EventsArgs, LogsArgs, ShareArgs, Target};
 use crate::client::Client;
 use crate::exit::{Exit, Failure};
 use crate::paths::Paths;
@@ -509,6 +509,44 @@ pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCod
         },
     ))?;
     Ok(ExitCode::SUCCESS)
+}
+
+pub fn events(paths: &Paths, args: EventsArgs, json: bool) -> anyhow::Result<ExitCode> {
+    let target = Target {
+        address: args.address,
+        project: args.project,
+    };
+    let scoped = target.address.is_some() || target.project.is_some();
+    let request = EventsRequest {
+        target: scoped.then(|| address(&target)),
+        follow: args.follow,
+        tail: Some(args.lines),
+    };
+    let mut stdout = std::io::stdout().lock();
+    runtime()?.block_on(Client::new(&paths.socket()).stream(
+        Method::POST,
+        paths::EVENTS,
+        Some(&request),
+        |event: Event| {
+            let line = if json {
+                serde_json::to_string(&event).unwrap_or_default()
+            } else {
+                render_event(&event)
+            };
+            let _ = writeln!(stdout, "{line}");
+        },
+    ))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `14:32:05  acme-web@feature-x  stopped: idle for 15m`
+pub fn render_event(event: &Event) -> String {
+    format!(
+        "{}  {}  {}",
+        crate::clock::local_hms(event.at_ms),
+        event.subject_label(),
+        event.summary()
+    )
 }
 
 pub fn open(paths: &Paths, target: Target) -> anyhow::Result<ExitCode> {

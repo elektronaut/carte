@@ -2,6 +2,7 @@
 //! else talks to it through a [`Handle`].
 
 mod actor;
+mod events;
 pub mod groups;
 pub mod runner;
 pub mod share;
@@ -13,10 +14,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, ExternalRequest, LogLine, LogsRequest,
+    Action, Address, ControlRequest, ControlResponse, Event, ExternalRequest, LogLine, LogsRequest,
     ShareRequest, ShareResponse, Snapshot, StartFailure, TunnelStatus,
 };
 use carte_core::model::{InstanceKey, World};
+pub use events::EventFilter;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::paths::Paths;
@@ -116,6 +118,11 @@ pub(crate) enum Msg {
         target: Address,
         reply: oneshot::Sender<Result<LogLine, String>>,
     },
+    Events {
+        target: Option<Address>,
+        tail: usize,
+        reply: oneshot::Sender<Result<(Vec<Event>, EventFilter), String>>,
+    },
     Reload(World),
     RestartCheckout(PathBuf),
     EnvChanged(PathBuf),
@@ -173,6 +180,7 @@ pub struct Handle {
     world: watch::Receiver<Arc<World>>,
     shared: watch::Receiver<Arc<share::SharedRoutes>>,
     logs: broadcast::Sender<LogLine>,
+    events: broadcast::Sender<Event>,
 }
 
 impl Handle {
@@ -243,6 +251,27 @@ impl Handle {
 
     pub fn follow_logs(&self) -> broadcast::Receiver<LogLine> {
         self.logs.subscribe()
+    }
+
+    /// Recent events about a target (every event for `None`), oldest first, and the
+    /// filter for following them.
+    pub async fn events(
+        &self,
+        target: Option<Address>,
+        tail: usize,
+    ) -> Result<(Vec<Event>, EventFilter), String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::Events {
+            target,
+            tail,
+            reply,
+        });
+        rx.await
+            .unwrap_or_else(|_| Err("carte is shutting down".into()))
+    }
+
+    pub fn follow_events(&self) -> broadcast::Receiver<Event> {
+        self.events.subscribe()
     }
 
     pub fn snapshot(&self) -> Arc<Snapshot> {

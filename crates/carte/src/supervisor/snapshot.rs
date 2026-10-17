@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use carte_api::{
-    AppInfo, Hold, InstanceState, InstanceStatus, Policy as ApiPolicy, ProcessState, ProcessStatus,
-    ProjectStatus, Snapshot, StackStatus, TunnelStatus,
+    AppInfo, Event, Hold, InstanceState, InstanceStatus, Policy as ApiPolicy, ProcessState,
+    ProcessStatus, ProjectStatus, Snapshot, StackStatus, TunnelStatus,
 };
 use carte_core::lifecycle;
 use carte_core::model::{App, InstanceKey, Policy, ProjectState, Stack, World};
@@ -20,6 +20,8 @@ pub(super) struct Input<'a> {
     pub overrides: &'a Overrides,
     pub shares: &'a Shares,
     pub tunnel: Option<&'a TunnelStatus>,
+    /// The latest event about each instance.
+    pub latest: &'a BTreeMap<InstanceKey, Event>,
     pub now: Instant,
 }
 
@@ -104,6 +106,7 @@ fn stack_status(
         instances,
         overrides,
         shares,
+        latest,
         now,
         ..
     } = *input;
@@ -142,6 +145,7 @@ fn stack_status(
                     cpu_percent: 0.0,
                     last_error: None,
                     env_changed: false,
+                    last_event: latest.get(&key).cloned(),
                 };
             };
             let mut holds = Vec::new();
@@ -215,6 +219,7 @@ fn stack_status(
                 cpu_percent: inst.procs.iter().map(|p| p.cpu_percent).sum(),
                 last_error: inst.last_error.clone(),
                 env_changed: inst.env_changed,
+                last_event: latest.get(&key).cloned(),
             }
         })
         .collect();

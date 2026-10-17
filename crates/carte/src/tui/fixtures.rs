@@ -60,6 +60,7 @@ pub fn instance(app: &str, stack: &str, checkout: &str, state: InstanceState) ->
         cpu_percent: 0.0,
         last_error: None,
         env_changed: false,
+        last_event: None,
     }
 }
 
