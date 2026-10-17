@@ -468,7 +468,7 @@ fn shares_reach_only_shared_apps_and_carry_the_public_url() {
     );
     let ls = stdout(&daemon.run(&["ls"]));
     assert!(
-        ls.contains("public: acme-web@main  https://web--acme.share.example"),
+        ls.contains("public https://web--acme.share.example"),
         "{ls}"
     );
     let snapshot = snapshot(&daemon);

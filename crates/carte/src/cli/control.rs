@@ -59,19 +59,21 @@ pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
             for inst in &stack.instances {
                 let shown = all
                     || inst.state != InstanceState::Stopped
+                    || inst.public_url.is_some()
                     || inst.checkout == stack.name && stack.name != "main";
                 if !shown {
                     stopped += 1;
                     continue;
                 }
+                let share = snapshot
+                    .shares
+                    .iter()
+                    .find(|s| s.project == project.name && s.stack == stack.name);
                 rows.push(vec![
-                    project.name.clone(),
-                    stack.name.clone(),
-                    inst.app.clone(),
+                    instance_name(inst),
                     state_word(inst),
-                    checkout_word(inst),
                     inst.url.clone(),
-                    detail(inst),
+                    notes(inst, share),
                 ]);
             }
         }
@@ -80,7 +82,7 @@ pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
     if rows.is_empty() {
         out.push_str("Nothing is running.\n");
     } else {
-        let header = ["PROJECT", "STACK", "APP", "STATE", "CHECKOUT", "URL", ""];
+        let header = ["NAME", "STATE", "URL", ""];
         let mut table = vec![header.iter().map(|s| s.to_string()).collect::<Vec<_>>()];
         table.extend(rows);
         out.push_str(&columns(&table));
@@ -90,34 +92,6 @@ pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
             "{} running, {stopped} stopped (carte ls --all lists them)\n",
             snapshot.running_instances
         ));
-    }
-    for share in &snapshot.shares {
-        let mut notes = Vec::new();
-        if share.auth {
-            notes.push("password".to_string());
-        }
-        if share.pinned {
-            notes.push("pinned".to_string());
-        }
-        notes.push(format!(
-            "for {}",
-            carte_core::duration::format(std::time::Duration::from_secs(share.shared_secs))
-        ));
-        if let Some(secs) = share.expires_in_secs {
-            notes.push(format!(
-                "ends in {}",
-                carte_core::duration::format(std::time::Duration::from_secs(secs))
-            ));
-        }
-        for app in &share.apps {
-            out.push_str(&format!(
-                "public: {}@{}  {}  ({})\n",
-                app.app,
-                share.stack,
-                app.url,
-                notes.join(", ")
-            ));
-        }
     }
     if let Some(tunnel) = &snapshot.tunnel
         && tunnel.state == carte_api::TunnelState::Failed
@@ -150,16 +124,20 @@ fn state_word(inst: &InstanceStatus) -> String {
     .to_string()
 }
 
-fn checkout_word(inst: &InstanceStatus) -> String {
-    if inst.stack != "main" && inst.checkout == "main" {
-        "main (fallback)".into()
+/// The address `carte up` takes for the instance.
+fn instance_name(inst: &InstanceStatus) -> String {
+    if inst.stack == "main" {
+        inst.app.clone()
     } else {
-        inst.checkout.clone()
+        format!("{}@{}", inst.app, inst.stack)
     }
 }
 
-fn detail(inst: &InstanceStatus) -> String {
+fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> String {
     let mut parts = Vec::new();
+    if inst.stack != "main" && inst.checkout == "main" {
+        parts.push("main checkout".to_string());
+    }
     let down: Vec<&str> = inst
         .processes
         .iter()
@@ -187,6 +165,20 @@ fn detail(inst: &InstanceStatus) -> String {
         && inst.state == InstanceState::Crashed
     {
         parts.push(error.clone());
+    }
+    if let Some(url) = &inst.public_url {
+        parts.push(format!("public {url}"));
+        if let Some(share) = share {
+            if share.auth {
+                parts.push("password".into());
+            }
+            if let Some(secs) = share.expires_in_secs {
+                parts.push(format!(
+                    "share ends in {}",
+                    carte_core::duration::format(std::time::Duration::from_secs(secs))
+                ));
+            }
+        }
     }
     parts.join(", ")
 }
@@ -391,4 +383,29 @@ pub fn unshare(paths: &Paths, target: Target, json: bool) -> anyhow::Result<Exit
         println!("No longer shared: {}", apps.join(", "));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::fixtures::{instance, shared_sample};
+
+    #[test]
+    fn lists_instances_by_address() {
+        let mut snapshot = shared_sample();
+        snapshot.running_instances = 2;
+        let mut fallback = instance("nova-billing", "feature-x", "main", InstanceState::Ready);
+        fallback.idle_in_secs = Some(300);
+        snapshot.projects[0].stacks[1].instances[0] = fallback;
+        assert_eq!(
+            render_ls(&snapshot, false),
+            "\
+NAME                     STATE    URL
+nova-billing             ready    https://nova-billing.test   public https://nova-billing--main--nova.demo.dev, password
+nova-billing@feature-x   ready    https://nova-billing.test   main checkout, idle in 5m
+nova-frontend@feature-x  stopped  https://nova-frontend.test
+2 running, 1 stopped (carte ls --all lists them)
+"
+        );
+    }
 }
