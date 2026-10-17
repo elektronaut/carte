@@ -595,6 +595,28 @@ mod tests {
     }
 
     #[test]
+    fn a_never_started_instance_lists_its_processes() {
+        let mut web = instance("acme", "main", "main", InstanceState::Stopped);
+        web.processes = vec![
+            process("web", ProcessState::Stopped),
+            process("worker", ProcessState::Stopped),
+        ];
+        web.processes[1].policy = Policy::Disabled;
+        let snap = snapshot(vec![project(
+            "acme",
+            &["acme"],
+            vec![stack("main", vec![web])],
+        )]);
+        let roots = build(&snap);
+        let mut fold = Fold::default();
+        fold.expanded.insert(roots[0].id().clone(), true);
+        assert_eq!(labels(&roots, &fold), ["acme", "  web", "  worker"]);
+        assert_eq!(roots[0].status.state, State::Stopped);
+        let states: Vec<State> = roots[0].children.iter().map(|c| c.status.state).collect();
+        assert_eq!(states, [State::Stopped, State::Disabled]);
+    }
+
+    #[test]
     fn a_single_app_project_shows_the_app_on_its_row() {
         let mut web = instance("acme", "main", "main", InstanceState::Ready);
         web.processes = vec![process("web", ProcessState::Running)];
