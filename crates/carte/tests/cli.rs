@@ -405,6 +405,40 @@ fn prints_the_env_as_json() {
 }
 
 #[test]
+fn shows_provided_values_with_their_process() {
+    let sb = Sandbox::new();
+    sb.repo(
+        "shop",
+        &[
+            ("Procfile", "web: bin/serve\n"),
+            (".env", "REDIS_URL=redis://localhost:6379\n"),
+        ],
+    );
+    sb.write_project(
+        "shop",
+        "repos = \"~/shop\"\nenv_provider = \"none\"\n\n\
+         [processes.redis]\ncommand = \"redis-server --port $PORT\"\nkind = \"service\"\n\
+         [processes.redis.provides]\nREDIS_URL = \"unix://{{run_dir}}/redis.sock\"\n\n\
+         [apps.shop]\nenv_files = [\".env\"]\n",
+    );
+    let out = sb.run(&["env", "shop", "REDIS_URL", "--json"]);
+    assert!(out.success, "{}", out.stderr);
+    let env: EnvResponse = serde_json::from_str(&out.stdout).unwrap();
+    let url = &env.vars[0];
+    assert_eq!(url.source, "provided by redis");
+    assert!(!url.masked);
+    let value = url.value.as_deref().unwrap();
+    assert!(
+        value.starts_with("unix:///") && value.ends_with("/redis.sock"),
+        "{value}"
+    );
+    assert_eq!(
+        url.overrides,
+        [format!("{}:1", sb.root.join("shop/.env").display())]
+    );
+}
+
+#[test]
 fn shows_hidden_values_by_name_or_with_values() {
     let sb = Sandbox::new();
     let repo = env_project(&sb);

@@ -766,6 +766,11 @@ impl Actor {
                 .iter()
                 .map(|&idx| (idx, inst.procs[idx].spec.clone(), inst.procs[idx].port))
                 .collect(),
+            processes: inst
+                .procs
+                .iter()
+                .map(|p| (p.spec.clone(), p.port))
+                .collect(),
             cached_provider: self
                 .providers
                 .get(inst.checkout.as_ref().unwrap().path())
@@ -2393,6 +2398,8 @@ struct EnvInput {
     checkout: Checkout,
     machine: carte_core::model::MachineConfig,
     procs: Vec<(usize, ProcessSpec, u16)>,
+    /// Every process of the instance with its port, for their `provides`.
+    processes: Vec<(ProcessSpec, u16)>,
     cached_provider: Option<Env>,
     daemon_env: Arc<BTreeMap<String, String>>,
     pidfile: PathBuf,
@@ -2461,6 +2468,7 @@ impl EnvInput {
                 project: &self.state.project,
                 app: &self.app,
                 process: spec,
+                processes: &self.processes,
                 checkout: &self.checkout,
                 stack: &self.key.stack,
                 branch: &branch,

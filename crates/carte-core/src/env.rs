@@ -26,6 +26,7 @@ pub enum Layer {
     Provider,
     EnvFile,
     Template,
+    Provided,
     Injected,
 }
 
@@ -48,6 +49,10 @@ pub enum Source {
         /// The iterated app, for a key template.
         for_app: Option<String>,
     },
+    /// A process's `provides`.
+    Provided {
+        process: String,
+    },
     Injected,
 }
 
@@ -57,6 +62,7 @@ impl Source {
             Source::Daemon | Source::Provider { .. } => Layer::Provider,
             Source::EnvFile { .. } => Layer::EnvFile,
             Source::Template { .. } => Layer::Template,
+            Source::Provided { .. } => Layer::Provided,
             Source::Injected => Layer::Injected,
         }
     }
@@ -79,6 +85,7 @@ impl fmt::Display for Source {
                     None => Ok(()),
                 }
             }
+            Source::Provided { process } => write!(f, "provided by {process}"),
             Source::Injected => f.write_str("carte"),
         }
     }
@@ -190,6 +197,8 @@ pub struct EnvRequest<'a> {
     pub project: &'a Project,
     pub app: &'a App,
     pub process: &'a ProcessSpec,
+    /// Every process of the instance with its port, for their `provides`.
+    pub processes: &'a [(ProcessSpec, u16)],
     pub checkout: &'a Checkout,
     pub stack: &'a Stack,
     /// The branch checked out in `checkout`.
@@ -236,6 +245,12 @@ pub enum EnvError {
         key: String,
         error: Box<TemplateError>,
     },
+    #[error("process {process:?} provides {key:?}: {error}")]
+    Provides {
+        process: String,
+        key: String,
+        error: Box<TemplateError>,
+    },
     #[error("{origin} template {key:?} rendered an empty variable name")]
     EmptyKey { origin: TemplateOrigin, key: String },
 }
@@ -253,7 +268,7 @@ pub fn build_env(
     render_env(req, provider, &files)
 }
 
-/// Layers env files, templates and injected variables over `provider`.
+/// Layers env files, templates, provided and injected variables over `provider`.
 pub fn render_env(req: &EnvRequest, provider: Env, files: &[EnvFile]) -> Result<Env, EnvError> {
     let mut env = provider;
     for file in files {
@@ -304,6 +319,26 @@ pub fn render_env(req: &EnvRequest, provider: Env, files: &[EnvFile]) -> Result<
                     },
                 );
             }
+        }
+    }
+
+    for (process, port) in req.processes {
+        let ctx = Context { port: *port, ..ctx };
+        for entry in &process.provides {
+            let value = Template::parse(&entry.value)
+                .and_then(|value| value.render(&ctx))
+                .map_err(|error| EnvError::Provides {
+                    process: process.name.clone(),
+                    key: entry.key.clone(),
+                    error: Box::new(error),
+                })?;
+            env.set(
+                &entry.key,
+                value,
+                Source::Provided {
+                    process: process.name.clone(),
+                },
+            );
         }
     }
 
@@ -422,6 +457,7 @@ mod tests {
             policy: Policy::Auto,
             kind: None,
             after: Vec::new(),
+            provides: Vec::new(),
         }
     }
 
@@ -436,6 +472,7 @@ mod tests {
     struct Fixture {
         project: Project,
         process: ProcessSpec,
+        processes: Vec<(ProcessSpec, u16)>,
         checkout: Checkout,
         stack: Stack,
         urls: Urls,
@@ -448,6 +485,7 @@ mod tests {
             Self {
                 project: nova_project(),
                 process: web(),
+                processes: Vec::new(),
                 checkout: feature_checkout(),
                 stack: Stack::Branch("feature-x".into()),
                 urls: Urls {
@@ -467,6 +505,7 @@ mod tests {
                 project: &self.project,
                 app: &self.project.apps[0],
                 process: &self.process,
+                processes: &self.processes,
                 checkout: &self.checkout,
                 stack: &self.stack,
                 branch: "feature/X",
@@ -780,6 +819,228 @@ mod tests {
             api.overrode[0].source.to_string(),
             "project (/Users/alex/.config/carte/projects/nova.toml) template \"{{app.name | upper}}_URL\" for nova-postcard-api"
         );
+    }
+
+    fn redis(provides: &[(&str, &str)]) -> ProcessSpec {
+        ProcessSpec {
+            name: "redis".into(),
+            command: "redis-server --port $PORT".into(),
+            http: false,
+            kind: Some(crate::model::ProcessKind::Service),
+            provides: provides.iter().map(|(k, v)| tpl(k, v)).collect(),
+            ..web()
+        }
+    }
+
+    #[test]
+    fn provided_values_render_in_the_instance_with_the_providers_port() {
+        let mut fx = Fixture::new();
+        fx.processes = vec![
+            (web(), 51234),
+            (
+                redis(&[
+                    ("REDIS_URL", "unix://{{run_dir}}/redis.sock"),
+                    ("REDIS_PORT", "{{port}}"),
+                    ("REDIS_PREFIX", "{{app.short}}:{{stack}}"),
+                ]),
+                51300,
+            ),
+        ];
+        let env = fx.render_empty();
+        let url = env.get("REDIS_URL").unwrap();
+        assert_eq!(url.value, "unix:///run/carte/abcdefgh/redis.sock");
+        assert_eq!(
+            url.source,
+            Source::Provided {
+                process: "redis".into()
+            }
+        );
+        assert_eq!(url.source.to_string(), "provided by redis");
+        assert_eq!(url.source.layer(), Layer::Provided);
+        assert_eq!(env.value("REDIS_PORT"), Some("51300"));
+        assert_eq!(env.value("PORT"), Some("51234"));
+        assert_eq!(
+            env.value("REDIS_PREFIX"),
+            Some("postcard-frontend:feature-x")
+        );
+    }
+
+    #[test]
+    fn provided_values_beat_env_files_and_templates_but_not_carte() {
+        let mut fx = Fixture::new();
+        fx.project.env = vec![tpl("REDIS_URL", "redis://localhost:6379/0")];
+        fx.process.env = vec![tpl("REDIS_URL", "redis://localhost:6379/1")];
+        fx.processes = vec![(
+            redis(&[
+                ("REDIS_URL", "unix://{{run_dir}}/redis.sock"),
+                ("PORT", "1"),
+            ]),
+            51300,
+        )];
+        let files = [EnvFile {
+            path: "/w/.env".into(),
+            entries: vec![EnvFileEntry {
+                key: "REDIS_URL".into(),
+                value: "redis://localhost:6379".into(),
+                line: 2,
+            }],
+        }];
+        let env = fx.render(Env::new(), &files);
+        let url = env.get("REDIS_URL").unwrap();
+        assert_eq!(url.value, "unix:///run/carte/abcdefgh/redis.sock");
+        let history: Vec<String> = url.overrode.iter().map(|o| o.source.to_string()).collect();
+        assert_eq!(
+            history,
+            [
+                "/w/.env:2",
+                "project (/Users/alex/.config/carte/projects/nova.toml) template \"REDIS_URL\"",
+                "process nova-postcard-frontend/web template \"REDIS_URL\"",
+            ]
+        );
+        let port = env.get("PORT").unwrap();
+        assert_eq!(port.value, "51234");
+        assert_eq!(port.source, Source::Injected);
+        assert_eq!(port.overrode[0].source.to_string(), "provided by redis");
+    }
+
+    #[test]
+    fn provides_errors_name_the_process() {
+        let mut fx = Fixture::new();
+        fx.processes = vec![(redis(&[("REDIS_URL", "unix://{{rundir}}/redis.sock")]), 1)];
+        let err = render_env(&fx.request(), Env::new(), &[]).unwrap_err();
+        assert!(
+            err.to_string().starts_with(
+                "process \"redis\" provides \"REDIS_URL\": unknown variable \"rundir\""
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_make_config_gives_redis_to_the_apps_it_lists() {
+        let file = crate::config::parse_project(
+            Path::new("/Users/alex/.config/carte/projects/make.toml"),
+            r#"
+            repos = "~/work/make-*"
+            strip_prefix = "make-"
+
+            [processes.redis]
+            apps = [
+              "make-start", "make-newsmail-api", "make-sms-api", "make-pmta-logger",
+              "make-sender-api", "make-subscribers-api", "make-integration-mystore",
+              "make-calendar", "make-mobile",
+            ]
+            command = "mkdir -p $CARTE_STATE_DIR/redis && exec redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --dir $CARTE_STATE_DIR/redis --appendonly yes --save ''"
+            kind = "service"
+
+            [processes.redis.provides]
+            REDIS_URL = "unix://{{run_dir}}/redis.sock"
+            "#,
+        )
+        .unwrap();
+        let discovered = [
+            "make-start",
+            "make-newsmail-api",
+            "make-sms-api",
+            "make-pmta-logger",
+            "make-sender-api",
+            "make-subscribers-api",
+            "make-integration-mystore",
+            "make-calendar",
+            "make-mobile",
+            "make-admin",
+        ]
+        .into_iter()
+        .map(|name| crate::config::DiscoveredApp {
+            name: name.into(),
+            path: Path::new("/Users/alex/work").join(name),
+            repo_config: None,
+        })
+        .collect();
+        let (project, problems) = crate::config::assemble_project(file, discovered);
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let procfile = vec![
+            ("web".to_string(), "bin/rails server -p $PORT".to_string()),
+            ("worker".to_string(), "bundle exec sidekiq".to_string()),
+        ];
+        let dirs = InstanceDirs {
+            state: "/state/data/make/feature-x/make-start".into(),
+            run: "/run/carte/abcdefgh".into(),
+        };
+        let urls = Urls {
+            stack: "feature-x",
+            shared: vec![],
+        };
+        let render = |app_name: &str, process: &str| {
+            let app = project.app(app_name).unwrap();
+            let list = crate::procfile::build(
+                crate::procfile::ProcessSource::Procfile,
+                procfile.clone(),
+                &app.settings,
+            )
+            .unwrap();
+            let processes: Vec<(ProcessSpec, u16)> = list
+                .processes
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.clone(), 51000 + i as u16))
+                .collect();
+            let (spec, port) = processes.iter().find(|(p, _)| p.name == process).unwrap();
+            let checkout = Checkout::Main {
+                path: app.path.clone(),
+            };
+            let req = EnvRequest {
+                project: &project,
+                app,
+                process: spec,
+                processes: &processes,
+                checkout: &checkout,
+                stack: &Stack::Branch("feature-x".into()),
+                branch: "feature-x",
+                port: *port,
+                urls: &urls,
+                tld: "test",
+                share_domain: None,
+                tld_length: 3,
+                ca_bundle: Path::new("/ca/bundle.pem"),
+                ca_cert: Path::new("/ca/ca.pem"),
+                pidfile: Path::new("/tmp/carte/app.pid"),
+                dirs: &dirs,
+            };
+            let names: Vec<String> = list.processes.iter().map(|p| p.name.clone()).collect();
+            (
+                names,
+                list.processes,
+                render_env(&req, Env::new(), &[]).unwrap(),
+            )
+        };
+
+        let (names, processes, worker) = render("make-start", "worker");
+        assert_eq!(names, ["web", "worker", "redis"]);
+        let redis = processes.iter().find(|p| p.name == "redis").unwrap();
+        assert!(redis.is_service());
+        assert_eq!(redis.scope, Scope::Instance);
+        assert!(!redis.http);
+        assert!(
+            redis
+                .command
+                .contains("--unixsocket $CARTE_RUN_DIR/redis.sock")
+        );
+        let url = worker.get("REDIS_URL").unwrap();
+        assert_eq!(url.value, "unix:///run/carte/abcdefgh/redis.sock");
+        assert_eq!(url.source.to_string(), "provided by redis");
+
+        let (_, _, server) = render("make-start", "redis");
+        assert_eq!(
+            server.value("CARTE_STATE_DIR"),
+            Some("/state/data/make/feature-x/make-start")
+        );
+        assert_eq!(server.value("CARTE_RUN_DIR"), Some("/run/carte/abcdefgh"));
+
+        let (names, _, admin) = render("make-admin", "worker");
+        assert_eq!(names, ["web", "worker"]);
+        assert_eq!(admin.value("REDIS_URL"), None);
     }
 
     #[test]

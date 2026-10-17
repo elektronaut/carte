@@ -68,8 +68,8 @@ Restarting a single process waits for its app.
 
 ### Env
 
-`carte env` shows values carte renders itself (its own variables and
-templates) and hides values from the environment provider, the daemon's
+`carte env` shows values carte renders itself (its own variables,
+templates and processes' `provides`) and hides values from the environment provider, the daemon's
 environment and env files, which can hold secrets. `carte env KEY` shows
 one variable with its value; `--values` shows them all.
 

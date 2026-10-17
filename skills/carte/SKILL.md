@@ -52,6 +52,12 @@ first and stop last; `kind = "task"` processes (such as
 start of the app. A failing service or task fails the start, and its log is
 in the error. A finished task shows as `done`.
 
+A service may also be declared in the project file for several apps at
+once (`[processes.redis]`), so it isn't always in the repo's Procfile or
+`carte.toml`. Its `provides` sets variables such as `REDIS_URL` on every
+process of the app, even while the service is down; `carte env` shows them
+as `provided by redis`. Use that value rather than `.env`'s.
+
 ## When something fails
 
 ```sh

@@ -1473,6 +1473,71 @@ async fn echoed_env(port: u16) -> String {
 }
 
 #[tokio::test]
+async fn a_project_process_provides_env_to_the_apps_it_is_declared_for() {
+    let setup = Setup::new();
+    for app in ["acme-web", "acme-api", "acme-admin"] {
+        setup.app(
+            app,
+            "web: FIXTURE_ENV=REDIS_URL,REDIS_PORT exec {fixture}\n",
+        );
+    }
+    setup.project(&format!(
+        r#"
+[processes.redis]
+apps = ["web", "acme-api"]
+command = 'exec {}'
+kind = "service"
+
+[processes.redis.provides]
+REDIS_URL = "unix://{{{{run_dir}}}}/redis.sock"
+REDIS_PORT = "{{{{port}}}}"
+
+[apps.acme-api.processes.redis]
+policy = "disabled"
+"#,
+        fixture().display()
+    ));
+    let handle = setup.start();
+
+    for app in ["acme-web", "acme-api", "acme-admin"] {
+        handle.ensure_ready(key(app, Stack::Main)).await.unwrap();
+    }
+    let snapshot = handle.snapshot();
+    let redis = process(&snapshot, "acme-web", "redis");
+    assert_eq!(redis.state, ProcessState::Running);
+    let run_dir = setup
+        .paths
+        .dir_roots()
+        .instance(&key("acme-web", Stack::Main))
+        .run;
+    let env = echoed_env(process(&snapshot, "acme-web", "web").port.unwrap()).await;
+    assert!(
+        env.contains(&format!(
+            "\"REDIS_URL\":\"unix://{}/redis.sock\"",
+            run_dir.display()
+        )),
+        "{env}"
+    );
+    assert!(
+        env.contains(&format!("\"REDIS_PORT\":\"{}\"", redis.port.unwrap())),
+        "{env}"
+    );
+
+    assert_eq!(
+        process(&snapshot, "acme-api", "redis").state,
+        ProcessState::Stopped
+    );
+    let env = echoed_env(process(&snapshot, "acme-api", "web").port.unwrap()).await;
+    assert!(env.contains("\"REDIS_URL\":\"unix://"), "{env}");
+
+    let admin = status(&snapshot, "acme-admin", "main");
+    assert!(admin.processes.iter().all(|p| p.name != "redis"));
+    let env = echoed_env(process(&snapshot, "acme-admin", "web").port.unwrap()).await;
+    assert!(env.contains("\"REDIS_URL\":null"), "{env}");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_crashed_service_restarts_on_its_own_port_until_stopped_by_hand() {
     let setup = Setup::new();
     setup.app("acme-web", "web: exec {fixture}\n");

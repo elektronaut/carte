@@ -142,6 +142,20 @@ policy = "disabled"
   ready before the others, and stops after them. One with
   `kind = "task"`, like `bin/rails db:prepare`, runs to completion
   between the services and the rest, on every start.
+- `[processes.<name>]` declares a process for several apps at once, all
+  of them or those in `apps`; an app's own `[apps.<app>.processes]`
+  entry overrides it key by key. Its `provides` sets env on every process
+  of the app, so each app's Redis hands out its own socket:
+
+```toml
+[processes.redis]
+apps = ["billing", "events"]
+command = "exec redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --save ''"
+kind = "service"
+
+[processes.redis.provides]
+REDIS_URL = "unix://{{run_dir}}/redis.sock"
+```
 
 A repo can carry its own defaults in a `carte.toml`, using the same keys
 as an `[apps.<name>]` table. The project file wins.
@@ -160,7 +174,8 @@ Each process's environment is built in layers, later ones winning:
    `shell` or `none` to choose.
 2. **Env files** listed in `env_files`.
 3. **Templates** from `[env]`.
-4. **carte's own:** `PORT`, `CARTE_URL`, `CARTE_STACK`,
+4. **Provided values** from the `provides` of the app's processes.
+5. **carte's own:** `PORT`, `CARTE_URL`, `CARTE_STACK`,
    `CARTE_CHECKOUT` and others, plus `SSL_CERT_FILE` and
    `NODE_EXTRA_CA_CERTS` so Ruby, Node, Python and curl trust the local
    certificate authority.
