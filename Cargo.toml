@@ -13,7 +13,7 @@ repository = "https://github.com/elektronaut/carte"
 carte-core = { path = "crates/carte-core", version = "0.1.0" }
 carte-api = { path = "crates/carte-api", version = "0.1.0" }
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4.6", features = ["derive"] }
 glob = "0.3"
