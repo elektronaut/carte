@@ -164,12 +164,11 @@ pub fn linked_worktrees(entries: &[WorktreeEntry]) -> Vec<Worktree> {
 }
 
 /// The stack name of each of a repo's linked worktrees: its slugged folder name, or
-/// the nearest ancestor's when the folder is named like the repo itself, or when
-/// another of the repo's worktrees would get the same name. Worktrees that still
-/// share a name at the filesystem root keep it; discovery reports them.
+/// the nearest ancestor's while the folder is named like the repo itself. Worktrees
+/// that end up with the same name keep it; discovery reports them.
 pub fn stack_names(repo: &str, paths: &[&Path]) -> Vec<String> {
     let repo = slugify(repo);
-    let candidates: Vec<Vec<String>> = paths
+    paths
         .iter()
         .map(|path| {
             path.components()
@@ -178,35 +177,9 @@ pub fn stack_names(repo: &str, paths: &[&Path]) -> Vec<String> {
                     Component::Normal(name) => Some(slugify(&name.to_string_lossy())),
                     _ => None,
                 })
-                .filter(|name| !name.is_empty() && *name != repo)
-                .collect()
+                .find(|name| !name.is_empty() && *name != repo)
+                .unwrap_or_else(|| repo.clone())
         })
-        .collect();
-    let mut depths = vec![0; paths.len()];
-    loop {
-        let names: Vec<Option<&String>> = candidates
-            .iter()
-            .zip(&depths)
-            .map(|(names, &depth)| names.get(depth))
-            .collect();
-        let bump: Vec<usize> = (0..names.len())
-            .filter(|&i| {
-                names[i].is_some()
-                    && depths[i] + 1 < candidates[i].len()
-                    && (0..names.len()).any(|j| j != i && names[j] == names[i])
-            })
-            .collect();
-        if bump.is_empty() {
-            break;
-        }
-        for i in bump {
-            depths[i] += 1;
-        }
-    }
-    candidates
-        .iter()
-        .zip(depths)
-        .map(|(names, depth)| names.get(depth).cloned().unwrap_or_else(|| repo.clone()))
         .collect()
 }
 
@@ -711,30 +684,13 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
-    fn worktrees_sharing_a_name_walk_up_until_they_differ() {
+    fn worktrees_sharing_a_name_keep_it() {
         assert_eq!(
             names(
                 "app",
                 &["/w/one/feature", "/w/two/feature", "/w/three/other"]
             ),
-            ["one", "two", "other"]
-        );
-        assert_eq!(
-            names("app", &["/w/a/x/feature", "/w/b/x/feature"]),
-            ["a", "b"]
-        );
-        assert_eq!(
-            names("app", &["/x/feature", "/y/x/feature"]),
-            ["x", "y"],
-            "the one that can't walk further keeps its name"
-        );
-    }
-
-    #[test]
-    fn names_that_still_collide_at_the_root_are_kept() {
-        assert_eq!(
-            names("app", &["/feature", "/Feature"]),
-            ["feature", "feature"]
+            ["feature", "feature", "other"]
         );
     }
 
@@ -1007,19 +963,22 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
-    fn reports_stacks_named_like_an_app_or_main() {
+    fn reports_stacks_named_like_an_app_or_main_or_shared_by_a_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         repo(&root.join("acme-web"));
         repo(&root.join("acme-api"));
-        git(
-            &root.join("acme-web"),
-            &["worktree", "add", "-q", "-b", "x", "../wt/api/acme-web"],
-        );
-        git(
-            &root.join("acme-web"),
-            &["worktree", "add", "-q", "-b", "y", "../wt/Main/acme-web"],
-        );
+        for (branch, path) in [
+            ("x", "../wt/api/acme-web"),
+            ("y", "../wt/Main/acme-web"),
+            ("z1", "../one/feature"),
+            ("z2", "../two/feature"),
+        ] {
+            git(
+                &root.join("acme-web"),
+                &["worktree", "add", "-q", "-b", branch, path],
+            );
+        }
         let file = config::parse_project(
             &root.join("acme.toml"),
             &format!(
@@ -1030,7 +989,20 @@ prunable gitdir file points to non-existent location
         .unwrap();
         let (state, problems) = discover_project(file);
         assert_eq!(state.project.apps.len(), 2);
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        let found: Vec<_> = problems
+            .iter()
+            .map(|p| (p.app.as_deref(), p.stack.as_deref()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (None, None),
+                (Some("acme-web"), Some("main")),
+                (Some("acme-web"), Some("feature")),
+                (Some("acme-api"), Some("api")),
+            ],
+            "{problems:?}"
+        );
         assert!(problems[0].message.contains("\"") && problems[0].message.contains("missing"));
         assert!(
             problems[1]
@@ -1039,8 +1011,18 @@ prunable gitdir file points to non-existent location
             "{}",
             problems[1].message
         );
-        assert!(problems[2].message.contains("same name as app acme-api"));
-        assert_eq!(state.stacks().into_iter().collect::<Vec<_>>(), vec!["api"]);
+        assert!(
+            problems[2]
+                .message
+                .contains("have the same stack name (feature)"),
+            "{}",
+            problems[2].message
+        );
+        assert!(problems[3].message.contains("same name as app acme-api"));
+        assert_eq!(
+            state.stacks().into_iter().collect::<Vec<_>>(),
+            vec!["api", "feature"]
+        );
     }
 
     #[test]
