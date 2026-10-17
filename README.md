@@ -221,11 +221,13 @@ Worktrees next to the main checkout keep their whole folder name, so
 lowercased, with anything outside `a-z`, `0-9` and `-` turned into a
 dash.
 
-Two worktrees of one repo can't share a stack, so when their folders
-have the same name, both take the name of the folder above, and so on
-until the names differ. Adding a second worktree with the same folder
-name therefore renames the first one's stack. Switching branches or a
-rebase inside a worktree never does.
+Two worktrees of one repo can't share a stack: when their folders have
+the same name, carte reports it as a problem. Switching branches or a
+rebase inside a worktree never changes a stack's name, but moving or
+renaming its folder (`git worktree move`) does. The checkout then starts
+fresh under the new name, and the old stack is torn down after
+`teardown_delay`, running its [teardown processes](docs/configuration.md#teardown),
+such as dropping its database.
 
 carte doesn't touch databases. Use `CARTE_CHECKOUT` in `database.yml` or
 similar if you want separate data per worktree.
