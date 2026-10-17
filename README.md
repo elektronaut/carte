@@ -208,6 +208,9 @@ name. Every command takes `--json`.
 [docs/cli.md](docs/cli.md) has every command, the JSON output and exit
 codes.
 
+Coding agents can use carte through `carte mcp`, an MCP server; see
+[docs/mcp.md](docs/mcp.md).
+
 ### The terminal UI
 
 `carte` without a command opens it: projects, stacks, apps and processes
