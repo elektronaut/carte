@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_waiting(frame, main, app);
     }
     frame.render_widget(status_line(app), status);
-    frame.render_widget(footer_line(app.focus, app.events), footer);
+    frame.render_widget(footer_line(app.focus, app.events, footer.width), footer);
 
     match &app.mode {
         Mode::Help => render_help(frame, main),
@@ -787,7 +787,8 @@ fn status_line(app: &App) -> Line<'static> {
     Line::default()
 }
 
-fn footer_line(focus: Focus, events: bool) -> Line<'static> {
+/// The most used keys for the focused pane, as many as fit in `width`.
+fn footer_line(focus: Focus, events: bool, width: u16) -> Line<'static> {
     let other = if events { "logs" } else { "events" };
     let keys: &[(&str, &str)] = match focus {
         Focus::Tree => &[
@@ -797,9 +798,10 @@ fn footer_line(focus: Focus, events: bool) -> Line<'static> {
             ("x", "stop"),
             ("r", "restart"),
             ("p", "pin"),
-            ("d", "disable"),
+            ("w", "share"),
             ("/", "filter"),
             ("a", "show"),
+            ("d", "disable"),
             ("tab", "logs"),
         ],
         Focus::Logs => &[
@@ -814,7 +816,13 @@ fn footer_line(focus: Focus, events: bool) -> Line<'static> {
         ],
     };
     let mut spans = vec![Span::raw(" ")];
+    let mut used = 1;
     for (key, what) in keys {
+        let entry = key.chars().count() + 1 + what.chars().count();
+        if used + entry > usize::from(width) {
+            break;
+        }
+        used += entry + 2;
         spans.push(Span::raw(*key).blue().bold());
         spans.push(Span::raw(format!(" {what}  ")));
     }
@@ -1080,7 +1088,7 @@ mod tests {
 │                                                    ││                                                                │
 ╰────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────╯
 
- ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show  tab logs"
+ ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  tab logs"
         );
     }
 
@@ -1293,7 +1301,7 @@ mod tests {
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
- ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show"
+ ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show"
         );
     }
 
@@ -1320,7 +1328,7 @@ mod tests {
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  reconnecting to the daemon…
- ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show"
+ ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show"
         );
     }
 
@@ -1374,7 +1382,7 @@ mod tests {
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 
- ? help  q quit  s start  x stop  r restart  p pin  d disable  / filter  a show  tab logs"
+ ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  tab logs"
         );
     }
 }
