@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::model::{AppSettings, ProcessKind, ProcessSpec, Readiness, Scope};
+use crate::model::{AppSettings, ProcessKind, ProcessSpec, Readiness, Restart, Scope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessSource {
@@ -90,6 +90,16 @@ pub enum ProcfileError {
     CheckoutScopedProvides { process: String },
     #[error("process {process:?} is a teardown, which runs on its own: remove `after`")]
     TeardownAfter { process: String },
+    #[error(
+        "process {process:?} serves HTTP, so it can't have `restart`: its crash stops the instance, and the next request starts it"
+    )]
+    RestartOnHttp { process: String },
+    #[error("process {process:?} is a teardown, which runs once: remove `restart`")]
+    RestartOnTeardown { process: String },
+    #[error(
+        "process {process:?} is a task, which runs once per start: remove restart = \"on-failure\""
+    )]
+    RestartOnTask { process: String },
     #[error("process {process:?} starts after {after:?}, which isn't a process of the app")]
     UnknownAfter { process: String, after: String },
     #[error(
@@ -233,6 +243,7 @@ pub fn build(
         .map(|(name, mut command)| {
             let ov = config.entries.get(&name).cloned().unwrap_or_default();
             let http = ov.http.unwrap_or(name == "web" && !explicit_http);
+            let restart = restart(&name, http, ov.kind, ov.restart)?;
             if http && let Some(rewritten) = rewrite_port(&command) {
                 notices.push(Notice::PortRewritten {
                     process: name.clone(),
@@ -252,7 +263,7 @@ pub fn build(
                     Scope::Instance
                 },
             );
-            ProcessSpec {
+            Ok(ProcessSpec {
                 cwd: ov.cwd,
                 env: ov.env,
                 http,
@@ -263,11 +274,12 @@ pub fn build(
                 kind: ov.kind,
                 after: ov.after.unwrap_or_default(),
                 provides: ov.provides,
+                restart,
                 name,
                 command,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     let http: Vec<String> = processes
         .iter()
@@ -287,6 +299,28 @@ pub fn build(
         teardown,
         notices,
     })
+}
+
+/// The restart policy a process gets: `on-failure` for services and ordinary
+/// processes, `never` for the HTTP process, tasks and teardowns.
+fn restart(
+    name: &str,
+    http: bool,
+    kind: Option<ProcessKind>,
+    configured: Option<Restart>,
+) -> Result<Restart, ProcfileError> {
+    let process = name.to_string();
+    match (configured, kind) {
+        (Some(_), _) if http => Err(ProcfileError::RestartOnHttp { process }),
+        (Some(_), Some(ProcessKind::Teardown)) => Err(ProcfileError::RestartOnTeardown { process }),
+        (Some(Restart::OnFailure), Some(ProcessKind::Task)) => {
+            Err(ProcfileError::RestartOnTask { process })
+        }
+        (Some(restart), _) => Ok(restart),
+        (None, Some(ProcessKind::Task | ProcessKind::Teardown)) => Ok(Restart::Never),
+        (None, _) if http => Ok(Restart::Never),
+        (None, _) => Ok(Restart::OnFailure),
+    }
 }
 
 fn check_kinds(processes: &[ProcessSpec]) -> Result<(), ProcfileError> {
@@ -852,6 +886,84 @@ mod tests {
         let list = build(ProcessSource::Config, Vec::new(), &s).unwrap();
         assert_eq!(names(&list), vec!["web"]);
         assert!(list.notices.is_empty(), "{:?}", list.notices);
+    }
+
+    #[test]
+    fn processes_restart_on_failure_except_http_and_tasks() {
+        let list = with_kinds(&[
+            ("redis", kind("redis-server", SERVICE, &[])),
+            ("migrate", kind("bin/rails db:prepare", TASK, &[])),
+            ("drop", kind("dropdb x", Some(ProcessKind::Teardown), &[])),
+        ])
+        .unwrap();
+        let restarts: Vec<_> = list
+            .processes
+            .iter()
+            .chain(&list.teardown)
+            .map(|p| (p.name.as_str(), p.restart))
+            .collect();
+        assert_eq!(
+            restarts,
+            [
+                ("web", Restart::Never),
+                ("worker", Restart::OnFailure),
+                ("migrate", Restart::Never),
+                ("redis", Restart::OnFailure),
+                ("drop", Restart::Never),
+            ]
+        );
+
+        let never = ProcessOverride {
+            restart: Some(Restart::Never),
+            ..Default::default()
+        };
+        let list = with_kinds(&[("worker", never)]).unwrap();
+        assert_eq!(list.processes[1].restart, Restart::Never);
+        let list = with_kinds(&[(
+            "migrate",
+            ProcessOverride {
+                restart: Some(Restart::Never),
+                ..kind("bin/rails db:prepare", TASK, &[])
+            },
+        )])
+        .unwrap();
+        assert_eq!(list.processes[2].name, "migrate");
+        assert_eq!(list.processes[2].restart, Restart::Never);
+    }
+
+    #[test]
+    fn restart_is_refused_where_it_cannot_apply() {
+        let on_failure = |ov: ProcessOverride| ProcessOverride {
+            restart: Some(Restart::OnFailure),
+            ..ov
+        };
+        let err = with_kinds(&[(
+            "web",
+            ProcessOverride {
+                restart: Some(Restart::Never),
+                ..Default::default()
+            },
+        )])
+        .unwrap_err();
+        assert!(matches!(err, ProcfileError::RestartOnHttp { .. }), "{err}");
+        let err = with_kinds(&[(
+            "migrate",
+            on_failure(kind("bin/rails db:prepare", TASK, &[])),
+        )])
+        .unwrap_err();
+        assert!(matches!(err, ProcfileError::RestartOnTask { .. }), "{err}");
+        let err = with_kinds(&[(
+            "drop",
+            ProcessOverride {
+                restart: Some(Restart::Never),
+                ..kind("dropdb x", Some(ProcessKind::Teardown), &[])
+            },
+        )])
+        .unwrap_err();
+        assert!(
+            matches!(err, ProcfileError::RestartOnTeardown { .. }),
+            "{err}"
+        );
     }
 
     #[test]

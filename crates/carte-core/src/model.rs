@@ -180,6 +180,7 @@ pub struct ProcessOverride {
     pub policy: Option<Policy>,
     pub kind: Option<ProcessKind>,
     pub after: Option<Vec<String>>,
+    pub restart: Option<Restart>,
     /// Env templates added to every process of the instance.
     pub provides: Vec<EnvTemplate>,
     /// Adjusts the process only where it exists: a project-wide entry without a
@@ -209,6 +210,8 @@ pub struct ProcessSpec {
     /// Env templates added to every process of the instance.
     #[serde(default)]
     pub provides: Vec<EnvTemplate>,
+    #[serde(default)]
+    pub restart: Restart,
 }
 
 impl ProcessSpec {
@@ -242,6 +245,16 @@ pub enum ProcessKind {
     Task,
     /// Runs once, in the app's main checkout, after the stack's worktrees are gone.
     Teardown,
+}
+
+/// Whether carte restarts a process that crashes after its instance is ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Restart {
+    /// After a non-zero exit or death by a signal.
+    OnFailure,
+    #[default]
+    Never,
 }
 
 /// An env entry whose key and value may both contain `{{ }}` expressions.

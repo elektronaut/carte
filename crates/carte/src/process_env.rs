@@ -237,6 +237,7 @@ pub fn render_subject(
                 kind: None,
                 after: Vec::new(),
                 provides: Vec::new(),
+                restart: Default::default(),
             };
             &shared_only
         }
