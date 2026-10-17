@@ -2330,6 +2330,16 @@ impl Actor {
                     })
                     .collect())
             }
+            (Some(Stack::Main), Action::Up | Action::Restart) => Ok(state
+                .project
+                .apps
+                .iter()
+                .map(|app| InstanceKey {
+                    project: project.clone(),
+                    app: app.name.clone(),
+                    stack: Stack::Main,
+                })
+                .collect()),
             (_, Action::Up) => Err(format!(
                 "name an app or a stack: this would start every app in {project}"
             )),

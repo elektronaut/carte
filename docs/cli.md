@@ -18,6 +18,11 @@ where every part is optional and inferred from the current directory:
 | `billing/worker` | One process of the app |
 | `acme` | A project: every stack of it |
 
+`up` and `restart` on a stack start the apps that belong to it: on
+`@main` every app of the project, on a branch the apps with a worktree
+on it and what they depend on. `up` refuses a whole project; name an app
+or a stack.
+
 Apps can be named by their full or short name, or any unambiguous part
 of one. When an app has the same name as its project, the name means the
 app; `--project acme` addresses the project itself, and resolves an

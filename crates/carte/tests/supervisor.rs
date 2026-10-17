@@ -481,6 +481,52 @@ async fn a_named_project_is_addressed_apart_from_its_namesake_app() {
 }
 
 #[tokio::test]
+async fn naming_the_main_stack_starts_every_app_on_main() {
+    let setup = Setup::new();
+    let web = setup.app("acme-web", WEB);
+    setup.app("acme-api", "web: FIXTURE_NAME=api exec {fixture}\n");
+    git(
+        &web,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature-x",
+            "../acme-web-feature-x",
+        ],
+    );
+    setup.project("");
+    let handle = setup.start();
+
+    let mut whole = control("", Action::Up);
+    whole.target.project = Some("acme".into());
+    let error = handle.control(whole).await.unwrap_err();
+    assert!(error.contains("name an app or a stack"), "{error}");
+
+    let mut main = control("@main", Action::Up);
+    main.target.cwd = Some(web.clone());
+    let response = handle.control(main).await.unwrap();
+    assert_eq!(response.affected, ["acme-api@main", "acme-web@main"]);
+    wait_for(&handle, "both ready", |s| {
+        ["acme-web", "acme-api"]
+            .iter()
+            .all(|app| status(s, app, "main").state == InstanceState::Ready)
+    })
+    .await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "feature-x").state,
+        InstanceState::Stopped
+    );
+
+    let mut restart = control("@main", Action::Restart);
+    restart.target.project = Some("acme".into());
+    let response = handle.control(restart).await.unwrap();
+    assert_eq!(response.affected, ["acme-api@main", "acme-web@main"]);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn disabled_processes_stay_down_until_started_by_hand() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);
