@@ -67,7 +67,7 @@ impl NodeId {
     }
 
     fn expanded_by_default(&self) -> bool {
-        matches!(self, NodeId::Project { .. } | NodeId::Stack { .. })
+        matches!(self, NodeId::Project { .. })
     }
 }
 
@@ -156,6 +156,14 @@ impl Node {
     /// The innermost merged level, which controls and logs act on.
     pub fn id(&self) -> &NodeId {
         self.ids.last().expect("a node has at least one id")
+    }
+
+    /// A stack folded into its project opens like the project.
+    fn expanded_by_default(&self) -> bool {
+        match self.ids.as_slice() {
+            [.., NodeId::Project { .. }, NodeId::Stack { .. }] => true,
+            _ => self.id().expanded_by_default(),
+        }
     }
 
     fn leaf(id: NodeId, label: &str, search: &str, status: Status) -> Self {
@@ -499,11 +507,11 @@ pub struct Fold {
 }
 
 impl Fold {
-    pub fn is_expanded(&self, id: &NodeId) -> bool {
+    pub fn is_expanded(&self, node: &Node) -> bool {
         self.expanded
-            .get(id)
+            .get(node.id())
             .copied()
-            .unwrap_or_else(|| id.expanded_by_default())
+            .unwrap_or_else(|| node.expanded_by_default())
     }
 
     /// The visible rows. A filter keeps matching nodes with their subtrees and opens
@@ -542,7 +550,7 @@ impl Fold {
             return false;
         }
         let expandable = !below.is_empty();
-        let expanded = expandable && (!matched || self.is_expanded(node.id()));
+        let expanded = expandable && (!matched || self.is_expanded(node));
         out.push(Row {
             path,
             depth,
@@ -788,25 +796,14 @@ mod tests {
     }
 
     #[test]
-    fn instances_start_folded_and_unfold_on_request() {
+    fn stacks_and_instances_start_folded_and_unfold_on_request() {
         let roots = big();
         let mut fold = Fold::default();
-        assert_eq!(
-            labels(&roots, &fold),
-            [
-                "nova",
-                "  main",
-                "    billing",
-                "    frontend",
-                "  feature-x",
-                "    billing",
-                "    frontend"
-            ]
-        );
+        assert_eq!(labels(&roots, &fold), ["nova", "  main", "  feature-x"]);
+        fold.expanded
+            .insert(roots[0].children[1].id().clone(), true);
         fold.expanded
             .insert(roots[0].children[1].children[1].id().clone(), true);
-        fold.expanded
-            .insert(roots[0].children[0].id().clone(), false);
         assert_eq!(
             labels(&roots, &fold),
             [
@@ -838,18 +835,21 @@ mod tests {
         };
         assert_eq!(
             labels(&roots, &fold),
-            ["nova", "  feature-x", "    billing", "    frontend"],
-            "a matching stack keeps its subtree"
+            ["nova", "  feature-x"],
+            "a matching stack keeps its fold"
         );
     }
 
     #[test]
     fn running_only_hides_stopped_instances_and_empty_groups() {
         let roots = big();
-        let fold = Fold {
+        let mut fold = Fold {
             show: Show::Running,
             ..Fold::default()
         };
+        for stack in &roots[0].children {
+            fold.expanded.insert(stack.id().clone(), true);
+        }
         assert_eq!(
             labels(&roots, &fold),
             [
@@ -889,10 +889,12 @@ mod tests {
         snap.projects[0].stacks[0].instances[1].public_url =
             Some("https://nova-frontend.example.com".into());
         let roots = build(&snap);
-        let fold = Fold {
+        let mut fold = Fold {
             show: Show::Shared,
             ..Fold::default()
         };
+        fold.expanded
+            .insert(roots[0].children[0].id().clone(), true);
         assert_eq!(labels(&roots, &fold), ["nova", "  main", "    frontend"]);
     }
 

@@ -1062,6 +1062,7 @@ mod tests {
     fn moving_follows_the_new_selection() {
         let (mut app, now) = connected();
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         let commands = press(&mut app, now, KeyCode::Down);
         assert_eq!(follows(&commands), ["nova-billing@main"]);
         assert_eq!(app.logs.prefix, Prefix::Process);
@@ -1072,6 +1073,7 @@ mod tests {
     fn controls_address_the_selection() {
         let (mut app, now) = connected();
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         let commands = press(&mut app, now, KeyCode::Char('r'));
         let [Command::Control { request, verb }] = commands.as_slice() else {
@@ -1086,6 +1088,7 @@ mod tests {
     fn a_marker_goes_to_the_selection() {
         let (mut app, now) = connected();
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         let commands = press(&mut app, now, KeyCode::Char('-'));
         let [Command::Mark(target)] = commands.as_slice() else {
@@ -1098,6 +1101,7 @@ mod tests {
     fn saving_writes_the_temporary_pin() {
         let (mut app, now) = connected();
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         assert!(press(&mut app, now, KeyCode::Char('S')).is_empty());
         assert_eq!(
@@ -1256,6 +1260,7 @@ mod tests {
         );
 
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         let commands = press(&mut app, now, KeyCode::Char('W'));
         let [Command::Share(request)] = commands.as_slice() else {
@@ -1330,8 +1335,8 @@ mod tests {
         let mut snapshot = shared_sample();
         snapshot.tunnel.as_mut().unwrap().single_host = true;
         app.update(Event::Snapshot(Box::new(snapshot)), now);
-        for _ in 0..3 {
-            press(&mut app, now, KeyCode::Down);
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down, KeyCode::Down] {
+            press(&mut app, now, code);
         }
         assert!(press(&mut app, now, KeyCode::Char('w')).is_empty());
         let Mode::Confirm(Confirm::ReplaceShare { shared, .. }) = &app.mode else {
@@ -1362,6 +1367,7 @@ mod tests {
         );
 
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         assert_eq!(
             press(&mut app, now, KeyCode::Char('y')),
@@ -1386,7 +1392,9 @@ mod tests {
             "a process copies its app's address"
         );
 
-        press(&mut app, now, KeyCode::End);
+        for code in [KeyCode::End, KeyCode::Right, KeyCode::End] {
+            press(&mut app, now, code);
+        }
         assert!(press(&mut app, now, KeyCode::Char('Y')).is_empty());
         assert_eq!(
             app.notice.as_ref().map(|n| n.text.as_str()),
@@ -1401,6 +1409,7 @@ mod tests {
         assert_eq!(app.mode, Mode::Normal, "a project has no env");
 
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         let commands = press(&mut app, now, KeyCode::Char('v'));
         let [Command::FetchEnv(target)] = commands.as_slice() else {
@@ -1450,12 +1459,7 @@ mod tests {
         let commands = app.update(Event::Snapshot(Box::new(snapshot.clone())), now);
         assert_eq!(app.selected, Some(here.clone()));
         assert_eq!(follows(&commands), ["nova-frontend@feature-x"]);
-        assert!(
-            app.fold.is_expanded(&NodeId::Folder {
-                folder: "clients".into()
-            }),
-            "its folder opened"
-        );
+        assert!(app.fold.is_expanded(&app.roots[0]), "its folder opened");
 
         press(&mut app, now, KeyCode::Up);
         app.update(Event::Snapshot(Box::new(snapshot)), now);
@@ -1564,14 +1568,15 @@ mod tests {
     fn folding_keeps_the_cursor_on_the_folded_node() {
         let (mut app, now) = connected();
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         press(&mut app, now, KeyCode::Right);
-        assert_eq!(app.rows.len(), 9);
+        assert_eq!(app.rows.len(), 7);
         press(&mut app, now, KeyCode::Down);
         press(&mut app, now, KeyCode::Left);
         assert_eq!(app.cursor, 2, "left on a leaf goes to the parent");
         press(&mut app, now, KeyCode::Left);
-        assert_eq!(app.rows.len(), 7);
+        assert_eq!(app.rows.len(), 5);
         assert_eq!(app.cursor, 2);
     }
 
@@ -1586,7 +1591,7 @@ mod tests {
         assert_eq!(app.rows.len(), 5);
         press(&mut app, now, KeyCode::Esc);
         assert_eq!(app.fold.filter, "");
-        assert_eq!(app.rows.len(), 7);
+        assert_eq!(app.rows.len(), 3);
     }
 
     #[test]
@@ -1601,8 +1606,14 @@ mod tests {
     #[test]
     fn a_snapshot_keeps_the_selection_by_identity() {
         let (mut app, now) = connected();
-        for _ in 0..6 {
-            press(&mut app, now, KeyCode::Down);
+        for code in [
+            KeyCode::Down,
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Down,
+        ] {
+            press(&mut app, now, code);
         }
         let selected = app.selected.clone();
         let mut next = sample();
