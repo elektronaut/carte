@@ -395,6 +395,7 @@ pub fn collisions(state: &ProjectState) -> Vec<Problem> {
             Some(Problem {
                 project: Some(project.name.clone()),
                 app: Some(app.name.clone()),
+                stack: Some(slug.clone()),
                 message: format!(
                     "stack {slug} has the same name as app {}: {slug}.{} goes to the app, \
                      so the stack is unreachable by hostname; rename its worktree folders",

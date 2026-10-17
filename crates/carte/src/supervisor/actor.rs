@@ -1592,7 +1592,9 @@ impl Actor {
                 let state = self.world.project(project);
                 let troubled = match state {
                     None => Some("its project isn't loaded".to_string()),
-                    Some(_) => troubled.get(project).cloned(),
+                    Some(_) => troubled
+                        .get(project)
+                        .map(|reason| format!("project {project} has a problem: {reason}")),
                 };
                 let state = state.filter(|_| troubled.is_none());
                 teardown::Candidate {

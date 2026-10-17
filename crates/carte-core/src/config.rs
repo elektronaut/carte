@@ -499,6 +499,7 @@ pub fn assemble_project(
     let problem = |app: &str, message: String| Problem {
         project: Some(project_name.clone()),
         app: Some(app.to_string()),
+        stack: None,
         message,
     };
 
@@ -548,6 +549,7 @@ pub fn assemble_project(
                     None => problems.push(Problem {
                         project: Some(project_name.clone()),
                         app: None,
+                        stack: None,
                         message: format!("[processes.{process}] lists unknown app {entry:?}"),
                     }),
                 }
@@ -1434,6 +1436,7 @@ mod tests {
             vec![Problem {
                 project: Some("nova".into()),
                 app: None,
+                stack: None,
                 message: "[processes.redis] lists unknown app \"nova-nope\"".into(),
             }]
         );

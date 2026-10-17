@@ -237,7 +237,12 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
     let problem = |app: Option<&str>, message: String| Problem {
         project: Some(project_name.clone()),
         app: app.map(str::to_string),
+        stack: None,
         message,
+    };
+    let stack_problem = |app: &str, stack: &str, message: String| Problem {
+        stack: Some(stack.to_string()),
+        ..problem(Some(app), message)
     };
     let (dirs, repo_problems) = expand_repos(&file.repos);
     let mut problems: Vec<Problem> = repo_problems
@@ -279,20 +284,22 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
         let (wts, on_main): (Vec<Worktree>, Vec<Worktree>) =
             wts.into_iter().partition(|wt| wt.slug != "main");
         for wt in on_main {
-            problems.push(problem(
-                Some(&app.name),
+            problems.push(stack_problem(
+                &app.name,
+                "main",
                 format!(
-                    "worktree {} is skipped: its stack would be named main, like the main checkout's",
+                    "worktree {} is skipped: its stack would be named main, like the main checkout's; rename its folder",
                     wt.path.display()
                 ),
             ));
         }
         for (i, wt) in wts.iter().enumerate() {
             if let Some(other) = wts[..i].iter().find(|o| o.slug == wt.slug) {
-                problems.push(problem(
-                    Some(&app.name),
+                problems.push(stack_problem(
+                    &app.name,
+                    &wt.slug,
                     format!(
-                        "worktrees {} and {} have the same stack name ({}) all the way up their paths",
+                        "worktrees {} and {} have the same stack name ({}); rename one of their folders",
                         other.path.display(),
                         wt.path.display(),
                         wt.slug
@@ -340,6 +347,7 @@ pub fn load_world(config_dir: &Path) -> World {
         Err(err) => world.problems.push(Problem {
             project: None,
             app: None,
+            stack: None,
             message: format!("{err}; using defaults"),
         }),
     }
@@ -351,6 +359,7 @@ pub fn load_world(config_dir: &Path) -> World {
             world.problems.push(Problem {
                 project: None,
                 app: None,
+                stack: None,
                 message: format!("{}: {err}", projects_dir.display()),
             });
             Vec::new()
@@ -362,6 +371,7 @@ pub fn load_world(config_dir: &Path) -> World {
             world.problems.push(Problem {
                 project: Some(name.clone()),
                 app: None,
+                stack: None,
                 message: format!(
                     "{} is skipped: {} already defines a project named {name}, and names are hostnames, so they must be unique across folders",
                     path.display(),
@@ -380,6 +390,7 @@ pub fn load_world(config_dir: &Path) -> World {
             Err(err) => world.problems.push(Problem {
                 project: path.file_stem().map(|s| s.to_string_lossy().into_owned()),
                 app: None,
+                stack: None,
                 message: err.to_string(),
             }),
         }
@@ -477,6 +488,7 @@ fn resolve_elsewhere(world: &mut World) {
                     Err(message) => world.problems.push(Problem {
                         project: Some(project.clone()),
                         app: Some(app.name.clone()),
+                        stack: None,
                         message,
                     }),
                 }
