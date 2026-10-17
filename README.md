@@ -219,6 +219,7 @@ carte logs -f billing        # follow logs
 carte pin billing --save     # keep it running, and save that
 carte open                   # open the app you're in
 carte stop-all --idle        # stop what nobody is using
+carte prune                  # remove data of branches and apps that are gone
 ```
 
 Addresses are `app@branch/process`, each part optional and inferred from

@@ -41,6 +41,7 @@ address inside it when given one.
 | `carte share [address] [--apps a,b] [--ttl 2h] [--auth] [--pin] [--replace]` | Put apps on the public internet |
 | `carte unshare [address]` | End a share |
 | `carte stop-all [--idle]` | Stop every instance, or the idle ones |
+| `carte prune [--dry-run] [-y]` | Remove leftover state folders, run directories and pidfiles; see below |
 | `carte project add\|ls\|edit\|rm` | Manage project files |
 | `carte setup [--dry-run\|--check\|--uninstall] [--share domain]` | Set up the machine |
 | `carte import puma-dev` | Create projects from `~/.puma-dev` |
@@ -53,6 +54,25 @@ address inside it when given one.
 `up` and `restart` print `ready <app@stack>` per instance once it answers.
 When one fails, they print why with its last log lines and exit with 5.
 Restarting a single process waits for its app.
+
+### Prune
+
+`carte prune` removes [instance directories](configuration.md#instance-directories)
+and pidfiles that nothing that exists owns any more: those of stacks with
+no worktree (never `main`), of apps no longer in their project, and of
+projects whose file is gone. It lists them by project and stack with
+their sizes, then asks before removing them. It only removes files: it
+runs no commands and doesn't touch databases, so it names the stacks whose
+external resources may remain.
+
+It leaves alone anything of a running instance, and every project whose
+configuration or discovery has a problem (a `repos` entry that matches
+nothing, a failing `git worktree list`), and says so.
+
+| Option | |
+| --- | --- |
+| `--dry-run` | Only list |
+| `-y`, `--yes` | Remove without asking; needed when stdin isn't a terminal |
 
 ### Logs
 
@@ -119,6 +139,23 @@ where `kind` is one of `started`, `ready`, `stopped`, `crashed`,
 
 **`up`, `down`, `restart`, `pin` and the rest** print
 `{ affected, messages, failures: [{ instance, title, detail, log }] }`.
+
+**`carte prune --json`** needs `--dry-run` or `--yes`, and prints
+`{ list, result }`:
+
+```
+list:   { candidates: [{ kind, project, stack, app, path, bytes }], total_bytes,
+          stacks: [{ project, stack }], skipped: [{ project, stack, reason }] }
+result: { removed: [Candidate], removed_bytes, kept: [{ path, reason }],
+          errors: [{ path, reason }] }
+```
+
+`kind` is `project`, `stack`, `app`, `run-dir` or `pidfile`; `project`,
+`stack` and `app` are null when they don't apply, and a run directory
+nothing names has no project. `stacks` are those whose external resources
+may remain. `result` is null with `--dry-run` or when there's nothing to
+remove; `kept` lists what stopped being a leftover or started running
+before it was removed.
 
 ## Exit codes
 

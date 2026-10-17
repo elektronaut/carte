@@ -788,3 +788,104 @@ fn mcp_answers_from_the_checkout_it_runs_in() {
         serde_json::from_slice(&daemon.run(&["status", "web", "--json"]).stdout).unwrap();
     assert_eq!(ready.instances[0].state, carte_api::InstanceState::Ready);
 }
+
+#[test]
+fn prune_removes_leftovers_of_what_no_longer_exists() {
+    use carte_core::model::{InstanceKey, Stack};
+    let daemon = Daemon::start();
+    let paths = carte::paths::Paths::under(&daemon.root);
+    let roots = paths.dir_roots();
+    let key = |project: &str, app: &str, stack: Stack| InstanceKey {
+        project: project.into(),
+        app: app.into(),
+        stack,
+    };
+    assert!(
+        daemon
+            .request("web.acme.test", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+    let main = roots.instance(&key("acme", "acme-web", Stack::Main));
+    assert!(main.state.is_dir());
+
+    let feature = roots.instance(&key("acme", "acme-web", Stack::Branch("feature-x".into())));
+    let old_app = roots.instance(&key("acme", "acme-old", Stack::Main));
+    let gone = roots.instance(&key("gone", "gone-web", Stack::Main));
+    let broken = roots.instance(&key("broken", "broken-web", Stack::Branch("x".into())));
+    for dirs in [&feature, &old_app, &gone, &broken] {
+        std::fs::create_dir_all(&dirs.state).unwrap();
+        std::fs::create_dir_all(&dirs.run).unwrap();
+    }
+    std::fs::write(feature.state.join("dump.rdb"), vec![0; 1000]).unwrap();
+    let pidfile = paths.pidfile(&key("acme", "acme-old", Stack::Main));
+    std::fs::write(&pidfile, "1").unwrap();
+    let unknown = roots.run.join("zzzzzzzz");
+    std::fs::create_dir_all(&unknown).unwrap();
+    std::fs::write(
+        daemon.root.join("config/projects/broken.toml"),
+        format!("repos = \"{}/nothing-*\"\n", daemon.root.display()),
+    )
+    .unwrap();
+
+    let json = stdout(&daemon.run(&["prune", "--dry-run", "--json"]));
+    let output: carte_api::PruneOutput = serde_json::from_str(&json).unwrap();
+    assert_eq!(output.result, None);
+    let listed: Vec<PathBuf> = output
+        .list
+        .candidates
+        .iter()
+        .map(|c| c.path.clone())
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            roots.stack_dir("acme", "feature-x"),
+            feature.run.clone(),
+            old_app.state.clone(),
+            old_app.run.clone(),
+            pidfile.clone(),
+            roots.data.join("gone"),
+            gone.run.clone(),
+        ]
+    );
+    assert!(output.list.total_bytes >= 1000);
+    let stacks: Vec<String> = output
+        .list
+        .stacks
+        .iter()
+        .map(|s| format!("{}@{}", s.project, s.stack))
+        .collect();
+    assert_eq!(stacks, ["acme@feature-x", "gone@main"]);
+    assert_eq!(output.list.skipped.len(), 1, "{:?}", output.list.skipped);
+    assert_eq!(output.list.skipped[0].project.as_deref(), Some("broken"));
+
+    let refused = daemon
+        .command(&["prune"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("--yes"), "{stderr}");
+    assert!(stdout(&refused).contains("acme @feature-x"));
+    assert!(feature.state.is_dir());
+
+    let json = stdout(&daemon.run(&["prune", "--yes", "--json"]));
+    let output: carte_api::PruneOutput = serde_json::from_str(&json).unwrap();
+    let result = output.result.unwrap();
+    assert_eq!(result.removed.len(), listed.len(), "{result:?}");
+    assert!(
+        result.kept.is_empty() && result.errors.is_empty(),
+        "{result:?}"
+    );
+    for path in &listed {
+        assert!(!path.exists(), "{} survived", path.display());
+    }
+    for kept in [&main.state, &main.run, &broken.state, &broken.run, &unknown] {
+        assert!(kept.is_dir(), "{} was removed", kept.display());
+    }
+
+    let again = stdout(&daemon.run(&["prune", "--dry-run"]));
+    assert!(again.starts_with("Nothing to prune.\n"), "{again}");
+    assert!(again.contains("Skipped broken: "), "{again}");
+}

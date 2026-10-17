@@ -23,6 +23,8 @@ mod tasks;
 mod tree;
 mod view;
 
+pub(crate) use view::format_bytes;
+
 pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

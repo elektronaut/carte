@@ -25,6 +25,8 @@ pub mod paths {
     pub const UNSHARE: &str = "/v1/unshare";
     /// Newline-delimited JSON `Event`s.
     pub const EVENTS: &str = "/v1/events";
+    /// GET lists leftovers as a `PruneList`; POST a `PruneRequest` removes them.
+    pub const PRUNE: &str = "/v1/prune";
 }
 
 /// A CLI address (`app@branch/process`, any part optional) and the directory it was
@@ -535,6 +537,87 @@ pub struct EnvVar {
     pub source: String,
     /// Sources this value replaced, earliest first.
     pub overrides: Vec<String>,
+}
+
+/// Directories and pidfiles nothing that exists owns any more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneList {
+    /// Grouped by project and stack; unattributed run directories last.
+    pub candidates: Vec<PruneCandidate>,
+    pub total_bytes: u64,
+    /// Stacks whose folder is among the candidates: their teardown never succeeded,
+    /// so external resources such as databases may remain.
+    pub stacks: Vec<PruneStack>,
+    /// What was left alone, and why.
+    pub skipped: Vec<PruneSkip>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneCandidate {
+    pub kind: PruneKind,
+    /// `None` for a run directory nothing on disk names.
+    pub project: Option<String>,
+    pub stack: Option<String>,
+    pub app: Option<String>,
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PruneKind {
+    /// The state folder of a project whose file is gone.
+    Project,
+    /// The state folder of a stack with no worktree.
+    Stack,
+    /// The state folder of an app no longer in its project.
+    App,
+    RunDir,
+    Pidfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneStack {
+    pub project: String,
+    pub stack: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneSkip {
+    /// `None` when the reason covers every project.
+    pub project: Option<String>,
+    pub stack: Option<String>,
+    pub reason: String,
+}
+
+/// Removes these candidates, each only if it is still a leftover and not running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneRequest {
+    pub paths: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneResult {
+    pub removed: Vec<PruneCandidate>,
+    pub removed_bytes: u64,
+    /// Asked for, but no longer a leftover, or running now.
+    pub kept: Vec<PruneKept>,
+    /// Couldn't be removed.
+    pub errors: Vec<PruneKept>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneKept {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// `carte prune --json`: the leftovers, and what removing them did; `result` is null
+/// with `--dry-run` or when there was nothing to remove.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneOutput {
+    pub list: PruneList,
+    pub result: Option<PruneResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
