@@ -335,6 +335,7 @@ fn merge_process(over: ProcessOverride, base: ProcessOverride) -> ProcessOverrid
         kind: over.kind.or(base.kind),
         after: over.after.or(base.after),
         provides: merge_env(base.provides, over.provides),
+        if_present: over.if_present && base.if_present,
     }
 }
 
@@ -379,6 +380,7 @@ impl RawProcess {
                 kind: self.kind,
                 after: self.after,
                 provides: self.provides.0,
+                if_present: false,
             },
         })
     }
@@ -407,7 +409,8 @@ fn project_process_table<'de, D: Deserializer<'de>>(
     let raw = BTreeMap::<String, RawProcess>::deserialize(d)?;
     raw.into_iter()
         .map(|(name, p)| {
-            let declared = p.into_project_process::<D::Error>(&name)?;
+            let mut declared = p.into_project_process::<D::Error>(&name)?;
+            declared.process.if_present = declared.process.command.is_none();
             Ok((name, declared))
         })
         .collect()
@@ -1217,6 +1220,47 @@ mod tests {
             file.apps["foo"].processes["redis"].provides,
             env(&[("REDIS_URL", "x")])
         );
+    }
+
+    #[test]
+    fn project_processes_without_a_command_only_adjust_existing_ones() {
+        let file = project(
+            r#"
+            [processes.worker]
+            policy = "disabled"
+
+            [processes.redis]
+            command = "redis-server --port $PORT"
+
+            [apps.app-one]
+            replace_processes = true
+            [apps.app-one.processes.web]
+            command = "bin/serve"
+
+            [apps.app-two.processes.worker]
+            pty = false
+            "#,
+        )
+        .unwrap();
+        let (project, problems) =
+            assemble_project(file, vec![discovered("app-one"), discovered("app-two")]);
+        assert!(problems.is_empty(), "{problems:?}");
+        let entries = |app: &str| &project.app(app).unwrap().settings.processes.entries;
+        assert!(entries("app-one")["worker"].if_present);
+        assert!(!entries("app-one")["redis"].if_present);
+        assert!(!entries("app-one")["web"].if_present);
+        assert!(!entries("app-two")["worker"].if_present);
+        assert_eq!(entries("app-two")["worker"].policy, Some(Policy::Disabled));
+
+        let list = crate::procfile::build(
+            crate::procfile::ProcessSource::Config,
+            Vec::new(),
+            &project.app("app-one").unwrap().settings,
+        )
+        .unwrap();
+        let names: Vec<&str> = list.processes.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["redis", "web"]);
+        assert!(list.notices.is_empty(), "{:?}", list.notices);
     }
 
     #[test]

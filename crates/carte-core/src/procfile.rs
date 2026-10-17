@@ -84,6 +84,10 @@ pub enum ProcfileError {
         "process {process:?} is a {kind}, which runs per instance: remove scope = \"checkout\""
     )]
     CheckoutScopedKind { process: String, kind: &'static str },
+    #[error(
+        "process {process:?} runs once per checkout, so it can't have `provides`: remove scope = \"checkout\""
+    )]
+    CheckoutScopedProvides { process: String },
     #[error("process {process:?} is a teardown, which runs on its own: remove `after`")]
     TeardownAfter { process: String },
     #[error("process {process:?} starts after {after:?}, which isn't a process of the app")]
@@ -209,6 +213,7 @@ pub fn build(
             (Some(entry), Some(command)) => entry.1 = command.clone(),
             (Some(_), None) => {}
             (None, Some(command)) => commands.push((name.clone(), command.clone())),
+            (None, None) if ov.if_present => {}
             (None, None) if config.replace => {
                 return Err(ProcfileError::MissingCommand {
                     process: name.clone(),
@@ -237,7 +242,11 @@ pub fn build(
                 command = rewritten;
             }
             let scope = ov.scope.unwrap_or(
-                if !http && ov.kind.is_none() && is_watcher(&name, &command) {
+                if !http
+                    && ov.kind.is_none()
+                    && ov.provides.is_empty()
+                    && is_watcher(&name, &command)
+                {
                     Scope::Checkout
                 } else {
                     Scope::Instance
@@ -303,6 +312,14 @@ fn check_kinds(processes: &[ProcessSpec]) -> Result<(), ProcfileError> {
             return Err(ProcfileError::CheckoutScopedKind {
                 process: p.name.clone(),
                 kind,
+            });
+        }
+        if p.scope == Scope::Checkout
+            && p.kind != Some(ProcessKind::Teardown)
+            && !p.provides.is_empty()
+        {
+            return Err(ProcfileError::CheckoutScopedProvides {
+                process: p.name.clone(),
             });
         }
         for after in &p.after {
@@ -436,7 +453,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::model::{Policy, ProcessConfig, ProcessOverride};
+    use crate::model::{EnvTemplate, Policy, ProcessConfig, ProcessOverride};
 
     fn settings(replace: bool, entries: &[(&str, ProcessOverride)]) -> AppSettings {
         AppSettings {
@@ -779,6 +796,62 @@ mod tests {
             matches!(err, ProcfileError::CheckoutScopedKind { kind: "task", .. }),
             "{err}"
         );
+    }
+
+    #[test]
+    fn only_processes_run_per_instance_provide_env() {
+        let provides = vec![EnvTemplate {
+            key: "X_URL".into(),
+            value: "http://localhost:{{port}}".into(),
+        }];
+        let watcher = ProcessOverride {
+            command: Some("bin/watch --watch".into()),
+            provides: provides.clone(),
+            ..Default::default()
+        };
+        let list = with_kinds(&[("watcher", watcher.clone())]).unwrap();
+        let p = list.processes.iter().find(|p| p.name == "watcher").unwrap();
+        assert_eq!(p.scope, Scope::Instance);
+
+        let checkout = ProcessOverride {
+            scope: Some(Scope::Checkout),
+            ..watcher
+        };
+        let err = with_kinds(&[("watcher", checkout)]).unwrap_err();
+        assert!(
+            matches!(err, ProcfileError::CheckoutScopedProvides { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn project_wide_adjustments_skip_apps_without_the_process() {
+        let disabled = ProcessOverride {
+            policy: Some(Policy::Disabled),
+            if_present: true,
+            ..Default::default()
+        };
+        let base = vec![
+            ("web".to_string(), "bin/serve".to_string()),
+            ("worker".to_string(), "bin/jobs".to_string()),
+        ];
+        let s = settings(
+            false,
+            &[("worker", disabled.clone()), ("clock", disabled.clone())],
+        );
+        let list = build(ProcessSource::Procfile, base, &s).unwrap();
+        assert_eq!(names(&list), vec!["web", "worker"]);
+        assert_eq!(list.processes[1].policy, Policy::Disabled);
+        assert!(list.notices.is_empty(), "{:?}", list.notices);
+
+        let web = ProcessOverride {
+            command: Some("bin/serve".into()),
+            ..Default::default()
+        };
+        let s = settings(true, &[("web", web), ("worker", disabled)]);
+        let list = build(ProcessSource::Config, Vec::new(), &s).unwrap();
+        assert_eq!(names(&list), vec!["web"]);
+        assert!(list.notices.is_empty(), "{:?}", list.notices);
     }
 
     #[test]
