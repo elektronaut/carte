@@ -158,18 +158,16 @@ branches:
 - The folder name is lowercased, with anything outside `a-z`, `0-9` and
   `-` turned into a dash.
 - A folder with the repo's own name gives way to the folder above it.
-- When two worktrees of the same repo would get the same name, both
-  take the name of the folder above, until they differ. Adding such a
-  worktree renames the existing one's stack, along with its hostnames,
-  state directory and `stack.id`.
 - Worktrees of different repos with the same name form one stack.
 - Worktrees with a detached HEAD count like any other.
+- Moving or renaming a worktree's folder (`git worktree move`) gives it
+  a new stack name, and the old stack is
+  [torn down](#teardown).
 
-Problems are reported when two worktrees of a repo still have the same
-name at the top of the filesystem, and when a worktree's name is
-`main` (it's skipped). A stack can't be named like an app of its
-project either: the app wins, and the stack is reported as
-unreachable.
+Problems are reported when two worktrees of a repo have the same name,
+and when a worktree's name is `main` (it's skipped). A stack can't be
+named like an app of its project either: the app wins, and the stack is
+reported as unreachable.
 
 ## Apps
 
@@ -449,24 +447,31 @@ DATABASE = "billing_{{stack | snake}}"
   any more, and the directories of the worktrees carte last saw for it
   are gone. A rebase or a `git switch` inside the worktree keeps the
   directory, so it never counts, however long it takes; neither does
-  deleting a branch. A worktree whose stack was renamed, because a
-  second worktree with the same folder name came along, keeps its
-  directory too, so its old stack isn't torn down; `carte prune` lists
-  it. The `main` stack is never removed, and a stack where no instance
-  ever ran has nothing to tear down. carte checks when its worktrees
-  change and every 30 seconds.
+  deleting a branch. The `main` stack is never removed, and a stack
+  where no instance ever ran has nothing to tear down. carte checks
+  when its worktrees change and every 30 seconds.
+- **Moving a worktree.** The stack is named after the worktree's
+  folder, so moving or renaming the folder (`git worktree move`) to a
+  different name removes the old stack: its teardown runs after
+  `teardown_delay`, dropping its database or whatever else the
+  teardown processes remove, while the checkout starts fresh under the
+  new name. Move it back within the delay to keep the old stack.
 - **Delay.** The stack must stay removed for `teardown_delay` (`"10m"`
-  by default), so moving a worktree or adding it again doesn't tear
-  anything down; a worktree with the name coming back cancels it. If
+  by default), so moving a worktree to a folder with the same name or
+  adding it again doesn't tear anything down; a worktree with the name
+  coming back cancels it. If
   it comes back while the teardown runs, the teardown processes that
   already ran aren't undone, but the folders are kept. carte only tears
   down stacks it saw with a worktree since the daemon started, and keeps
   pending teardowns in memory: a daemon restart forgets them.
 - **Discovery.** Nothing is torn down in a project whose configuration
-  or discovery has a problem, such as a failing `git worktree list`, or
-  whose `stack.toml` can't be read. A pending teardown then pauses
-  (`teardown-paused` in `carte events`): its delay keeps counting, but
-  it only runs once carte can tell again that the stack is removed.
+  or discovery has a problem, such as a failing `git worktree list` or
+  a `repos` entry that matches nothing, or in a stack whose
+  `stack.toml` can't be read. A pending teardown then pauses
+  (`teardown-paused` in `carte events`, with the problem): its delay
+  keeps counting, but it only runs once carte can tell again that the
+  stack is removed. Problems with a single worktree, such as one named
+  `main` or two of a repo with the same name, don't pause the others.
 - **Where.** Instances still running in the stack, such as apps without
   a worktree running from their main checkout, are stopped first. Then
   each app with a teardown process runs it once, in the app's main

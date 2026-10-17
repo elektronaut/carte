@@ -62,8 +62,10 @@ stack's worktrees are removed and stay gone for `teardown_delay` (10
 minutes by default), carte runs them once in the main checkout with that
 stack's env, typically dropping the stack's database, and then deletes the
 stack's data. Switching branches inside a worktree never triggers them.
-They are destructive: removing a worktree has consequences, and adding it
-back within the delay cancels them. `carte events` shows `teardown-scheduled`, `teardown-paused` (the
+They are destructive: removing a worktree has consequences, and so does
+moving or renaming its folder (`git worktree move`), which gives it a new
+stack name and tears down the old one. Adding it back within the delay
+cancels them. `carte events` shows `teardown-scheduled`, `teardown-paused` (the
 project has a problem, so carte can't tell), `teardown-cancelled`,
 `teardown-finished` and `teardown-failed`.
 
@@ -138,8 +140,8 @@ Ask the user first before:
 - `carte stop-all`, or stopping apps you're not working on
 - `carte prune` without `--dry-run`: it deletes the data of stacks, apps
   and projects that are gone
-- removing a worktree in a project with teardown processes: after the
-  delay, they destroy that stack's data
+- removing, moving or renaming a worktree in a project with teardown
+  processes: after the delay, they destroy that stack's data
 - `--save` on `pin`, `unpin`, `disable` or `enable`, which edits project
   files
 - editing anything under `~/.config/carte`
