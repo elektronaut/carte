@@ -448,6 +448,20 @@ impl Actor {
                 let running = self.running();
                 let _ = reply.send(prune::detach(orphans, &running, &self.paths.dir_roots()));
             }
+            Msg::DetachStack {
+                project,
+                stack,
+                orphans,
+                reply,
+            } => {
+                let present = self
+                    .world
+                    .project(&project)
+                    .is_some_and(|state| state.stacks().contains(&stack));
+                let detached = (!present)
+                    .then(|| prune::detach(orphans, &self.running(), &self.paths.dir_roots()));
+                let _ = reply.send(detached);
+            }
             Msg::Internal(internal) => self.internal(internal),
         }
     }
@@ -1483,7 +1497,9 @@ impl Actor {
     // Teardown
 
     /// Notes the stacks that have a worktree, cancels pending teardowns of those that
-    /// came back, and checks off the actor's thread whether the others are removed.
+    /// came back, and checks off the actor's thread whether the others are removed:
+    /// every seen stack when discovery changed or every 30s, and in between only those
+    /// whose delay has passed.
     fn check_teardowns(&mut self) {
         let mut present = BTreeSet::new();
         for state in &self.world.projects {
@@ -1492,6 +1508,7 @@ impl Actor {
             }
         }
         for id in &present {
+            self.teardowns.paused.remove(id);
             if self.teardowns.pending.remove(id).is_some() {
                 self.event(
                     EventKind::TeardownCancelled,
@@ -1504,6 +1521,12 @@ impl Actor {
         if self.teardowns.checking {
             return;
         }
+        let now = Instant::now();
+        let all = self.teardowns.stale
+            || self
+                .teardowns
+                .checked_all
+                .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(30));
         let troubled = prune::troubled(&self.world);
         let roots = self.paths.dir_roots();
         let candidates: Vec<teardown::Candidate> = self
@@ -1511,14 +1534,20 @@ impl Actor {
             .seen
             .iter()
             .filter(|id| !present.contains(*id) && !self.teardowns.running.contains(*id))
+            .filter(|id| {
+                all || (self.teardown_due(id, now) && !self.teardowns.paused.contains(*id))
+            })
             .map(|(project, stack)| {
-                let state = self
-                    .world
-                    .project(project)
-                    .filter(|_| !troubled.contains_key(project));
+                let state = self.world.project(project);
+                let troubled = match state {
+                    None => Some("its project isn't loaded".to_string()),
+                    Some(_) => troubled.get(project).cloned(),
+                };
+                let state = state.filter(|_| troubled.is_none());
                 teardown::Candidate {
                     id: (project.clone(), stack.clone()),
                     stacks: state.map(ProjectState::stacks),
+                    troubled,
                     stack_dir: roots.stack_dir(project, stack),
                     repos: state
                         .into_iter()
@@ -1528,6 +1557,10 @@ impl Actor {
                 }
             })
             .collect();
+        if all {
+            self.teardowns.stale = false;
+            self.teardowns.checked_all = Some(now);
+        }
         if candidates.is_empty() {
             return;
         }
@@ -1537,6 +1570,21 @@ impl Actor {
             let results = teardown::check(candidates);
             let _ = tx.send(Msg::Internal(Internal::TeardownCheck(results)));
         });
+    }
+
+    fn teardown_delay(&self, project: &str) -> Duration {
+        self.world
+            .project(project)
+            .and_then(|state| state.project.teardown_delay)
+            .unwrap_or(self.world.machine.teardown_delay)
+    }
+
+    /// Whether a stack's teardown is pending and its delay has passed.
+    fn teardown_due(&self, id: &StackId, now: Instant) -> bool {
+        self.teardowns
+            .pending
+            .get(id)
+            .is_some_and(|since| now.duration_since(*since) >= self.teardown_delay(&id.0))
     }
 
     /// Schedules the teardown of stacks that are now removed, cancels it for those
@@ -1552,27 +1600,41 @@ impl Actor {
                 teardown::Status::Unrecorded => {
                     self.teardowns.seen.remove(&id);
                     self.teardowns.pending.remove(&id);
+                    self.teardowns.paused.remove(&id);
                     continue;
                 }
                 teardown::Status::Kept => {
+                    self.teardowns.paused.remove(&id);
                     if self.teardowns.pending.remove(&id).is_some() {
                         self.event(
                             EventKind::TeardownCancelled,
-                            "its worktree is back",
+                            "its worktree or branch is back",
                             vec![events::stack(&id.0, &id.1)],
                         );
                     }
                     continue;
                 }
-                teardown::Status::Removed(record) => record,
+                teardown::Status::Unknown(reason) => {
+                    if self.teardowns.pending.contains_key(&id)
+                        && self.teardowns.paused.insert(id.clone())
+                    {
+                        self.event(
+                            EventKind::TeardownPaused,
+                            format!("waits until carte can tell its worktrees are gone: {reason}"),
+                            vec![events::stack(&id.0, &id.1)],
+                        );
+                    }
+                    continue;
+                }
+                teardown::Status::Removed(record) => {
+                    self.teardowns.paused.remove(&id);
+                    record
+                }
             };
-            let Some(state) = self.world.project(&id.0) else {
+            if self.world.project(&id.0).is_none() {
                 continue;
-            };
-            let delay = state
-                .project
-                .teardown_delay
-                .unwrap_or(self.world.machine.teardown_delay);
+            }
+            let delay = self.teardown_delay(&id.0);
             match self.teardowns.pending.get(&id) {
                 None => {
                     self.teardowns.pending.insert(id.clone(), now);
@@ -1599,6 +1661,7 @@ impl Actor {
             return;
         };
         self.teardowns.pending.remove(&id);
+        self.teardowns.paused.remove(&id);
         self.teardowns.seen.remove(&id);
         self.teardowns.running.insert(id.clone());
         let keys: Vec<InstanceKey> = self
@@ -2450,6 +2513,7 @@ impl Actor {
         for (key, why) in gone {
             self.stop(&key, Some(why));
         }
+        self.teardowns.stale = true;
         self.check_teardowns();
         self.dirty = true;
     }

@@ -58,8 +58,9 @@ branch's worktree is removed (or the branch deleted) and stays gone for
 checkout with that stack's env, typically dropping the branch's database,
 and then deletes the stack's data. They are destructive: removing a
 worktree has consequences, and adding it back within the delay cancels
-them. `carte events` shows `teardown-scheduled`, `teardown-finished` and
-`teardown-failed`.
+them. `carte events` shows `teardown-scheduled`, `teardown-paused` (the
+project has a problem, so carte can't tell), `teardown-cancelled`,
+`teardown-finished` and `teardown-failed`.
 
 A service may also be declared in the project file for several apps at
 once (`[processes.redis]`), so it isn't always in the repo's Procfile or
