@@ -383,6 +383,7 @@ pub fn injected(req: &EnvRequest) -> Vec<(&'static str, String)> {
         ("NODE_EXTRA_CA_CERTS", path(req.ca_cert)),
         ("DISABLE_SPRING", "1".into()),
         ("RAILS_DEVELOPMENT_HOSTS", hosts.join(",")),
+        ("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", hosts.join(",")),
         ("PIDFILE", path(req.pidfile)),
     ]);
     vars
@@ -511,6 +512,10 @@ mod tests {
             ("DISABLE_SPRING", "1"),
             (
                 "RAILS_DEVELOPMENT_HOSTS",
+                ".nova.test,.nova.localhost,.example.dev",
+            ),
+            (
+                "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS",
                 ".nova.test,.nova.localhost,.example.dev",
             ),
             ("PIDFILE", "/tmp/carte/nova-postcard-frontend@feature-x.pid"),

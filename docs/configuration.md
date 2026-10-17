@@ -245,8 +245,9 @@ with `$PORT` automatically.
 carte passes the `.test` hostname through to the app, and recent dev
 servers refuse hostnames they don't know:
 
-- **Vite** (and Astro, under `vite.server`): add the domain to
-  `server.allowedHosts`, as in `allowedHosts: [".test"]`.
+- **Vite** (and Astro, which runs on it) accepts them without config:
+  carte sets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, which Vite adds to
+  `server.allowedHosts`.
 - **Next.js:** list the hostnames in `allowedDevOrigins` in
   `next.config.js`, as in `["*.acme.test"]`, so hot reloading works.
 
@@ -287,6 +288,7 @@ Each process's environment is built in layers, later ones winning:
 | `CARTE_PUBLIC_URL` | Its public URL, while shared |
 | `CARTE_TLD_LENGTH` | Labels after the app's own, for Rails' `tld_length` |
 | `RAILS_DEVELOPMENT_HOSTS` | The project's domain and the share domain |
+| `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` | The same, for Vite's `server.allowedHosts` |
 | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` | System roots plus carte's CA |
 | `NODE_EXTRA_CA_CERTS` | carte's CA |
 | `DISABLE_SPRING` | `1` |
