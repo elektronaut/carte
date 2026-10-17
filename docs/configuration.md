@@ -284,6 +284,8 @@ Each process's environment is built in layers, later ones winning:
 | `CARTE_STACK` | `main`, or the branch slug of the stack |
 | `CARTE_CHECKOUT` | `main`, or the branch slug of the worktree the code runs from |
 | `CARTE_BRANCH`, `CARTE_WORKTREE` | The checkout's branch and path |
+| `CARTE_STATE_DIR` | The instance's [state directory](#instance-directories) |
+| `CARTE_RUN_DIR` | The instance's [run directory](#instance-directories) |
 | `CARTE_URL` | The app's URL in this stack |
 | `CARTE_PUBLIC_URL` | Its public URL, while shared |
 | `CARTE_TLD_LENGTH` | Labels after the app's own, for Rails' `tld_length` |
@@ -296,6 +298,38 @@ Each process's environment is built in layers, later ones winning:
 When `mise.toml` or `.tool-versions` changes, running apps are marked
 "env changed" rather than restarted. `carte env <app>` prints the result
 with where each value came from.
+
+### Instance directories
+
+Each instance (an app in a stack) gets two directories of its own. carte
+creates them before its processes start, and creates nothing inside them.
+
+- The **state directory**, `CARTE_STATE_DIR`, is for data that should
+  outlive a restart, such as a database's files. It's
+  `<state>/data/<project>/<stack>/<app>` in carte's state directory
+  (`~/.local/state/carte` by default).
+- The **run directory**, `CARTE_RUN_DIR`, is for sockets and other
+  files that don't need to survive a reboot. Its path is short, so a Unix
+  socket in it stays under the operating system's limit of about 100
+  bytes: a hash of project, stack and app in the per-user temp directory
+  on macOS, in `$XDG_RUNTIME_DIR/carte` or `/tmp/carte-<uid>` on Linux.
+  `CARTE_RUNTIME_DIR` in the daemon's environment moves it.
+
+Commands aren't templated, so they use the variables like `$PORT`. A
+process that wants a subdirectory creates it:
+
+```
+redis: mkdir -p $CARTE_STATE_DIR/redis && exec redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --dir $CARTE_STATE_DIR/redis
+```
+
+```toml
+[env]
+REDIS_URL = "unix://{{run_dir}}/redis.sock"
+```
+
+The stack's folder, `<state>/data/<project>/<stack>`, also holds
+`stack.toml`, where carte records the stack's branch and each app's
+worktree.
 
 ### Env templates
 
@@ -312,7 +346,9 @@ BILLING_URL = "{{url:billing}}"
 | `app.name`, `app.short` | The app's full and short name |
 | `project` | The project's name |
 | `stack`, `checkout`, `branch` | As in `CARTE_STACK`, `CARTE_CHECKOUT` and `CARTE_BRANCH` |
+| `stack.id` | 8 lowercase letters and digits from a hash of project and stack; the same for a recreated branch and on every machine |
 | `port` | The process's port |
+| `state_dir`, `run_dir` | The instance's [directories](#instance-directories), as in `CARTE_STATE_DIR` and `CARTE_RUN_DIR` |
 | `url:<app>` | Another app's URL in the same stack; `url:app` is the app itself |
 | `public_url:<app>` | Another app's public URL; an error while it isn't shared |
 

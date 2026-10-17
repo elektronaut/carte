@@ -41,6 +41,7 @@ impl Sandbox {
         cmd.args(args)
             .env("CARTE_CONFIG_DIR", self.root.join("config"))
             .env("CARTE_STATE_DIR", self.root.join("state"))
+            .env("CARTE_RUNTIME_DIR", self.root.join("tmp"))
             .env("HOME", &self.root)
             .env_remove("VISUAL")
             .env_remove("EDITOR")

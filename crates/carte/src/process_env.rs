@@ -172,6 +172,7 @@ pub fn render(
     let ca_bundle = paths.ca_bundle();
     let ca_cert = paths.ca_cert();
     let pidfile = paths.pidfile(key);
+    let dirs = paths.dir_roots().instance(key);
     let tld_length = naming::tld_length(&machine.tld, &state.project, app, &key.stack);
     let port = daemon.ports.get(&spec.name).copied().unwrap_or(0);
     let req = EnvRequest {
@@ -189,6 +190,7 @@ pub fn render(
         ca_bundle: &ca_bundle,
         ca_cert: &ca_cert,
         pidfile: &pidfile,
+        dirs: &dirs,
     };
     let runner = SystemRunner::from_env();
     let env = core_env::build_env(&req, &daemon.env, &runner)?;

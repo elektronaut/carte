@@ -4,6 +4,7 @@ pub mod clock;
 pub mod daemon;
 pub mod dns;
 pub mod exit;
+pub mod instance_dirs;
 pub mod logs;
 pub mod metrics;
 pub mod paths;
