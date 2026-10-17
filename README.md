@@ -205,6 +205,9 @@ name. Every command takes `--json`.
 
 `touch tmp/restart.txt` restarts an app, as with puma-dev.
 
+[docs/cli.md](docs/cli.md) has every command, the JSON output and exit
+codes.
+
 ### The terminal UI
 
 `carte` without a command opens it: projects, stacks, apps and processes
