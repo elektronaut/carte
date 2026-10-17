@@ -203,6 +203,7 @@ fn process_word(process: &carte_api::ProcessStatus) -> String {
         } => format!("killed by signal {signal}"),
         ProcessState::Exited { .. } => "exited".to_string(),
         ProcessState::Disabled => "disabled".to_string(),
+        ProcessState::Done => "done".to_string(),
     };
     match process.port {
         Some(port) if process.pid.is_some() => format!("{} {state} :{port}", process.name),
@@ -309,7 +310,12 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
     let down: Vec<&str> = inst
         .processes
         .iter()
-        .filter(|p| !matches!(p.state, ProcessState::Running | ProcessState::Starting))
+        .filter(|p| {
+            !matches!(
+                p.state,
+                ProcessState::Running | ProcessState::Starting | ProcessState::Done
+            )
+        })
         .map(|p| p.name.as_str())
         .collect();
     if inst.state == InstanceState::Ready && !down.is_empty() {

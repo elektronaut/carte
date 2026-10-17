@@ -138,6 +138,10 @@ policy = "disabled"
   project, or `app.project`.
 - `policy` is `auto` (the default), `pinned` (never idles out) or
   `disabled` (never starts unless you start it).
+- A process with `kind = "service"`, like a Redis server, starts and is
+  ready before the others, and stops after them. One with
+  `kind = "task"`, like `bin/rails db:prepare`, runs to completion
+  between the services and the rest, on every start.
 
 A repo can carry its own defaults in a `carte.toml`, using the same keys
 as an `[apps.<name>]` table. The project file wins.

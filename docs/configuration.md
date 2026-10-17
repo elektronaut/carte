@@ -219,6 +219,8 @@ MAILCATCHER_SMTP = "1025"
 | `scope` | detected | `instance` runs per stack; `checkout` runs once per checkout and is shared by every stack running from it |
 | `pty` | `true` | Run under a pseudo-terminal. `false` uses pipes |
 | `policy` | the app's | See [Policies](#policies) |
+| `kind` | none | `"service"` or `"task"`, which start before the other processes. See [Services and tasks](#services-and-tasks) |
+| `after` | none | Processes of the same kind this one starts after, like `["migrate"]` |
 
 Every process gets its own `PORT`. A fixed port in the HTTP process's
 command (`-p 3000`, `--port=3000`) is replaced with `$PORT`, with a
@@ -227,6 +229,49 @@ notice.
 Processes that look like file watchers default to `scope = "checkout"`:
 names containing `watch`, `css` and `js`, and commands with `-w`,
 `--watch` or a `:watch` task.
+
+### Services and tasks
+
+`kind` decides when a process starts. An instance starts its processes in
+three tiers, each once the one before is done:
+
+| Tier | `kind` | Done when |
+| --- | --- | --- |
+| 1 | `"service"` | Ready, as checked by `ready` |
+| 2 | `"task"` | Exited with code 0 |
+| 3 | none: everything else, from the Procfile or config | Ready |
+
+```toml
+[apps.acme-billing.processes.redis]
+command = "redis-server --port $PORT --save ''"
+kind = "service"
+
+[apps.acme-billing.processes.migrate]
+command = "bin/rails db:prepare"
+kind = "task"
+```
+
+- A service that exits or isn't ready within the boot timeout, or a task
+  that exits non-zero or doesn't finish within it, fails the start like a
+  crashing web process: the later tiers don't start, and the error and
+  the process's log show on the error page and in `carte up`.
+- Requests wait for the whole sequence.
+- Tasks run on every start of the instance, including after an idle
+  stop, so they must be quick when there's nothing to do. A finished task
+  shows as `done` and isn't run again until the next start; restarting
+  one process doesn't run them.
+- Stopping goes the other way: services get their signal once
+  everything else has exited, so a job worker can hand its unfinished
+  jobs back to Redis.
+- A disabled service or task is skipped, and nothing waits for it.
+- After the start, a service that exits is reported like any other
+  process; the instance keeps running.
+- `after` orders processes within a tier: a task with
+  `after = ["migrate"]` starts once `migrate` has finished, a process
+  after `web` once `web` is ready.
+
+The HTTP process can't have a `kind`, and services and tasks always run
+per instance, never with `scope = "checkout"`.
 
 ### Node apps
 

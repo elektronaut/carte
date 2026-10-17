@@ -1215,3 +1215,246 @@ async fn idle_stops_and_config_changes_are_events() {
     .await;
     handle.shutdown().await;
 }
+
+fn lines(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn process<'a>(
+    snapshot: &'a carte_api::Snapshot,
+    app: &str,
+    name: &str,
+) -> &'a carte_api::ProcessStatus {
+    status(snapshot, app, "main")
+        .processes
+        .iter()
+        .find(|p| p.name == name)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn services_then_tasks_then_the_rest_start_in_order() {
+    let setup = Setup::new();
+    let path = setup.root.join("order.log");
+    let log = path.display();
+    setup.app(
+        "acme-web",
+        &format!("web: echo web >> {log} && exec {{fixture}}\n"),
+    );
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.redis]
+command = 'sleep 0.5 && echo redis >> {log} && exec {fixture}'
+kind = "service"
+
+[apps.acme-web.processes.cache]
+command = 'sleep 30'
+kind = "service"
+policy = "disabled"
+
+[apps.acme-web.processes.migrate]
+command = 'sleep 0.3 && echo migrate >> {log}'
+kind = "task"
+
+[apps.acme-web.processes.seed]
+command = 'echo seed >> {log}'
+kind = "task"
+after = ["migrate"]
+"#,
+        fixture = fixture().display()
+    ));
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    assert_eq!(lines(&path), ["redis", "migrate", "seed", "web"]);
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        process(&snapshot, "acme-web", "redis").state,
+        ProcessState::Running
+    );
+    assert_eq!(
+        process(&snapshot, "acme-web", "cache").state,
+        ProcessState::Stopped
+    );
+    assert_eq!(
+        process(&snapshot, "acme-web", "migrate").state,
+        ProcessState::Done
+    );
+    assert_eq!(
+        process(&snapshot, "acme-web", "seed").state,
+        ProcessState::Done
+    );
+    assert_eq!(
+        process(&snapshot, "acme-web", "web").state,
+        ProcessState::Running
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failing_service_or_task_fails_the_start_before_later_tiers() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");
+    setup.app("acme-cache", "web: exec {fixture}\n");
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.redis]
+command = 'exec {fixture}'
+kind = "service"
+
+[apps.acme-web.processes.migrate]
+command = 'echo boom && exit 4'
+kind = "task"
+
+[apps.acme-cache.processes.redis]
+command = 'echo no redis today && exit 2'
+kind = "service"
+"#,
+        fixture = fixture().display()
+    ));
+    let handle = setup.start();
+
+    let failure = handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.title, "acme-web@main crashed");
+    assert!(
+        failure.detail.contains("migrate exited with code 4"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.log.iter().any(|l| l.contains("boom")),
+        "{failure:?}"
+    );
+    wait_for(&handle, "redis to stop", |s| {
+        process(s, "acme-web", "redis").pid.is_none()
+    })
+    .await;
+    let snapshot = handle.snapshot();
+    let web = status(&snapshot, "acme-web", "main");
+    assert_eq!(web.state, InstanceState::Crashed);
+    assert!(
+        web.last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("migrate exited with code 4")),
+        "{web:?}"
+    );
+    for name in ["web", "worker"] {
+        let p = process(&snapshot, "acme-web", name);
+        assert_eq!((p.state, p.pid), (ProcessState::Stopped, None), "{name}");
+    }
+
+    let failure = handle
+        .control(waiting("cache", Action::Up))
+        .await
+        .unwrap()
+        .failures;
+    let [failure] = failure.as_slice() else {
+        panic!("{failure:?}");
+    };
+    assert!(
+        failure.detail.contains("redis exited with code 2"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.log.iter().any(|l| l.contains("no redis today")),
+        "{failure:?}"
+    );
+    let snapshot = handle.snapshot();
+    assert_eq!(process(&snapshot, "acme-cache", "web").pid, None);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn tasks_run_on_each_start_and_not_when_a_process_restarts() {
+    let setup = Setup::new();
+    let log = setup.root.join("runs.log");
+    setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");
+    setup.project(&format!(
+        "[apps.acme-web.processes.migrate]\ncommand = 'echo run >> {}'\nkind = \"task\"\n",
+        log.display()
+    ));
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    assert_eq!(lines(&log), ["run"]);
+    let worker = process(&handle.snapshot(), "acme-web", "worker").pid;
+
+    handle
+        .control(control("web/worker", Action::Restart))
+        .await
+        .unwrap();
+    wait_for(&handle, "the worker to restart", |s| {
+        let p = process(s, "acme-web", "worker");
+        p.state == ProcessState::Running && p.pid.is_some() && p.pid != worker
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(lines(&log), ["run"]);
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        process(&snapshot, "acme-web", "migrate").state,
+        ProcessState::Done
+    );
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Ready
+    );
+
+    handle.control(control("web", Action::Down)).await.unwrap();
+    wait_for(&handle, "stopped", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Stopped
+    })
+    .await;
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    assert_eq!(lines(&log), ["run", "run"]);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn services_stop_after_everything_else() {
+    let setup = Setup::new();
+    let path = setup.root.join("stop.log");
+    let log = path.display();
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: exec {{fixture}}\nworker: trap 'sleep 0.2; echo worker >> {log}; exit 0' TERM; while :; do sleep 0.05; done\n"
+        ),
+    );
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.redis]
+command = '''trap 'echo redis >> {log}; exit 0' TERM; {fixture} & wait'''
+kind = "service"
+"#,
+        fixture = fixture().display()
+    ));
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    handle.control(control("web", Action::Down)).await.unwrap();
+    wait_for(&handle, "stopped", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Stopped
+    })
+    .await;
+    assert_eq!(lines(&path), ["worker", "redis"]);
+    handle.shutdown().await;
+}

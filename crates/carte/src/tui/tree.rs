@@ -79,6 +79,8 @@ pub enum State {
     Stopped,
     /// A process that exited cleanly on its own.
     Exited,
+    /// A task that finished.
+    Done,
     Crashed,
     Disabled,
 }
@@ -371,6 +373,7 @@ fn process_node(instance: &NodeId, process: &ProcessStatus) -> Node {
         ProcessState::Exited { code: Some(0), .. } => State::Exited,
         ProcessState::Exited { .. } => State::Crashed,
         ProcessState::Disabled => State::Disabled,
+        ProcessState::Done => State::Done,
         ProcessState::Stopped if disabled.is_some() => State::Disabled,
         ProcessState::Stopped => State::Stopped,
     };
