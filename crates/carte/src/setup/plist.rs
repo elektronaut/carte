@@ -67,6 +67,8 @@ impl Agent {
         line(&mut out, 1, "<true/>");
         key(&mut out, 1, "ProcessType");
         string(&mut out, 1, "Interactive");
+        key(&mut out, 1, "ExitTimeOut");
+        line(&mut out, 1, "<integer>40</integer>");
         key(&mut out, 1, "SoftResourceLimits");
         line(&mut out, 1, "<dict>");
         key(&mut out, 2, "NumberOfFiles");
@@ -140,6 +142,7 @@ mod tests {
             "  <array>\n    <string>/opt/homebrew/bin/carte</string>\n    <string>daemon</string>\n  </array>\n",
             "<key>KeepAlive</key>\n  <true/>",
             "<key>RunAtLoad</key>\n  <true/>",
+            "<key>ExitTimeOut</key>\n  <integer>40</integer>",
             "<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Users/me/.local/bin:/Users/me/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
             "<key>CARTE_STATE_HOME</key>\n    <string>/Users/me/.local/state/R&amp;D &lt;carte&gt;</string>",
             "<key>StandardErrorPath</key>\n  <string>/Users/me/.local/state/R&amp;D &lt;carte&gt;/carte.log</string>",
