@@ -1806,6 +1806,50 @@ kind = "task"
 }
 
 #[tokio::test]
+async fn restarting_a_stopping_task_while_starting_keeps_later_tiers_waiting() {
+    let setup = Setup::new();
+    let path = setup.root.join("order.log");
+    let marker = setup.root.join("ran");
+    let log = path.display();
+    setup.app(
+        "acme-web",
+        &format!("web: echo web >> {log} && exec {{fixture}}\n"),
+    );
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.migrate]
+command = '''if [ -e {marker} ]; then sleep 0.3; echo migrate >> {log}; exit 0; fi; trap 'sleep 0.3; exit 0' TERM; touch {marker}; while :; do sleep 0.05; done'''
+kind = "task"
+"#,
+        marker = marker.display()
+    ));
+    let handle = setup.start();
+
+    handle.control(control("web", Action::Up)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    handle
+        .control(control("web/migrate", Action::Down))
+        .await
+        .unwrap();
+    handle
+        .control(control("web/migrate", Action::Restart))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    assert_eq!(lines(&path), ["migrate", "web"]);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn stopping_a_service_while_starting_fails_the_start() {
     let setup = Setup::new();
     setup.app("acme-web", "web: exec {fixture}\n");
