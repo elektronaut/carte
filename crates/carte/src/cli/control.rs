@@ -6,11 +6,13 @@ use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Hold, InstanceState, InstanceStatus, LogLine,
     LogsRequest, ProcessState, Snapshot, StopAllRequest, paths,
 };
+use carte_core::model::World;
 use carte_core::{address, discovery, naming};
 use http::Method;
 
 use super::{LogsArgs, ShareArgs, Target};
 use crate::client::Client;
+use crate::exit::Failure;
 use crate::paths::Paths;
 
 fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
@@ -27,6 +29,16 @@ fn address(target: &Target) -> Address {
             .map(|dir| dir.canonicalize().unwrap_or(dir)),
         project: target.project.clone(),
     }
+}
+
+/// Resolves an address against the configuration on disk, as the daemon would.
+fn resolve_locally(world: &World, address: &Address) -> Result<address::Target, Failure> {
+    let parsed: address::Address = address.address.parse()?;
+    let cwd = address.cwd.as_deref();
+    Ok(match &address.project {
+        Some(project) => address::resolve_in_project(world, project, &parsed, cwd)?,
+        None => address::resolve(world, &parsed, cwd)?,
+    })
 }
 
 pub fn daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
@@ -284,12 +296,7 @@ pub fn logs(paths: &Paths, args: LogsArgs, json: bool) -> anyhow::Result<ExitCod
 pub fn open(paths: &Paths, target: Target) -> anyhow::Result<ExitCode> {
     let world = discovery::load_world(&paths.config_dir);
     let address = address(&target);
-    let parsed: address::Address = address.address.parse()?;
-    let cwd = address.cwd.as_deref();
-    let resolved = match &address.project {
-        Some(project) => address::resolve_in_project(&world, project, &parsed, cwd)?,
-        None => address::resolve(&world, &parsed, cwd)?,
-    };
+    let resolved = resolve_locally(&world, &address)?;
     let Some(key) = resolved.instance() else {
         bail!("name an app to open");
     };

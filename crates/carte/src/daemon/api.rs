@@ -9,9 +9,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use carte_api::{
-    ControlRequest, ErrorBody, LogsRequest, Problem, ShareRequest, StopAllRequest, UnshareRequest,
-    paths,
+    Address, ControlRequest, ErrorBody, LogsRequest, Problem, ShareRequest, StopAllRequest,
+    UnshareRequest, paths,
 };
+use carte_core::address;
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
@@ -49,6 +50,23 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// A 404 answer when the address names nothing in the current world.
+fn unresolved(api: &Api, target: &Address) -> Option<Response> {
+    let parsed: address::Address = match target.address.parse() {
+        Ok(parsed) => parsed,
+        Err(err) => return Some(error(StatusCode::NOT_FOUND, err.to_string())),
+    };
+    let world = api.supervisor.world();
+    let cwd = target.cwd.as_deref();
+    let resolved = match &target.project {
+        Some(project) => address::resolve_in_project(&world, project, &parsed, cwd),
+        None => address::resolve(&world, &parsed, cwd),
+    };
+    resolved
+        .err()
+        .map(|err| error(StatusCode::NOT_FOUND, err.to_string()))
+}
+
 async fn snapshot(State(api): State<Api>) -> Response {
     Json(api.supervisor.snapshot().as_ref().clone()).into_response()
 }
@@ -68,6 +86,9 @@ async fn watch(State(api): State<Api>) -> Response {
 }
 
 async fn control(State(api): State<Api>, Json(request): Json<ControlRequest>) -> Response {
+    if let Some(response) = unresolved(&api, &request.target) {
+        return response;
+    }
     match api.supervisor.control(request).await {
         Ok(response) => Json(response).into_response(),
         Err(message) => error(StatusCode::BAD_REQUEST, message),
@@ -79,6 +100,9 @@ async fn stop_all(State(api): State<Api>, Json(request): Json<StopAllRequest>) -
 }
 
 async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Response {
+    if let Some(response) = unresolved(&api, &request.target) {
+        return response;
+    }
     let mut follow = request.follow.then(|| api.supervisor.follow_logs());
     let tail = request.tail.unwrap_or(100);
     let (lines, filter) = match api
@@ -115,6 +139,9 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
 }
 
 async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Response {
+    if let Some(response) = unresolved(&api, &request.target) {
+        return response;
+    }
     match api.supervisor.share(request).await {
         Ok(response) => Json(response).into_response(),
         Err(message) => error(StatusCode::BAD_REQUEST, message),
@@ -122,6 +149,9 @@ async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Res
 }
 
 async fn unshare(State(api): State<Api>, Json(request): Json<UnshareRequest>) -> Response {
+    if let Some(response) = unresolved(&api, &request.target) {
+        return response;
+    }
     match api.supervisor.unshare(request.target).await {
         Ok(apps) => Json(apps).into_response(),
         Err(message) => error(StatusCode::BAD_REQUEST, message),

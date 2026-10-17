@@ -14,6 +14,7 @@ struct Sandbox {
 
 struct Run {
     success: bool,
+    code: Option<i32>,
     stdout: String,
     stderr: String,
 }
@@ -76,6 +77,7 @@ fn run(cmd: &mut Command) -> Run {
     } = cmd.output().unwrap();
     Run {
         success: status.success(),
+        code: status.code(),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
     }
@@ -422,8 +424,20 @@ fn env_needs_an_app() {
     let sb = Sandbox::new();
     env_project(&sb);
     let out = sb.run(&["env"]);
-    assert!(!out.success);
+    assert_eq!(out.code, Some(4), "{}", out.stderr);
     assert!(out.stderr.contains("not inside an app"), "{}", out.stderr);
+}
+
+#[test]
+fn exit_codes_tell_failures_apart() {
+    let sb = Sandbox::new();
+    let repo = env_project(&sb);
+    assert_eq!(sb.run_in(&repo, &["env", "nosuchapp"]).code, Some(4));
+    assert_eq!(sb.run_in(&repo, &["env", "-p", "nope"]).code, Some(4));
+    let ls = sb.run(&["ls"]);
+    assert_eq!(ls.code, Some(3), "{}", ls.stderr);
+    assert!(ls.stderr.contains("isn't running"), "{}", ls.stderr);
+    assert_eq!(sb.run(&["up", "--bogus"]).code, Some(2));
 }
 
 /// An `$EDITOR` that replaces the file with `$NEW_CONTENT`.

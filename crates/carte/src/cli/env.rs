@@ -12,21 +12,23 @@ use carte_core::{discovery, naming};
 
 use super::EnvArgs;
 use super::prompt::tilde;
+use crate::exit::{Exit, Failure};
 use crate::paths::Paths;
 use crate::urls::StackUrls;
 
 pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode> {
     let world = discovery::load_world(&paths.config_dir);
     let typed = args.target.address.as_deref().unwrap_or("");
-    let mut address: Address = typed.parse()?;
+    let mut address: Address = typed.parse().map_err(Failure::from)?;
     if args.process.is_some() {
         address.process = args.process;
     }
     let cwd = std::env::current_dir()?.canonicalize()?;
     let target = match &args.target.project {
-        Some(project) => address::resolve_in_project(&world, project, &address, Some(&cwd))?,
-        None => address::resolve(&world, &address, Some(&cwd))?,
-    };
+        Some(project) => address::resolve_in_project(&world, project, &address, Some(&cwd)),
+        None => address::resolve(&world, &address, Some(&cwd)),
+    }
+    .map_err(Failure::from)?;
     let Some(key) = target.instance() else {
         bail!("{typed:?} names a whole project or stack; give an app, as in `carte env <app>`");
     };
@@ -63,10 +65,13 @@ pub fn run(paths: &Paths, args: EnvArgs, json: bool) -> anyhow::Result<ExitCode>
             .iter()
             .find(|p| &p.name == name)
             .ok_or_else(|| {
-                anyhow!(
-                    "{} has no process {name:?}; choose from {}",
-                    app.name,
-                    names()
+                Failure::new(
+                    Exit::NotFound,
+                    format!(
+                        "{} has no process {name:?}; choose from {}",
+                        app.name,
+                        names()
+                    ),
                 )
             })?,
         None => list.processes.iter().find(|p| p.http).ok_or_else(|| {

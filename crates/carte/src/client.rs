@@ -13,6 +13,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
 
+use crate::exit::{Exit, Failure};
+
 pub struct Client {
     socket: PathBuf,
 }
@@ -78,9 +80,12 @@ impl Client {
         body: Bytes,
     ) -> anyhow::Result<http::Response<Incoming>> {
         let stream = UnixStream::connect(&self.socket).await.map_err(|err| {
-            anyhow::anyhow!(
-                "the carte daemon isn't running ({}: {err}); start it with `carte daemon`",
-                self.socket.display()
+            Failure::new(
+                Exit::DaemonDown,
+                format!(
+                    "the carte daemon isn't running ({}: {err}); start it with `carte daemon`",
+                    self.socket.display()
+                ),
             )
         })?;
         let (mut sender, connection) =
@@ -101,6 +106,9 @@ async fn decode<T: DeserializeOwned>(response: http::Response<Incoming>) -> anyh
     let bytes = response.into_body().collect().await?.to_bytes();
     if status != StatusCode::OK {
         if let Ok(error) = serde_json::from_slice::<ErrorBody>(&bytes) {
+            if status == StatusCode::NOT_FOUND {
+                return Err(Failure::new(Exit::NotFound, error.error).into());
+            }
             bail!("{}", error.error);
         }
         bail!("the daemon answered {status}");

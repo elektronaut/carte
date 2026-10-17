@@ -6,6 +6,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::exit::{self, Exit};
 use crate::paths::Paths;
 
 mod control;
@@ -226,7 +227,7 @@ pub fn run(cli: Cli) -> ExitCode {
     let Some(command) = cli.command else {
         if !std::io::stdout().is_terminal() {
             let _ = <Cli as clap::CommandFactory>::command().print_help();
-            return ExitCode::from(2);
+            return Exit::Usage.into();
         }
         return finish(crate::tui::run(&paths));
     };
@@ -284,7 +285,7 @@ fn finish(result: anyhow::Result<ExitCode>) -> ExitCode {
         Ok(code) => code,
         Err(err) => {
             eprintln!("carte: {err:#}");
-            ExitCode::FAILURE
+            exit::code(&err).into()
         }
     }
 }

@@ -297,6 +297,24 @@ fn up_and_down_by_address() {
 }
 
 #[test]
+fn addresses_that_match_nothing_exit_with_not_found() {
+    let daemon = Daemon::start();
+    for args in [
+        &["up", "nosuchapp"][..],
+        &["logs", "nosuchapp"],
+        &["down", "@nosuchstack"],
+    ] {
+        let output = daemon.command(args).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(4),
+            "carte {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn lists_processes_before_the_first_start_and_follows_the_procfile() {
     let daemon = Daemon::start();
     let processes = || -> Vec<(String, carte_api::ProcessState)> {

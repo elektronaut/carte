@@ -2,6 +2,7 @@ pub mod cli;
 pub mod client;
 pub mod daemon;
 pub mod dns;
+pub mod exit;
 pub mod logs;
 pub mod metrics;
 pub mod paths;
