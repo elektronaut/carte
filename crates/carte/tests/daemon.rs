@@ -517,6 +517,17 @@ fn env_shows_the_assigned_port_while_running() {
         Some(dirs.state.display().to_string())
     );
     assert_eq!(value("CARTE_RUN_DIR"), Some(dirs.run.display().to_string()));
+    let elsewhere = daemon
+        .command(&["env", "web", "CARTE_RUN_DIR", "--json"])
+        .env("CARTE_RUNTIME_HOME", daemon.root.join("elsewhere"))
+        .output()
+        .unwrap();
+    let elsewhere: carte_api::EnvResponse = serde_json::from_str(&stdout(&elsewhere)).unwrap();
+    assert_eq!(
+        elsewhere.vars[0].value,
+        Some(dirs.run.display().to_string()),
+        "carte env uses the daemon's run root"
+    );
     for own in ["CARTE_STATE_HOME", "CARTE_RUNTIME_HOME", "CARTE_CONFIG_DIR"] {
         assert_eq!(value(own), None, "{own} leaked into the app env");
     }

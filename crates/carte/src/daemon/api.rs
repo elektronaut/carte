@@ -247,9 +247,10 @@ async fn prune(State(api): State<Api>, Json(request): Json<PruneRequest>) -> Res
     }
 }
 
-async fn daemon_env() -> Response {
+async fn daemon_env(State(api): State<Api>) -> Response {
     Json(carte_api::DaemonEnv {
         vars: crate::supervisor::base_env(),
+        run_root: Some(api.paths.run_root.clone()),
     })
     .into_response()
 }

@@ -156,12 +156,13 @@ pub(crate) fn render_for(
             ports: Default::default(),
             shared: Default::default(),
             running: Default::default(),
+            run_root: None,
         }),
     )?;
     Ok((rendered, daemon.is_some()))
 }
 
-/// The daemon's base env, ports and shares, when the daemon runs.
+/// The daemon's base env, run root, ports and shares, when the daemon runs.
 fn daemon_state(paths: &Paths, key: &carte_core::model::InstanceKey) -> Option<DaemonState> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -171,7 +172,10 @@ fn daemon_state(paths: &Paths, key: &carte_core::model::InstanceKey) -> Option<D
     runtime.block_on(async {
         let env: carte_api::DaemonEnv = client.get(carte_api::paths::ENV).await.ok()?;
         let snapshot: carte_api::Snapshot = client.get(carte_api::paths::SNAPSHOT).await.ok()?;
-        Some(DaemonState::new(env.vars, &snapshot, key))
+        Some(DaemonState {
+            run_root: env.run_root,
+            ..DaemonState::new(env.vars, &snapshot, key)
+        })
     })
 }
 

@@ -522,7 +522,8 @@ creates them before its processes start, and creates nothing inside them.
   socket in it stays under the operating system's limit of about 100
   bytes: a hash of project, stack and app in the per-user temp directory
   on macOS, in `$XDG_RUNTIME_DIR/carte` or `/tmp/carte-<uid>` on Linux.
-  `CARTE_RUNTIME_HOME` in the daemon's environment moves it. The folder and each run
+  `CARTE_RUNTIME_HOME` in the daemon's environment moves it; `carte env`
+  shows the daemon's path while it runs. The folder and each run
   directory must be real directories owned by you: carte refuses a
   symlink or another user's folder, and closes the folder to other
   users.

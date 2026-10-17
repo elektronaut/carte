@@ -527,6 +527,9 @@ impl EventKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonEnv {
     pub vars: std::collections::BTreeMap<String, String>,
+    /// Where the daemon puts instances' run directories.
+    #[serde(default)]
+    pub run_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -26,6 +26,8 @@ pub struct DaemonState {
     pub shared: BTreeSet<String>,
     /// The instance's processes that are running, by name.
     pub running: BTreeSet<String>,
+    /// The daemon's run root; this process's own when `None`.
+    pub run_root: Option<PathBuf>,
 }
 
 impl DaemonState {
@@ -62,6 +64,7 @@ impl DaemonState {
             ports,
             shared,
             running,
+            run_root: None,
         }
     }
 }
@@ -249,7 +252,11 @@ pub fn render_subject(
     let ca_bundle = paths.ca_bundle();
     let ca_cert = paths.ca_cert();
     let pidfile = paths.pidfile(key);
-    let dirs = paths.dir_roots().instance(key);
+    let mut roots = paths.dir_roots();
+    if let Some(run) = &daemon.run_root {
+        roots.run = run.clone();
+    }
+    let dirs = roots.instance(key);
     let tld_length = naming::tld_length(&machine.tld, &state.project, app, &key.stack);
     let port = daemon.ports.get(&spec.name).copied().unwrap_or(0);
     let processes: Vec<_> = list
@@ -427,6 +434,7 @@ mod tests {
             ports: BTreeMap::new(),
             shared: BTreeSet::new(),
             running: BTreeSet::new(),
+            run_root: None,
         };
 
         let command =
