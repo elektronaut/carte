@@ -3,7 +3,9 @@
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
-pub const LABEL: &str = "carte.daemon";
+pub const LABEL: &str = "no.elektronaut.carte";
+/// The label earlier installs used.
+pub const OLD_LABEL: &str = "carte.daemon";
 
 /// Everything the LaunchAgent needs to know.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,7 +136,7 @@ mod tests {
     fn runs_the_daemon_with_launchd_sockets() {
         let plist = agent().to_plist();
         for expected in [
-            "  <key>Label</key>\n  <string>carte.daemon</string>\n",
+            "  <key>Label</key>\n  <string>no.elektronaut.carte</string>\n",
             "  <array>\n    <string>/opt/homebrew/bin/carte</string>\n    <string>daemon</string>\n  </array>\n",
             "<key>KeepAlive</key>\n  <true/>",
             "<key>RunAtLoad</key>\n  <true/>",
@@ -157,7 +159,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn is_a_valid_property_list() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("carte.daemon.plist");
+        let path = dir.path().join("no.elektronaut.carte.plist");
         std::fs::write(&path, agent().to_plist()).unwrap();
         let output = std::process::Command::new("plutil")
             .arg("-lint")

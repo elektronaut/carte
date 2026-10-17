@@ -20,7 +20,7 @@ use crate::dns;
 use crate::paths::Paths;
 use crate::tls::trust::{self, CommandLine};
 use crate::tls::{CertificateAuthority, CreateReason};
-use plist::{Agent, LABEL};
+use plist::{Agent, LABEL, OLD_LABEL};
 
 pub const PUMA_DEV_LABEL: &str = "io.puma.dev";
 
@@ -71,6 +71,10 @@ impl SetupEnv {
 
     pub fn agent_plist(&self) -> PathBuf {
         self.launch_agents_dir.join(format!("{LABEL}.plist"))
+    }
+
+    pub fn old_agent_plist(&self) -> PathBuf {
+        self.launch_agents_dir.join(format!("{OLD_LABEL}.plist"))
     }
 
     pub fn puma_dev_plist(&self) -> PathBuf {
@@ -127,6 +131,18 @@ impl PumaDev {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OldAgent {
+    pub plist: bool,
+    pub loaded: bool,
+}
+
+impl OldAgent {
+    pub fn installed(&self) -> bool {
+        self.plist || self.loaded
+    }
+}
+
 /// What setup found on the machine, read without changing anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facts {
@@ -134,6 +150,8 @@ pub struct Facts {
     pub ca: CaState,
     pub agent_plist: Option<String>,
     pub agent_loaded: bool,
+    /// The agent under its old label.
+    pub old_agent: OldAgent,
     pub puma_dev: PumaDev,
     pub projects: usize,
     pub daemon_running: bool,
@@ -164,6 +182,10 @@ impl Facts {
             ca,
             agent_plist: fs::read_to_string(env.agent_plist()).ok(),
             agent_loaded: check::launchd_loaded(&env.service(LABEL)),
+            old_agent: OldAgent {
+                plist: env.old_agent_plist().exists(),
+                loaded: check::launchd_loaded(&env.service(OLD_LABEL)),
+            },
             puma_dev: PumaDev {
                 plist: env.puma_dev_plist().exists(),
                 loaded: check::launchd_loaded(&env.service(PUMA_DEV_LABEL)),
@@ -318,6 +340,8 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
         ));
     }
 
+    old_agent_steps(env, facts, steps);
+
     let resolver = env.resolver_contents();
     if facts.resolver.as_deref() != Some(resolver.as_str()) {
         let file = env.resolver_file();
@@ -426,8 +450,28 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
     plan
 }
 
+/// Takes down an agent installed under the old label.
+fn old_agent_steps(env: &SetupEnv, facts: &Facts, steps: &mut Vec<Step>) {
+    if facts.old_agent.loaded {
+        steps.push(Step::run(
+            format!("Stop carte's LaunchAgent under its old label, {OLD_LABEL}"),
+            "launchctl",
+            &["bootout", &env.service(OLD_LABEL)],
+        ));
+    }
+    if facts.old_agent.plist {
+        steps.push(Step {
+            description: format!("Remove carte's LaunchAgent under its old label, {OLD_LABEL}"),
+            action: Action::RemoveFile {
+                path: env.old_agent_plist(),
+            },
+        });
+    }
+}
+
 pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
     let mut plan = Plan::default();
+    old_agent_steps(env, facts, &mut plan.steps);
     if facts.agent_loaded {
         plan.steps.push(Step::run(
             "Stop the carte daemon and its apps",
@@ -581,6 +625,7 @@ mod tests {
             ca: CaState::Missing,
             agent_plist: None,
             agent_loaded: false,
+            old_agent: OldAgent::default(),
             puma_dev: PumaDev::default(),
             projects: 0,
             daemon_running: false,
@@ -624,8 +669,8 @@ mod tests {
                 "sudo tee /r/resolver/test",
                 "create ca",
                 "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /r/state/ca.pem",
-                "write /r/home/Library/LaunchAgents/carte.daemon.plist",
-                "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/carte.daemon.plist",
+                "write /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
+                "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
                 "verify",
             ]
         );
@@ -670,9 +715,9 @@ mod tests {
             commands(&plan_install(&env, &changed)),
             [
                 "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /r/state/ca.pem",
-                "launchctl bootout gui/501/carte.daemon",
-                "write /r/home/Library/LaunchAgents/carte.daemon.plist",
-                "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/carte.daemon.plist",
+                "launchctl bootout gui/501/no.elektronaut.carte",
+                "write /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
+                "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
                 "verify",
             ]
         );
@@ -686,7 +731,7 @@ mod tests {
         assert_eq!(
             commands(&plan),
             [
-                "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/carte.daemon.plist",
+                "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
                 "verify",
             ]
         );
@@ -694,6 +739,38 @@ mod tests {
             plan.notes[0].contains("already running"),
             "{:?}",
             plan.notes
+        );
+    }
+
+    #[test]
+    fn replaces_an_agent_under_the_old_label() {
+        let root = Path::new("/r");
+        let env = env(root);
+        let facts = Facts {
+            resolver: Some(env.resolver_contents()),
+            ca: CaState::Trusted,
+            old_agent: OldAgent {
+                plist: true,
+                loaded: true,
+            },
+            ..fresh()
+        };
+        assert_eq!(
+            commands(&plan_install(&env, &facts)),
+            [
+                "launchctl bootout gui/501/carte.daemon",
+                "rm /r/home/Library/LaunchAgents/carte.daemon.plist",
+                "write /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
+                "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
+                "verify",
+            ]
+        );
+        assert_eq!(
+            commands(&plan_uninstall(&env, &facts))[..2],
+            [
+                "launchctl bootout gui/501/carte.daemon",
+                "rm /r/home/Library/LaunchAgents/carte.daemon.plist",
+            ]
         );
     }
 
@@ -725,8 +802,8 @@ mod tests {
         assert_eq!(
             commands(&plan),
             [
-                "launchctl bootout gui/501/carte.daemon".to_string(),
-                format!("rm {root}/home/Library/LaunchAgents/carte.daemon.plist"),
+                "launchctl bootout gui/501/no.elektronaut.carte".to_string(),
+                format!("rm {root}/home/Library/LaunchAgents/no.elektronaut.carte.plist"),
                 format!("sudo rm -f {root}/resolver/test"),
                 format!("sudo security remove-trusted-cert -d {root}/state/ca.pem"),
             ]

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::cli::prompt::tilde;
 
-use super::plist::LABEL;
+use super::plist::{LABEL, OLD_LABEL};
 use super::{CaState, Facts, PUMA_DEV_LABEL, SetupEnv};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +235,20 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
             "LaunchAgent",
             format!("{plist}, {loaded}"),
         ),
+    }
+    if facts.old_agent.installed() {
+        report.push(
+            Status::Warn,
+            "LaunchAgent",
+            format!(
+                "{} is installed under its old label; `carte setup` replaces it",
+                if facts.old_agent.plist {
+                    tilde(&env.old_agent_plist())
+                } else {
+                    OLD_LABEL.to_string()
+                }
+            ),
+        );
     }
     report.push(
         if facts.daemon_running {
