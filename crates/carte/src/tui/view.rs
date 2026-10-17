@@ -735,7 +735,7 @@ fn footer_line(focus: Focus) -> Line<'static> {
     let mut spans = vec![Span::raw(" ")];
     for (key, what) in keys {
         spans.push(Span::raw(*key).blue().bold());
-        spans.push(Span::raw(format!(" {what}  ")).dark_gray());
+        spans.push(Span::raw(format!(" {what}  ")));
     }
     Line::from(spans)
 }
