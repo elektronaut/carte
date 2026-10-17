@@ -176,6 +176,8 @@ pub struct ProcessOverride {
     pub policy: Option<Policy>,
     pub kind: Option<ProcessKind>,
     pub after: Option<Vec<String>>,
+    /// Env templates added to every process of the instance.
+    pub provides: Vec<EnvTemplate>,
 }
 
 /// A process ready to run in one checkout.
@@ -197,6 +199,9 @@ pub struct ProcessSpec {
     /// Processes of the same tier this one starts after.
     #[serde(default)]
     pub after: Vec<String>,
+    /// Env templates added to every process of the instance.
+    #[serde(default)]
+    pub provides: Vec<EnvTemplate>,
 }
 
 impl ProcessSpec {

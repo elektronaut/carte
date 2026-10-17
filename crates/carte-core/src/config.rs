@@ -211,6 +211,16 @@ pub struct ProjectFile {
     pub idle_timeout: Option<Duration>,
     /// `[apps.<full name>]` tables.
     pub apps: BTreeMap<String, AppConfig>,
+    /// `[processes.<name>]` tables, declared for many apps at once.
+    pub processes: BTreeMap<String, ProjectProcess>,
+}
+
+/// A process declared in a project file's `[processes]`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProjectProcess {
+    /// The apps it's declared for, by full or short name; `None` for every app.
+    pub apps: Option<Vec<String>>,
+    pub process: ProcessOverride,
 }
 
 #[derive(Deserialize)]
@@ -229,6 +239,8 @@ struct RawProject {
     idle_timeout: Option<DurationValue>,
     #[serde(default)]
     apps: BTreeMap<String, AppConfig>,
+    #[serde(default, deserialize_with = "project_process_table")]
+    processes: BTreeMap<String, ProjectProcess>,
 }
 
 /// Per-app settings as written in a project file's `[apps.X]` table or a repo's `carte.toml`.
@@ -318,6 +330,7 @@ fn merge_process(over: ProcessOverride, base: ProcessOverride) -> ProcessOverrid
         policy: over.policy.or(base.policy),
         kind: over.kind.or(base.kind),
         after: over.after.or(base.after),
+        provides: merge_env(base.provides, over.provides),
     }
 }
 
@@ -335,30 +348,65 @@ struct RawProcess {
     policy: Option<Policy>,
     kind: Option<ProcessKind>,
     after: Option<Vec<String>>,
+    #[serde(default)]
+    provides: EnvTable,
+    apps: Option<Vec<String>>,
+}
+
+impl RawProcess {
+    fn into_project_process<E: de::Error>(self, name: &str) -> Result<ProjectProcess, E> {
+        if let Some(entry) = self.provides.0.iter().find(|e| e.key.contains("{{")) {
+            return Err(E::custom(format!(
+                "process {name:?} provides {:?}: names in `provides` can't be templates",
+                entry.key
+            )));
+        }
+        Ok(ProjectProcess {
+            apps: self.apps,
+            process: ProcessOverride {
+                command: self.command,
+                cwd: self.cwd,
+                env: self.env.0,
+                http: self.http,
+                ready: self.ready.map(|r| r.0),
+                scope: self.scope,
+                pty: self.pty,
+                policy: self.policy,
+                kind: self.kind,
+                after: self.after,
+                provides: self.provides.0,
+            },
+        })
+    }
 }
 
 fn process_table<'de, D: Deserializer<'de>>(
     d: D,
 ) -> Result<BTreeMap<String, ProcessOverride>, D::Error> {
     let raw = BTreeMap::<String, RawProcess>::deserialize(d)?;
-    Ok(raw
-        .into_iter()
+    raw.into_iter()
         .map(|(name, p)| {
-            let ov = ProcessOverride {
-                command: p.command,
-                cwd: p.cwd,
-                env: p.env.0,
-                http: p.http,
-                ready: p.ready.map(|r| r.0),
-                scope: p.scope,
-                pty: p.pty,
-                policy: p.policy,
-                kind: p.kind,
-                after: p.after,
-            };
-            (name, ov)
+            let declared = p.into_project_process::<D::Error>(&name)?;
+            if declared.apps.is_some() {
+                return Err(de::Error::custom(format!(
+                    "process {name:?}: `apps` only applies to a project's [processes.{name}]"
+                )));
+            }
+            Ok((name, declared.process))
         })
-        .collect())
+        .collect()
+}
+
+fn project_process_table<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, ProjectProcess>, D::Error> {
+    let raw = BTreeMap::<String, RawProcess>::deserialize(d)?;
+    raw.into_iter()
+        .map(|(name, p)| {
+            let declared = p.into_project_process::<D::Error>(&name)?;
+            Ok((name, declared))
+        })
+        .collect()
 }
 
 /// Parses a project file. The project's name is the file stem.
@@ -383,6 +431,7 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         scheme: raw.scheme,
         idle_timeout: raw.idle_timeout.map(|d| d.0),
         apps: raw.apps,
+        processes: raw.processes,
     })
 }
 
@@ -414,8 +463,9 @@ pub struct DiscoveredApp {
 }
 
 /// Builds a project from its file and discovered app directories, merging each
-/// app's `carte.toml` under the project file and validating names and references.
-/// Apps that fail validation are left out and reported.
+/// app's `carte.toml`, the project's `[processes]` and its `[apps.X]` table, in
+/// that order, and validating names and references. Apps that fail validation
+/// are left out and reported.
 pub fn assemble_project(
     file: ProjectFile,
     discovered: Vec<DiscoveredApp>,
@@ -430,6 +480,7 @@ pub fn assemble_project(
         scheme,
         idle_timeout,
         apps: mut app_tables,
+        processes: project_processes,
         repos: _,
     } = file;
     let mut problems = Vec::new();
@@ -439,20 +490,16 @@ pub fn assemble_project(
         message,
     };
 
-    let mut candidates: Vec<(String, PathBuf, AppConfig)> = discovered
+    let mut candidates: Vec<(String, PathBuf, AppConfig, Option<AppConfig>)> = discovered
         .into_iter()
         .map(|d| {
             let table = app_tables.remove(&d.name).unwrap_or_default();
-            let config = match d.repo_config {
-                Some(repo) => table.merged_over(repo),
-                None => table,
-            };
-            (d.name, d.path, config)
+            (d.name, d.path, table, d.repo_config)
         })
         .collect();
     for (name, table) in std::mem::take(&mut app_tables) {
         if table.port.is_some() {
-            candidates.push((name, PathBuf::new(), table));
+            candidates.push((name, PathBuf::new(), table, None));
         } else {
             problems.push(problem(
                 &name,
@@ -462,21 +509,65 @@ pub fn assemble_project(
     }
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
 
+    let short_names: Vec<(String, String)> = candidates
+        .iter()
+        .map(|(name, _, table, repo)| {
+            let override_name = table
+                .name
+                .as_deref()
+                .or(repo.as_ref().and_then(|r| r.name.as_deref()));
+            let short = short_name(name, override_name, strip_prefix.as_deref());
+            (name.clone(), short)
+        })
+        .collect();
+    let mut declared: Vec<(String, Option<BTreeSet<String>>, ProcessOverride)> = Vec::new();
+    for (process, ProjectProcess { apps, process: ov }) in project_processes {
+        let targets = apps.map(|entries| {
+            let mut targets = BTreeSet::new();
+            for entry in entries {
+                let target = short_names
+                    .iter()
+                    .find(|(n, _)| *n == entry)
+                    .or_else(|| short_names.iter().find(|(_, s)| *s == entry));
+                match target {
+                    Some((full, _)) => {
+                        targets.insert(full.clone());
+                    }
+                    None => problems.push(Problem {
+                        project: Some(project_name.clone()),
+                        app: None,
+                        message: format!("[processes.{process}] lists unknown app {entry:?}"),
+                    }),
+                }
+            }
+            targets
+        });
+        declared.push((process, targets, ov));
+    }
+    let candidates = candidates.into_iter().map(|(name, path, table, repo)| {
+        let project_wide = AppConfig {
+            processes: declared
+                .iter()
+                .filter(|(_, targets, _)| targets.as_ref().is_none_or(|t| t.contains(&name)))
+                .map(|(process, _, ov)| (process.clone(), ov.clone()))
+                .collect(),
+            ..AppConfig::default()
+        };
+        let config = table.merged_over(project_wide.merged_over(repo.unwrap_or_default()));
+        (name, path, config)
+    });
+
     let mut apps: Vec<App> = Vec::new();
     for (name, path, mut config) in candidates {
         if apps.iter().any(|a| a.name == name) {
             problems.push(problem(&name, format!("app {name:?} is found twice")));
             continue;
         }
-        let short = match config.name.take() {
-            Some(short) => short,
-            None => strip_prefix
-                .as_deref()
-                .and_then(|p| name.strip_prefix(p))
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&name)
-                .to_string(),
-        };
+        let short = short_name(
+            &name,
+            config.name.take().as_deref(),
+            strip_prefix.as_deref(),
+        );
         if let Err(err) = slug::validate_app_short_name(&short) {
             problems.push(problem(&name, err.to_string()));
             continue;
@@ -551,6 +642,19 @@ pub fn assemble_project(
         apps,
     };
     (project, problems)
+}
+
+/// The hostname label of an app: its `name` override, else the directory name
+/// without the project's prefix.
+fn short_name(name: &str, override_name: Option<&str>, strip_prefix: Option<&str>) -> String {
+    match override_name {
+        Some(short) => short.to_string(),
+        None => strip_prefix
+            .and_then(|p| name.strip_prefix(p))
+            .filter(|s| !s.is_empty())
+            .unwrap_or(name)
+            .to_string(),
+    }
 }
 
 fn check_dns_label(label: &str) -> Result<(), String> {
@@ -1032,6 +1136,201 @@ mod tests {
             .merged_over(repo);
         assert_eq!(merged.processes["redis"].kind, Some(ProcessKind::Service));
         assert_eq!(merged.processes["redis"].after, Some(vec![]));
+    }
+
+    #[test]
+    fn parses_project_processes() {
+        let file = project(
+            r#"
+            [processes.redis]
+            apps = ["nova-billing", "api"]
+            command = "redis-server --port $PORT"
+            kind = "service"
+            [processes.redis.env]
+            REDIS_ARGS = "--save ''"
+            [processes.redis.provides]
+            REDIS_URL = "unix://{{run_dir}}/redis.sock"
+            [processes.mailcatcher]
+            command = "mailcatcher -f"
+            "#,
+        )
+        .unwrap();
+        let redis = &file.processes["redis"];
+        assert_eq!(
+            redis.apps,
+            Some(vec!["nova-billing".to_string(), "api".to_string()])
+        );
+        assert_eq!(redis.process.kind, Some(ProcessKind::Service));
+        assert_eq!(redis.process.env, env(&[("REDIS_ARGS", "--save ''")]));
+        assert_eq!(
+            redis.process.provides,
+            env(&[("REDIS_URL", "unix://{{run_dir}}/redis.sock")])
+        );
+        assert_eq!(file.processes["mailcatcher"].apps, None);
+    }
+
+    #[test]
+    fn apps_filter_is_only_valid_in_project_processes() {
+        let err = project("[apps.foo.processes.redis]\napps = [\"foo\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`apps` only applies to a project's"), "{err}");
+
+        let err = parse_repo_config(
+            Path::new("carte.toml"),
+            "[processes.redis]\napps = [\"foo\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("`apps` only applies to a project's"), "{err}");
+
+        let err = project("[processes.redis]\napp = [\"foo\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown field `app`"), "{err}");
+    }
+
+    #[test]
+    fn provides_names_are_not_templates() {
+        let err = project("[processes.redis.provides]\n\"{{app.name}}_URL\" = \"x\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("can't be templates"), "{err}");
+        let file = project("[apps.foo.processes.redis.provides]\nREDIS_URL = \"x\"\n").unwrap();
+        assert_eq!(
+            file.apps["foo"].processes["redis"].provides,
+            env(&[("REDIS_URL", "x")])
+        );
+    }
+
+    #[test]
+    fn project_processes_sit_between_repo_config_and_app_tables() {
+        let file = project(
+            r#"
+            [processes.redis]
+            command = "redis-server --port $PORT"
+            kind = "service"
+            pty = false
+            [processes.redis.env]
+            A = "project-wide"
+            B = "project-wide"
+            [processes.redis.provides]
+            REDIS_URL = "unix://{{run_dir}}/redis.sock"
+            REDIS_DB = "0"
+
+            [apps.app-one.processes.redis]
+            command = "redis-server --port $PORT --appendonly yes"
+            [apps.app-one.processes.redis.env]
+            B = "app"
+            [apps.app-one.processes.redis.provides]
+            REDIS_DB = "1"
+            "#,
+        )
+        .unwrap();
+        let repo = parse_repo_config(
+            Path::new("carte.toml"),
+            r#"
+            [processes.redis]
+            command = "redis-server"
+            ready = "port"
+            pty = true
+            policy = "disabled"
+            [processes.redis.env]
+            A = "repo"
+            C = "repo"
+            "#,
+        )
+        .unwrap();
+        let mut one = discovered("app-one");
+        one.repo_config = Some(repo.clone());
+        let mut two = discovered("app-two");
+        two.repo_config = Some(repo);
+        let (project, problems) = assemble_project(file, vec![one, two]);
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let redis = &project.app("app-one").unwrap().settings.processes.entries["redis"];
+        assert_eq!(
+            redis.command.as_deref(),
+            Some("redis-server --port $PORT --appendonly yes")
+        );
+        assert_eq!(redis.kind, Some(ProcessKind::Service));
+        assert_eq!(redis.pty, Some(false));
+        assert_eq!(redis.policy, Some(Policy::Disabled));
+        assert_eq!(
+            redis.env,
+            env(&[("A", "project-wide"), ("C", "repo"), ("B", "app")])
+        );
+        assert_eq!(
+            redis.provides,
+            env(&[
+                ("REDIS_URL", "unix://{{run_dir}}/redis.sock"),
+                ("REDIS_DB", "1")
+            ])
+        );
+
+        let redis = &project.app("app-two").unwrap().settings.processes.entries["redis"];
+        assert_eq!(redis.command.as_deref(), Some("redis-server --port $PORT"));
+        assert_eq!(
+            redis.env,
+            env(&[("A", "project-wide"), ("C", "repo"), ("B", "project-wide")])
+        );
+        assert_eq!(
+            redis.provides,
+            env(&[
+                ("REDIS_URL", "unix://{{run_dir}}/redis.sock"),
+                ("REDIS_DB", "0")
+            ])
+        );
+    }
+
+    #[test]
+    fn project_processes_apply_to_the_apps_they_list() {
+        let file = project(
+            r#"
+            strip_prefix = "nova-"
+            [processes.redis]
+            apps = ["nova-billing", "api", "nova-nope"]
+            command = "redis-server"
+            [processes.mail]
+            command = "mailcatcher"
+            [processes.none]
+            apps = []
+            command = "true"
+            [apps.nova-postcard-api]
+            name = "api"
+            "#,
+        )
+        .unwrap();
+        let (project, problems) = assemble_project(
+            file,
+            vec![
+                discovered("nova-billing"),
+                discovered("nova-postcard-api"),
+                discovered("nova-frontend"),
+            ],
+        );
+        let processes = |app: &str| -> Vec<String> {
+            project
+                .app(app)
+                .unwrap()
+                .settings
+                .processes
+                .entries
+                .keys()
+                .cloned()
+                .collect()
+        };
+        assert_eq!(processes("nova-billing"), ["mail", "redis"]);
+        assert_eq!(processes("nova-postcard-api"), ["mail", "redis"]);
+        assert_eq!(processes("nova-frontend"), ["mail"]);
+        assert_eq!(
+            problems,
+            vec![Problem {
+                project: Some("nova".into()),
+                app: None,
+                message: "[processes.redis] lists unknown app \"nova-nope\"".into(),
+            }]
+        );
     }
 
     #[test]

@@ -100,7 +100,10 @@ impl Rendered {
 
 /// Values carte renders itself, which can't hold secrets from the environment.
 pub fn revealed(source: &Source) -> bool {
-    matches!(source, Source::Injected | Source::Template { .. })
+    matches!(
+        source,
+        Source::Injected | Source::Template { .. } | Source::Provided { .. }
+    )
 }
 
 /// Renders the env of `process` of an instance, or of its HTTP process.
@@ -175,10 +178,16 @@ pub fn render(
     let dirs = paths.dir_roots().instance(key);
     let tld_length = naming::tld_length(&machine.tld, &state.project, app, &key.stack);
     let port = daemon.ports.get(&spec.name).copied().unwrap_or(0);
+    let processes: Vec<_> = list
+        .processes
+        .iter()
+        .map(|p| (p.clone(), daemon.ports.get(&p.name).copied().unwrap_or(0)))
+        .collect();
     let req = EnvRequest {
         project: &state.project,
         app,
         process: spec,
+        processes: &processes,
         checkout: &checkout,
         stack: &key.stack,
         branch: &branch,

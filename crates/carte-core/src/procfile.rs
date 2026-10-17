@@ -234,6 +234,7 @@ pub fn build(
                 policy: ov.policy.or(settings.policy).unwrap_or_default(),
                 kind: ov.kind,
                 after: ov.after.unwrap_or_default(),
+                provides: ov.provides,
                 name,
                 command,
             }

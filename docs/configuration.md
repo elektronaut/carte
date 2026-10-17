@@ -125,6 +125,7 @@ repos = ["~/work/acme-billing", "~/work/acme-frontend", "~/clients/acme/*"]
 | `scheme` | `"https"` | The scheme of URLs carte injects. `"http"` for apps that misbehave behind HTTPS |
 | `idle_timeout` | machine's | Overrides the machine's idle timeout for this project |
 | `apps` | none | Per-app settings, keyed by directory name. See [Apps](#apps) |
+| `processes` | none | Processes declared for many apps at once. See [Project-level processes](#project-level-processes) |
 
 ### Names and hostnames
 
@@ -147,7 +148,8 @@ wins, and the stack is reported as unreachable.
 
 `[apps.<directory name>]` tables in a project file, or the top level of a
 repo's `carte.toml`. When both set a key, the project file wins, key by
-key; `env` and `processes` are merged entry by entry.
+key; `env` and `processes` are merged entry by entry. The project's
+[`[processes]`](#project-level-processes) sit between the two.
 
 ```toml
 [apps.acme-events]
@@ -221,6 +223,7 @@ MAILCATCHER_SMTP = "1025"
 | `policy` | the app's | See [Policies](#policies) |
 | `kind` | none | `"service"` or `"task"`, which start before the other processes. See [Services and tasks](#services-and-tasks) |
 | `after` | none | Processes of the same kind this one starts after, like `["migrate"]` |
+| `provides` | none | Env templates set on every process of the instance, like a server's socket URL. See [Services and tasks](#services-and-tasks) |
 
 Every process gets its own `PORT`. A fixed port in the HTTP process's
 command (`-p 3000`, `--port=3000`) is replaced with `$PORT`, with a
@@ -278,6 +281,66 @@ kind = "task"
 The HTTP process can't have a `kind`, and services and tasks always run
 per instance, never with `scope = "checkout"`.
 
+A service tells the other processes where to find it with `provides`, a
+table of env templates set on every process of its instance, itself
+included:
+
+```toml
+[apps.acme-billing.processes.redis]
+command = "mkdir -p $CARTE_STATE_DIR/redis && exec redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --dir $CARTE_STATE_DIR/redis --save ''"
+kind = "service"
+
+[apps.acme-billing.processes.redis.provides]
+REDIS_URL = "unix://{{run_dir}}/redis.sock"
+```
+
+- The values are set whenever the process is part of the app, even
+  while it's disabled, stopped or crashed: a socket that isn't there
+  fails loudly, where a missing `REDIS_URL` would quietly fall back to a
+  shared Redis.
+- They render in the receiving instance, like other templates, except
+  that `{{port}}` is the providing process's port.
+- They win over env files and every `[env]` template, a process's own
+  included; only carte's own variables win over them. See
+  [Environment](#environment).
+- Names are plain variable names, not key templates.
+- `carte env` shows their source as `provided by redis`.
+
+### Project-level processes
+
+`[processes.<process>]` tables in a project file declare a process for
+several apps at once, with the same keys as
+`[apps.<name>.processes.<process>]`, plus `apps`:
+
+```toml
+[processes.redis]
+apps = ["billing", "acme-events"]
+command = "mkdir -p $CARTE_STATE_DIR/redis && exec redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --dir $CARTE_STATE_DIR/redis --save ''"
+kind = "service"
+
+[processes.redis.provides]
+REDIS_URL = "unix://{{run_dir}}/redis.sock"
+
+[apps.acme-events.processes.redis]
+policy = "disabled"
+```
+
+| Key | Default | |
+| --- | --- | --- |
+| `apps` | every app | The apps that get the process, by full or short name. A name that isn't an app of the project is reported, and the others still get it |
+
+Each listed app gets its own copy, as if it were in its
+`[apps.<name>.processes]`: one Redis per app per stack, with its own
+directories. When several places set the same process, later ones win,
+key by key, with `env` and `provides` merged entry by entry:
+
+1. The Procfile
+2. The repo's `carte.toml`
+3. The project's `[processes]`
+4. The app's `[apps.<name>.processes]` in the project file
+
+`apps` is only valid here, not in an app's processes or `carte.toml`.
+
 ### Node apps
 
 carte doesn't read `package.json`, so a Node app needs a `Procfile.dev`
@@ -331,7 +394,9 @@ Each process's environment is built in layers, later ones winning:
 2. **Env files** from `env_files`.
 3. **Templates:** the project's `[env]`, then the app's, then the
    process's.
-4. **Variables carte sets:**
+4. **Provided values** from the `provides` of the instance's processes.
+   See [Services and tasks](#services-and-tasks).
+5. **Variables carte sets:**
 
 | Variable | |
 | --- | --- |
@@ -379,8 +444,11 @@ process that wants a subdirectory creates it:
 redis: mkdir -p $CARTE_STATE_DIR/redis && exec redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --dir $CARTE_STATE_DIR/redis
 ```
 
+Templates use `{{state_dir}}` and `{{run_dir}}`. The process's
+[`provides`](#services-and-tasks) gives the socket to the rest of the app:
+
 ```toml
-[env]
+[apps.acme-billing.processes.redis.provides]
 REDIS_URL = "unix://{{run_dir}}/redis.sock"
 ```
 
