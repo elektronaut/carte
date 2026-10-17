@@ -1213,6 +1213,7 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         press(&mut app, now, KeyCode::Right);
         let generation = app.logs.generation;
@@ -1241,9 +1242,9 @@ mod tests {
 │        ● web           running             0%    0B│╭ logs following ────────────────────────────────────────────────╮
 │        ● worker pin*   running             0%    0B││web    Puma starting in single mode...                          │
 │      ✖ frontend !      crashed                     ││worker Started worker with 5 threads                            │
-│  ▾ ● feature-x         1/2                 0%    0B││web    GET /up 200 in 2ms                                       │
-│      ○ billing main                                ││                                                                │
-│      ● frontend !      idle in 14m         0%    0B││                                                                │
+│  ▸ ● feature-x         1/2                 0%    0B││web    GET /up 200 in 2ms                                       │
+│                                                    ││                                                                │
+│                                                    ││                                                                │
 │                                                    ││                                                                │
 │                                                    ││                                                                │
 │                                                    ││                                                                │
@@ -1259,6 +1260,7 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         let generation = app.logs.generation;
         log(&mut app, generation, "web", "before");
@@ -1305,6 +1307,7 @@ mod tests {
         let mut app = App::new(now);
         app.update(Event::Snapshot(Box::new(snapshot)), now);
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         let screen = draw(&mut app, 120, 18);
         let lines: Vec<&str> = screen.lines().collect();
@@ -1328,6 +1331,15 @@ mod tests {
     fn the_tree_scrolls_only_past_its_edges() {
         let mut app = busy_app();
         let now = app.now;
+        for code in [
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::End,
+            KeyCode::Right,
+            KeyCode::Home,
+        ] {
+            press(&mut app, now, code);
+        }
         draw(&mut app, 80, 18);
         for _ in 0..6 {
             press(&mut app, now, KeyCode::Down);
@@ -1417,6 +1429,7 @@ mod tests {
         });
         app.update(Event::Snapshot(Box::new(snapshot)), now);
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         let later = now + std::time::Duration::from_secs(3);
         app.update(Event::Tick, later);
@@ -1433,8 +1446,8 @@ mod tests {
     fn renders_a_crash_and_its_problem() {
         let mut app = busy_app();
         let now = app.now;
-        for _ in 0..3 {
-            press(&mut app, now, KeyCode::Down);
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down, KeyCode::Down] {
+            press(&mut app, now, code);
         }
         let screen = draw(&mut app, 80, 24);
         assert_eq!(
@@ -1446,9 +1459,9 @@ mod tests {
 │  ▾ ✖ main                                        1/2                 3%  412M│
 │    ▸ ● billing pin*                              ready               3%  412M│
 │      ✖ frontend !                                crashed                     │
-│  ▾ ● feature-x                                   1/2                 0%    0B│
-│      ○ billing main                                                          │
-│      ● frontend !                                idle in 14m         0%    0B│
+│  ▸ ● feature-x                                   1/2                 0%    0B│
+│                                                                              │
+│                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ nova-frontend@main ──────────────────────────────────────────────────────────╮
@@ -1480,7 +1493,7 @@ mod tests {
         let now = Instant::now();
         let mut app = App::new(now);
         app.update(Event::Snapshot(Box::new(snapshot)), now);
-        for code in [KeyCode::Down, KeyCode::Down, KeyCode::Right] {
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down, KeyCode::Right] {
             press(&mut app, now, code);
         }
         for _ in 0..2 {
@@ -1529,6 +1542,7 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
         press(&mut app, now, KeyCode::Char('v'));
         let var = |key: &str, value: &str, source: &str| carte_api::EnvVar {
@@ -1599,9 +1613,9 @@ mod tests {
             popup,
             [
                 "│ ╭ jump to ─────────────────────────────────────────────╮M│",
-                "│ │ › bill▏                                              │M│",
+                "│ │ › bill▏                                              │B│",
                 "│ │   nova-billing@main                                  │ │",
-                "│ │   nova-billing@main/web                              │B│",
+                "│ │   nova-billing@main/web                              │ │",
                 "│ │   nova-billing@feature-x                             │ │",
                 "╰─│   nova-billing@main/worker                           │─╯",
                 "╭ ╰ ↑↓ pick · enter goes · esc closes ───────────────────╯─╮",
