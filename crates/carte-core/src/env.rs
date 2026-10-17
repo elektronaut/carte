@@ -410,24 +410,77 @@ pub fn injected(req: &EnvRequest) -> Vec<(&'static str, String)> {
     if let Some(public) = req.urls.public_url(req.app) {
         vars.push(("CARTE_PUBLIC_URL", public));
     }
-    let mut hosts = vec![format!(".{}.{}", req.project.name, req.tld)];
-    if req.tld != "localhost" {
-        hosts.push(format!(".{}.localhost", req.project.name));
-    }
-    if let Some(domain) = req.share_domain {
-        hosts.push(format!(".{}", domain.trim_start_matches('.')));
-    }
     vars.extend([
         ("CARTE_TLD_LENGTH", req.tld_length.to_string()),
         ("SSL_CERT_FILE", path(req.ca_bundle)),
         ("REQUESTS_CA_BUNDLE", path(req.ca_bundle)),
         ("NODE_EXTRA_CA_CERTS", path(req.ca_cert)),
         ("DISABLE_SPRING", "1".into()),
-        ("RAILS_DEVELOPMENT_HOSTS", hosts.join(",")),
-        ("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", hosts.join(",")),
+        ("RAILS_DEVELOPMENT_HOSTS", rails_hosts(req).join(",")),
+        (
+            "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS",
+            vite_hosts(req).join(","),
+        ),
         ("PIDFILE", path(req.pidfile)),
     ]);
     vars
+}
+
+fn served_tlds(tld: &str) -> Vec<&str> {
+    if tld == "localhost" {
+        vec![tld]
+    } else {
+        vec![tld, "localhost"]
+    }
+}
+
+fn push_unique(hosts: &mut Vec<String>, host: String) {
+    if !hosts.contains(&host) {
+        hosts.push(host);
+    }
+}
+
+/// Rails' `config.hosts` entries, each matching its domain and one label below it:
+/// the project, the branch stack, the app's own host when it takes subdomains, and
+/// each alias on main.
+fn rails_hosts(req: &EnvRequest) -> Vec<String> {
+    let tlds = served_tlds(req.tld);
+    let mut domains = vec![req.project.name.clone()];
+    if let Stack::Branch(slug) = req.stack {
+        domains.push(format!("{slug}.{}", req.project.name));
+    }
+    if req.app.settings.subdomains {
+        domains.push(crate::naming::local_labels(req.project, req.app, req.stack).join("."));
+    }
+    if *req.stack == Stack::Main {
+        domains.extend(req.app.settings.aliases.iter().cloned());
+    }
+    let mut hosts = Vec::new();
+    for domain in &domains {
+        for tld in &tlds {
+            push_unique(&mut hosts, format!(".{domain}.{tld}"));
+        }
+    }
+    hosts.extend(share_host(req));
+    hosts
+}
+
+/// Vite's `server.allowedHosts` entries: a leading-dot entry matches subdomains at
+/// any depth and `.localhost` is always allowed.
+fn vite_hosts(req: &EnvRequest) -> Vec<String> {
+    let mut hosts = vec![format!(".{}.{}", req.project.name, req.tld)];
+    if *req.stack == Stack::Main {
+        for alias in &req.app.settings.aliases {
+            push_unique(&mut hosts, format!(".{alias}.{}", req.tld));
+        }
+    }
+    hosts.extend(share_host(req));
+    hosts
+}
+
+fn share_host(req: &EnvRequest) -> Option<String> {
+    req.share_domain
+        .map(|domain| format!(".{}", domain.trim_start_matches('.')))
 }
 
 #[cfg(test)]
@@ -571,11 +624,11 @@ mod tests {
             ("DISABLE_SPRING", "1"),
             (
                 "RAILS_DEVELOPMENT_HOSTS",
-                ".nova.test,.nova.localhost,.example.dev",
+                ".nova.test,.nova.localhost,.feature-x.nova.test,.feature-x.nova.localhost,.example.dev",
             ),
             (
                 "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS",
-                ".nova.test,.nova.localhost,.example.dev",
+                ".nova.test,.example.dev",
             ),
             ("PIDFILE", "/tmp/carte/nova-postcard-frontend@feature-x.pid"),
         ];
@@ -602,6 +655,198 @@ mod tests {
         );
         assert_eq!(env.value("CARTE_CHECKOUT"), Some("main"));
         assert_eq!(env.value("CARTE_STACK"), Some("main"));
+    }
+
+    /// `ActionDispatch::HostAuthorization`: a leading-dot entry becomes
+    /// `\A(?:[a-z0-9-]+\.)?<domain>(:\d+)?\z`, anything else an exact match.
+    fn rails_allows(entries: &str, host: &str) -> bool {
+        entries
+            .split(',')
+            .any(|entry| match entry.strip_prefix('.') {
+                Some(domain) => {
+                    host == domain
+                        || host.strip_suffix(domain).is_some_and(|rest| {
+                            rest.strip_suffix('.').is_some_and(|label| {
+                                !label.is_empty()
+                                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                            })
+                        })
+                }
+                None => host == entry,
+            })
+    }
+
+    /// Vite's `isHostAllowed`: `.localhost` always, a leading-dot entry at any depth.
+    fn vite_allows(entries: &str, host: &str) -> bool {
+        host.ends_with(".localhost")
+            || entries.split(',').any(|entry| {
+                entry == host
+                    || entry.starts_with('.') && (host == &entry[1..] || host.ends_with(entry))
+            })
+    }
+
+    fn hosts_for(fx: &Fixture) -> (String, String) {
+        let env = fx.render_empty();
+        (
+            env.value("RAILS_DEVELOPMENT_HOSTS").unwrap().to_string(),
+            env.value("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS")
+                .unwrap()
+                .to_string(),
+        )
+    }
+
+    fn assert_allowed(fx: &Fixture, hosts: &[&str]) {
+        let (rails, vite) = hosts_for(fx);
+        for host in hosts {
+            assert!(
+                rails_allows(&rails, host),
+                "Rails blocks {host} with {rails}"
+            );
+            assert!(vite_allows(&vite, host), "Vite blocks {host} with {vite}");
+        }
+    }
+
+    fn on_main(fx: &mut Fixture) {
+        fx.checkout = Checkout::Main {
+            path: "/Users/alex/work/nova-postcard-frontend".into(),
+        };
+        fx.stack = Stack::Main;
+        fx.urls.stack = "main";
+    }
+
+    #[test]
+    fn rails_matcher_allows_one_label_below_a_leading_dot() {
+        assert!(rails_allows(".nova.test", "nova.test"));
+        assert!(rails_allows(".nova.test", "postcard-frontend.nova.test"));
+        assert!(!rails_allows(
+            ".nova.test",
+            "postcard-frontend.feature-x.nova.test"
+        ));
+        assert!(!rails_allows(".nova.test", "xnova.test"));
+        assert!(rails_allows("nova.test", "nova.test"));
+        assert!(!rails_allows("nova.test", "a.nova.test"));
+    }
+
+    #[test]
+    fn hosts_on_main() {
+        let mut fx = Fixture::new();
+        on_main(&mut fx);
+        let (rails, vite) = hosts_for(&fx);
+        assert_eq!(rails, ".nova.test,.nova.localhost");
+        assert_eq!(vite, ".nova.test");
+        assert_allowed(
+            &fx,
+            &[
+                "postcard-frontend.nova.test",
+                "postcard-frontend.nova.localhost",
+            ],
+        );
+    }
+
+    #[test]
+    fn hosts_in_a_branch_stack() {
+        let fx = Fixture::new();
+        let (rails, vite) = hosts_for(&fx);
+        assert_eq!(
+            rails,
+            ".nova.test,.nova.localhost,.feature-x.nova.test,.feature-x.nova.localhost"
+        );
+        assert_eq!(vite, ".nova.test");
+        assert_allowed(
+            &fx,
+            &[
+                "postcard-frontend.feature-x.nova.test",
+                "postcard-frontend.feature-x.nova.localhost",
+                "postcard-api.nova.test",
+            ],
+        );
+    }
+
+    #[test]
+    fn hosts_for_subdomains_on_main() {
+        let mut fx = Fixture::new();
+        on_main(&mut fx);
+        fx.project.apps[0].settings.subdomains = true;
+        let (rails, _) = hosts_for(&fx);
+        assert_eq!(
+            rails,
+            ".nova.test,.nova.localhost,.postcard-frontend.nova.test,.postcard-frontend.nova.localhost"
+        );
+        assert_allowed(
+            &fx,
+            &[
+                "postcard-frontend.nova.test",
+                "www.postcard-frontend.nova.test",
+                "www.postcard-frontend.nova.localhost",
+            ],
+        );
+    }
+
+    #[test]
+    fn hosts_for_subdomains_in_a_branch_stack() {
+        let mut fx = Fixture::new();
+        fx.project.apps[0].settings.subdomains = true;
+        let (rails, vite) = hosts_for(&fx);
+        assert_eq!(
+            rails,
+            ".nova.test,.nova.localhost,.feature-x.nova.test,.feature-x.nova.localhost,\
+             .postcard-frontend.feature-x.nova.test,.postcard-frontend.feature-x.nova.localhost"
+        );
+        assert_eq!(vite, ".nova.test");
+        assert_allowed(
+            &fx,
+            &[
+                "postcard-frontend.feature-x.nova.test",
+                "www.postcard-frontend.feature-x.nova.test",
+                "www.postcard-frontend.feature-x.nova.localhost",
+            ],
+        );
+    }
+
+    #[test]
+    fn hosts_for_aliases_only_on_main() {
+        let mut fx = Fixture::new();
+        on_main(&mut fx);
+        fx.project.apps[0].settings.aliases = vec!["nova-frontend".into()];
+        fx.project.apps[0].settings.subdomains = true;
+        let (rails, vite) = hosts_for(&fx);
+        assert_eq!(
+            rails,
+            ".nova.test,.nova.localhost,.postcard-frontend.nova.test,.postcard-frontend.nova.localhost,\
+             .nova-frontend.test,.nova-frontend.localhost"
+        );
+        assert_eq!(vite, ".nova.test,.nova-frontend.test");
+        assert_allowed(
+            &fx,
+            &[
+                "nova-frontend.test",
+                "nova-frontend.localhost",
+                "www.nova-frontend.test",
+            ],
+        );
+
+        let mut fx = Fixture::new();
+        fx.project.apps[0].settings.aliases = vec!["nova-frontend".into()];
+        let (rails, vite) = hosts_for(&fx);
+        assert!(!rails.contains("nova-frontend"), "{rails}");
+        assert!(!vite.contains("nova-frontend"), "{vite}");
+    }
+
+    #[test]
+    fn hosts_for_the_share_domain() {
+        let mut fx = Fixture::new();
+        fx.urls.shared = vec!["nova-postcard-frontend"];
+        fx.share_domain = Some("example.dev");
+        let (rails, vite) = hosts_for(&fx);
+        assert!(rails.ends_with(",.example.dev"), "{rails}");
+        assert_eq!(vite, ".nova.test,.example.dev");
+        assert_allowed(
+            &fx,
+            &[
+                "postcard-frontend--feature-x--nova.example.dev",
+                "example.dev",
+            ],
+        );
     }
 
     #[test]
