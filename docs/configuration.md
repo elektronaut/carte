@@ -516,7 +516,9 @@ servers refuse hostnames they don't know:
 
 - **Vite** (and Astro, which runs on it) accepts them without config:
   carte sets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, which Vite adds to
-  `server.allowedHosts`.
+  `server.allowedHosts`. Vite 6.1 to 8.0 read it as a single hostname,
+  so there it only works while it holds one domain: an app with aliases,
+  or a machine with a share domain, needs `server.allowedHosts` set.
 - **Next.js:** list the hostnames in `allowedDevOrigins` in
   `next.config.js`, as in `["*.acme.test"]`, so hot reloading works.
 
@@ -561,8 +563,8 @@ Each process's environment is built in layers, later ones winning:
 | `CARTE_PUBLIC_URL` | Its public URL, while shared |
 | `CARTE_TLD_LENGTH` | Labels after the app's own, for Rails' `tld_length` |
 | `PIDFILE` | A pidfile path for the instance, in carte's state directory |
-| `RAILS_DEVELOPMENT_HOSTS` | The project's domain and the share domain |
-| `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` | The same, for Vite's `server.allowedHosts` |
+| `RAILS_DEVELOPMENT_HOSTS` | Every domain the instance answers under, for Rails' `config.hosts`: the project's, the stack's, the app's own with `subdomains = true`, its aliases on main, and the share domain |
+| `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` | The project's domain, aliases on main and the share domain, for Vite's `server.allowedHosts` |
 | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` | System roots plus carte's CA |
 | `NODE_EXTRA_CA_CERTS` | carte's CA |
 | `DISABLE_SPRING` | `1` |
