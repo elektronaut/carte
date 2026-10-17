@@ -160,8 +160,9 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
     .header(header)
     .block(block)
     .row_highlight_style(selected_style);
-    let mut state =
-        TableState::default().with_selected((!app.rows.is_empty()).then_some(app.cursor));
+    let mut state = TableState::default()
+        .with_offset(app.tree_offset)
+        .with_selected((!app.rows.is_empty()).then_some(app.cursor));
     frame.render_stateful_widget(table, area, &mut state);
     app.tree_area = area;
     app.tree_offset = state.offset();
@@ -1036,6 +1037,30 @@ mod tests {
         }
         assert!(!screen.contains("← GET / "), "only the last three visits");
         assert!(screen.contains("billing shared"), "{screen}");
+    }
+
+    #[test]
+    fn the_tree_scrolls_only_past_its_edges() {
+        let mut app = busy_app();
+        let now = app.now;
+        draw(&mut app, 80, 18);
+        for _ in 0..6 {
+            press(&mut app, now, KeyCode::Down);
+            draw(&mut app, 80, 18);
+        }
+        let offset = app.tree_offset;
+        assert!(offset > 0, "the bottom row scrolled into view");
+        press(&mut app, now, KeyCode::Up);
+        draw(&mut app, 80, 18);
+        assert_eq!(
+            app.tree_offset, offset,
+            "moving up inside the view keeps it"
+        );
+        for _ in 0..6 {
+            press(&mut app, now, KeyCode::Up);
+            draw(&mut app, 80, 18);
+        }
+        assert_eq!(app.tree_offset, 0);
     }
 
     #[test]
