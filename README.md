@@ -31,6 +31,16 @@ The `.test` hostnames, starting apps on request, idle shutdown and
 `tmp/restart.txt` all come from it. If you want a simpler solution that 
 just gives you a web server per app, it's highly recommended.
 
+[Overmind](https://github.com/DarthSim/overmind) and
+[process-compose](https://github.com/F1bonacc1/process-compose) run a
+project's processes in your terminal, with no daemon, hostnames or idle
+shutdown. They're a good fit if you work on one app at a time and want a
+better `bin/dev`.
+
+[portless](https://github.com/vercel-labs/portless) gives dev servers you
+start yourself stable `.localhost` names, including one per worktree. It
+routes, but leaves starting and stopping processes to you.
+
 ## Install
 
 With Homebrew:
