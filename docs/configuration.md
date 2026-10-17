@@ -8,6 +8,12 @@ carte reads three kinds of TOML files:
 | `~/.config/carte/projects/<name>.toml` | One project: its repos, env and per-app settings |
 | `carte.toml` in a repo | Defaults for that app, which can be committed |
 
+The config directory is `~/.config/carte` and carte's state (logs, the
+CA, pidfiles, instance data) lives in `~/.local/state/carte`, or under
+`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` when set. `CARTE_CONFIG_DIR`
+and `CARTE_STATE_HOME` set them directly; `carte setup` writes both into
+the daemon's LaunchAgent.
+
 Every key is optional unless noted. Unknown keys are errors, so a typo is
 reported instead of ignored.
 
@@ -289,6 +295,7 @@ Each process's environment is built in layers, later ones winning:
 | `CARTE_URL` | The app's URL in this stack |
 | `CARTE_PUBLIC_URL` | Its public URL, while shared |
 | `CARTE_TLD_LENGTH` | Labels after the app's own, for Rails' `tld_length` |
+| `PIDFILE` | A pidfile path for the instance, in carte's state directory |
 | `RAILS_DEVELOPMENT_HOSTS` | The project's domain and the share domain |
 | `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` | The same, for Vite's `server.allowedHosts` |
 | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` | System roots plus carte's CA |
@@ -313,7 +320,7 @@ creates them before its processes start, and creates nothing inside them.
   socket in it stays under the operating system's limit of about 100
   bytes: a hash of project, stack and app in the per-user temp directory
   on macOS, in `$XDG_RUNTIME_DIR/carte` or `/tmp/carte-<uid>` on Linux.
-  `CARTE_RUNTIME_DIR` in the daemon's environment moves it.
+  `CARTE_RUNTIME_HOME` in the daemon's environment moves it.
 
 Commands aren't templated, so they use the variables like `$PORT`. A
 process that wants a subdirectory creates it:

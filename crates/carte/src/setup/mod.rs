@@ -1035,6 +1035,32 @@ mod tests {
     }
 
     #[test]
+    fn a_plist_with_the_old_state_dir_key_is_outdated() {
+        let root = Path::new("/r");
+        let env = env(root);
+        let old = env
+            .agent()
+            .to_plist()
+            .replace("CARTE_STATE_HOME", "CARTE_STATE_DIR");
+        let facts = Facts {
+            resolver: Some(env.resolver_contents()),
+            ca: CaState::Trusted,
+            agent_plist: Some(old),
+            agent_loaded: true,
+            ..fresh()
+        };
+        let report = check::check(&env, &facts).to_string();
+        assert!(
+            report.contains("differs from what setup writes now"),
+            "{report}"
+        );
+        assert!(
+            commands(&plan_install(&env, &facts))
+                .contains(&"write /r/home/Library/LaunchAgents/no.elektronaut.carte.plist".into())
+        );
+    }
+
+    #[test]
     fn installs_the_skill_and_links_it_for_claude() {
         let root = Path::new("/r");
         let env = env(root);
