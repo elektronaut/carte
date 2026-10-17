@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, Credentials, InstanceStatus, LogLine,
-    LogsRequest, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
+    Action, Address, ControlRequest, ControlResponse, Credentials, EventsRequest, InstanceStatus,
+    LogLine, LogsRequest, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
 };
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -52,6 +52,11 @@ pub enum Command {
     FollowLogs {
         generation: u64,
         request: LogsRequest,
+    },
+    /// Follows events into the log pane, as `Event::Log` lines.
+    FollowEvents {
+        generation: u64,
+        request: EventsRequest,
     },
     StopLogs,
     Share(ShareRequest),
@@ -105,6 +110,8 @@ pub struct App {
     pub focus: Focus,
     pub mode: Mode,
     pub logs: Logs,
+    /// The log pane shows events instead of logs.
+    pub events: bool,
     pub notice: Option<Notice>,
     /// Passwords of the shares made here, by project and stack: the daemon only hands
     /// them out when a share is made.
@@ -136,6 +143,7 @@ impl App {
             focus: Focus::Tree,
             mode: Mode::Normal,
             logs: Logs::default(),
+            events: false,
             notice: None,
             credentials: BTreeMap::new(),
             tree_height: 0,
@@ -423,6 +431,14 @@ impl App {
                     "Mouse on"
                 } else {
                     "Mouse off: drag to select text, m turns it back on"
+                });
+            }
+            (Intent::ToggleEvents, _) => {
+                self.events = !self.events;
+                self.inform(if self.events {
+                    "showing events; e goes back to logs"
+                } else {
+                    "showing logs"
                 });
             }
             (Intent::CycleShow, _) => {
@@ -736,7 +752,21 @@ impl App {
         if wanted.is_none() {
             return Some(Command::StopLogs);
         }
-        let Some(node) = self.selected_node() else {
+        let node = self.selected_node();
+        if self.events {
+            return Some(Command::FollowEvents {
+                generation,
+                request: EventsRequest {
+                    target: node
+                        .map(Node::id)
+                        .filter(|id| !matches!(id, NodeId::Folder { .. }))
+                        .map(target::address),
+                    follow: true,
+                    tail: Some(1000),
+                },
+            });
+        }
+        let Some(node) = node else {
             return Some(Command::StopLogs);
         };
         Some(Command::FollowLogs {
@@ -751,9 +781,20 @@ impl App {
         })
     }
 
+    /// What the log pane follows: an address's logs, or the events about it (every
+    /// event for a folder or an empty tree).
     fn log_key(&self) -> Option<String> {
         self.snapshot.as_ref()?;
-        let id = self.selected_node()?.id();
+        let id = self.selected_node().map(Node::id);
+        if self.events {
+            return Some(match id {
+                Some(id) if !matches!(id, NodeId::Folder { .. }) => {
+                    format!("events {}", target::label(id))
+                }
+                _ => "events".to_string(),
+            });
+        }
+        let id = id?;
         if matches!(id, NodeId::Folder { .. }) {
             return None;
         }
@@ -761,6 +802,9 @@ impl App {
     }
 
     fn log_prefix(&self) -> Prefix {
+        if self.events {
+            return Prefix::None;
+        }
         match self.selected_node().map(Node::id) {
             Some(NodeId::Folder { .. } | NodeId::Project { .. }) => Prefix::Full,
             Some(NodeId::Stack { .. }) => Prefix::AppProcess,
@@ -821,6 +865,35 @@ mod tests {
                 project: "nova".into()
             })
         );
+    }
+
+    #[test]
+    fn e_switches_the_log_pane_to_events_and_back() {
+        let (mut app, now) = connected();
+        let commands = press(&mut app, now, KeyCode::Char('e'));
+        let [Command::FollowEvents { request, .. }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(
+            request.target.as_ref().and_then(|t| t.project.clone()),
+            Some("nova".into())
+        );
+        assert!(request.follow);
+        assert_eq!(app.logs.prefix, Prefix::None);
+
+        let commands = press(&mut app, now, KeyCode::Down);
+        let [Command::FollowEvents { request, .. }] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(
+            request.target.as_ref().map(|t| t.address.as_str()),
+            Some("@main"),
+            "events follow the selection"
+        );
+
+        let commands = press(&mut app, now, KeyCode::Char('e'));
+        assert_eq!(follows(&commands), ["@main"]);
+        assert!(!app.events);
     }
 
     #[test]

@@ -59,6 +59,8 @@ pub enum Intent {
     FilterDone,
     CycleShow,
     ToggleMouse,
+    /// Switch the log pane between logs and events.
+    ToggleEvents,
     Control(Control),
     StopIdle,
     StopAll,
@@ -90,6 +92,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("/", "filter the focused pane"),
             ("esc", "clear the filter"),
             ("a", "show all, running or shared"),
+            ("e", "show logs or events"),
             ("drag", "copy log lines"),
             ("-", "mark the logs with the time"),
             ("m", "mouse on or off"),
@@ -175,6 +178,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('I') => Some(Intent::StopIdle),
         KeyCode::Char('X') => Some(Intent::StopAll),
         KeyCode::Char('a') => Some(Intent::CycleShow),
+        KeyCode::Char('e') => Some(Intent::ToggleEvents),
         KeyCode::Char('m') => Some(Intent::ToggleMouse),
         _ => None,
     };

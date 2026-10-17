@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use carte_api::{InstanceStatus, Policy, Problem, ProcessState, ProcessStatus, TunnelState};
+use carte_api::{Event, InstanceStatus, Policy, Problem, ProcessState, ProcessStatus, TunnelState};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -43,7 +43,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_waiting(frame, main, app);
     }
     frame.render_widget(status_line(app), status);
-    frame.render_widget(footer_line(app.focus), footer);
+    frame.render_widget(footer_line(app.focus, app.events), footer);
 
     match &app.mode {
         Mode::Help => render_help(frame, main),
@@ -394,10 +394,54 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
             }
         }
     }
+    if let Some(event) = latest_event(app, id) {
+        lines.push(Line::from(event_note(event, crate::clock::now_ms())).dark_gray());
+    }
     for problem in problems_for(app, id) {
         lines.push(Line::from(format!("! {}", problem.message)).red());
     }
     lines
+}
+
+/// The newest event about the node or anything under it.
+fn latest_event<'a>(app: &'a App, id: &NodeId) -> Option<&'a Event> {
+    let (folder, project, stack, app_name) = match id {
+        NodeId::Folder { folder } => (Some(folder.as_str()), None, None, None),
+        NodeId::Project { project } => (None, Some(project.as_str()), None, None),
+        NodeId::Stack { project, stack } => (None, Some(project.as_str()), Some(stack), None),
+        NodeId::Instance {
+            project,
+            stack,
+            app,
+        }
+        | NodeId::Process {
+            project,
+            stack,
+            app,
+            ..
+        } => (None, Some(project.as_str()), Some(stack), Some(app)),
+    };
+    app.snapshot
+        .iter()
+        .flat_map(|s| &s.projects)
+        .filter(|p| project.is_none_or(|name| p.name == name))
+        .filter(|p| folder.is_none_or(|f| p.folder.as_deref() == Some(f)))
+        .flat_map(|p| &p.stacks)
+        .filter(|s| stack.is_none_or(|name| s.name == *name))
+        .flat_map(|s| &s.instances)
+        .filter(|i| app_name.is_none_or(|name| i.app == *name))
+        .filter_map(|i| i.last_event.as_ref())
+        .max_by_key(|e| e.seq)
+}
+
+/// `stopped 3m ago: idle for 15m`, naming what it's about when that isn't obvious.
+fn event_note(event: &Event, now_ms: u64) -> String {
+    let ago = crate::clock::ago(event.at_ms, now_ms);
+    let mut note = format!("{} {ago} ago", event.kind.words());
+    if !event.message.is_empty() {
+        note.push_str(&format!(": {}", event.message));
+    }
+    note
 }
 
 fn crashed_below(node: &Node) -> Vec<&str> {
@@ -597,7 +641,7 @@ fn problems_for<'a>(app: &'a App, id: &NodeId) -> Vec<&'a Problem> {
 
 fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
     let logs = &app.logs;
-    let mut title = vec![Span::raw(" logs ")];
+    let mut title = vec![Span::raw(if app.events { " events " } else { " logs " })];
     if !logs.filter.is_empty() {
         title.push(Span::raw(format!("/{} ", logs.filter)).yellow());
     }
@@ -619,8 +663,10 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
             .selected_node()
             .is_some_and(|n| matches!(n.status.state, State::Stopped | State::Disabled));
         let message = match (&logs.ended, logs.is_empty()) {
+            (Some(reason), _) if app.events => format!("No events: {reason}"),
             (Some(reason), _) => format!("No logs: {reason}"),
             (None, false) => "No lines match the filter.".into(),
+            (None, true) if app.events => "Nothing has happened here yet.".into(),
             (None, true) if logs.key.is_some() && stopped => "Not running; s starts it.".into(),
             (None, true) if logs.key.is_some() => "No output yet.".into(),
             (None, true)
@@ -716,7 +762,8 @@ fn status_line(app: &App) -> Line<'static> {
     Line::default()
 }
 
-fn footer_line(focus: Focus) -> Line<'static> {
+fn footer_line(focus: Focus, events: bool) -> Line<'static> {
+    let other = if events { "logs" } else { "events" };
     let keys: &[(&str, &str)] = match focus {
         Focus::Tree => &[
             ("?", "help"),
@@ -737,6 +784,7 @@ fn footer_line(focus: Focus) -> Line<'static> {
             ("g", "top"),
             ("G", "follow"),
             ("/", "filter"),
+            ("e", other),
             ("tab", "tree"),
         ],
     };
@@ -1106,6 +1154,61 @@ mod tests {
     }
 
     #[test]
+    fn renders_events_and_the_latest_one_in_the_details() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        let mut snapshot = sample();
+        let event = |seq, kind, message: &str, ago_ms| carte_api::Event {
+            seq,
+            at_ms: crate::clock::now_ms() - ago_ms,
+            kind,
+            message: message.into(),
+            subjects: vec![],
+            boot_ms: None,
+            exit_code: None,
+        };
+        let stacks = &mut snapshot.projects[0].stacks;
+        stacks[0].instances[0].last_event = Some(event(
+            7,
+            carte_api::EventKind::Stopped,
+            "idle for 15m",
+            185_000,
+        ));
+        stacks[1].instances[0].last_event =
+            Some(event(3, carte_api::EventKind::Ready, "in 2.1s", 600_000));
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let commands = press(&mut app, now, KeyCode::Char('e'));
+        let Some(Command::FollowEvents { generation, .. }) = commands.first() else {
+            panic!("{commands:?}");
+        };
+        app.update(
+            Event::Log {
+                generation: *generation,
+                line: LogLine {
+                    project: String::new(),
+                    app: String::new(),
+                    stack: String::new(),
+                    process: String::new(),
+                    at_ms: 0,
+                    text: "14:32:05  nova-billing  stopped: idle for 15m".into(),
+                    marker: false,
+                },
+            },
+            now,
+        );
+        let screen = draw(&mut app, 80, 24);
+        assert!(
+            screen.contains("stopped 3m ago: idle for 15m"),
+            "the project shows its newest event:\n{screen}"
+        );
+        assert!(screen.contains("╭ events following"), "{screen}");
+        assert!(
+            screen.contains("│14:32:05  nova-billing  stopped: idle for 15m"),
+            "{screen}"
+        );
+    }
+
+    #[test]
     fn renders_a_crash_and_its_problem() {
         let mut app = busy_app();
         let now = app.now;
@@ -1175,7 +1278,7 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Char('?'));
-        let screen = draw(&mut app, 100, 41);
+        let screen = draw(&mut app, 100, 42);
         assert_eq!(
             screen,
             "\
@@ -1191,21 +1294,22 @@ mod tests {
 │                        │ /            filter the focused pane           │                        │
 │                        │ esc          clear the filter                  │                        │
 │                        │ a            show all, running or shared       │                        │
+│                        │ e            show logs or events               │                        │
 │                        │ drag         copy log lines                    │                        │
 │                        │ -            mark the logs with the time       │                        │
 │                        │ m            mouse on or off                   │                        │
 │                        │                                                │                        │
 │                        │ Control the selection                          │                        │
 │                        │ s            start                             │                        │
-│                        │ x            stop                              │                        │
-╰────────────────────────│ r            restart                           │────────────────────────╯
-╭ nova ──────────────────│ p            pin or unpin                      │────────────────────────╮
-│✖ 2 of 4 instances runni│ d            disable or enable                 │                        │
-│crashed: frontend       │ S            save a temporary pin or disable   │                        │
-│! branch slug \"billing\" │ o            open in the browser               │                        │
-╰────────────────────────│ w            share on the web, or stop sharing │────────────────────────╯
-╭ logs following ────────│ W            share behind a password           │────────────────────────╮
-│No output yet.          │ O            open the shared address           │                        │
+╰────────────────────────│ x            stop                              │────────────────────────╯
+╭ nova ──────────────────│ r            restart                           │────────────────────────╮
+│✖ 2 of 4 instances runni│ p            pin or unpin                      │                        │
+│crashed: frontend       │ d            disable or enable                 │                        │
+│! branch slug \"billing\" │ S            save a temporary pin or disable   │                        │
+╰────────────────────────│ o            open in the browser               │────────────────────────╯
+╭ logs following ────────│ w            share on the web, or stop sharing │────────────────────────╮
+│No output yet.          │ W            share behind a password           │                        │
+│                        │ O            open the shared address           │                        │
 │                        │                                                │                        │
 │                        │ Everything                                     │                        │
 │                        │ I            stop idle instances               │                        │

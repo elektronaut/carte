@@ -14,6 +14,23 @@ pub fn local_hms(at_ms: u64) -> String {
     format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
+/// `14:32:05  acme-web@feature-x  stopped: idle for 15m`
+pub fn event_line(event: &carte_api::Event) -> String {
+    format!(
+        "{}  {}  {}",
+        local_hms(event.at_ms),
+        event.subject_label(),
+        event.summary()
+    )
+}
+
+/// Milliseconds since the Unix epoch.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
 /// How long ago, roughly: `12s`, `3m`, `2h`, `4d`.
 pub fn ago(at_ms: u64, now_ms: u64) -> String {
     let secs = now_ms.saturating_sub(at_ms) / 1000;

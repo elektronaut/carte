@@ -531,22 +531,12 @@ pub fn events(paths: &Paths, args: EventsArgs, json: bool) -> anyhow::Result<Exi
             let line = if json {
                 serde_json::to_string(&event).unwrap_or_default()
             } else {
-                render_event(&event)
+                crate::clock::event_line(&event)
             };
             let _ = writeln!(stdout, "{line}");
         },
     ))?;
     Ok(ExitCode::SUCCESS)
-}
-
-/// `14:32:05  acme-web@feature-x  stopped: idle for 15m`
-pub fn render_event(event: &Event) -> String {
-    format!(
-        "{}  {}  {}",
-        crate::clock::local_hms(event.at_ms),
-        event.subject_label(),
-        event.summary()
-    )
 }
 
 pub fn open(paths: &Paths, target: Target) -> anyhow::Result<ExitCode> {

@@ -6,7 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carte_api::{
-    ControlResponse, LogLine, MarkRequest, ShareResponse, Snapshot, StopAllRequest, paths,
+    ControlResponse, Event as DaemonEvent, LogLine, MarkRequest, ShareResponse, Snapshot,
+    StopAllRequest, paths,
 };
 use http::Method;
 use ratatui::crossterm::event::{
@@ -77,6 +78,38 @@ impl Tasks {
                             paths::LOGS,
                             Some(&request),
                             |line: LogLine| {
+                                let _ = line_tx.send(Event::Log { generation, line });
+                            },
+                        )
+                        .await;
+                    let _ = tx.send(Event::LogsEnded {
+                        generation,
+                        error: result.err().map(|e| format!("{e:#}")),
+                    });
+                }));
+            }
+            Command::FollowEvents {
+                generation,
+                request,
+            } => {
+                self.stop_logs();
+                self.logs = Some(tokio::spawn(async move {
+                    let line_tx = tx.clone();
+                    let result = client
+                        .stream(
+                            Method::POST,
+                            paths::EVENTS,
+                            Some(&request),
+                            |event: DaemonEvent| {
+                                let line = LogLine {
+                                    project: String::new(),
+                                    app: String::new(),
+                                    stack: String::new(),
+                                    process: String::new(),
+                                    at_ms: event.at_ms,
+                                    text: crate::clock::event_line(&event),
+                                    marker: false,
+                                };
                                 let _ = line_tx.send(Event::Log { generation, line });
                             },
                         )
