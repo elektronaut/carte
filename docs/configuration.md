@@ -233,7 +233,8 @@ notice.
 
 Processes that look like file watchers default to `scope = "checkout"`:
 names containing `watch`, `css` and `js`, and commands with `-w`,
-`--watch` or a `:watch` task.
+`--watch` or a `:watch` task. A process with `provides` always defaults
+to `scope = "instance"`.
 
 ### Services and tasks
 
@@ -319,6 +320,8 @@ REDIS_URL = "unix://{{run_dir}}/redis.sock"
   included; only carte's own variables win over them. See
   [Environment](#environment).
 - Names are plain variable names, not key templates.
+- Only processes that run per instance provide env: `provides` on a
+  process with `scope = "checkout"` is an error.
 - `carte env` shows their source as `provided by redis`.
 - Run consoles, rake tasks and other commands with
   [`carte exec`](cli.md#exec) so they get these values too, rather than
@@ -356,6 +359,12 @@ key by key, with `env` and `provides` merged entry by entry:
 2. The repo's `carte.toml`
 3. The project's `[processes]`
 4. The app's `[apps.<name>.processes]` in the project file
+
+An entry without a `command` only adjusts the process in the apps that
+already have it, from their Procfile, `carte.toml` or app table; the
+other apps skip it silently. `[processes.worker]` with
+`policy = "disabled"` turns off every app's worker, and apps without one
+aren't affected.
 
 `apps` is only valid here, not in an app's processes or `carte.toml`.
 

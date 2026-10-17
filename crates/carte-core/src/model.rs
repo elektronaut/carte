@@ -182,6 +182,9 @@ pub struct ProcessOverride {
     pub after: Option<Vec<String>>,
     /// Env templates added to every process of the instance.
     pub provides: Vec<EnvTemplate>,
+    /// Adjusts the process only where it exists: a project-wide entry without a
+    /// command, which apps without the process skip silently.
+    pub if_present: bool,
 }
 
 /// A process ready to run in one checkout.
