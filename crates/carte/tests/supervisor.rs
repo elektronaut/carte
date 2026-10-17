@@ -1638,3 +1638,124 @@ kind = "service"
     );
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_crashed_instance_restarts_once_its_processes_have_stopped_services_last() {
+    let setup = Setup::new();
+    let path = setup.root.join("stop.log");
+    let log = path.display();
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: exec {{fixture}}\nworker: trap 'sleep 0.3; echo worker >> {log}; exit 0' TERM; while :; do sleep 0.05; done\n"
+        ),
+    );
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.redis]
+command = '''echo start >> {log}; trap 'echo redis >> {log}; exit 0' TERM; {fixture} & wait'''
+kind = "service"
+"#,
+        fixture = fixture().display()
+    ));
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let web = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    kill(Pid::from_raw(web as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "the crash", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Crashed
+    })
+    .await;
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    assert_eq!(lines(&path), ["start", "worker", "redis", "start"]);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn restarting_a_task_while_starting_keeps_later_tiers_waiting() {
+    let setup = Setup::new();
+    let path = setup.root.join("order.log");
+    let log = path.display();
+    setup.app(
+        "acme-web",
+        &format!("web: echo web >> {log} && exec {{fixture}}\n"),
+    );
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.migrate]
+command = 'sleep 1; echo migrate >> {log}'
+kind = "task"
+"#
+    ));
+    let handle = setup.start();
+
+    handle.control(control("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the task to run", |s| {
+        process(s, "acme-web", "migrate").state == ProcessState::Running
+    })
+    .await;
+    handle
+        .control(control("web/migrate", Action::Restart))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    assert_eq!(lines(&path), ["migrate", "web"]);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn stopping_a_service_while_starting_fails_the_start() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\n");
+    setup.project(&format!(
+        r#"
+[apps.acme-web.processes.redis]
+command = 'exec {fixture}'
+kind = "service"
+
+[apps.acme-web.processes.migrate]
+command = 'sleep 30'
+kind = "task"
+"#,
+        fixture = fixture().display()
+    ));
+    let handle = setup.start();
+
+    let waiter = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.ensure_ready(key("acme-web", Stack::Main)).await })
+    };
+    wait_for(&handle, "the task to run", |s| {
+        process(s, "acme-web", "migrate").state == ProcessState::Running
+    })
+    .await;
+    handle
+        .control(control("web/redis", Action::Down))
+        .await
+        .unwrap();
+    let failure = waiter.await.unwrap().unwrap_err();
+    assert!(
+        failure
+            .detail
+            .contains("redis was stopped while acme-web@main was starting"),
+        "{failure:?}"
+    );
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Crashed
+    );
+    assert_eq!(process(&snapshot, "acme-web", "web").pid, None);
+    handle.shutdown().await;
+}

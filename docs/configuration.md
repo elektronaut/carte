@@ -260,14 +260,17 @@ kind = "task"
   that exits non-zero or doesn't finish within it, fails the start like a
   crashing web process: the later tiers don't start, and the error and
   the process's log show on the error page and in `carte up`.
-- Requests wait for the whole sequence.
+- Requests wait for the whole sequence. Restarting a service or task by
+  hand during it reruns it before the later tiers start; stopping one
+  fails the start.
 - Tasks run on every start of the instance, including after an idle
   stop, so they must be quick when there's nothing to do. A finished task
   shows as `done` and isn't run again until the next start; restarting
   one process doesn't run them.
 - Stopping goes the other way: services get their signal once
   everything else has exited, so a job worker can hand its unfinished
-  jobs back to Redis.
+  jobs back to Redis. The same holds when a crashed instance is started
+  again: it starts once its old processes have exited.
 - A disabled service or task is skipped, and nothing waits for it.
 - After the start, a service that exits on its own is restarted on the
   same port with the same env, so sockets and URLs other processes use

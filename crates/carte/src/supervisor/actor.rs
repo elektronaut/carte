@@ -605,12 +605,26 @@ impl Actor {
     }
 
     /// Starts an instance and its dependencies. `force` starts a disabled process once.
+    /// A crashed or stopping instance whose processes still run is restarted once they
+    /// have exited, services last.
     fn start(
         &mut self,
         key: &InstanceKey,
         force: Option<&str>,
         why: Why,
     ) -> Result<(), BootFailure> {
+        if let Some(inst) = self.instances.get_mut(key)
+            && matches!(inst.state, InstanceState::Crashed | InstanceState::Stopping)
+            && inst.any_running()
+        {
+            inst.restart_pending = true;
+            if inst.state == InstanceState::Crashed {
+                inst.state = InstanceState::Stopping;
+                inst.signal_stop(self.options.grace, true);
+            }
+            self.dirty = true;
+            return Ok(());
+        }
         let running = self.instances.values().filter(|i| i.is_active()).count();
         if !lifecycle::under_ceiling(running, self.world.machine.limits.hard_ceiling) {
             return Err(BootFailure::new(
@@ -1107,6 +1121,7 @@ impl Actor {
         let boot_step = proc.spec.kind.is_some();
         let service = proc.spec.is_service();
         let done = proc.state == ProcessState::Done;
+        let restarting = proc.restart;
         match inst.state {
             InstanceState::Starting | InstanceState::Ready if done => self.advance(key),
             InstanceState::Starting | InstanceState::Ready if http && !manual => {
@@ -1114,6 +1129,10 @@ impl Actor {
             }
             InstanceState::Starting if boot_step && !manual => {
                 self.crash(key, code, Some(idx), message);
+            }
+            InstanceState::Starting if boot_step && !restarting => {
+                let message = format!("{name} was stopped while {} was starting", inst.label());
+                self.crash(key, None, Some(idx), message);
             }
             InstanceState::Starting | InstanceState::Ready => {
                 if !manual {
@@ -1332,6 +1351,9 @@ impl Actor {
         if let Some(stop) = proc.stop.take() {
             proc.state = ProcessState::Stopping;
             proc.manual_stop = true;
+            if inst.state == InstanceState::Starting && proc.spec.kind.is_some() && proc.restart {
+                proc.queued = true;
+            }
             let _ = stop.send(grace);
             let kind = if proc.restart {
                 EventKind::Restarted
