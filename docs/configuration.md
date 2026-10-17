@@ -526,7 +526,8 @@ creates them before its processes start, and creates nothing inside them.
   shows the daemon's path while it runs. The folder and each run
   directory must be real directories owned by you: carte refuses a
   symlink or another user's folder, and closes the folder to other
-  users.
+  users. Beside each run directory, a `<hash>.owner` file names the
+  carte that made it, by its state directory's `data` folder.
 
 Commands aren't templated, so they use the variables like `$PORT`. A
 process that wants a subdirectory creates it:
