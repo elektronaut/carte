@@ -226,6 +226,82 @@ pub fn resolve(
     })
 }
 
+/// Resolves an address inside the named project. Without an app or branch it addresses
+/// every stack of the project, wherever `cwd` is; an app without a branch takes the
+/// current directory's stack when that is in the same project, `main` otherwise.
+pub fn resolve_in_project(
+    world: &World,
+    project: &str,
+    address: &Address,
+    cwd: Option<&Path>,
+) -> Result<Target, AddressError> {
+    let state = world
+        .project(&project.to_lowercase())
+        .ok_or_else(|| AddressError::NoMatch {
+            kind: "project",
+            input: project.to_string(),
+            candidates: world
+                .projects
+                .iter()
+                .map(|state| state.project.name.clone())
+                .collect(),
+        })?;
+    let app = match &address.app {
+        Some(query) => Some(find_app_in(state, query)?),
+        None => None,
+    };
+    let (stack, process) = match &address.branch {
+        Some(branch) => {
+            let (stack, process) = find_stack(state, branch, address.process.as_deref())?;
+            (Some(stack), process)
+        }
+        None => {
+            let here = cwd
+                .and_then(|dir| locate(world, dir))
+                .filter(|here| here.project == state.project.name);
+            let stack = app.map(|_| here.map_or(Stack::Main, |here| here.stack));
+            (stack, address.process.clone())
+        }
+    };
+    Ok(Target {
+        project: state.project.name.clone(),
+        app: app.map(|a| a.name.clone()),
+        stack,
+        process,
+    })
+}
+
+fn find_app_in<'a>(state: &'a ProjectState, query: &str) -> Result<&'a App, AddressError> {
+    let query_lower = query.to_lowercase();
+    let apps = &state.project.apps;
+    if let Some(app) = apps.iter().find(|app| {
+        app.name.to_lowercase() == query_lower || app.short.to_lowercase() == query_lower
+    }) {
+        return Ok(app);
+    }
+    let partial: Vec<&App> = apps
+        .iter()
+        .filter(|app| {
+            app.name.to_lowercase().contains(&query_lower)
+                || app.short.to_lowercase().contains(&query_lower)
+        })
+        .collect();
+    let names = |apps: &[&App]| apps.iter().map(|app| app.name.clone()).collect();
+    match partial.as_slice() {
+        [app] => Ok(app),
+        [] => Err(AddressError::NoMatch {
+            kind: "app",
+            input: query.to_string(),
+            candidates: names(&apps.iter().collect::<Vec<_>>()),
+        }),
+        _ => Err(AddressError::Ambiguous {
+            kind: "app",
+            input: query.to_string(),
+            candidates: names(&partial),
+        }),
+    }
+}
+
 enum Found<'a> {
     App(&'a ProjectState, &'a App),
     Project(&'a ProjectState),
@@ -815,6 +891,69 @@ mod tests {
             })
         );
         assert_eq!(resolve_str("make", None).unwrap().instance(), None);
+    }
+
+    fn resolve_in(project: &str, input: &str, cwd: Option<&str>) -> Result<Target, AddressError> {
+        let cwd = cwd.map(PathBuf::from);
+        resolve_in_project(&world(), project, &parse(input), cwd.as_deref())
+    }
+
+    #[test]
+    fn a_named_project_is_addressed_even_when_an_app_shares_its_name() {
+        assert_eq!(
+            resolve_in("acme", "", None),
+            Ok(target("acme", None, None, None))
+        );
+        assert_eq!(
+            resolve_in("make", "", Some(FRONTEND_FEATURE_X)),
+            Ok(target("make", None, None, None))
+        );
+        assert_eq!(
+            resolve_in("acme", "@feature-x", None),
+            Ok(target("acme", None, Some(branch("feature-x")), None))
+        );
+        assert_eq!(
+            resolve_in("acme", "/web", None),
+            Ok(target("acme", None, None, Some("web")))
+        );
+    }
+
+    #[test]
+    fn apps_resolve_only_inside_the_named_project() {
+        // "api" alone is acme-api, a short name; inside make it's a substring.
+        assert_eq!(
+            resolve_in("make", "api", None),
+            Ok(target(
+                "make",
+                Some("make-newsmail-api"),
+                Some(Stack::Main),
+                None
+            ))
+        );
+        assert_eq!(
+            resolve_in("make", "newsmail-api", Some(FRONTEND_FEATURE_X)),
+            Ok(target(
+                "make",
+                Some("make-newsmail-api"),
+                Some(branch("feature-x")),
+                None
+            ))
+        );
+        assert_eq!(
+            resolve_in("acme", "api", Some(FRONTEND_FEATURE_X)),
+            Ok(target("acme", Some("acme-api"), Some(Stack::Main), None))
+        );
+        assert!(matches!(
+            resolve_in("make", "acme-api", None),
+            Err(AddressError::NoMatch { kind: "app", .. })
+        ));
+        assert!(matches!(
+            resolve_in("nope", "", None),
+            Err(AddressError::NoMatch {
+                kind: "project",
+                ..
+            })
+        ));
     }
 
     #[test]

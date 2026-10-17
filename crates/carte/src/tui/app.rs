@@ -509,7 +509,6 @@ impl App {
             self.warn("select a project, stack or app in the folder");
             return None;
         }
-        let snapshot = self.snapshot.as_ref()?;
         let action = match control {
             Control::Start => Action::Up,
             Control::Stop => Action::Down,
@@ -533,7 +532,7 @@ impl App {
         };
         Some(Command::Control {
             request: ControlRequest {
-                target: target::address(snapshot, node.id()),
+                target: target::address(node.id()),
                 action,
             },
             verb,
@@ -544,7 +543,6 @@ impl App {
     /// process below the selection that has one, to the project file.
     fn save(&mut self) -> Option<Command> {
         let node = self.selected_node()?;
-        let snapshot = self.snapshot.as_ref()?;
         let mut candidates = Vec::new();
         let mut stack = vec![node];
         while let Some(n) = stack.pop() {
@@ -560,7 +558,7 @@ impl App {
         }
         let request = match candidates.as_slice() {
             [(id, action)] => ControlRequest {
-                target: target::address(snapshot, id),
+                target: target::address(id),
                 action: *action,
             },
             [] => {
@@ -640,7 +638,7 @@ impl App {
             self.warn("select an app to share");
             return None;
         };
-        let target = target::address(snapshot, &id);
+        let target = target::address(&id);
         if instance.public_url.is_some() && !auth {
             return Some(Command::Unshare(UnshareRequest { target }));
         }
@@ -725,13 +723,13 @@ impl App {
         if wanted.is_none() {
             return Some(Command::StopLogs);
         }
-        let (Some(snapshot), Some(node)) = (&self.snapshot, self.selected_node()) else {
+        let Some(node) = self.selected_node() else {
             return Some(Command::StopLogs);
         };
         Some(Command::FollowLogs {
             generation,
             request: LogsRequest {
-                target: target::address(snapshot, node.id()),
+                target: target::address(node.id()),
                 follow: true,
                 tail: Some(1000),
                 search: None,
@@ -740,12 +738,12 @@ impl App {
     }
 
     fn log_key(&self) -> Option<String> {
-        let snapshot = self.snapshot.as_ref()?;
+        self.snapshot.as_ref()?;
         let id = self.selected_node()?.id();
         if matches!(id, NodeId::Folder { .. }) {
             return None;
         }
-        Some(target::address(snapshot, id).address)
+        Some(target::label(id))
     }
 
     fn log_prefix(&self) -> Prefix {
@@ -766,6 +764,8 @@ impl App {
 mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyModifiers};
 
+    use carte_api::Address;
+
     use super::*;
     use crate::tui::fixtures::{sample, shared_sample};
 
@@ -784,7 +784,12 @@ mod tests {
         commands
             .iter()
             .filter_map(|c| match c {
-                Command::FollowLogs { request, .. } => Some(request.target.address.clone()),
+                Command::FollowLogs { request, .. } => Some(match &request.target {
+                    Address {
+                        address, project, ..
+                    } if address.is_empty() => project.clone().unwrap_or_default(),
+                    target => target.address.clone(),
+                }),
                 _ => None,
             })
             .collect()

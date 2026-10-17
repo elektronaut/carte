@@ -1541,7 +1541,12 @@ impl Actor {
             .address
             .parse()
             .map_err(|e: address::AddressError| e.to_string())?;
-        address::resolve(&self.world, &parsed, address.cwd.as_deref()).map_err(|e| e.to_string())
+        let cwd = address.cwd.as_deref();
+        match &address.project {
+            Some(project) => address::resolve_in_project(&self.world, project, &parsed, cwd),
+            None => address::resolve(&self.world, &parsed, cwd),
+        }
+        .map_err(|e| e.to_string())
     }
 
     fn target_keys(&self, target: &Target, action: Action) -> Result<Vec<InstanceKey>, String> {

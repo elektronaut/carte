@@ -94,6 +94,10 @@ pub enum Command {
 pub struct Target {
     /// `app@branch/process`; every part is optional and inferred from the current directory.
     pub address: Option<String>,
+    /// Resolve the address inside this project; alone, it addresses the whole project
+    /// even when an app has the same name.
+    #[arg(long, value_name = "NAME")]
+    pub project: Option<String>,
 }
 
 #[derive(Args, Clone)]

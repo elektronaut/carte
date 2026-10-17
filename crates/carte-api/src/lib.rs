@@ -27,6 +27,9 @@ pub mod paths {
 pub struct Address {
     pub address: String,
     pub cwd: Option<PathBuf>,
+    /// Resolve inside this project; an empty address then means the whole project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
