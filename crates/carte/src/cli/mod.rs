@@ -292,6 +292,8 @@ pub enum ProjectCommand {
 pub fn run(cli: Cli) -> ExitCode {
     let paths = Paths::from_env();
     if !matches!(cli.command, Some(Command::Shim { .. } | Command::Daemon)) {
+        // SAFETY: called before any other thread exists.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
         refresh_skill();
     }
     let Some(command) = cli.command else {
