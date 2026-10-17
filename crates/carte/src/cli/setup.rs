@@ -12,7 +12,10 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
     if let Some(domain) = &args.share {
         return share(&env, domain, &args.tunnel, args.dry_run);
     }
-    let facts = Facts::gather(&env);
+    let mut facts = Facts::gather(&env);
+    if args.no_skill {
+        facts.skill = None;
+    }
     if args.check {
         let report = check::check(&env, &facts);
         print!("{report}");

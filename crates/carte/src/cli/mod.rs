@@ -239,6 +239,9 @@ pub struct SetupArgs {
     /// The Cloudflare tunnel to create or reuse for --share.
     #[arg(long, default_value = "carte", requires = "share")]
     pub tunnel: String,
+    /// Leave the skill for coding agents (~/.agents/skills/carte) alone.
+    #[arg(long, conflicts_with_all = ["check", "share"])]
+    pub no_skill: bool,
 }
 
 #[derive(Subcommand, Clone)]
@@ -288,6 +291,9 @@ pub enum ProjectCommand {
 
 pub fn run(cli: Cli) -> ExitCode {
     let paths = Paths::from_env();
+    if !matches!(cli.command, Some(Command::Shim { .. } | Command::Daemon)) {
+        refresh_skill();
+    }
     let Some(command) = cli.command else {
         if !std::io::stdout().is_terminal() {
             let _ = <Cli as clap::CommandFactory>::command().print_help();
@@ -361,6 +367,18 @@ pub fn run(cli: Cli) -> ExitCode {
         }
     };
     finish(result)
+}
+
+/// Brings a skill `carte setup` installed up to this version. `CARTE_SKILL_REFRESH=0`
+/// turns it off.
+fn refresh_skill() {
+    if std::env::var_os("CARTE_SKILL_REFRESH").is_some_and(|v| v == "0") {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+        return;
+    };
+    let _ = crate::setup::skill::refresh(&crate::setup::skill::dir_in(&PathBuf::from(home)));
 }
 
 fn finish(result: anyhow::Result<ExitCode>) -> ExitCode {

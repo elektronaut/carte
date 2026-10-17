@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crate::cli::prompt::tilde;
 
 use super::plist::{LABEL, OLD_LABEL};
+use super::skill::{SkillDir, SkillLink};
 use super::{CaState, Facts, PUMA_DEV_LABEL, SetupEnv};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +264,37 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
             "not running".to_string()
         },
     );
+
+    if let Some(skill) = &facts.skill {
+        let dir = tilde(&env.skill_dir());
+        let (status, detail) = match skill.dir {
+            SkillDir::Missing => (
+                Status::Info,
+                format!("{dir} is missing; `carte setup` installs it"),
+            ),
+            SkillDir::Unmanaged => (
+                Status::Warn,
+                format!("{dir} wasn't written by carte; setup leaves it alone"),
+            ),
+            SkillDir::Managed { current: false } => (
+                Status::Info,
+                format!("{dir} is from another version; the next carte command updates it"),
+            ),
+            SkillDir::Managed { current: true } => (Status::Ok, dir.clone()),
+        };
+        let link = match skill.link {
+            SkillLink::Ours => format!(", linked from {}", tilde(&env.skill_link())),
+            SkillLink::Other => format!(
+                "; {} is something else, so Claude Code doesn't see it",
+                tilde(&env.skill_link())
+            ),
+            SkillLink::Missing if skill.dir != SkillDir::Unmanaged => {
+                format!("; not linked from {}", tilde(&env.skill_link()))
+            }
+            SkillLink::Missing | SkillLink::NoClaude => String::new(),
+        };
+        report.push(status, "agent skill", format!("{detail}{link}"));
+    }
 
     let puma_dev = &facts.puma_dev;
     if puma_dev.installed() || puma_dev.links > 0 {

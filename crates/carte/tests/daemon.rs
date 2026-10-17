@@ -140,6 +140,7 @@ impl Daemon {
             .env("CARTE_CONFIG_DIR", self.root.join("config"))
             .env("CARTE_STATE_DIR", self.root.join("state"))
             .env("NO_COLOR", "1")
+            .env("CARTE_SKILL_REFRESH", "0")
             .current_dir(&self.root);
         if let Some(bin) = &self.bin {
             let inherited = std::env::var_os("PATH").unwrap_or_default();

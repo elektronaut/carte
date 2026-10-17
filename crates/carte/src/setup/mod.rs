@@ -3,6 +3,7 @@
 pub mod check;
 pub mod plist;
 pub mod share;
+pub mod skill;
 
 use std::fmt::Write as _;
 use std::fs;
@@ -21,6 +22,7 @@ use crate::paths::Paths;
 use crate::tls::trust::{self, CommandLine};
 use crate::tls::{CertificateAuthority, CreateReason};
 use plist::{Agent, LABEL, OLD_LABEL};
+use skill::{SkillDir, SkillFacts, SkillLink};
 
 pub const PUMA_DEV_LABEL: &str = "io.puma.dev";
 
@@ -107,6 +109,19 @@ impl SetupEnv {
         ]
     }
 
+    pub fn skill_dir(&self) -> PathBuf {
+        skill::dir_in(&self.home)
+    }
+
+    pub fn claude_dir(&self) -> PathBuf {
+        self.home.join(".claude")
+    }
+
+    /// Claude Code's link to the skill.
+    pub fn skill_link(&self) -> PathBuf {
+        self.claude_dir().join("skills/carte")
+    }
+
     fn domain(&self) -> String {
         format!("gui/{}", self.uid)
     }
@@ -169,6 +184,8 @@ pub struct Facts {
     pub puma_dev: PumaDev,
     pub projects: usize,
     pub daemon_running: bool,
+    /// The agent skill, unless setup leaves it alone.
+    pub skill: Option<SkillFacts>,
 }
 
 impl Facts {
@@ -211,6 +228,11 @@ impl Facts {
             },
             projects,
             daemon_running: UnixStream::connect(env.paths.socket()).is_ok(),
+            skill: Some(SkillFacts::gather(
+                &env.skill_dir(),
+                &env.skill_link(),
+                &env.claude_dir(),
+            )),
         }
     }
 }
@@ -230,6 +252,14 @@ pub enum Action {
         path: PathBuf,
     },
     CreateCa,
+    /// Writes carte's skill and its marker into the directory.
+    InstallSkill {
+        dir: PathBuf,
+    },
+    Symlink {
+        link: PathBuf,
+        target: PathBuf,
+    },
     Verify,
 }
 
@@ -301,6 +331,12 @@ impl Step {
             }
             Action::CreateCa => {
                 let _ = writeln!(out, "   write {}", tilde(&env.ca_cert()));
+            }
+            Action::InstallSkill { dir } => {
+                let _ = writeln!(out, "   write {}", tilde(&dir.join("SKILL.md")));
+            }
+            Action::Symlink { link, target } => {
+                let _ = writeln!(out, "   $ ln -s {} {}", tilde(target), tilde(link));
             }
             Action::Verify => {
                 let _ = writeln!(
@@ -446,7 +482,10 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
             &["bootstrap", &env.domain(), &plist_path.to_string_lossy()],
         ));
     }
-    steps.push(Step {
+    if let Some(skill) = &facts.skill {
+        skill_steps(env, skill, &mut plan);
+    }
+    plan.steps.push(Step {
         description: "Check that carte answers".into(),
         action: Action::Verify,
     });
@@ -464,6 +503,40 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
         ));
     }
     plan
+}
+
+/// Installs or refreshes the agent skill and links it for Claude Code.
+fn skill_steps(env: &SetupEnv, skill: &SkillFacts, plan: &mut Plan) {
+    let dir = env.skill_dir();
+    match skill.dir {
+        SkillDir::Unmanaged => {
+            plan.notes.push(format!(
+                "{} wasn't written by carte, so setup leaves it alone; remove it, or add a {} file to it, to let carte manage it",
+                tilde(&dir),
+                skill::MARKER
+            ));
+            return;
+        }
+        SkillDir::Managed { current: true } => {}
+        SkillDir::Missing | SkillDir::Managed { current: false } => plan.steps.push(Step {
+            description: "Install carte's skill for coding agents, so they use carte instead of starting servers".into(),
+            action: Action::InstallSkill { dir: dir.clone() },
+        }),
+    }
+    match skill.link {
+        SkillLink::Missing => plan.steps.push(Step {
+            description: "Let Claude Code find the skill".into(),
+            action: Action::Symlink {
+                link: env.skill_link(),
+                target: dir,
+            },
+        }),
+        SkillLink::Other => plan.notes.push(format!(
+            "{} isn't carte's, so setup leaves it alone; Claude Code won't see carte's skill until it's gone",
+            tilde(&env.skill_link())
+        )),
+        SkillLink::NoClaude | SkillLink::Ours => {}
+    }
 }
 
 /// Takes down an agent installed under the old label.
@@ -509,6 +582,23 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
             "rm",
             &["-f", &env.resolver_file().to_string_lossy()],
         ));
+    }
+    if let Some(skill) = &facts.skill {
+        if skill.link == SkillLink::Ours {
+            plan.steps.push(Step {
+                description: "Remove Claude Code's link to carte's skill".into(),
+                action: Action::RemoveFile {
+                    path: env.skill_link(),
+                },
+            });
+        }
+        if matches!(skill.dir, SkillDir::Managed { .. }) {
+            plan.steps.push(Step::run(
+                "Remove carte's skill for coding agents",
+                "rm",
+                &["-rf", &env.skill_dir().to_string_lossy()],
+            ));
+        }
     }
     if matches!(facts.ca, CaState::Trusted | CaState::Unknown(_)) {
         plan.steps.push(Step::sudo(
@@ -630,6 +720,15 @@ fn run_step(step: &Step, env: &SetupEnv) -> anyhow::Result<()> {
             )?;
             crate::tls::bundle::rebuild(&env.paths.state_dir, &ca)?;
         }
+        Action::InstallSkill { dir } => {
+            skill::install(dir).with_context(|| dir.display().to_string())?;
+        }
+        Action::Symlink { link, target } => {
+            if let Some(dir) = link.parent() {
+                fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
+            }
+            std::os::unix::fs::symlink(target, link).with_context(|| link.display().to_string())?;
+        }
         Action::Verify => {
             let report = check::verify(env);
             print!("{report}");
@@ -670,6 +769,7 @@ mod tests {
             puma_dev: PumaDev::default(),
             projects: 0,
             daemon_running: false,
+            skill: None,
         }
     }
 
@@ -683,6 +783,10 @@ mod tests {
                 Action::WriteFile { path, .. } => format!("write {}", path.display()),
                 Action::RemoveFile { path } => format!("rm {}", path.display()),
                 Action::CreateCa => "create ca".into(),
+                Action::InstallSkill { dir } => format!("install skill {}", dir.display()),
+                Action::Symlink { link, target } => {
+                    format!("ln -s {} {}", target.display(), link.display())
+                }
                 Action::Verify => "verify".into(),
             })
             .collect()
@@ -928,6 +1032,122 @@ mod tests {
         assert!(err.contains("step 1 failed"), "{err}");
         assert!(err.contains("the 1 after it didn't run"), "{err}");
         assert!(!dir.path().join("never").exists());
+    }
+
+    #[test]
+    fn installs_the_skill_and_links_it_for_claude() {
+        let root = Path::new("/r");
+        let env = env(root);
+        let done = Facts {
+            resolver: Some(env.resolver_contents()),
+            ca: CaState::Trusted,
+            agent_plist: Some(env.agent().to_plist()),
+            agent_loaded: true,
+            ..fresh()
+        };
+        let missing = Facts {
+            skill: Some(SkillFacts {
+                dir: SkillDir::Missing,
+                link: SkillLink::Missing,
+            }),
+            ..done.clone()
+        };
+        let plan = plan_install(&env, &missing);
+        assert_eq!(
+            commands(&plan),
+            [
+                "install skill /r/home/.agents/skills/carte",
+                "ln -s /r/home/.agents/skills/carte /r/home/.claude/skills/carte",
+                "verify",
+            ]
+        );
+        assert!(!plan.steps.iter().any(Step::needs_sudo));
+
+        let current = Facts {
+            skill: Some(SkillFacts {
+                dir: SkillDir::Managed { current: true },
+                link: SkillLink::Ours,
+            }),
+            ..done.clone()
+        };
+        assert_eq!(commands(&plan_install(&env, &current)), ["verify"]);
+
+        let outdated_without_claude = Facts {
+            skill: Some(SkillFacts {
+                dir: SkillDir::Managed { current: false },
+                link: SkillLink::NoClaude,
+            }),
+            ..done.clone()
+        };
+        assert_eq!(
+            commands(&plan_install(&env, &outdated_without_claude)),
+            ["install skill /r/home/.agents/skills/carte", "verify"]
+        );
+
+        let theirs = Facts {
+            skill: Some(SkillFacts {
+                dir: SkillDir::Unmanaged,
+                link: SkillLink::Other,
+            }),
+            ..done
+        };
+        let plan = plan_install(&env, &theirs);
+        assert_eq!(commands(&plan), ["verify"]);
+        assert!(
+            plan.notes[0].contains(".managed-by-carte"),
+            "{:?}",
+            plan.notes
+        );
+    }
+
+    #[test]
+    fn uninstalls_only_carte_s_skill() {
+        let root = Path::new("/r");
+        let env = env(root);
+        let ours = Facts {
+            skill: Some(SkillFacts {
+                dir: SkillDir::Managed { current: true },
+                link: SkillLink::Ours,
+            }),
+            ..fresh()
+        };
+        assert_eq!(
+            commands(&plan_uninstall(&env, &ours)),
+            [
+                "rm /r/home/.claude/skills/carte",
+                "rm -rf /r/home/.agents/skills/carte",
+            ]
+        );
+        let theirs = Facts {
+            skill: Some(SkillFacts {
+                dir: SkillDir::Unmanaged,
+                link: SkillLink::Other,
+            }),
+            ..fresh()
+        };
+        assert!(plan_uninstall(&env, &theirs).steps.is_empty());
+    }
+
+    #[test]
+    fn writes_the_skill_and_its_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        fs::create_dir_all(env.claude_dir()).unwrap();
+        let facts = SkillFacts::gather(&env.skill_dir(), &env.skill_link(), &env.claude_dir());
+        let mut plan = Plan::default();
+        skill_steps(&env, &facts, &mut plan);
+        execute(&plan.steps, &env).unwrap();
+        assert_eq!(
+            fs::read_to_string(env.skill_link().join("SKILL.md")).unwrap(),
+            skill::SKILL
+        );
+        assert_eq!(
+            SkillFacts::gather(&env.skill_dir(), &env.skill_link(), &env.claude_dir()),
+            SkillFacts {
+                dir: SkillDir::Managed { current: true },
+                link: SkillLink::Ours,
+            }
+        );
     }
 
     #[test]
