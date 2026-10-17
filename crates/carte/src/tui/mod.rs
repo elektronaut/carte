@@ -17,6 +17,7 @@ pub(crate) mod fixtures;
 mod input;
 mod jump;
 mod logs;
+mod saved;
 mod target;
 mod tasks;
 mod tree;
@@ -28,19 +29,27 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
         .build()?;
     let socket = paths.socket();
     let start_at = here(paths);
-    runtime.block_on(async move {
-        let mut terminal = ratatui::try_init()?;
-        let restore = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
+    let saved_path = saved::path(&paths.state_dir);
+    let restored = saved::load(&saved_path);
+    runtime
+        .block_on(async move {
+            let mut terminal = ratatui::try_init()?;
+            let restore = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                tasks::set_mouse_capture(false);
+                restore(info);
+            }));
+            tasks::set_mouse_capture(true);
+            let result = event_loop(&mut terminal, socket, start_at, restored).await;
             tasks::set_mouse_capture(false);
-            restore(info);
-        }));
-        tasks::set_mouse_capture(true);
-        let result = event_loop(&mut terminal, socket, start_at).await;
-        tasks::set_mouse_capture(false);
-        ratatui::restore();
-        result
-    })?;
+            ratatui::restore();
+            result
+        })
+        .map(|saved| {
+            if let Err(err) = saved::store(&saved_path, &saved) {
+                eprintln!("carte: couldn't save the TUI's state: {err}");
+            }
+        })?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -60,11 +69,13 @@ async fn event_loop(
     terminal: &mut DefaultTerminal,
     socket: std::path::PathBuf,
     start_at: Option<tree::NodeId>,
-) -> anyhow::Result<()> {
+    restored: saved::Saved,
+) -> anyhow::Result<saved::Saved> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut tasks = tasks::Tasks::start(socket, tx);
     let mut app = app::App::new(Instant::now());
     app.start_at = start_at;
+    restored.apply(&mut app.fold);
     terminal.draw(|frame| view::render(frame, &mut app))?;
     while let Some(event) = rx.recv().await {
         let mut next = Some(event);
@@ -80,5 +91,5 @@ async fn event_loop(
         }
         terminal.draw(|frame| view::render(frame, &mut app))?;
     }
-    Ok(())
+    Ok(saved::Saved::from_fold(&app.fold, &app.roots))
 }

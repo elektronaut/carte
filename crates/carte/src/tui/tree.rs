@@ -7,8 +7,10 @@ use carte_api::{
     Hold, InstanceState, InstanceStatus, Policy, ProcessState, ProcessStatus, ProjectStatus,
     Snapshot, StackStatus,
 };
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "level", rename_all = "snake_case")]
 pub enum NodeId {
     /// A subdirectory of `projects/`, only for grouping.
     Folder {
@@ -451,7 +453,8 @@ pub struct Row {
 }
 
 /// Which instances the tree shows.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Show {
     #[default]
     All,
