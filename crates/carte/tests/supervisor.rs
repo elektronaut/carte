@@ -1105,7 +1105,9 @@ async fn events_tell_what_happened_and_why() {
         "acme-api",
         "web: FIXTURE_NAME=api exec {fixture}\nworker: FIXTURE_CRASH=4 exec {fixture}\n",
     );
-    setup.project("[apps.acme-web]\ndepends_on = [\"api\"]\n");
+    setup.project(
+        "[apps.acme-web]\ndepends_on = [\"api\"]\n[apps.acme-api.processes.worker]\nrestart = \"never\"\n",
+    );
     let handle = setup.start();
     let mut follow = handle.follow_events();
 
@@ -1137,7 +1139,7 @@ async fn events_tell_what_happened_and_why() {
     assert_eq!(follow.recv().await.unwrap(), events[0]);
 
     handle
-        .control(control("web", Action::Restart))
+        .control(waiting("web", Action::Restart))
         .await
         .unwrap();
     handle
