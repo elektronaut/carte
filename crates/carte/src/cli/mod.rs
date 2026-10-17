@@ -154,7 +154,7 @@ pub struct SetupArgs {
     /// Report what is set up, read-only.
     #[arg(long, conflicts_with_all = ["dry_run", "uninstall"])]
     pub check: bool,
-    /// Undo setup: LaunchAgent, resolver file and CA trust.
+    /// Undo setup: LaunchAgent, resolver file and the local CA.
     #[arg(long)]
     pub uninstall: bool,
     /// Set up sharing under this domain: a Cloudflare zone, or your ngrok dev domain
