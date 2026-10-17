@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, Ta
 
 use super::app::{App, Connection};
 use super::input::{Confirm, Focus, HELP, Mode};
+use super::jump;
 use super::target;
 use super::tree::{self, Node, NodeId, Show, Source, State, Status};
 
@@ -52,6 +53,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Problems => render_problems(frame, main, app),
         Mode::Confirm(confirm) => render_confirm(frame, main, app, confirm),
         Mode::Env => render_env(frame, main, app),
+        Mode::Jump => render_jump(frame, main, app),
         Mode::Normal | Mode::Filter => {}
     }
 }
@@ -882,6 +884,49 @@ fn render_help(frame: &mut Frame, area: Rect) {
     popup(frame, area, "keys", lines);
 }
 
+/// The jump prompt near the top, with the best matches below what was typed.
+fn render_jump(frame: &mut Frame, area: Rect, app: &mut App) {
+    let all = jump::candidates(&app.roots);
+    let Some(prompt) = &mut app.jump else {
+        return;
+    };
+    let found = jump::matches(&all, &prompt.query);
+    prompt.cursor = prompt.cursor.min(found.len().saturating_sub(1));
+    let shown = 10;
+    let first = prompt.cursor.saturating_sub(shown - 1);
+    let mut lines = vec![Line::from(vec![
+        Span::raw("› ").blue(),
+        Span::raw(format!("{}▏", prompt.query)),
+    ])];
+    if found.is_empty() {
+        lines.push(Line::from("Nothing matches.".dark_gray()));
+    }
+    for (i, candidate) in found.iter().enumerate().skip(first).take(shown) {
+        let line = Line::from(format!("  {}", candidate.name));
+        lines.push(if i == prompt.cursor {
+            line.reversed()
+        } else {
+            line
+        });
+    }
+    let width = area.width.saturating_sub(4).min(64);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height / 6,
+        width,
+        height: (lines.len() as u16 + 2).min(area.height),
+    };
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            pane(Line::from(" jump to ").bold(), true)
+                .padding(ratatui::widgets::Padding::horizontal(1))
+                .title_bottom(Line::from(" ↑↓ pick · enter goes · esc closes ").dark_gray()),
+        ),
+        rect,
+    );
+}
+
 /// The selected process's env, one variable per line with where it came from, in a
 /// popup that fills most of the screen and scrolls.
 fn render_env(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -1468,6 +1513,35 @@ mod tests {
         assert!(
             !screen.contains("CARTE_APP"),
             "scrolled to the end\n{screen}"
+        );
+    }
+
+    #[test]
+    fn renders_the_jump_prompt() {
+        let mut app = busy_app();
+        let now = app.now;
+        app.update(
+            Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+            now,
+        );
+        for c in "bill".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        press(&mut app, now, KeyCode::Down);
+        let screen = draw(&mut app, 60, 20);
+        let popup: Vec<&str> = screen.lines().skip(3).take(7).collect();
+        assert_eq!(
+            popup,
+            [
+                "│ ╭ jump to ─────────────────────────────────────────────╮M│",
+                "│ │ › bill▏                                              │M│",
+                "│ │   nova-billing@main                                  │ │",
+                "│ │   nova-billing@main/web                              │B│",
+                "│ │   nova-billing@feature-x                             │ │",
+                "╰─│   nova-billing@main/worker                           │─╯",
+                "╭ ╰ ↑↓ pick · enter goes · esc closes ───────────────────╯─╮",
+            ],
+            "{screen}"
         );
     }
 

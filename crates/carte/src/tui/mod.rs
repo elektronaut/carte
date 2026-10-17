@@ -15,6 +15,7 @@ mod app;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod input;
+mod jump;
 mod logs;
 mod target;
 mod tasks;

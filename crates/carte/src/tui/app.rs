@@ -12,6 +12,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKin
 use ratatui::layout::{Position, Rect};
 
 use super::input::{self, Confirm, Control, Focus, Intent, Mode};
+use super::jump::{self, Jump};
 use super::logs::{Logs, Prefix};
 use super::target;
 use super::tree::{self, Fold, Node, NodeId, Row, Show};
@@ -138,6 +139,7 @@ pub struct App {
     pub logs_area: Rect,
     pub selection: Option<Selection>,
     pub env: Option<EnvView>,
+    pub jump: Option<Jump>,
     /// Selected and revealed once the first snapshot arrives.
     pub start_at: Option<NodeId>,
     pub mouse: bool,
@@ -168,6 +170,7 @@ impl App {
             logs_area: Rect::default(),
             selection: None,
             env: None,
+            jump: None,
             start_at: None,
             mouse: true,
             quit: false,
@@ -283,9 +286,15 @@ impl App {
                 let ancestor = tree::node(&self.roots, &path[..depth]).id().clone();
                 self.fold.expanded.insert(ancestor, true);
             }
-            self.selected = Some(id);
+            self.selected = Some(id.clone());
         }
         self.refresh_rows();
+        if !self.selected_node().is_some_and(|n| n.ids.contains(&id)) {
+            self.fold.filter.clear();
+            self.fold.show = Show::All;
+            self.selected = Some(id);
+            self.refresh_rows();
+        }
     }
 
     /// Recomputes the visible rows and keeps the selection on the same node, or the
@@ -429,6 +438,9 @@ impl App {
         if self.mode == Mode::Env {
             return self.env_key(intent);
         }
+        if self.mode == Mode::Jump {
+            return self.jump_key(intent);
+        }
         match (intent, self.focus) {
             (Intent::Quit, _) => self.quit = true,
             (Intent::Help, _) => self.mode = Mode::Help,
@@ -514,11 +526,50 @@ impl App {
             (Intent::Mark, _) => commands.extend(self.mark()),
             (Intent::CopyUrl, _) => commands.extend(self.copy_url()),
             (Intent::ShowEnv, _) => commands.extend(self.show_env()),
+            (Intent::StartJump, _) => {
+                self.mode = Mode::Jump;
+                self.jump = Some(Jump::default());
+            }
             (Intent::CopyPublicUrl, _) => commands.extend(self.public_url("copy").map(|url| {
                 self.inform(&format!("copied {url}"));
                 Command::Copy(url)
             })),
             (Intent::Share { auth }, _) => commands.extend(self.share(auth)),
+        }
+    }
+
+    fn jump_key(&mut self, intent: Intent) {
+        let Some(prompt) = &mut self.jump else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        match intent {
+            Intent::FilterChar(c) => {
+                prompt.query.push(c);
+                prompt.cursor = 0;
+            }
+            Intent::FilterBackspace => {
+                prompt.query.pop();
+                prompt.cursor = 0;
+            }
+            Intent::Move(delta) => prompt.cursor = prompt.cursor.saturating_add_signed(delta),
+            Intent::FilterDone => {
+                let all = jump::candidates(&self.roots);
+                let found = jump::matches(&all, &prompt.query);
+                let picked = found
+                    .get(prompt.cursor.min(found.len().saturating_sub(1)))
+                    .map(|c| c.id.clone());
+                self.mode = Mode::Normal;
+                self.jump = None;
+                if let Some(id) = picked {
+                    self.focus = Focus::Tree;
+                    self.reveal(id);
+                }
+            }
+            _ => {
+                self.mode = Mode::Normal;
+                self.jump = None;
+            }
         }
     }
 
@@ -1402,6 +1453,40 @@ mod tests {
         press(&mut app, now, KeyCode::Up);
         app.update(Event::Snapshot(Box::new(snapshot)), now);
         assert_ne!(app.selected, Some(here), "only the first snapshot");
+    }
+
+    #[test]
+    fn ctrl_p_jumps_to_a_typed_name() {
+        let (mut app, now) = connected();
+        press(&mut app, now, KeyCode::Char('a'));
+        assert_eq!(app.fold.show, Show::Running);
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        app.update(Event::Key(ctrl_p), now);
+        assert_eq!(app.mode, Mode::Jump);
+        press(&mut app, now, KeyCode::Char('q'));
+        assert!(!app.quit, "letters are text");
+        press(&mut app, now, KeyCode::Backspace);
+        for c in "frontfx".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        let commands = press(&mut app, now, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.selected,
+            Some(NodeId::Instance {
+                project: "nova".into(),
+                stack: "feature-x".into(),
+                app: "nova-frontend".into(),
+            })
+        );
+        assert_eq!(follows(&commands), ["nova-frontend@feature-x"]);
+        assert_eq!(app.fold.show, Show::All, "a stopped app shows again");
+
+        app.update(Event::Key(ctrl_p), now);
+        press(&mut app, now, KeyCode::Char('b'));
+        press(&mut app, now, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.jump, None);
     }
 
     #[test]

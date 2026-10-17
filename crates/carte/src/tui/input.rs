@@ -19,6 +19,8 @@ pub enum Mode {
     Problems,
     /// The selected process's env.
     Env,
+    /// Typing a name to jump to.
+    Jump,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +75,7 @@ pub enum Intent {
     CopyUrl,
     CopyPublicUrl,
     ShowEnv,
+    StartJump,
     /// Share or unshare the selected app; with `auth`, share it behind a password.
     Share {
         auth: bool,
@@ -101,6 +104,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("drag", "copy log lines"),
             ("-", "mark the logs with the time"),
             ("m", "mouse on or off"),
+            ("ctrl-p", "jump to a project, stack, app or process"),
         ],
     ),
     (
@@ -133,11 +137,26 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
 ];
 
 pub fn intent(mode: &Mode, focus: Focus, key: KeyEvent) -> Option<Intent> {
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        return Some(Intent::Quit);
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => return Some(Intent::Quit),
+            KeyCode::Char('p') if *mode == Mode::Jump => return Some(Intent::Move(-1)),
+            KeyCode::Char('n') if *mode == Mode::Jump => return Some(Intent::Move(1)),
+            KeyCode::Char('p') if *mode == Mode::Normal => return Some(Intent::StartJump),
+            _ => {}
+        }
     }
     match mode {
         Mode::Filter => filter(key),
+        Mode::Jump => Some(match key.code {
+            KeyCode::Esc => Intent::Close,
+            KeyCode::Enter => Intent::FilterDone,
+            KeyCode::Down | KeyCode::Tab => Intent::Move(1),
+            KeyCode::Up | KeyCode::BackTab => Intent::Move(-1),
+            KeyCode::Backspace => Intent::FilterBackspace,
+            KeyCode::Char(c) => Intent::FilterChar(c),
+            _ => return None,
+        }),
         Mode::Confirm(_) => Some(match key.code {
             KeyCode::Char('y') | KeyCode::Enter => Intent::Yes,
             _ => Intent::Close,
