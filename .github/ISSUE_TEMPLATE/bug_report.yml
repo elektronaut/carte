@@ -1,0 +1,51 @@
+name: Bug report
+description: Something doesn't behave as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report only what you observed or verified, and leave out theories about the cause. The [contributing guidelines](https://github.com/elektronaut/carte/blob/main/CONTRIBUTING.md) explain why.
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead, as observed. Include the error message, if any. Put logs under Error output.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, numbered steps you actually ran. Include the relevant project file or `carte.toml`.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Error output
+      description: Raw output, not a paraphrase, such as `carte logs` or the daemon's log lines.
+      render: shell
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `carte --version`, and your OS version.
+    validations:
+      required: true
+  - type: textarea
+    id: ruled-out
+    attributes:
+      label: Ruled out
+      description: Negative results only, e.g. "Still happens after restarting the daemon." No theories about the cause.
