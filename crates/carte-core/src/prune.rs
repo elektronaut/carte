@@ -41,6 +41,8 @@ pub struct Listing {
     pub data: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
     /// Directory names in the run root.
     pub run: BTreeSet<String>,
+    /// Those whose owner marker names this carte's data root.
+    pub run_owned: BTreeSet<String>,
     /// Pidfile names in each project's folder of the pidfile directory.
     pub pidfiles: BTreeMap<String, BTreeSet<String>>,
 }
@@ -126,7 +128,7 @@ fn key(project: &str, stack: &str, app: &str) -> InstanceKey {
 /// The leftovers in `listing`: in a project that is gone, a stack that has no
 /// worktree, or an app that isn't in its project. Skipped projects and running
 /// instances are never touched. A run directory no folder or instance names goes
-/// only when nothing was skipped.
+/// only when its owner marker names this carte and nothing was skipped.
 pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known) -> Plan {
     let mut plan = Plan::default();
     let gone = |project: &str| {
@@ -212,13 +214,18 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
                 path,
             }),
             Some((_, false)) => {}
-            None if known.complete && known.skipped.is_empty() => candidates.push(Orphan {
-                project: None,
-                stack: None,
-                kind: OrphanKind::RunDir,
-                app: None,
-                path,
-            }),
+            None if known.complete
+                && known.skipped.is_empty()
+                && listing.run_owned.contains(name) =>
+            {
+                candidates.push(Orphan {
+                    project: None,
+                    stack: None,
+                    kind: OrphanKind::RunDir,
+                    app: None,
+                    path,
+                })
+            }
             None => {}
         }
     }
@@ -406,6 +413,7 @@ mod tests {
         let mut listing = listing;
         listing.run.insert(run_name("broken", "x", "broken-web"));
         listing.run.insert("aaaaaaaa".into());
+        listing.run_owned.insert("aaaaaaaa".into());
         let mut skipped = plan(&roots(), Path::new("/s/run"), &listing, &known);
         assert_eq!(paths(&skipped), ["/s/data/unknown"]);
         assert_eq!(
@@ -429,7 +437,8 @@ mod tests {
         let orphaned = run_name("nova", "feature-x", "nova-web");
         listing
             .run
-            .extend([kept, orphaned.clone(), "aaaaaaaa".into()]);
+            .extend([kept, orphaned.clone(), "aaaaaaaa".into(), "bbbbbbbb".into()]);
+        listing.run_owned.insert("aaaaaaaa".into());
         let known = known(&[("nova", &["nova-web"], &[])]);
         let plan = plan(&roots(), Path::new("/s/run"), &listing, &known);
         assert_eq!(

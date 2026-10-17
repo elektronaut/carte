@@ -64,6 +64,12 @@ impl DirRoots {
     }
 }
 
+/// The file beside a run directory that names the data root of the carte that made
+/// it, since several cartes can share a run root.
+pub fn owner_marker(run_dir: &Path) -> PathBuf {
+    run_dir.with_extension("owner")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceDirs {
     /// `{{state_dir}}`, `CARTE_STATE_DIR`.

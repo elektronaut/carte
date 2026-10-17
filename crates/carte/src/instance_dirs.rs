@@ -5,11 +5,12 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 
-use carte_core::dirs::{DirRoots, InstanceDirs, STACK_RECORD, StackRecord};
+use carte_core::dirs::{DirRoots, InstanceDirs, STACK_RECORD, StackRecord, owner_marker};
 use carte_core::model::{InstanceKey, ProjectState};
 
-/// Creates `key`'s directories and records the stack's current worktrees in
-/// its folder. Creates nothing inside the instance's directories.
+/// Creates `key`'s directories, marks the run directory as this carte's, and records
+/// the stack's current worktrees in its folder. Creates nothing inside the
+/// instance's directories.
 pub fn prepare(
     roots: &DirRoots,
     key: &InstanceKey,
@@ -18,6 +19,11 @@ pub fn prepare(
     let dirs = roots.instance(key);
     create_run_root(&roots.run)?;
     private_dir(&dirs.run)?;
+    let marker = owner_marker(&dirs.run);
+    let owner = roots.data.display().to_string();
+    if fs::read_to_string(&marker).ok().as_deref() != Some(owner.as_str()) {
+        fs::write(&marker, owner)?;
+    }
     fs::create_dir_all(&dirs.state)?;
 
     let stack = key.stack.slug();
@@ -158,6 +164,10 @@ mod tests {
         assert!(dirs.run.is_dir());
         assert_eq!(fs::read_dir(&dirs.state).unwrap().count(), 0);
         assert_eq!(fs::read_dir(&dirs.run).unwrap().count(), 0);
+        assert_eq!(
+            fs::read_to_string(owner_marker(&dirs.run)).unwrap(),
+            roots.data.display().to_string()
+        );
         let mode = fs::metadata(&roots.run).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
 

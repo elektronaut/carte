@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use carte_api::{
     PruneCandidate, PruneKept, PruneKind, PruneList, PruneResult, PruneSkip, PruneStack,
 };
-use carte_core::dirs::DirRoots;
+use carte_core::dirs::{self, DirRoots};
 use carte_core::discovery;
 use carte_core::model::{InstanceKey, Stack, World};
 use carte_core::prune::{self, Known, KnownProject, Listing, Orphan, OrphanKind, Plan, Skip};
@@ -153,6 +153,14 @@ pub fn detach(
 }
 
 fn detach_one(orphan: &Orphan) -> io::Result<Option<PathBuf>> {
+    let detached = detach_path(orphan)?;
+    if orphan.kind == OrphanKind::RunDir {
+        let _ = fs::remove_file(dirs::owner_marker(&orphan.path));
+    }
+    Ok(detached)
+}
+
+fn detach_path(orphan: &Orphan) -> io::Result<Option<PathBuf>> {
     let meta = match fs::symlink_metadata(&orphan.path) {
         Ok(meta) => meta,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -164,7 +172,6 @@ fn detach_one(orphan: &Orphan) -> io::Result<Option<PathBuf>> {
             return Err(io::Error::other("not a regular file"));
         }
         fs::remove_file(&orphan.path)?;
-        let _ = fs::remove_dir(parent);
         return Ok(None);
     }
     if !meta.is_dir() {
@@ -315,6 +322,16 @@ fn listing(roots: &DirRoots, pidfiles: &Path) -> Listing {
         listing.data.insert(project, stacks);
     }
     listing.run = dirs_in(&roots.run);
+    let owner = roots.data.display().to_string();
+    listing.run_owned = listing
+        .run
+        .iter()
+        .filter(|name| {
+            fs::read_to_string(dirs::owner_marker(&roots.run.join(name)))
+                .is_ok_and(|text| text.trim_end() == owner)
+        })
+        .cloned()
+        .collect();
     for project in dirs_in(pidfiles) {
         let files = entries(&pidfiles.join(&project), fs::FileType::is_file);
         if !files.is_empty() {
@@ -379,6 +396,15 @@ mod tests {
         symlink(&outside, roots.data.join("nova/x/linked")).unwrap();
         symlink(&outside, roots.data.join("elsewhere")).unwrap();
         fs::create_dir_all(roots.run.join("abcdefgh")).unwrap();
+        fs::create_dir_all(roots.run.join("ijklmnop")).unwrap();
+        fs::create_dir_all(roots.run.join("qrstuvwx")).unwrap();
+        let owner = roots.data.display().to_string();
+        fs::write(dirs::owner_marker(&roots.run.join("abcdefgh")), &owner).unwrap();
+        fs::write(
+            dirs::owner_marker(&roots.run.join("ijklmnop")),
+            "/elsewhere",
+        )
+        .unwrap();
         let pidfiles = tmp.path().join("pids");
         fs::create_dir_all(pidfiles.join("nova")).unwrap();
         fs::write(pidfiles.join("nova/web@x.pid"), "1").unwrap();
@@ -391,7 +417,11 @@ mod tests {
                 BTreeMap::from([("x".to_string(), BTreeSet::from(["web".to_string()]))])
             )])
         );
-        assert_eq!(listing.run, BTreeSet::from(["abcdefgh".to_string()]));
+        assert_eq!(
+            listing.run,
+            BTreeSet::from(["abcdefgh", "ijklmnop", "qrstuvwx"].map(String::from))
+        );
+        assert_eq!(listing.run_owned, BTreeSet::from(["abcdefgh".to_string()]));
         assert_eq!(
             listing.pidfiles["nova"],
             BTreeSet::from(["web@x.pid".into()])
@@ -449,11 +479,34 @@ mod tests {
         );
         assert!(!stack.exists());
         assert!(!pidfile.exists());
-        assert!(!pidfile.parent().unwrap().exists());
+        assert!(pidfile.parent().unwrap().is_dir());
         let result = finish(detached, &BTreeMap::new(), Vec::new());
         assert_eq!(result.removed.len(), 2, "{result:?}");
         assert!(result.errors.is_empty());
         assert_eq!(fs::read_dir(roots.data.join("nova")).unwrap().count(), 0);
         assert!(outside.join("keep").exists());
+    }
+
+    #[test]
+    fn detaching_a_run_directory_removes_its_owner_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = DirRoots {
+            data: tmp.path().join("data"),
+            run: tmp.path().join("run"),
+        };
+        let run = roots.run.join("abcdefgh");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(dirs::owner_marker(&run), "x").unwrap();
+        let orphan = Orphan {
+            project: None,
+            stack: None,
+            kind: OrphanKind::RunDir,
+            app: None,
+            path: run.clone(),
+        };
+        let detached = detach(vec![orphan], &BTreeSet::new(), &roots);
+        let result = finish(detached, &BTreeMap::new(), Vec::new());
+        assert_eq!(result.removed.len(), 1, "{result:?}");
+        assert_eq!(fs::read_dir(&roots.run).unwrap().count(), 0);
     }
 }
