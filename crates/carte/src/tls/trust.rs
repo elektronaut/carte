@@ -58,10 +58,41 @@ pub fn trust_command(ca_cert: &Path) -> CommandLine {
             "-r",
             "trustRoot",
             "-k",
-            "/Library/Keychains/System.keychain",
+            SYSTEM_KEYCHAIN,
             &ca_cert,
         ],
     )
+}
+
+pub const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
+
+/// The SHA-256 hashes of carte's CAs in the system keychain, old ones included.
+pub fn keychain_cas() -> Vec<String> {
+    CommandLine::new(
+        "security",
+        &[
+            "find-certificate",
+            "-a",
+            "-c",
+            "carte local CA",
+            "-Z",
+            SYSTEM_KEYCHAIN,
+        ],
+    )
+    .command()
+    .stdin(Stdio::null())
+    .stderr(Stdio::null())
+    .output()
+    .map(|output| sha256_hashes(&String::from_utf8_lossy(&output.stdout)))
+    .unwrap_or_default()
+}
+
+fn sha256_hashes(listing: &str) -> Vec<String> {
+    listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("SHA-256 hash: "))
+        .map(|hash| hash.trim().to_owned())
+        .collect()
 }
 
 /// Whether macOS trusts a leaf issued by the CA, checked read-only with `security verify-cert`.
@@ -155,5 +186,11 @@ mod tests {
         assert!(verify_leaf(&ca, "app.make.test", root).unwrap());
         assert!(verify_leaf(&ca, "oslo.feature-x.delegatbase.test", root).unwrap());
         assert!(!verify_leaf(&ca, "example.com", root).unwrap());
+    }
+
+    #[test]
+    fn reads_hashes_from_a_keychain_listing() {
+        let listing = "SHA-256 hash: 1D2D\nSHA-1 hash: 34FB\nkeychain: \"/Library/Keychains/System.keychain\"\n    \"labl\"<blob>=\"carte local CA (me@host)\"\nSHA-256 hash: C544\nSHA-1 hash: 0112\n";
+        assert_eq!(sha256_hashes(listing), ["1D2D", "C544"]);
     }
 }

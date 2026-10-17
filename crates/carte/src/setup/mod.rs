@@ -97,6 +97,16 @@ impl SetupEnv {
         CertificateAuthority::cert_path_in(&self.paths.state_dir)
     }
 
+    /// The CA's certificate, key and the trust bundle made from it.
+    pub fn ca_files(&self) -> [PathBuf; 3] {
+        let state = &self.paths.state_dir;
+        [
+            self.ca_cert(),
+            state.join("ca-key.pem"),
+            state.join("ca-bundle.pem"),
+        ]
+    }
+
     fn domain(&self) -> String {
         format!("gui/{}", self.uid)
     }
@@ -148,6 +158,10 @@ impl OldAgent {
 pub struct Facts {
     pub resolver: Option<String>,
     pub ca: CaState,
+    /// The CA's files that exist.
+    pub ca_files: Vec<PathBuf>,
+    /// SHA-256 hashes of carte's CAs in the system keychain.
+    pub keychain_cas: Vec<String>,
     pub agent_plist: Option<String>,
     pub agent_loaded: bool,
     /// The agent under its old label.
@@ -180,6 +194,8 @@ impl Facts {
         Facts {
             resolver: fs::read_to_string(env.resolver_file()).ok(),
             ca,
+            ca_files: env.ca_files().into_iter().filter(|f| f.exists()).collect(),
+            keychain_cas: trust::keychain_cas(),
             agent_plist: fs::read_to_string(env.agent_plist()).ok(),
             agent_loaded: check::launchd_loaded(&env.service(LABEL)),
             old_agent: OldAgent {
@@ -506,6 +522,29 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
         ));
     }
 
+    for hash in &facts.keychain_cas {
+        plan.steps.push(Step::sudo(
+            "Remove carte's local CA from the system keychain",
+            "security",
+            &["delete-certificate", "-Z", hash, trust::SYSTEM_KEYCHAIN],
+        ));
+    }
+    if !facts.ca_files.is_empty() {
+        let mut args = vec!["-f".to_string()];
+        args.extend(
+            facts
+                .ca_files
+                .iter()
+                .map(|f| f.to_string_lossy().into_owned()),
+        );
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        plan.steps.push(Step::run(
+            "Delete carte's local CA and its key",
+            "rm",
+            &args,
+        ));
+    }
+
     let puma_dev = if env.puma_dev_plist().exists() {
         format!(
             "launchctl enable {service} && launchctl bootstrap {domain} {plist}",
@@ -518,7 +557,7 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
     };
     plan.notes.push(format!(
         "to bring puma-dev back: `{puma_dev}`, and `sudo puma-dev -setup` for /etc/resolver/{tld}. \
-         Your projects in {config}, carte's state in {state} and ~/.puma-dev are left alone.",
+         Your projects in {config}, the rest of carte's state in {state} and ~/.puma-dev are left alone.",
         tld = env.machine.tld,
         config = tilde(&env.paths.config_dir),
         state = tilde(&env.paths.state_dir),
@@ -623,6 +662,8 @@ mod tests {
         Facts {
             resolver: None,
             ca: CaState::Missing,
+            ca_files: Vec::new(),
+            keychain_cas: Vec::new(),
             agent_plist: None,
             agent_loaded: false,
             old_agent: OldAgent::default(),
@@ -793,6 +834,8 @@ mod tests {
         let facts = Facts {
             resolver: Some(env.resolver_contents()),
             ca: CaState::Trusted,
+            ca_files: env.ca_files()[..2].to_vec(),
+            keychain_cas: vec!["1D2D".into(), "C544".into()],
             agent_plist: Some("x".into()),
             agent_loaded: true,
             ..fresh()
@@ -806,6 +849,11 @@ mod tests {
                 format!("rm {root}/home/Library/LaunchAgents/no.elektronaut.carte.plist"),
                 format!("sudo rm -f {root}/resolver/test"),
                 format!("sudo security remove-trusted-cert -d {root}/state/ca.pem"),
+                "sudo security delete-certificate -Z 1D2D /Library/Keychains/System.keychain"
+                    .to_string(),
+                "sudo security delete-certificate -Z C544 /Library/Keychains/System.keychain"
+                    .to_string(),
+                format!("rm -f {root}/state/ca.pem {root}/state/ca-key.pem"),
             ]
         );
         assert!(plan.notes[0].contains("puma-dev -install"));
