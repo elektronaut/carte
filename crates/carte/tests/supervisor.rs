@@ -404,6 +404,42 @@ async fn logs_are_kept_and_filtered() {
 }
 
 #[tokio::test]
+async fn following_a_project_picks_up_instances_that_start_later() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: FIXTURE_LINES=3 exec {fixture}\n");
+    setup.app("acme-api", WEB);
+    setup.project("");
+    let handle = setup.start();
+
+    let mut follow = handle.follow_logs();
+    let target = Address {
+        address: "acme".into(),
+        cwd: None,
+    };
+    let (lines, filter) = handle.logs(target, 100, None).await.unwrap();
+    assert!(lines.is_empty(), "{lines:?}");
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let line = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let line = follow.recv().await.unwrap();
+            if filter.matches(&line) {
+                return line;
+            }
+        }
+    })
+    .await
+    .expect("a line from the instance that started");
+    assert_eq!(
+        (line.project.as_str(), line.app.as_str()),
+        ("acme", "acme-web")
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn missing_infrastructure_fails_with_one_clear_message() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);

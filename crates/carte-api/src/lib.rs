@@ -306,6 +306,8 @@ pub struct LogsRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogLine {
+    #[serde(default)]
+    pub project: String,
     pub app: String,
     pub stack: String,
     pub process: String,

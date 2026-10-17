@@ -104,6 +104,7 @@ pub fn now_ms() -> u64 {
 /// Identifies a process in log lines.
 #[derive(Debug, Clone)]
 pub struct LogLabel {
+    pub project: String,
     pub app: String,
     pub stack: String,
     pub process: String,
@@ -195,6 +196,7 @@ fn broadcast_lines(tx: &broadcast::Sender<LogLine>, label: &LogLabel, lines: Vec
     }
     for (at_ms, text) in lines {
         let _ = tx.send(LogLine {
+            project: label.project.clone(),
             app: label.app.clone(),
             stack: label.stack.clone(),
             process: label.process.clone(),

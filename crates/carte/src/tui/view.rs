@@ -947,6 +947,7 @@ mod tests {
             Event::Log {
                 generation,
                 line: LogLine {
+                    project: "make".into(),
                     app: "make-billing".into(),
                     stack: "main".into(),
                     process: process.into(),

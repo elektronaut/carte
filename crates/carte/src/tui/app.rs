@@ -12,7 +12,7 @@ use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKin
 use ratatui::layout::{Position, Rect};
 
 use super::input::{self, Confirm, Control, Focus, Intent, Mode};
-use super::logs::{self, Logs, Prefix};
+use super::logs::{Logs, Prefix};
 use super::target;
 use super::tree::{self, Fold, Node, NodeId, Row, Show};
 
@@ -713,8 +713,7 @@ impl App {
         });
     }
 
-    /// Starts a new log stream when the selection, or the instances a merged view
-    /// covers, changed.
+    /// Starts a new log stream when the selection changed.
     fn sync_logs(&mut self) -> Option<Command> {
         let wanted = self.log_key();
         if wanted == self.logs.key {
@@ -740,30 +739,13 @@ impl App {
         })
     }
 
-    fn log_key(&self) -> Option<logs::Key> {
+    fn log_key(&self) -> Option<String> {
         let snapshot = self.snapshot.as_ref()?;
         let id = self.selected_node()?.id();
-        let instances = match id {
-            NodeId::Folder { .. } => return None,
-            NodeId::Project { project } | NodeId::Stack { project, .. } => snapshot
-                .projects
-                .iter()
-                .filter(|p| p.name == *project)
-                .flat_map(|p| &p.stacks)
-                .filter(|s| match id {
-                    NodeId::Stack { stack, .. } => s.name == *stack,
-                    _ => true,
-                })
-                .flat_map(|s| &s.instances)
-                .filter(|i| !i.processes.is_empty())
-                .map(|i| (i.app.clone(), i.stack.clone()))
-                .collect(),
-            NodeId::Instance { .. } | NodeId::Process { .. } => Vec::new(),
-        };
-        Some(logs::Key {
-            address: target::address(snapshot, id).address,
-            instances,
-        })
+        if matches!(id, NodeId::Folder { .. }) {
+            return None;
+        }
+        Some(target::address(snapshot, id).address)
     }
 
     fn log_prefix(&self) -> Prefix {
@@ -889,6 +871,7 @@ mod tests {
             app.logs.push(
                 app.logs.generation,
                 LogLine {
+                    project: "make".into(),
                     app: "make-billing".into(),
                     stack: "main".into(),
                     process: "web".into(),
@@ -914,6 +897,7 @@ mod tests {
             app.logs.push(
                 app.logs.generation,
                 LogLine {
+                    project: "make".into(),
                     app: "make-billing".into(),
                     stack: "main".into(),
                     process: "web".into(),
