@@ -4,17 +4,17 @@ carte runs your local web apps on demand. Visit `https://myapp.test` and
 carte starts the app's processes, waits until it answers, and forwards the
 request. After 15 minutes without traffic, it stops them again.
 
-It's built for many apps at once, and for git worktrees: each branch you
-check out in a worktree gets its own hostname, and apps without a
-worktree for that branch run from their main checkout, so you only create
+It's built for many apps at once, and for git worktrees: each worktree
+gets its own hostname, named after its folder, and apps without a
+worktree of that name run from their main checkout, so you only create
 worktrees for the services you change.
 
 - **The whole process group**, not only the web server: everything in
   `Procfile.dev` starts and stops together, including asset watchers,
   job workers and schedulers.
-- **Stacks per branch:** `billing.feature-x.acme.test` is the billing app
-  on the `feature-x` branch, and its calls to other apps stay on that
-  branch.
+- **Stacks per worktree:** `billing.feature-x.acme.test` is the billing
+  app in its `feature-x` worktree, and its calls to other apps stay in
+  the `feature-x` stack.
 - **HTTPS everywhere,** with a local certificate authority your apps and
   browsers trust.
 - **A terminal UI** for state, logs and controls.
@@ -143,7 +143,7 @@ policy = "disabled"
   `kind = "task"`, like `bin/rails db:prepare`, runs to completion
   between the services and the rest, on every start. One with
   `kind = "teardown"`, like `dropdb`, runs once in the main checkout
-  when a branch's worktree has been gone for `teardown_delay` (10
+  when a stack's worktrees have been gone for `teardown_delay` (10
   minutes), and then carte deletes the stack's data.
 - A process other than the web process and tasks that crashes after the
   start is restarted on the same port, with a growing wait; carte gives
@@ -191,12 +191,13 @@ Each process's environment is built in layers, later ones winning:
 
 ## Worktrees and stacks
 
-Stacks are never created by hand. When repos in a project have
-worktrees on the same branch, they form a stack:
+Stacks are never created by hand. A worktree's stack is named after
+its folder, and worktrees of different repos in a project with the same
+name form one stack, whatever branch each has checked out:
 
 ```sh
 cd ~/work/acme-billing
-git worktree add ../acme-billing-feature-x -b feature-x
+git worktree add ~/worktrees/acme-billing/feature-x -b feature-x
 ```
 
 Now `https://billing.feature-x.acme.test` runs the worktree, and
@@ -204,6 +205,27 @@ Now `https://billing.feature-x.acme.test` runs the worktree, and
 as a separate instance whose URLs point into the `feature-x` stack. When
 you remove the worktree, carte stops its instance and the stack falls
 back to main.
+
+When a worktree's folder has the repo's own name, the stack takes the
+name of the folder above it. That suits a folder per task with a
+checkout of each repo inside:
+
+```
+~/work/workspaces/checkout-flow/acme-billing    stack checkout-flow
+~/work/workspaces/checkout-flow/acme-frontend   stack checkout-flow
+```
+
+Worktrees next to the main checkout keep their whole folder name, so
+`../acme-billing-feature-x` is the stack `acme-billing-feature-x`, and
+`.worktrees/feature-x` inside the repo is `feature-x`. Names are
+lowercased, with anything outside `a-z`, `0-9` and `-` turned into a
+dash.
+
+Two worktrees of one repo can't share a stack, so when their folders
+have the same name, both take the name of the folder above, and so on
+until the names differ. Adding a second worktree with the same folder
+name therefore renames the first one's stack. Switching branches or a
+rebase inside a worktree never does.
 
 carte doesn't touch databases. Use `CARTE_CHECKOUT` in `database.yml` or
 similar if you want separate data per worktree.
@@ -219,7 +241,7 @@ Most of the time you don't need the CLI: visiting an app starts it.
 ```sh
 carte                        # the terminal UI
 carte ls                     # what's running
-carte up billing@feature-x   # start an app on a branch
+carte up billing@feature-x   # start an app in a stack
 carte up @feature-x          # start a whole stack
 carte restart billing/worker # restart one process
 carte logs -f billing        # follow logs
@@ -227,10 +249,10 @@ carte pin billing --save     # keep it running, and save that
 carte open                   # open the app you're in
 carte exec -- bin/rails c    # a command with the app's env
 carte stop-all --idle        # stop what nobody is using
-carte prune                  # remove data of branches and apps that are gone
+carte prune                  # remove data of stacks and apps that are gone
 ```
 
-Addresses are `app@branch/process`, each part optional and inferred from
+Addresses are `app@stack/process`, each part optional and inferred from
 the current directory. Any unambiguous part of a name works.
 `--project` addresses a project, even when one of its apps has the same
 name. Every command takes `--json`.

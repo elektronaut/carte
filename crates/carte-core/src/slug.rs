@@ -2,11 +2,11 @@ use std::fmt;
 
 use thiserror::Error;
 
-/// Turns a branch name into a DNS label: lowercase, every character outside `[a-z0-9-]`
+/// Turns a name into a DNS label: lowercase, every character outside `[a-z0-9-]`
 /// becomes `-`, repeated dashes collapse and leading or trailing dashes are dropped.
-pub fn branch_slug(branch: &str) -> String {
-    let mut slug = String::with_capacity(branch.len());
-    for c in branch.chars().flat_map(char::to_lowercase) {
+pub fn slugify(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    for c in name.chars().flat_map(char::to_lowercase) {
         let c = if c.is_ascii_lowercase() || c.is_ascii_digit() {
             c
         } else {
@@ -109,27 +109,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slugs_branches() {
-        assert_eq!(branch_slug("feature-x"), "feature-x");
-        assert_eq!(branch_slug("claude/fix-thing-123"), "claude-fix-thing-123");
-        assert_eq!(
-            branch_slug("Feature/JIRA-42_Thing"),
-            "feature-jira-42-thing"
-        );
-        assert_eq!(branch_slug("a//b--c"), "a-b-c");
-        assert_eq!(
-            branch_slug("/-leading/and/trailing-/"),
-            "leading-and-trailing"
-        );
-        assert_eq!(branch_slug("v1.2.3"), "v1-2-3");
-        assert_eq!(branch_slug("blåbær"), "bl-b-r");
-        assert_eq!(branch_slug("---"), "");
+    fn slugs_names() {
+        assert_eq!(slugify("feature-x"), "feature-x");
+        assert_eq!(slugify("claude/fix-thing-123"), "claude-fix-thing-123");
+        assert_eq!(slugify("Feature/JIRA-42_Thing"), "feature-jira-42-thing");
+        assert_eq!(slugify("a//b--c"), "a-b-c");
+        assert_eq!(slugify("/-leading/and/trailing-/"), "leading-and-trailing");
+        assert_eq!(slugify("v1.2.3"), "v1-2-3");
+        assert_eq!(slugify("blåbær"), "bl-b-r");
+        assert_eq!(slugify("---"), "");
     }
 
     #[test]
     fn slugs_never_contain_double_dashes() {
         for branch in ["x--y", "x/-/y", "x_-_y", "x - y", "x.-.y"] {
-            assert!(!branch_slug(branch).contains("--"), "{branch}");
+            assert!(!slugify(branch).contains("--"), "{branch}");
         }
     }
 

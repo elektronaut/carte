@@ -1600,11 +1600,6 @@ impl Actor {
                     stacks: state.map(ProjectState::stacks),
                     troubled,
                     stack_dir: roots.stack_dir(project, stack),
-                    repos: state
-                        .into_iter()
-                        .flat_map(|s| &s.project.apps)
-                        .map(|app| (app.name.clone(), app.path.clone()))
-                        .collect(),
                 }
             })
             .collect();
@@ -1659,7 +1654,7 @@ impl Actor {
                     if self.teardowns.pending.remove(&id).is_some() {
                         self.event(
                             EventKind::TeardownCancelled,
-                            "its worktree or branch is back",
+                            "its worktree is back",
                             vec![events::stack(&id.0, &id.1)],
                         );
                     }
@@ -2537,8 +2532,8 @@ impl Actor {
     }
 
     /// Takes a new view of config and disk. Instances whose app is gone, or whose
-    /// checkout moved (a removed worktree, a switched branch), are stopped; the next
-    /// request starts them from the right place.
+    /// checkout moved (a removed or added worktree), are stopped; the next request
+    /// starts them from the right place. A branch switch inside a worktree isn't a move.
     fn reload(&mut self, world: World) {
         if *self.world == world {
             return;
@@ -2549,28 +2544,28 @@ impl Actor {
         self.world = Arc::new(world);
         self.world_tx.send_replace(self.world.clone());
         self.providers.clear();
-        let gone: Vec<(InstanceKey, &'static str)> =
-            self.instances
-                .values()
-                .filter(|inst| inst.is_active() || inst.any_running())
-                .filter_map(|inst| {
-                    let why = match self.world.project(&inst.key.project) {
-                        None => "its project is gone",
-                        Some(state) => match state.project.app(&inst.key.app) {
-                            None => "its app is gone",
-                            Some(app)
-                                if inst.checkout.as_ref().is_some_and(|c| {
-                                    *c != state.checkout(app, &inst.key.stack)
-                                }) =>
-                            {
-                                "its checkout moved"
-                            }
-                            Some(_) => return None,
-                        },
-                    };
-                    Some((inst.key.clone(), why))
-                })
-                .collect();
+        let gone: Vec<(InstanceKey, &'static str)> = self
+            .instances
+            .values()
+            .filter(|inst| inst.is_active() || inst.any_running())
+            .filter_map(|inst| {
+                let why = match self.world.project(&inst.key.project) {
+                    None => "its project is gone",
+                    Some(state) => match state.project.app(&inst.key.app) {
+                        None => "its app is gone",
+                        Some(app)
+                            if inst.checkout.as_ref().is_some_and(|c| {
+                                c.path() != state.checkout(app, &inst.key.stack).path()
+                            }) =>
+                        {
+                            "its checkout moved"
+                        }
+                        Some(_) => return None,
+                    },
+                };
+                Some((inst.key.clone(), why))
+            })
+            .collect();
         for (key, why) in gone {
             self.stop(&key, Some(why));
         }
@@ -2761,7 +2756,7 @@ impl EnvInput {
         };
         let branch = match (&self.branch, &self.checkout) {
             (Some(branch), _) => branch.clone(),
-            (None, Checkout::Worktree(wt)) => wt.branch.clone(),
+            (None, Checkout::Worktree(wt)) => wt.branch.clone().unwrap_or_default(),
             (None, Checkout::Main { path }) => current_branch(path),
         };
         let dirs = if self.prepare {
@@ -2840,7 +2835,7 @@ impl EnvInput {
 
 fn current_branch(path: &Path) -> String {
     std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .args(["branch", "--show-current"])
         .current_dir(path)
         .output()
         .ok()

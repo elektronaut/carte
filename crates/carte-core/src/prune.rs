@@ -24,7 +24,7 @@ pub struct Known {
 pub struct KnownProject {
     /// Full app names.
     pub apps: BTreeSet<String>,
-    /// Branch stack slugs; `main` is implied.
+    /// Stack names; `main` is implied.
     pub stacks: BTreeSet<String>,
 }
 

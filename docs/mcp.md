@@ -29,7 +29,7 @@ Other clients take a command and arguments, usually in JSON:
 
 ## Tools
 
-Every tool takes an optional `address` (`app@branch/process`) and
+Every tool takes an optional `address` (`app@stack/process`) and
 `project`, as the CLI does. Results are the JSON that the CLI's `--json`
 prints; logs and events come as one JSON object per line.
 

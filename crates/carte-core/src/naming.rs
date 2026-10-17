@@ -12,7 +12,7 @@ pub enum NamingError {
     #[error("project {project} has no stack {stack}")]
     UnknownStack { project: String, stack: String },
     #[error(
-        "public hostname label {label:?} is longer than 63 characters even with the branch shortened"
+        "public hostname label {label:?} is longer than 63 characters even with the stack name shortened"
     )]
     PublicLabelTooLong { label: String },
 }
@@ -71,20 +71,21 @@ pub fn tld_length(tld: &str, project: &Project, app: &App, stack: &Stack) -> usi
     local_labels(project, app, stack).len() + tld.split('.').count() - 1
 }
 
-/// The branch name behind a stack slug. Several branches can share a slug across repos;
-/// the smallest name is picked so the result doesn't depend on discovery order.
+/// The branch a stack's worktrees have checked out, when they all have the same one.
+/// `None` when they differ or any of them has a detached HEAD.
 pub fn stack_branch<'a>(state: &'a ProjectState, slug: &str) -> Option<&'a str> {
-    state
+    let mut branches = state
         .worktrees
         .values()
         .flatten()
         .filter(|wt| wt.slug == slug)
-        .map(|wt| wt.branch.as_str())
-        .min()
+        .map(|wt| wt.branch.as_deref());
+    let first = branches.next()??;
+    branches.all(|b| b == Some(first)).then_some(first)
 }
 
 /// The single DNS label used under the share domain: local labels joined with `--`.
-/// When it exceeds 63 characters the branch slug is cut and gets a hash of the branch name.
+/// When it exceeds 63 characters the stack name is cut and gets a hash of the full name.
 pub fn public_label(state: &ProjectState, app: &App, stack: &Stack) -> Result<String, NamingError> {
     let project = &state.project;
     let full = local_labels(project, app, stack).join("--");
@@ -94,11 +95,13 @@ pub fn public_label(state: &ProjectState, app: &App, stack: &Stack) -> Result<St
     let Stack::Branch(slug) = stack else {
         return Err(NamingError::PublicLabelTooLong { label: full });
     };
-    let branch = stack_branch(state, slug).ok_or_else(|| NamingError::UnknownStack {
-        project: project.name.clone(),
-        stack: slug.clone(),
-    })?;
-    let hash = Sha256::digest(branch.as_bytes());
+    if !state.has_stack(slug) {
+        return Err(NamingError::UnknownStack {
+            project: project.name.clone(),
+            stack: slug.clone(),
+        });
+    }
+    let hash = Sha256::digest(slug.as_bytes());
     let suffix: String = hash[..3].iter().map(|b| format!("{b:02x}")).collect();
     let budget = 63usize.saturating_sub(full.len() - slug.len());
     let keep = budget.saturating_sub(suffix.len() + 1);
@@ -363,7 +366,7 @@ pub fn resolve_public_host(world: &World, host: &str) -> Result<InstanceKey, Not
     })
 }
 
-/// Finds the instance whose `public_label` is `label`, including shortened branch slugs.
+/// Finds the instance whose `public_label` is `label`, including shortened stack names.
 pub fn resolve_public_label(world: &World, label: &str) -> Option<InstanceKey> {
     let project_name = label.rsplit("--").next()?;
     let state = world.project(project_name)?;
@@ -389,13 +392,12 @@ pub fn collisions(state: &ProjectState) -> Vec<Problem> {
         .into_iter()
         .filter_map(|slug| {
             let app = labelled_app(project, &slug)?;
-            let branch = stack_branch(state, &slug).unwrap_or(&slug);
             Some(Problem {
                 project: Some(project.name.clone()),
                 app: Some(app.name.clone()),
                 message: format!(
-                    "branch {branch} has the same name as app {}: {slug}.{} goes to the app, \
-                     so stack {slug} is unreachable by hostname",
+                    "stack {slug} has the same name as app {}: {slug}.{} goes to the app, \
+                     so the stack is unreachable by hostname; rename its worktree folders",
                     app.name, project.name
                 ),
             })
@@ -444,7 +446,7 @@ mod tests {
             .unwrap()
             .push(worktree(
                 branch_name,
-                "/Users/dev/work/nova-postcard-api-long",
+                "/Users/dev/work/long/nova-postcard-api",
             ));
         nova
     }
@@ -565,17 +567,17 @@ mod tests {
     }
 
     #[test]
-    fn long_public_labels_shorten_the_branch() {
+    fn long_public_labels_shorten_the_stack_name() {
         let long = "claude/implement-the-entire-newsletter-subscription-flow-with-tests";
         let nova = with_branch(long);
         let frontend = nova.project.app("nova-postcard-frontend").unwrap();
-        let slug = crate::slug::branch_slug(long);
+        let slug = crate::slug::slugify(long);
         let label = public_label(&nova, frontend, &branch(&slug)).unwrap();
         assert_eq!(label.len(), 63);
         assert!(label.starts_with("postcard-frontend--claude-implement-the-entire-"));
         assert!(label.ends_with("--nova"));
         assert_eq!(label.matches("--").count(), 2);
-        let hash = Sha256::digest(long.as_bytes());
+        let hash = Sha256::digest(slug.as_bytes());
         let hex: String = hash[..3].iter().map(|b| format!("{b:02x}")).collect();
         assert!(label.contains(&format!("-{hex}--")), "{label}");
         assert_eq!(
@@ -896,7 +898,7 @@ mod tests {
             .unwrap()
             .push(worktree(
                 "billing",
-                "/Users/dev/work/nova-postcard-api-billing",
+                "/Users/dev/work/billing/nova-postcard-api",
             ));
         let world = World {
             projects: vec![nova],
@@ -1007,7 +1009,7 @@ mod tests {
         let long = "claude/implement-the-entire-newsletter-subscription-flow-with-tests";
         let mut world = world();
         world.projects[0] = with_branch(long);
-        let slug = crate::slug::branch_slug(long);
+        let slug = crate::slug::slugify(long);
         let nova = &world.projects[0];
         let frontend = nova.project.app("nova-postcard-frontend").unwrap();
         let label = public_label(nova, frontend, &branch(&slug)).unwrap();
@@ -1041,7 +1043,18 @@ mod tests {
     }
 
     #[test]
-    fn finds_branch_collisions() {
+    fn a_stack_has_a_branch_only_when_its_worktrees_agree() {
+        let mut nova = test_support::nova();
+        assert_eq!(stack_branch(&nova, "feature-x"), Some("feature-x"));
+        assert_eq!(stack_branch(&nova, "nope"), None);
+        nova.worktrees.get_mut("nova-postcard-api").unwrap()[0].branch = Some("other".into());
+        assert_eq!(stack_branch(&nova, "feature-x"), None);
+        nova.worktrees.get_mut("nova-postcard-api").unwrap()[0].branch = None;
+        assert_eq!(stack_branch(&nova, "feature-x"), None);
+    }
+
+    #[test]
+    fn finds_stacks_named_like_apps() {
         assert!(collisions(&test_support::nova()).is_empty());
         let mut nova = test_support::nova();
         nova.worktrees
@@ -1049,14 +1062,14 @@ mod tests {
             .unwrap()
             .push(worktree(
                 "Billing",
-                "/Users/dev/work/nova-postcard-api-billing",
+                "/Users/dev/work/billing/nova-postcard-api",
             ));
         let problems = collisions(&nova);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].project.as_deref(), Some("nova"));
         assert_eq!(problems[0].app.as_deref(), Some("nova-billing"));
         assert!(
-            problems[0].message.contains("branch Billing"),
+            problems[0].message.contains("stack billing"),
             "{}",
             problems[0].message
         );
@@ -1068,7 +1081,7 @@ mod tests {
         acme.worktrees
             .get_mut("acme-api")
             .unwrap()
-            .push(worktree("acme", "/Users/dev/clients/acme-api-acme"));
+            .push(worktree("acme", "/Users/dev/clients/acme/acme-api"));
         assert!(collisions(&acme).is_empty());
     }
 

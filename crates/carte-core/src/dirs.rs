@@ -36,7 +36,7 @@ fn short_hash(parts: &[&str]) -> String {
         .collect()
 }
 
-/// `{{stack.id}}`: the same for a project and stack slug on every machine and
+/// `{{stack.id}}`: the same for a project and stack name on every machine and
 /// every run.
 pub fn stack_id(project: &str, stack: &str) -> String {
     short_hash(&[project, stack])
@@ -81,7 +81,8 @@ pub struct InstanceDirs {
 /// What a stack's `stack.toml` holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackRecord {
-    /// The branch of the stack's worktrees, once one was seen.
+    /// The last branch seen checked out in the stack's worktrees, for `CARTE_BRANCH`
+    /// in teardowns. Informational only: stacks are named after worktree folders.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
     /// The worktree each app last had for the stack, by app name.
@@ -101,7 +102,9 @@ impl StackRecord {
     /// Records the stack's current worktrees, keeping apps that no longer have one.
     pub fn update<'a>(&mut self, worktrees: impl IntoIterator<Item = (&'a str, &'a Worktree)>) {
         for (app, wt) in worktrees {
-            self.branch = Some(wt.branch.clone());
+            if let Some(branch) = &wt.branch {
+                self.branch = Some(branch.clone());
+            }
             self.worktrees.insert(app.to_string(), wt.path.clone());
         }
     }
@@ -177,7 +180,7 @@ mod tests {
         let mut record = StackRecord::default();
         assert_eq!(record.to_toml(), "[worktrees]\n");
         let wt = |path: &str| Worktree {
-            branch: "feature/X".into(),
+            branch: Some("feature/X".into()),
             slug: "feature-x".into(),
             path: path.into(),
         };

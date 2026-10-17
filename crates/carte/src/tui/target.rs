@@ -101,10 +101,10 @@ mod tests {
             .map(|id| address(id).address.parse().unwrap())
             .collect();
         assert_eq!(parsed[0], Parsed::default());
-        assert_eq!(parsed[1].branch.as_deref(), Some("feature-x"));
+        assert_eq!(parsed[1].stack.as_deref(), Some("feature-x"));
         assert_eq!(parsed[1].app, None);
         assert_eq!(parsed[2].app.as_deref(), Some("nova-billing"));
-        assert_eq!(parsed[3].branch.as_deref(), Some("main"));
+        assert_eq!(parsed[3].stack.as_deref(), Some("main"));
         assert_eq!(parsed[3].process.as_deref(), Some("worker"));
     }
 }

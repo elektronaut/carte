@@ -5,10 +5,9 @@ use std::path::Path;
 
 use crate::dirs::StackRecord;
 
-/// Whether a stack is gone for good rather than between branches: no worktree has
-/// its branch, and every worktree its record names is gone, its directory or the
-/// branch in that app's repo. A rebase (detached HEAD) or a `git switch` inside a
-/// worktree keeps both, so it never counts, however long it takes.
+/// Whether a stack is gone: no worktree is named for it, and every worktree directory
+/// its record names is gone. A rebase or a `git switch` inside a worktree keeps the
+/// directory, so it never counts, however long it takes.
 ///
 /// `stacks` are the stacks with a worktree as discovery found them; `None` when
 /// discovery of the project failed, which never counts. `main` never counts, nor a
@@ -18,7 +17,6 @@ pub fn is_removed(
     stacks: Option<&BTreeSet<String>>,
     record: &StackRecord,
     dir_exists: impl Fn(&Path) -> bool,
-    branch_exists: impl Fn(&str, &str) -> bool,
 ) -> bool {
     let Some(stacks) = stacks else {
         return false;
@@ -26,14 +24,7 @@ pub fn is_removed(
     if stack == "main" || stacks.contains(stack) {
         return false;
     }
-    let Some(branch) = &record.branch else {
-        return false;
-    };
-    !record.worktrees.is_empty()
-        && record
-            .worktrees
-            .iter()
-            .all(|(app, path)| !dir_exists(path) || !branch_exists(app, branch))
+    !record.worktrees.is_empty() && record.paths().all(|path| !dir_exists(path))
 }
 
 #[cfg(test)]
@@ -56,92 +47,57 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
-    fn removed(
-        stacks: Option<&BTreeSet<String>>,
-        record: &StackRecord,
-        dirs: &[&str],
-        branches: &[(&str, &str)],
-    ) -> bool {
-        is_removed(
-            "feature-x",
-            stacks,
-            record,
-            |path| dirs.iter().any(|d| Path::new(d) == path),
-            |app, branch| branches.contains(&(app, branch)),
-        )
+    fn removed(stacks: Option<&BTreeSet<String>>, record: &StackRecord, dirs: &[&str]) -> bool {
+        is_removed("feature-x", stacks, record, |path| {
+            dirs.iter().any(|d| Path::new(d) == path)
+        })
     }
 
     #[test]
-    fn a_worktree_with_the_branch_keeps_the_stack() {
+    fn a_worktree_named_for_the_stack_keeps_it() {
         let record = record(&[("web", "/w/web-x")]);
         let found = stacks(&["feature-x"]);
-        assert!(!removed(Some(&found), &record, &[], &[]));
+        assert!(!removed(Some(&found), &record, &[]));
     }
 
     #[test]
-    fn a_rebase_or_a_switch_keeps_the_stack() {
+    fn an_existing_directory_keeps_the_stack() {
         let record = record(&[("web", "/w/web-x")]);
         let none = stacks(&[]);
-        let branch = [("web", "feature/x")];
-        assert!(!removed(Some(&none), &record, &["/w/web-x"], &branch));
+        assert!(!removed(Some(&none), &record, &["/w/web-x"]));
     }
 
     #[test]
     fn a_removed_worktree_removes_the_stack() {
         let record = record(&[("web", "/w/web-x")]);
         let none = stacks(&[]);
-        assert!(removed(Some(&none), &record, &[], &[("web", "feature/x")]));
-    }
-
-    #[test]
-    fn a_deleted_branch_removes_the_stack() {
-        let record = record(&[("web", "/w/web-x")]);
-        let none = stacks(&[]);
-        assert!(removed(Some(&none), &record, &["/w/web-x"], &[]));
-        assert!(removed(
-            Some(&none),
-            &record,
-            &["/w/web-x"],
-            &[("web", "other")]
-        ));
+        assert!(removed(Some(&none), &record, &[]));
     }
 
     #[test]
     fn every_recorded_worktree_must_be_gone() {
         let record = record(&[("api", "/w/api-x"), ("web", "/w/web-x")]);
         let none = stacks(&[]);
-        let branches = [("api", "feature/x"), ("web", "feature/x")];
-        assert!(!removed(Some(&none), &record, &["/w/api-x"], &branches));
-        assert!(removed(
-            Some(&none),
-            &record,
-            &["/w/api-x"],
-            &[("web", "feature/x")]
-        ));
+        assert!(!removed(Some(&none), &record, &["/w/api-x"]));
+        assert!(removed(Some(&none), &record, &[]));
     }
 
     #[test]
     fn a_failed_discovery_never_removes() {
         let record = record(&[("web", "/w/web-x")]);
-        assert!(!removed(None, &record, &[], &[]));
+        assert!(!removed(None, &record, &[]));
     }
 
     #[test]
     fn main_and_unrecorded_stacks_are_never_removed() {
         let none = stacks(&[]);
         let record = record(&[("web", "/w/web-x")]);
-        assert!(!is_removed(
-            "main",
-            Some(&none),
-            &record,
-            |_| false,
-            |_, _| false
-        ));
-        assert!(!removed(Some(&none), &StackRecord::default(), &[], &[]));
+        assert!(!is_removed("main", Some(&none), &record, |_| false));
+        assert!(!removed(Some(&none), &StackRecord::default(), &[]));
         let no_branch = StackRecord {
             branch: None,
             ..record
         };
-        assert!(!removed(Some(&none), &no_branch, &[], &[]));
+        assert!(removed(Some(&none), &no_branch, &[]));
     }
 }

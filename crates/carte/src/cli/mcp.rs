@@ -18,7 +18,7 @@ const VERSIONS: [&str; 4] = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-
 
 const INSTRUCTIONS: &str = "carte runs this machine's local web apps on demand: each app is \
 served at its own https URL, and the first request starts it. Don't start dev servers \
-yourself. Addresses are `app@branch/process`; every part is optional and inferred from \
+yourself. Addresses are `app@stack/process`; every part is optional and inferred from \
 the directory this server runs in.";
 
 pub fn run(paths: &Paths, control: bool) -> anyhow::Result<ExitCode> {
@@ -285,7 +285,7 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
     let mut all = json!({
         "address": {
             "type": "string",
-            "description": "`app@branch/process`; every part is optional and inferred from the current directory.",
+            "description": "`app@stack/process`; every part is optional and inferred from the current directory.",
         },
         "project": {
             "type": "string",

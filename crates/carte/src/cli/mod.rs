@@ -112,7 +112,7 @@ pub enum Command {
 
 #[derive(Args, Clone, Default)]
 pub struct Target {
-    /// `app@branch/process`; every part is optional and inferred from the current directory.
+    /// `app@stack/process`; every part is optional and inferred from the current directory.
     pub address: Option<String>,
     /// Resolve the address inside this project; alone, it addresses the whole project
     /// even when an app has the same name.
@@ -231,7 +231,7 @@ fn parse_duration(value: &str) -> Result<std::time::Duration, String> {
 
 #[derive(Args, Clone)]
 pub struct EventsArgs {
-    /// `app@branch/process` or a project; without one (or --project), every event.
+    /// `app@stack/process` or a project; without one (or --project), every event.
     pub address: Option<String>,
     /// Events about this project, or resolve the address inside it.
     #[arg(long, value_name = "NAME")]

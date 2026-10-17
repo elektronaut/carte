@@ -275,7 +275,14 @@ fn lists_projects_as_json() {
     git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]);
     git(
         &repo,
-        &["worktree", "add", "-q", "-b", "feature/x", "../shop-x"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/x",
+            "../feature-x/shop",
+        ],
     );
     sb.write_project("shop", "repos = [\"~/shop\", \"~/tools\"]\n");
     sb.write_project("broken", "repos = \n");

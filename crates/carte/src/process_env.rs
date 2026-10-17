@@ -168,7 +168,7 @@ pub fn render_subject(
         .ok_or_else(|| anyhow!("unknown app {}", key.app))?;
     let checkout = state.checkout(app, &key.stack);
     let branch = match &checkout {
-        Checkout::Worktree(wt) => wt.branch.clone(),
+        Checkout::Worktree(wt) => wt.branch.clone().unwrap_or_default(),
         Checkout::Main { path } => current_branch(path),
     };
 

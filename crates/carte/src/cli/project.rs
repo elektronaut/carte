@@ -250,7 +250,7 @@ fn choose_name(given: Option<&str>, dir_name: &str, interactive: bool) -> anyhow
     let suggestion = Some(dir_name.to_string())
         .filter(|n| slug::validate_project_name(n).is_ok())
         .or_else(|| {
-            let fixed = slug::branch_slug(dir_name);
+            let fixed = slug::slugify(dir_name);
             slug::validate_project_name(&fixed).is_ok().then_some(fixed)
         });
     if !interactive {
@@ -334,7 +334,7 @@ pub(super) fn name_overrides(
             let fixed = if single {
                 project.to_string()
             } else {
-                slug::branch_slug(short)
+                slug::slugify(short)
             };
             slug::validate_app_short_name(&fixed).ok()?;
             let entry = AppEntry {

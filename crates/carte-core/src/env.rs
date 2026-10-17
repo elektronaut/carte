@@ -201,7 +201,7 @@ pub struct EnvRequest<'a> {
     pub processes: &'a [(ProcessSpec, u16)],
     pub checkout: &'a Checkout,
     pub stack: &'a Stack,
-    /// The branch checked out in `checkout`.
+    /// The branch checked out in `checkout`; empty on a detached HEAD.
     pub branch: &'a str,
     pub port: u16,
     /// URLs for the instance's stack; also gives `CARTE_URL` and `CARTE_PUBLIC_URL`.
@@ -464,7 +464,7 @@ mod tests {
 
     fn feature_checkout() -> Checkout {
         Checkout::Worktree(Worktree {
-            branch: "feature/X".into(),
+            branch: Some("feature/X".into()),
             slug: "feature-x".into(),
             path: "/Users/alex/work/nova-postcard-frontend-feature-x".into(),
         })

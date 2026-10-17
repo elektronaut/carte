@@ -339,7 +339,7 @@ async fn dependencies_start_with_their_dependent_in_the_same_stack() {
             "-q",
             "-b",
             "feature-x",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
         ],
     );
     setup.project("[apps.acme-web]\ndepends_on = [\"api\"]\n");
@@ -363,7 +363,7 @@ async fn dependencies_start_with_their_dependent_in_the_same_stack() {
     assert!(
         web_x
             .checkout_path
-            .ends_with(Path::new("acme-web-feature-x"))
+            .ends_with(Path::new("feature-x/acme-web"))
     );
     handle.shutdown().await;
 }
@@ -493,7 +493,7 @@ async fn naming_the_main_stack_starts_every_app_on_main() {
             "-q",
             "-b",
             "feature-x",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
         ],
     );
     setup.project("");
@@ -948,7 +948,7 @@ async fn checkout_watchers_run_once_and_move_to_another_instance() {
             "-q",
             "-b",
             "feature-x",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
         ],
     );
     setup.project("");
@@ -1251,7 +1251,7 @@ async fn idle_stops_and_config_changes_are_events() {
             "-q",
             "-b",
             "feature-x",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
         ],
     );
     setup.project("idle_timeout = \"2s\"\n");
@@ -1262,7 +1262,7 @@ async fn idle_stops_and_config_changes_are_events() {
             .any(|l| l == "acme config reloaded: project file")
             && lines.iter().any(|l| {
                 l.starts_with("acme-web@feature-x worktree added: ")
-                    && l.ends_with("acme-web-feature-x")
+                    && l.ends_with("feature-x/acme-web")
             })
     })
     .await;
@@ -2001,7 +2001,7 @@ async fn a_crashed_checkout_watcher_comes_back_once_in_the_instance_that_ran_it(
             "-q",
             "-b",
             "feature-x",
-            "../acme-web-feature-x",
+            "../feature-x/acme-web",
         ],
     );
     setup.project("");

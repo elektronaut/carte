@@ -409,7 +409,7 @@ fn valid_project_name(name: &str) -> Option<String> {
     if slug::validate_project_name(&lower).is_ok() {
         return Some(lower);
     }
-    let fixed = slug::branch_slug(name);
+    let fixed = slug::slugify(name);
     slug::validate_project_name(&fixed).is_ok().then_some(fixed)
 }
 
