@@ -466,8 +466,13 @@ impl App {
                 _ => {}
             },
             (Intent::Open, _) => commands.extend(self.open()),
-            (Intent::OpenPublic, _) => commands.extend(self.open_public()),
+            (Intent::OpenPublic, _) => commands.extend(self.public_url("open").map(Command::Open)),
             (Intent::Mark, _) => commands.extend(self.mark()),
+            (Intent::CopyUrl, _) => commands.extend(self.copy_url()),
+            (Intent::CopyPublicUrl, _) => commands.extend(self.public_url("copy").map(|url| {
+                self.inform(&format!("copied {url}"));
+                Command::Copy(url)
+            })),
             (Intent::Share { auth }, _) => commands.extend(self.share(auth)),
         }
     }
@@ -642,17 +647,32 @@ impl App {
         Some((id, instance))
     }
 
-    fn open_public(&mut self) -> Option<Command> {
+    /// The selected app's public URL, or a notice why there is none.
+    fn public_url(&mut self, verb: &str) -> Option<String> {
         match self.selected_instance() {
             Some((_, instance)) => match instance.public_url.clone() {
-                Some(url) => Some(Command::Open(url)),
+                Some(url) => Some(url),
                 None => {
                     self.warn("not shared; w shares it");
                     None
                 }
             },
             None => {
-                self.warn("select an app to open");
+                self.warn(&format!("select an app to {verb}"));
+                None
+            }
+        }
+    }
+
+    fn copy_url(&mut self) -> Option<Command> {
+        match self.selected_instance() {
+            Some((_, instance)) => {
+                let url = instance.url.clone();
+                self.inform(&format!("copied {url}"));
+                Some(Command::Copy(url))
+            }
+            None => {
+                self.warn("select an app to copy");
                 None
             }
         }
@@ -1186,6 +1206,50 @@ mod tests {
         };
         assert_eq!(request.target.address, "nova-frontend@main");
         assert!(request.replace);
+    }
+
+    #[test]
+    fn y_copies_the_address_and_shift_y_the_shared_one() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(shared_sample())), now);
+        assert!(press(&mut app, now, KeyCode::Char('y')).is_empty());
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("select an app to copy")
+        );
+
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, now, KeyCode::Char('y')),
+            [Command::Copy("https://nova-billing.test".into())]
+        );
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("copied https://nova-billing.test")
+        );
+        assert_eq!(
+            press(&mut app, now, KeyCode::Char('Y')),
+            [Command::Copy(
+                "https://nova-billing--main--nova.demo.dev".into()
+            )]
+        );
+
+        press(&mut app, now, KeyCode::Right);
+        press(&mut app, now, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, now, KeyCode::Char('y')),
+            [Command::Copy("https://nova-billing.test".into())],
+            "a process copies its app's address"
+        );
+
+        press(&mut app, now, KeyCode::End);
+        assert!(press(&mut app, now, KeyCode::Char('Y')).is_empty());
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("not shared; w shares it")
+        );
     }
 
     #[test]

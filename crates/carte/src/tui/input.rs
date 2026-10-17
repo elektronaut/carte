@@ -68,6 +68,8 @@ pub enum Intent {
     OpenPublic,
     /// Add a marker with the time to the selection's logs.
     Mark,
+    CopyUrl,
+    CopyPublicUrl,
     /// Share or unshare the selected app; with `auth`, share it behind a password.
     Share {
         auth: bool,
@@ -111,6 +113,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("w", "share on the web, or stop sharing"),
             ("W", "share behind a password"),
             ("O", "open the shared address"),
+            ("y Y", "copy the address, the shared address"),
         ],
     ),
     (
@@ -173,6 +176,8 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('o') => Some(Intent::Open),
         KeyCode::Char('O') => Some(Intent::OpenPublic),
         KeyCode::Char('-') => Some(Intent::Mark),
+        KeyCode::Char('y') => Some(Intent::CopyUrl),
+        KeyCode::Char('Y') => Some(Intent::CopyPublicUrl),
         KeyCode::Char('w') => Some(Intent::Share { auth: false }),
         KeyCode::Char('W') => Some(Intent::Share { auth: true }),
         KeyCode::Char('I') => Some(Intent::StopIdle),

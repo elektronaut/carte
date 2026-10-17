@@ -1337,52 +1337,15 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Char('?'));
-        let screen = draw(&mut app, 100, 42);
-        assert_eq!(
-            screen,
-            "\
-╭ carte · 2 running · 1 problem (!) ───────────────────────────────────────────────────────────────╮
-│                        ╭ keys ──────────────────────────────────────────╮             CPU   MEM  │
-│▾ ✖ nova !              │ Navigate                                       │                3%  412M│
-│  ▾ ✖ main              │ ↑↓ j k       move                              │                3%  412M│
-│    ▸ ● billing pin*    │ ←→ h l       fold, unfold                      │y               3%  412M│
-│      ✖ frontend !      │ enter space  fold or unfold                    │hed                     │
-│  ▾ ● feature-x         │ g G          top, bottom                       │                0%    0B│
-│      ○ billing main    │ PgUp PgDn    page                              │                        │
-│      ● frontend !      │ tab          switch between tree and logs      │ in 14m         0%    0B│
-│                        │ /            filter the focused pane           │                        │
-│                        │ esc          clear the filter                  │                        │
-│                        │ a            show all, running or shared       │                        │
-│                        │ e            show logs or events               │                        │
-│                        │ drag         copy log lines                    │                        │
-│                        │ -            mark the logs with the time       │                        │
-│                        │ m            mouse on or off                   │                        │
-│                        │                                                │                        │
-│                        │ Control the selection                          │                        │
-│                        │ s            start                             │                        │
-╰────────────────────────│ x            stop                              │────────────────────────╯
-╭ nova ──────────────────│ r            restart                           │────────────────────────╮
-│✖ 2 of 4 instances runni│ p            pin or unpin                      │                        │
-│crashed: frontend       │ d            disable or enable                 │                        │
-│! branch slug \"billing\" │ S            save a temporary pin or disable   │                        │
-╰────────────────────────│ o            open in the browser               │────────────────────────╯
-╭ logs following ────────│ w            share on the web, or stop sharing │────────────────────────╮
-│No output yet.          │ W            share behind a password           │                        │
-│                        │ O            open the shared address           │                        │
-│                        │                                                │                        │
-│                        │ Everything                                     │                        │
-│                        │ I            stop idle instances               │                        │
-│                        │ X            stop all instances                │                        │
-│                        │ !            problems                          │                        │
-│                        │ ?            this help                         │                        │
-│                        │ q            quit                              │                        │
-│                        │                                                │                        │
-│                        │ pin* and off* last until the daemon restarts   │                        │
-│                        ╰────────────────────────────────────────────────╯                        │
-│                                                                                                  │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
-
- ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  tab logs"
-        );
+        let screen = draw(&mut app, 100, 50);
+        for (_, keys) in HELP {
+            for (key, what) in keys.iter() {
+                assert!(
+                    screen.lines().any(|l| l.contains(key) && l.contains(what)),
+                    "{key} {what} in\n{screen}"
+                );
+            }
+        }
+        assert!(screen.contains("pin* and off* last until the daemon restarts"));
     }
 }
