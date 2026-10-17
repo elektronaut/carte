@@ -25,19 +25,11 @@ impl Prefix {
     }
 }
 
-/// The selection a stream follows; a new key means a new stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Key {
-    pub address: String,
-    /// Instances a merged stream covers. The daemon fixes them when the stream
-    /// starts, so a stack whose instances change needs a new one.
-    pub instances: Vec<(String, String)>,
-}
-
 #[derive(Debug)]
 pub struct Logs {
     pub generation: u64,
-    pub key: Option<Key>,
+    /// The address the stream follows; a new one means a new stream.
+    pub key: Option<String>,
     pub prefix: Prefix,
     lines: VecDeque<LogLine>,
     /// Lines dropped from the front so far; a line's sequence number is this plus its
@@ -77,7 +69,7 @@ impl Default for Logs {
 
 impl Logs {
     /// Starts over for a new stream and returns its generation.
-    pub fn restart(&mut self, key: Option<Key>, prefix: Prefix) -> u64 {
+    pub fn restart(&mut self, key: Option<String>, prefix: Prefix) -> u64 {
         self.generation += 1;
         self.key = key;
         self.prefix = prefix;
@@ -210,6 +202,7 @@ mod tests {
 
     fn line(text: &str) -> LogLine {
         LogLine {
+            project: "nova".into(),
             app: "nova-billing".into(),
             stack: "main".into(),
             process: "web".into(),

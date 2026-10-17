@@ -672,6 +672,7 @@ impl Actor {
         proc.run = run;
         proc.manual_stop = false;
         let label = LogLabel {
+            project: key.project.clone(),
             app: key.app.clone(),
             stack: key.stack.slug().to_string(),
             process: proc.spec.name.clone(),
@@ -1627,35 +1628,26 @@ impl Actor {
         search: Option<String>,
     ) -> Result<(Vec<LogLine>, LogFilter), String> {
         let resolved = self.resolve(target)?;
-        let keys: Vec<InstanceKey> = match &resolved.app {
-            Some(app) => vec![InstanceKey {
-                project: resolved.project.clone(),
-                app: app.clone(),
-                stack: resolved.stack.clone().unwrap_or(Stack::Main),
-            }],
-            None => self
-                .instances
-                .keys()
-                .filter(|k| {
-                    k.project == resolved.project
-                        && resolved.stack.as_ref().is_none_or(|s| *s == k.stack)
-                })
-                .cloned()
-                .collect(),
+        let stack = match (&resolved.app, &resolved.stack) {
+            (_, Some(stack)) => Some(stack.clone()),
+            (Some(_), None) => Some(Stack::Main),
+            (None, None) => None,
         };
         let filter = LogFilter {
-            instances: keys
-                .iter()
-                .map(|k| (k.app.clone(), k.stack.slug().to_string()))
-                .collect(),
+            project: resolved.project.clone(),
+            stack: stack.as_ref().map(|s| s.slug().to_string()),
+            app: resolved.app.clone(),
             process: resolved.process.clone(),
             search: search.clone(),
         };
         let mut lines = Vec::new();
-        for key in &keys {
-            let Some(inst) = self.instances.get(key) else {
-                continue;
-            };
+        let keys = self.instances.keys().filter(|k| {
+            k.project == resolved.project
+                && stack.as_ref().is_none_or(|s| *s == k.stack)
+                && resolved.app.as_ref().is_none_or(|a| *a == k.app)
+        });
+        for key in keys {
+            let inst = &self.instances[key];
             for proc in &inst.procs {
                 if resolved
                     .process
@@ -1667,6 +1659,7 @@ impl Actor {
                 let log = proc.log.lock().unwrap();
                 for (at_ms, text) in log.lines() {
                     lines.push(LogLine {
+                        project: key.project.clone(),
                         app: key.app.clone(),
                         stack: key.stack.slug().to_string(),
                         process: proc.spec.name.clone(),

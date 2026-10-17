@@ -122,16 +122,19 @@ pub(crate) enum Msg {
 /// Which log lines a follower wants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogFilter {
-    pub instances: Vec<(String, String)>,
+    pub project: String,
+    /// The stack's slug.
+    pub stack: Option<String>,
+    pub app: Option<String>,
     pub process: Option<String>,
     pub search: Option<String>,
 }
 
 impl LogFilter {
     pub fn matches(&self, line: &LogLine) -> bool {
-        self.instances
-            .iter()
-            .any(|(app, stack)| *app == line.app && *stack == line.stack)
+        self.project == line.project
+            && self.stack.as_ref().is_none_or(|s| *s == line.stack)
+            && self.app.as_ref().is_none_or(|a| *a == line.app)
             && self.process.as_ref().is_none_or(|p| *p == line.process)
             && self
                 .search

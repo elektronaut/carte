@@ -947,6 +947,7 @@ mod tests {
             Event::Log {
                 generation,
                 line: LogLine {
+                    project: "nova".into(),
                     app: "nova-billing".into(),
                     stack: "main".into(),
                     process: process.into(),
