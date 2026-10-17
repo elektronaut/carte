@@ -434,7 +434,7 @@ pub fn injected(req: &EnvRequest) -> Vec<(&'static str, String)> {
 mod tests {
     use super::*;
     use crate::env::provider::tests::{FakeRunner, ok};
-    use crate::model::{Policy, Readiness, Scope, Worktree};
+    use crate::model::{Policy, Readiness, Restart, Scope, Worktree};
     use crate::template::tests::{Urls, nova_project};
 
     fn tpl(key: &str, value: &str) -> EnvTemplate {
@@ -458,6 +458,7 @@ mod tests {
             kind: None,
             after: Vec::new(),
             provides: Vec::new(),
+            restart: Restart::Never,
         }
     }
 
@@ -828,6 +829,7 @@ mod tests {
             http: false,
             kind: Some(crate::model::ProcessKind::Service),
             provides: provides.iter().map(|(k, v)| tpl(k, v)).collect(),
+            restart: Restart::OnFailure,
             ..web()
         }
     }

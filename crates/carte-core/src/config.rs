@@ -11,8 +11,8 @@ use thiserror::Error;
 
 use crate::model::{
     App, AppSettings, EnvProviderKind, EnvTemplate, Limits, MachineConfig, MemoryTarget, Policy,
-    Problem, ProcessConfig, ProcessKind, ProcessOverride, Project, Readiness, Scheme, Scope,
-    ShareConfig,
+    Problem, ProcessConfig, ProcessKind, ProcessOverride, Project, Readiness, Restart, Scheme,
+    Scope, ShareConfig,
 };
 use crate::{duration, slug};
 
@@ -334,6 +334,7 @@ fn merge_process(over: ProcessOverride, base: ProcessOverride) -> ProcessOverrid
         policy: over.policy.or(base.policy),
         kind: over.kind.or(base.kind),
         after: over.after.or(base.after),
+        restart: over.restart.or(base.restart),
         provides: merge_env(base.provides, over.provides),
         if_present: over.if_present && base.if_present,
     }
@@ -353,6 +354,7 @@ struct RawProcess {
     policy: Option<Policy>,
     kind: Option<ProcessKind>,
     after: Option<Vec<String>>,
+    restart: Option<Restart>,
     #[serde(default)]
     provides: EnvTable,
     apps: Option<Vec<String>>,
@@ -379,6 +381,7 @@ impl RawProcess {
                 policy: self.policy,
                 kind: self.kind,
                 after: self.after,
+                restart: self.restart,
                 provides: self.provides.0,
                 if_present: false,
             },
@@ -1155,6 +1158,49 @@ mod tests {
             .merged_over(repo);
         assert_eq!(merged.processes["redis"].kind, Some(ProcessKind::Service));
         assert_eq!(merged.processes["redis"].after, Some(vec![]));
+    }
+
+    #[test]
+    fn parses_and_merges_restart_policies() {
+        let file = project(
+            r#"
+            [processes.worker]
+            restart = "never"
+            [apps.foo.processes.css]
+            restart = "on-failure"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            file.processes["worker"].process.restart,
+            Some(Restart::Never)
+        );
+        assert_eq!(
+            file.apps["foo"].processes["css"].restart,
+            Some(Restart::OnFailure)
+        );
+        let err = project("[apps.foo.processes.css]\nrestart = \"always\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown variant `always`"), "{err}");
+
+        let repo = parse_repo_config(
+            Path::new("carte.toml"),
+            "[processes.worker]\ncommand = \"bin/jobs\"\nrestart = \"never\"\n",
+        )
+        .unwrap();
+        let merged = project("[apps.foo.processes.worker]\npty = false\n")
+            .unwrap()
+            .apps["foo"]
+            .clone()
+            .merged_over(repo.clone());
+        assert_eq!(merged.processes["worker"].restart, Some(Restart::Never));
+        let merged = project("[apps.foo.processes.worker]\nrestart = \"on-failure\"\n")
+            .unwrap()
+            .apps["foo"]
+            .clone()
+            .merged_over(repo);
+        assert_eq!(merged.processes["worker"].restart, Some(Restart::OnFailure));
     }
 
     #[test]
