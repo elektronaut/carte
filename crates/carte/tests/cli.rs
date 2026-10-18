@@ -129,7 +129,11 @@ fn adds_a_single_repo() {
         fs::read_to_string(sb.project_file("myapp")).unwrap(),
         "root = \"~/myapp\"\n"
     );
-    assert!(out.stdout.contains("https://myapp.test"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("https://myapp.localhost"),
+        "{}",
+        out.stdout
+    );
     assert!(out.stdout.contains("web, css (Procfile.dev)"));
     assert!(
         out.stdout
@@ -200,7 +204,11 @@ fn requires_a_name_when_the_directory_name_is_invalid() {
         fs::read_to_string(sb.project_file("my-app")).unwrap(),
         "root = \"~/My_App\"\n"
     );
-    assert!(out.stdout.contains("https://my-app.test"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("https://my-app.localhost"),
+        "{}",
+        out.stdout
+    );
 }
 
 #[test]
@@ -243,11 +251,11 @@ fn adds_a_directory_of_repos_with_a_prefix() {
     );
     assert!(out.stdout.contains("Left out (no \"nova-\" prefix): other"));
     assert!(
-        out.stdout.contains("https://api.work.test"),
+        out.stdout.contains("https://api.work.localhost"),
         "{}",
         out.stdout
     );
-    assert!(out.stdout.contains("https://search.work.test"));
+    assert!(out.stdout.contains("https://search.work.localhost"));
 }
 
 #[test]
@@ -267,7 +275,7 @@ fn takes_the_prefix_and_name_from_flags() {
         "acme-",
     ]);
     assert!(out.success, "{}", out.stderr);
-    assert!(out.stdout.contains("https://web.acme.test"));
+    assert!(out.stdout.contains("https://web.acme.localhost"));
     assert!(
         fs::read_to_string(sb.project_file("acme"))
             .unwrap()
@@ -371,7 +379,7 @@ fn prints_the_env_with_sources() {
         out.stdout
     );
     assert_eq!(line("PORT"), "PORT carte <assigned at start>");
-    assert_eq!(line("CARTE_URL"), "CARTE_URL carte https://shop.test");
+    assert_eq!(line("CARTE_URL"), "CARTE_URL carte https://shop.localhost");
     assert_eq!(line("CARTE_BRANCH"), "CARTE_BRANCH carte main");
     assert_eq!(
         line("NODE_EXTRA_CA_CERTS"),

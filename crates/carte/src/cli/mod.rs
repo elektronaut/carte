@@ -275,6 +275,10 @@ pub struct SetupArgs {
     /// Leave the skill for coding agents (~/.agents/skills/carte) alone.
     #[arg(long, conflicts_with_all = ["check", "share"])]
     pub no_skill: bool,
+    /// Serve apps under this TLD and save it in config.toml: `localhost` needs no
+    /// resolver, anything else (like `test`) gets one in /etc/resolver.
+    #[arg(long, value_name = "TLD", conflicts_with_all = ["check", "uninstall", "share"])]
+    pub tld: Option<String>,
 }
 
 #[derive(Subcommand, Clone)]

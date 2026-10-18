@@ -137,6 +137,7 @@ pub fn acme() -> ProjectState {
 pub fn world() -> World {
     World {
         machine: MachineConfig {
+            tld: "test".into(),
             share: Some(ShareConfig {
                 provider: "cloudflare".into(),
                 domain: "alex.carte.dev".into(),

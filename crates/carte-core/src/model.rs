@@ -36,7 +36,7 @@ impl MachineConfig {
 impl Default for MachineConfig {
     fn default() -> Self {
         Self {
-            tld: "test".into(),
+            tld: "localhost".into(),
             http_port: 80,
             https_port: 443,
             dns_port: 9253,

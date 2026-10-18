@@ -488,7 +488,10 @@ mod tests {
     fn urls_include_only_non_default_ports() {
         let nova = test_support::nova();
         let frontend = nova.project.app("nova-postcard-frontend").unwrap();
-        let mut machine = MachineConfig::default();
+        let mut machine = MachineConfig {
+            tld: "test".into(),
+            ..MachineConfig::default()
+        };
         assert_eq!(
             instance_url(&machine, &nova.project, frontend, &branch("feature-x")),
             "https://postcard-frontend.feature-x.nova.test"
@@ -903,7 +906,7 @@ mod tests {
             ));
         let world = World {
             projects: vec![nova],
-            ..World::default()
+            ..test_support::world()
         };
         assert_eq!(
             resolve_host(&world, "billing.nova.test"),

@@ -160,7 +160,12 @@ pub fn parse_resolver(text: &str) -> (Option<&str>, Option<u16>) {
 pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
     let mut report = Report::default();
     let file = tilde(&env.resolver_file());
-    match &facts.resolver {
+    match facts.resolver(&env.machine.tld) {
+        _ if !env.needs_resolver() => report.push(
+            Status::Ok,
+            "resolver",
+            ".localhost resolves to loopback without one",
+        ),
         None => report.push(Status::Missing, "resolver", format!("{file} is missing")),
         Some(text) => {
             let by = if text.contains("puma-dev") {
@@ -186,6 +191,32 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
                 ),
             }
         }
+    }
+
+    for tld in super::leftover_resolvers(env, facts) {
+        report.push(
+            Status::Warn,
+            "resolver",
+            format!(
+                "{} isn't needed for .{}; `carte setup` removes it",
+                tilde(&env.resolver_dir.join(tld)),
+                env.machine.tld
+            ),
+        );
+    }
+    let previous = super::previous_tlds(env, facts);
+    if !env.tld_configured && !previous.is_empty() {
+        report.push(
+            Status::Warn,
+            "tld",
+            format!(
+                "carte serves .{}, but .{} was used here before: `carte setup --tld {}` keeps it, `--tld {}` confirms the switch",
+                env.machine.tld,
+                previous.join(", ."),
+                previous[0],
+                env.machine.tld
+            ),
+        );
     }
 
     let ca = tilde(&env.ca_cert());

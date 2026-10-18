@@ -240,6 +240,7 @@ mod tests {
             resolver_dir: root.join("resolver"),
             launch_agents_dir: root.join("agents"),
             puma_dev_dir: root.join("puma-dev"),
+            tld_configured: false,
         }
     }
 

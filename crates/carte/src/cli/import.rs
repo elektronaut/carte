@@ -670,7 +670,10 @@ mod tests {
     }
 
     fn import(fixture: &Fixture, paths: &Paths) -> (Vec<Built>, Vec<Skipped>, Vec<String>) {
-        let machine = MachineConfig::default();
+        let machine = MachineConfig {
+            tld: "test".into(),
+            ..MachineConfig::default()
+        };
         let world = discovery::load_world(&paths.config_dir);
         let scan = scan(&fixture.root.join("puma-dev")).unwrap();
         let mut importer = Importer::new(paths, &machine, &world, false);

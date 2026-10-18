@@ -30,7 +30,7 @@ binary unit: `"512KB"`, `"256MB"`, `"1GB"`.
 `~/.config/carte/config.toml`. A missing file means all defaults.
 
 ```toml
-tld = "test"
+tld = "localhost"
 http_port = 80
 https_port = 443
 dns_port = 9253
@@ -47,14 +47,15 @@ domain = "dev.example.com"
 
 | Key | Default | |
 | --- | --- | --- |
-| `tld` | `"test"` | The top-level domain apps are served under |
+| `tld` | `"localhost"` | The top-level domain apps are served under. Any other (like `"test"`) needs `/etc/resolver/<tld>`, which `carte setup` writes; apps answer under `.localhost` too |
 | `http_port` | `80` | Plain HTTP |
 | `https_port` | `443` | HTTPS |
-| `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` points to |
+| `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` points to for a `tld` other than `localhost` |
 | `idle_timeout` | `"15m"` | How long an app runs without traffic before it's stopped; projects can override it |
 | `teardown_delay` | `"10m"` | How long a stack's worktrees must stay gone before its [teardown](#teardown) runs; projects can override it |
 
-Changing `tld` or the ports means running `carte setup` again.
+Changing `tld` or the ports means running `carte setup` again;
+`carte setup --tld <tld>` changes `tld` and does the rest.
 
 ### `[limits]`
 
@@ -223,7 +224,7 @@ aliases = ["old-wiki"]
 ```
 
 With no `include`, each project's root is its one app, so
-`~/clients/sites/wiki` is served at `wiki.test`. With `include =
+`~/clients/sites/wiki` is served at `wiki.localhost`. With `include =
 "apps/*"`, each matched monorepo becomes a project with those apps.
 
 - `projects` entries work like `include` entries: paths and globs
@@ -251,9 +252,9 @@ names. Hostnames are built from short names, project and stack:
 
 | | Hostname |
 | --- | --- |
-| On main | `billing.acme.test` |
-| In a stack | `billing.feature-x.acme.test` |
-| An app whose short name is the project's | `acme.test`, `feature-x.acme.test` |
+| On main | `billing.acme.localhost` |
+| In a stack | `billing.feature-x.acme.localhost` |
+| An app whose short name is the project's | `acme.localhost`, `feature-x.acme.localhost` |
 | Shared | `billing--feature-x--acme.<share domain>` |
 
 Short names must be at least three characters and unique within the
@@ -316,7 +317,7 @@ TZ = "Europe/Oslo"
 | `env_files` | none | Files of `KEY=VALUE` lines, relative to the checkout, read in order |
 | `depends_on` | none | Apps this app calls. See below |
 | `aliases` | none | Extra hostnames, without the TLD, routed to the app on main. `carte import puma-dev` sets the old puma-dev names |
-| `subdomains` | `false` | Pass extra labels on the left (`oslo.events.acme.test`) through to the app instead of returning 404 |
+| `subdomains` | `false` | Pass extra labels on the left (`oslo.events.acme.localhost`) through to the app instead of returning 404 |
 | `policy` | `"auto"` | Default policy for the app's processes. See [Policies](#policies) |
 | `port` | none | Route to a fixed port instead of running processes, for an app you start yourself |
 | `replace_processes` | `false` | Ignore the Procfile and run only the processes configured here |

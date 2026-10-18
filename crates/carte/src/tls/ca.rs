@@ -143,7 +143,7 @@ impl CertificateAuthority {
             return Err(CreateReason::Expiring);
         }
         let previous = permitted_dns_names(&x509);
-        if previous != tlds {
+        if !tlds.iter().all(|tld| previous.contains(tld)) {
             return Err(CreateReason::TldsChanged { previous });
         }
 
@@ -377,6 +377,14 @@ mod tests {
             ))
         );
         assert_eq!(create(tmp.path()).origin(), &CaOrigin::Loaded);
+    }
+
+    #[test]
+    fn keeps_a_ca_made_for_more_tlds() {
+        let tmp = tempfile::tempdir().unwrap();
+        CertificateAuthority::load_or_create(tmp.path(), "x", &["test", "localhost"]).unwrap();
+        let ca = CertificateAuthority::load_or_create(tmp.path(), "x", &["localhost"]).unwrap();
+        assert_eq!(ca.origin(), &CaOrigin::Loaded);
     }
 
     #[test]

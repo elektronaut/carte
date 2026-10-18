@@ -8,11 +8,20 @@ use crate::paths::Paths;
 use crate::setup::{self, Facts, SetupEnv, check};
 
 pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
-    let env = SetupEnv::from_system(paths)?;
+    let mut env = SetupEnv::from_system(paths)?;
     if let Some(domain) = &args.share {
         return share(&env, domain, &args.tunnel, args.dry_run);
     }
     let mut facts = Facts::gather(&env);
+    let tld = if args.check || args.uninstall {
+        None
+    } else {
+        choose_tld(&env, &facts, &args)?
+    };
+    if let Some(tld) = &tld {
+        env.machine.tld = tld.clone();
+        facts = Facts::gather(&env);
+    }
     if args.no_skill {
         facts.skill = None;
     }
@@ -26,20 +35,27 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
         });
     }
 
-    let plan = if args.uninstall {
+    let mut plan = if args.uninstall {
         setup::plan_uninstall(&env, &facts)
     } else {
         setup::plan_install(&env, &facts)
     };
+    if tld.is_some() {
+        setup::set_tld(&mut plan, &env, &facts)?;
+    }
     let import_first = !args.uninstall && facts.puma_dev.links > 0 && facts.projects == 0;
     if !args.uninstall && facts.puma_dev.installed() {
+        let resolver = if env.needs_resolver() {
+            format!(", and points /etc/resolver/{} at carte", env.machine.tld)
+        } else {
+            String::new()
+        };
         println!(
             "puma-dev is installed. Setup stops and disables its LaunchAgent so carte can take \
-             over ports {} and {}, and points /etc/resolver/{} at carte. {} and puma-dev's CA stay; \
+             over ports {} and {}{resolver}. {} and puma-dev's CA stay; \
              `carte setup --uninstall` shows how to bring puma-dev back.",
             env.machine.http_port,
             env.machine.https_port,
-            env.machine.tld,
             tilde(&env.puma_dev_dir),
         );
         if import_first {
@@ -108,6 +124,54 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
         println!("\ncarte is set up.");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The TLD to save: the one given with `--tld`, or, when `config.toml` doesn't set one
+/// and puma-dev or an earlier setup used another, the user's answer to keeping it.
+fn choose_tld(env: &SetupEnv, facts: &Facts, args: &SetupArgs) -> anyhow::Result<Option<String>> {
+    if let Some(tld) = &args.tld {
+        let tld = tld.trim().trim_matches('.').to_ascii_lowercase();
+        if tld.is_empty()
+            || !tld.split('.').all(|label| {
+                !label.is_empty()
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+        {
+            bail!("{tld:?} isn't a TLD; try `localhost` or `test`");
+        }
+        return Ok(Some(tld));
+    }
+    let previous = setup::previous_tlds(env, facts);
+    if env.tld_configured || previous.is_empty() {
+        return Ok(None);
+    }
+    let by = if facts.puma_dev.domains.iter().any(|d| previous.contains(d)) {
+        "puma-dev"
+    } else {
+        "an earlier carte setup"
+    };
+    let old = &previous[0];
+    if args.dry_run || !prompt::interactive(false) {
+        bail!(
+            "{by} served apps under .{old}. Choose with `--tld {old}` to keep those hostnames \
+             (carte answers them through /etc/resolver/{old}), or `--tld localhost` to switch to \
+             .localhost, which needs no resolver. Apps answer under .localhost either way."
+        );
+    }
+    println!(
+        "{by} served apps under .{old}. carte can keep those hostnames, through \
+         /etc/resolver/{old}, or switch to .localhost, which needs no resolver. Apps answer under \
+         .localhost either way.\n"
+    );
+    let keep = prompt::confirm(&format!("Keep .{old}?"), true)?;
+    println!();
+    Ok(Some(if keep {
+        old.clone()
+    } else {
+        "localhost".into()
+    }))
 }
 
 fn share(env: &SetupEnv, domain: &str, tunnel: &str, dry_run: bool) -> anyhow::Result<ExitCode> {

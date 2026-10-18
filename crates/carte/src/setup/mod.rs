@@ -5,6 +5,7 @@ pub mod plist;
 pub mod share;
 pub mod skill;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
@@ -37,11 +38,17 @@ pub struct SetupEnv {
     pub resolver_dir: PathBuf,
     pub launch_agents_dir: PathBuf,
     pub puma_dev_dir: PathBuf,
+    /// Whether `config.toml` sets `tld`, rather than leaving it to the default.
+    pub tld_configured: bool,
 }
 
 impl SetupEnv {
     pub fn from_system(paths: &Paths) -> anyhow::Result<Self> {
         let machine = config::load_machine_config(&paths.machine_config())?;
+        let tld_configured = fs::read_to_string(paths.machine_config())
+            .ok()
+            .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
+            .is_some_and(|doc| doc.contains_key("tld"));
         let home = std::env::var_os("HOME")
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
@@ -60,7 +67,18 @@ impl SetupEnv {
             launch_agents_dir: home.join("Library/LaunchAgents"),
             puma_dev_dir: home.join(".puma-dev"),
             home,
+            tld_configured,
         })
+    }
+
+    /// Whether the TLD needs a resolver file: `.localhost` resolves to loopback without one.
+    pub fn needs_resolver(&self) -> bool {
+        self.machine.tld != "localhost"
+    }
+
+    /// Whether a resolver file sends lookups to carte's DNS server.
+    pub fn is_carte_resolver(&self, text: &str) -> bool {
+        matches!(check::parse_resolver(text), (Some("127.0.0.1"), Some(port)) if port == self.machine.dns_port)
     }
 
     pub fn resolver_file(&self) -> PathBuf {
@@ -148,6 +166,8 @@ pub struct PumaDev {
     pub loaded: bool,
     /// Entries in `~/.puma-dev`.
     pub links: usize,
+    /// The domains its LaunchAgent serves, from `-d`.
+    pub domains: Vec<String>,
 }
 
 impl PumaDev {
@@ -171,7 +191,8 @@ impl OldAgent {
 /// What setup found on the machine, read without changing anything.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facts {
-    pub resolver: Option<String>,
+    /// The files in the resolver directory, by TLD.
+    pub resolvers: BTreeMap<String, String>,
     pub ca: CaState,
     /// The CA's files that exist.
     pub ca_files: Vec<PathBuf>,
@@ -208,8 +229,17 @@ impl Facts {
         };
         let projects = carte_core::discovery::project_files(&env.paths.projects_dir())
             .map_or(0, |files| files.len());
+        let resolvers = fs::read_dir(&env.resolver_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let text = fs::read_to_string(entry.path()).ok()?;
+                Some((entry.file_name().to_string_lossy().into_owned(), text))
+            })
+            .collect();
         Facts {
-            resolver: fs::read_to_string(env.resolver_file()).ok(),
+            resolvers,
             ca,
             ca_files: env.ca_files().into_iter().filter(|f| f.exists()).collect(),
             keychain_cas: trust::keychain_cas(),
@@ -225,6 +255,9 @@ impl Facts {
                 links: fs::read_dir(&env.puma_dev_dir)
                     .map(|entries| entries.filter_map(Result::ok).count())
                     .unwrap_or(0),
+                domains: fs::read_to_string(env.puma_dev_plist())
+                    .map(|text| puma_dev_domains(&text))
+                    .unwrap_or_default(),
             },
             projects,
             daemon_running: UnixStream::connect(env.paths.socket()).is_ok(),
@@ -235,6 +268,123 @@ impl Facts {
             )),
         }
     }
+}
+
+impl Facts {
+    pub fn resolver(&self, tld: &str) -> Option<&str> {
+        self.resolvers.get(tld).map(String::as_str)
+    }
+}
+
+/// The domains in puma-dev's LaunchAgent: its `-d` argument split on `:`, or
+/// puma-dev's default, `test`.
+pub fn puma_dev_domains(plist: &str) -> Vec<String> {
+    let strings: Vec<&str> = plist
+        .split("<string>")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("</string>").map(|(value, _)| value.trim()))
+        .collect();
+    let value = strings
+        .iter()
+        .position(|s| *s == "-d")
+        .and_then(|i| strings.get(i + 1).copied())
+        .or_else(|| strings.iter().find_map(|s| s.strip_prefix("-d=")))
+        .unwrap_or("test");
+    value
+        .split(':')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Resolver files carte doesn't need: ones pointing at its DNS server, or written by
+/// puma-dev, for any TLD but the configured one when that needs a resolver.
+pub fn leftover_resolvers<'a>(env: &SetupEnv, facts: &'a Facts) -> Vec<&'a str> {
+    facts
+        .resolvers
+        .iter()
+        .filter(|(tld, text)| {
+            (env.is_carte_resolver(text) || text.contains("puma-dev"))
+                && !(env.needs_resolver() && **tld == env.machine.tld)
+        })
+        .map(|(tld, _)| tld.as_str())
+        .collect()
+}
+
+/// TLDs other than `localhost` that puma-dev served or that resolver files send to
+/// carte or puma-dev: the hostnames a machine without a configured `tld` used before.
+pub fn previous_tlds(env: &SetupEnv, facts: &Facts) -> Vec<String> {
+    let from_resolvers = facts
+        .resolvers
+        .iter()
+        .filter(|(_, text)| env.is_carte_resolver(text) || text.contains("puma-dev"))
+        .map(|(tld, _)| tld.clone());
+    facts
+        .puma_dev
+        .domains
+        .iter()
+        .cloned()
+        .chain(from_resolvers)
+        .filter(|tld| tld != "localhost")
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// `config.toml` with `tld` set, everything else kept as written.
+pub fn with_tld(text: &str, tld: &str) -> anyhow::Result<String> {
+    let mut doc: toml_edit::DocumentMut = text.parse().context("parsing config.toml")?;
+    let had_values = doc.iter().any(|(_, item)| item.is_value());
+    doc["tld"] = toml_edit::value(tld);
+    if !had_values
+        && let Some(table) = doc
+            .as_table_mut()
+            .iter_mut()
+            .filter_map(|(_, item)| item.as_table_mut())
+            .min_by_key(|table| table.position())
+    {
+        table.decor_mut().set_prefix("\n");
+    }
+    Ok(doc.to_string())
+}
+
+/// Writes `tld` to `config.toml` at the start of the plan when it differs, and restarts
+/// a running daemon whose LaunchAgent the plan leaves alone, so it serves the new TLD.
+pub fn set_tld(plan: &mut Plan, env: &SetupEnv, facts: &Facts) -> anyhow::Result<()> {
+    let path = env.paths.machine_config();
+    let current = fs::read_to_string(&path).unwrap_or_default();
+    let contents = with_tld(&current, &env.machine.tld)?;
+    if contents == current {
+        return Ok(());
+    }
+    plan.steps.insert(
+        0,
+        Step {
+            description: format!("Serve apps under .{} (config.toml)", env.machine.tld),
+            action: Action::WriteFile { path, contents },
+        },
+    );
+    let bootstraps = plan
+        .steps
+        .iter()
+        .any(|s| matches!(&s.action, Action::Run { command, .. } if command.args.first().is_some_and(|a| a == "bootstrap")));
+    if facts.agent_loaded && !bootstraps {
+        let verify = plan
+            .steps
+            .iter()
+            .position(|s| s.action == Action::Verify)
+            .unwrap_or(plan.steps.len());
+        plan.steps.insert(
+            verify,
+            Step::run(
+                "Restart the daemon so it serves the new TLD",
+                "launchctl",
+                &["kickstart", "-k", &env.service(LABEL)],
+            ),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,10 +544,23 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
 
     old_agent_steps(env, facts, steps);
 
+    for tld in leftover_resolvers(env, facts) {
+        let why = if tld == "localhost" {
+            ".localhost resolves without it".to_string()
+        } else {
+            format!("carte serves .{}, not .{tld}", env.machine.tld)
+        };
+        steps.push(Step::sudo(
+            format!("Remove /etc/resolver/{tld}: {why}"),
+            "rm",
+            &["-f", &env.resolver_dir.join(tld).to_string_lossy()],
+        ));
+    }
+
     let resolver = env.resolver_contents();
-    if facts.resolver.as_deref() != Some(resolver.as_str()) {
+    if env.needs_resolver() && facts.resolver(&env.machine.tld) != Some(resolver.as_str()) {
         let file = env.resolver_file();
-        if facts.resolver.is_none() {
+        if facts.resolvers.is_empty() {
             let dir = env.resolver_dir.to_string_lossy();
             steps.push(Step::sudo(
                 format!("Create {}", env.resolver_dir.display()),
@@ -576,12 +739,14 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
             },
         });
     }
-    if facts.resolver.as_deref() == Some(env.resolver_contents().as_str()) {
-        plan.steps.push(Step::sudo(
-            format!("Stop sending .{} lookups to carte", env.machine.tld),
-            "rm",
-            &["-f", &env.resolver_file().to_string_lossy()],
-        ));
+    for (tld, text) in &facts.resolvers {
+        if *text == env.resolver_contents() {
+            plan.steps.push(Step::sudo(
+                format!("Stop sending .{tld} lookups to carte"),
+                "rm",
+                &["-f", &env.resolver_dir.join(tld).to_string_lossy()],
+            ));
+        }
     }
     if let Some(skill) = &facts.skill {
         if skill.link == SkillLink::Ours {
@@ -646,9 +811,8 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
         "puma-dev -install".to_string()
     };
     plan.notes.push(format!(
-        "to bring puma-dev back: `{puma_dev}`, and `sudo puma-dev -setup` for /etc/resolver/{tld}. \
+        "to bring puma-dev back: `{puma_dev}`, and `sudo puma-dev -setup` for its resolver files. \
          Your projects in {config}, the rest of carte's state in {state} and ~/.puma-dev are left alone.",
-        tld = env.machine.tld,
         config = tilde(&env.paths.config_dir),
         state = tilde(&env.paths.state_dir),
     ));
@@ -754,12 +918,27 @@ mod tests {
             resolver_dir: root.join("resolver"),
             launch_agents_dir: root.join("home/Library/LaunchAgents"),
             puma_dev_dir: root.join("home/.puma-dev"),
+            tld_configured: false,
         }
+    }
+
+    fn with_test_tld(mut env: SetupEnv) -> SetupEnv {
+        env.machine.tld = "test".into();
+        env
+    }
+
+    const PUMA_DEV_RESOLVER: &str = "# Generated by puma-dev\nnameserver 127.0.0.1\nport 9253\n";
+
+    fn resolvers(files: &[(&str, &str)]) -> BTreeMap<String, String> {
+        files
+            .iter()
+            .map(|(tld, text)| (tld.to_string(), text.to_string()))
+            .collect()
     }
 
     fn fresh() -> Facts {
         Facts {
-            resolver: None,
+            resolvers: BTreeMap::new(),
             ca: CaState::Missing,
             ca_files: Vec::new(),
             keychain_cas: Vec::new(),
@@ -795,13 +974,14 @@ mod tests {
     #[test]
     fn plans_a_switch_from_puma_dev() {
         let root = Path::new("/r");
-        let env = env(root);
+        let env = with_test_tld(env(root));
         let facts = Facts {
-            resolver: Some("# Generated by puma-dev\nnameserver 127.0.0.1\nport 9253\n".into()),
+            resolvers: resolvers(&[("test", PUMA_DEV_RESOLVER)]),
             puma_dev: PumaDev {
                 plist: true,
                 loaded: true,
                 links: 3,
+                domains: vec!["test".into()],
             },
             ..fresh()
         };
@@ -837,11 +1017,108 @@ mod tests {
     }
 
     #[test]
+    fn switches_from_puma_dev_to_localhost_without_a_resolver() {
+        let root = Path::new("/r");
+        let env = env(root);
+        let facts = Facts {
+            resolvers: resolvers(&[
+                ("localhost", PUMA_DEV_RESOLVER),
+                ("test", PUMA_DEV_RESOLVER),
+                ("vpn", "nameserver 10.0.0.1\n"),
+            ]),
+            puma_dev: PumaDev {
+                plist: true,
+                loaded: true,
+                links: 3,
+                domains: vec!["test".into(), "localhost".into()],
+            },
+            ..fresh()
+        };
+        let plan = plan_install(&env, &facts);
+        assert_eq!(
+            commands(&plan)[..4],
+            [
+                "launchctl disable gui/501/io.puma.dev",
+                "launchctl bootout gui/501/io.puma.dev",
+                "sudo rm -f /r/resolver/localhost",
+                "sudo rm -f /r/resolver/test",
+            ]
+        );
+        assert_eq!(commands(&plan)[4], "create ca");
+        assert_eq!(
+            plan.steps[3].description,
+            "Remove /etc/resolver/test: carte serves .localhost, not .test"
+        );
+        assert_eq!(previous_tlds(&env, &facts), ["test"]);
+    }
+
+    #[test]
+    fn reads_puma_devs_domains() {
+        let plist = "<array>\n<string>/opt/homebrew/bin/puma-dev</string>\n<string>-launchd</string>\n\
+                     <string>-d</string>\n<string>test:localhost</string>\n</array>";
+        assert_eq!(puma_dev_domains(plist), ["test", "localhost"]);
+        assert_eq!(puma_dev_domains("<string>-d=dev</string>"), ["dev"]);
+        assert_eq!(puma_dev_domains("<string>puma-dev</string>"), ["test"]);
+    }
+
+    #[test]
+    fn previous_tlds_come_from_carte_and_puma_dev_resolvers() {
+        let env = env(Path::new("/r"));
+        let facts = Facts {
+            resolvers: resolvers(&[
+                ("test", "nameserver 127.0.0.1\nport 9253\n"),
+                ("dev", "nameserver 127.0.0.1\nport 9999\n"),
+                ("localhost", PUMA_DEV_RESOLVER),
+            ]),
+            ..fresh()
+        };
+        assert_eq!(previous_tlds(&env, &facts), ["test"]);
+        assert_eq!(leftover_resolvers(&env, &facts), ["localhost", "test"]);
+        let test = with_test_tld(env);
+        assert_eq!(leftover_resolvers(&test, &facts), ["localhost"]);
+    }
+
+    #[test]
+    fn saves_the_tld_and_restarts_a_running_daemon() {
+        assert_eq!(
+            with_tld(
+                "# mine\nidle_timeout = \"10m\"\n\n[share]\nprovider = \"none\"\n",
+                "test"
+            )
+            .unwrap(),
+            "# mine\nidle_timeout = \"10m\"\ntld = \"test\"\n\n[share]\nprovider = \"none\"\n"
+        );
+        assert_eq!(
+            with_tld("[share]\nprovider = \"none\"\n", "localhost").unwrap(),
+            "tld = \"localhost\"\n\n[share]\nprovider = \"none\"\n"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let env = with_test_tld(env(dir.path()));
+        let facts = Facts {
+            resolvers: resolvers(&[("test", "nameserver 127.0.0.1\nport 9253\n")]),
+            ca: CaState::Trusted,
+            agent_plist: Some(env.agent().to_plist()),
+            agent_loaded: true,
+            ..fresh()
+        };
+        let mut plan = plan_install(&env, &facts);
+        set_tld(&mut plan, &env, &facts).unwrap();
+        let root = dir.path().display();
+        assert_eq!(
+            commands(&plan),
+            [
+                format!("write {root}/config/config.toml"),
+                "launchctl kickstart -k gui/501/no.elektronaut.carte".to_string(),
+                "verify".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn plans_only_what_is_missing() {
         let root = Path::new("/r");
         let env = env(root);
         let done = Facts {
-            resolver: Some(env.resolver_contents()),
             ca: CaState::Trusted,
             agent_plist: Some(env.agent().to_plist()),
             agent_loaded: true,
@@ -892,7 +1169,6 @@ mod tests {
         let root = Path::new("/r");
         let env = env(root);
         let facts = Facts {
-            resolver: Some(env.resolver_contents()),
             ca: CaState::Trusted,
             old_agent: OldAgent {
                 plist: true,
@@ -924,7 +1200,7 @@ mod tests {
 
     #[test]
     fn warns_about_a_binary_in_a_build_directory() {
-        let mut env = env(Path::new("/r"));
+        let mut env = with_test_tld(env(Path::new("/r")));
         env.exe = "/src/carte/target/debug/carte".into();
         let plan = plan_install(&env, &fresh());
         assert!(plan.notes.iter().any(|n| n.contains("build directory")));
@@ -939,7 +1215,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let env = env(dir.path());
         let facts = Facts {
-            resolver: Some(env.resolver_contents()),
+            resolvers: resolvers(&[("test", &env.resolver_contents())]),
             ca: CaState::Trusted,
             ca_files: env.ca_files()[..2].to_vec(),
             keychain_cas: vec!["1D2D".into(), "C544".into()],
@@ -968,7 +1244,7 @@ mod tests {
         fs::create_dir_all(&env.launch_agents_dir).unwrap();
         fs::write(env.puma_dev_plist(), "").unwrap();
         let puma_dev_resolver = Facts {
-            resolver: Some("# Generated by puma-dev\nnameserver 127.0.0.1\nport 9253\n".into()),
+            resolvers: resolvers(&[("test", PUMA_DEV_RESOLVER)]),
             ca: CaState::Untrusted,
             ..fresh()
         };
@@ -1043,7 +1319,6 @@ mod tests {
             .to_plist()
             .replace("CARTE_STATE_HOME", "CARTE_STATE_DIR");
         let facts = Facts {
-            resolver: Some(env.resolver_contents()),
             ca: CaState::Trusted,
             agent_plist: Some(old),
             agent_loaded: true,
@@ -1065,7 +1340,6 @@ mod tests {
         let root = Path::new("/r");
         let env = env(root);
         let done = Facts {
-            resolver: Some(env.resolver_contents()),
             ca: CaState::Trusted,
             agent_plist: Some(env.agent().to_plist()),
             agent_loaded: true,

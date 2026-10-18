@@ -152,7 +152,7 @@ async fn lazy_start_serves_http_with_injected_env() {
         .unwrap();
     let body = http_get(upstream.port, "/");
     assert!(body.contains("\"name\":\"web\""), "{body}");
-    assert!(body.contains("https://web.acme.test"), "{body}");
+    assert!(body.contains("https://web.acme.localhost"), "{body}");
     assert!(body.contains("\"CARTE_CHECKOUT\":\"main\""), "{body}");
 
     wait_for(&handle, "worker running", |s| {
@@ -354,7 +354,10 @@ async fn dependencies_start_with_their_dependent_in_the_same_stack() {
         .await
         .unwrap();
     let body = http_get(api.port, "/");
-    assert!(body.contains("https://api.feature-x.acme.test"), "{body}");
+    assert!(
+        body.contains("https://api.feature-x.acme.localhost"),
+        "{body}"
+    );
     assert!(body.contains("\"CARTE_CHECKOUT\":\"main\""), "{body}");
 
     let snapshot = handle.snapshot();

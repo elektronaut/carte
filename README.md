@@ -1,6 +1,6 @@
 # carte
 
-carte runs your local web apps on demand. Visit `https://myapp.test` and
+carte runs your local web apps on demand. Visit `https://myapp.localhost` and
 carte starts the app's processes, waits until it answers, and forwards the
 request. After 15 minutes without traffic, it stops them again.
 
@@ -12,7 +12,7 @@ worktrees for the services you change.
 - **The whole process group**, not only the web server: everything in
   `Procfile.dev` starts and stops together, including asset watchers,
   job workers and schedulers.
-- **Stacks per worktree:** `billing.feature-x.acme.test` is the billing
+- **Stacks per worktree:** `billing.feature-x.acme.localhost` is the billing
   app in its `feature-x` worktree, and its calls to other apps stay in
   the `feature-x` stack.
 - **HTTPS everywhere,** with a local certificate authority your apps and
@@ -64,7 +64,6 @@ carte setup
 
 Setup does this once per machine, asking for your password where needed:
 
-- sends `.test` lookups to carte's DNS server (`/etc/resolver/test`)
 - creates a local certificate authority and trusts it
 - installs a LaunchAgent that runs the daemon on ports 80 and 443, on
   127.0.0.1 and ::1
@@ -73,6 +72,11 @@ Setup does this once per machine, asking for your password where needed:
 `carte setup --check` reports what's in place, and
 `carte setup --uninstall` undoes it all.
 
+Apps are served under `.localhost`, which resolves to your machine without
+any DNS setup. For another TLD, like `.test`, run `carte setup --tld test`:
+setup then also sends `.test` lookups to carte's DNS server through
+`/etc/resolver/test`. Apps answer under `.localhost` either way.
+
 ### Coming from puma-dev
 
 ```sh
@@ -80,8 +84,10 @@ carte import puma-dev
 ```
 
 This creates a project for each app linked in `~/.puma-dev`. Each app
-keeps its puma-dev hostname as an alias, so bookmarks, `.env` URLs and
-OAuth callbacks keep working. `.env` and `.powenv` files are read as
+keeps its puma-dev name as an alias. `carte setup` then asks whether to
+keep puma-dev's `.test` hostnames, so bookmarks, `.env` URLs and OAuth
+callbacks keep working, or switch to `.localhost` and remove puma-dev's
+resolver files (`--tld test` or `--tld localhost` answers up front). `.env` and `.powenv` files are read as
 before. puma-dev's own files stay untouched, and
 `carte setup --uninstall` tells you how to bring puma-dev back.
 
@@ -101,7 +107,7 @@ That writes `~/.config/carte/projects/myapp.toml` with one line:
 root = "~/code/myapp"
 ```
 
-and the app is at `https://myapp.test`. Its processes come from
+and the app is at `https://myapp.localhost`. Its processes come from
 `Procfile.dev`, then `Procfile`. Without either, a `config.ru` runs
 `bundle exec puma -p $PORT`. Every process gets its own `PORT`.
 
@@ -137,8 +143,8 @@ policy = "disabled"
   file a template with a project per directory. See
   [Templates](docs/configuration.md#templates).
 - `strip_prefix` shortens hostnames: `acme-billing` is
-  `billing.acme.test`. An app named like its project is just
-  `acme.test`.
+  `billing.acme.localhost`. An app named like its project is just
+  `acme.localhost`.
 - `requires` is checked before anything in the project starts, so a
   stopped database gives you one clear error instead of a crash per app.
 - `[env]` templates apply to every app. A template key, like the one
@@ -211,8 +217,8 @@ cd ~/work/acme-billing
 git worktree add ~/worktrees/acme-billing/feature-x -b feature-x
 ```
 
-Now `https://billing.feature-x.acme.test` runs the worktree, and
-`https://frontend.feature-x.acme.test` runs the frontend's main checkout
+Now `https://billing.feature-x.acme.localhost` runs the worktree, and
+`https://frontend.feature-x.acme.localhost` runs the frontend's main checkout
 as a separate instance whose URLs point into the `feature-x` stack. When
 you remove the worktree, carte stops its instance and the stack falls
 back to main.

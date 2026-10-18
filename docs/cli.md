@@ -49,7 +49,7 @@ address inside it when given one.
 | `carte stop-all [--idle]` | Stop every instance, or the idle ones |
 | `carte prune [--dry-run] [-y]` | Remove leftover state folders, run directories and pidfiles; see below |
 | `carte project add\|ls\|edit\|rm` | Manage project files |
-| `carte setup [--dry-run\|--check\|--uninstall] [--share domain]` | Set up the machine |
+| `carte setup [--dry-run\|--check\|--uninstall] [--tld tld] [--share domain]` | Set up the machine |
 | `carte import puma-dev` | Create projects from `~/.puma-dev` |
 | `carte tui` | The terminal UI |
 | `carte daemon` | Run the daemon in the foreground |
