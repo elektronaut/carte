@@ -153,6 +153,9 @@ kebab-case strings. Times are milliseconds since the Unix epoch.
   problems, running_instances, memory_bytes, shares, tunnel }
 ```
 
+A project's `folder` is the path of its file's directory below
+`projects/`, like `clients/sites`, and absent for a file at the top.
+
 A stack's `name` comes from its worktrees' folder names
 ([names](configuration.md#names-and-hostnames)). Its `branch` is the
 branch its worktrees have checked out, and null on `main`, when they are

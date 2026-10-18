@@ -483,62 +483,73 @@ fn expand_template(
 
 pub struct ProjectFileEntry {
     pub name: String,
-    /// The subdirectory of `projects/` the file is in.
+    /// The subdirectory of `projects/` the file is in, `/`-separated.
     pub folder: Option<String>,
     pub path: PathBuf,
 }
 
-/// The project files in `projects/` and its subdirectories one level down, top level
-/// first, each level sorted by name. A missing directory has none.
+/// The project files in `projects/` and its subdirectories at any depth: a
+/// directory's files sorted by name, then its subdirectories in name order. A missing
+/// directory has none.
 pub fn project_files(projects_dir: &Path) -> std::io::Result<Vec<ProjectFileEntry>> {
-    let mut top = Vec::new();
-    let mut nested = Vec::new();
     let entries = match std::fs::read_dir(projects_dir) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(err) => return Err(err),
     };
-    let toml_files = |dir: &Path| -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-            .into_iter()
-            .flatten()
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|ext| ext == "toml") && p.is_file())
-            .collect();
-        files.sort();
-        files
-    };
-    let mut dirs: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
+    let mut seen = BTreeSet::new();
+    if let Ok(dir) = projects_dir.canonicalize() {
+        seen.insert(dir);
+    }
+    let mut files = Vec::new();
+    collect_project_files(entries, None, &mut seen, &mut files);
+    Ok(files)
+}
+
+/// Directories already in `seen` are skipped, so a symlink loop ends.
+fn collect_project_files(
+    entries: std::fs::ReadDir,
+    folder: Option<&str>,
+    seen: &mut BTreeSet<PathBuf>,
+    out: &mut Vec<ProjectFileEntry>,
+) {
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    for path in entries.filter_map(Result::ok).map(|e| e.path()) {
+        if path.is_dir() {
+            dirs.push(path);
+        } else if path.extension().is_some_and(|ext| ext == "toml") && path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
     dirs.sort();
-    let entry = |path: PathBuf, folder: Option<String>| ProjectFileEntry {
-        name: path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        folder,
-        path,
-    };
-    for path in toml_files(projects_dir) {
-        top.push(entry(path, None));
+    for path in files {
+        out.push(ProjectFileEntry {
+            name: path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            folder: folder.map(str::to_string),
+            path,
+        });
     }
     for dir in dirs {
-        let Some(folder) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
         };
-        if folder.starts_with('.') {
+        if name.starts_with('.') || !dir.canonicalize().is_ok_and(|real| seen.insert(real)) {
             continue;
         }
-        for path in toml_files(&dir) {
-            nested.push(entry(path, Some(folder.clone())));
-        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let sub = match folder {
+            Some(parent) => format!("{parent}/{name}"),
+            None => name,
+        };
+        collect_project_files(entries, Some(&sub), seen, out);
     }
-    top.extend(nested);
-    Ok(top)
 }
 
 /// Resolves the `depends_on` names that aren't apps of their own project: another
@@ -880,6 +891,69 @@ prunable gitdir file points to non-existent location
             world.problems[0]
                 .message
                 .contains("already defines a project named wiki")
+        );
+    }
+
+    #[test]
+    fn folders_nest_and_names_stay_unique_across_depths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for name in ["shop", "nova", "mono", "acme"] {
+            repo(&root.join("work").join(name));
+        }
+        let projects = root.join("config/projects");
+        std::fs::create_dir_all(projects.join("clients/sites/.cache")).unwrap();
+        std::fs::create_dir_all(projects.join("clients/apps")).unwrap();
+        let file = |path: &str, repo: &str| {
+            std::fs::write(
+                projects.join(path),
+                format!("root = \"{}/work/{repo}\"\n", root.display()),
+            )
+            .unwrap();
+        };
+        file("acme.toml", "acme");
+        file("clients/shop.toml", "shop");
+        file("clients/sites/nova.toml", "nova");
+        file("clients/apps/mono.toml", "mono");
+        file("clients/apps/acme.toml", "acme");
+        file("clients/sites/.cache/stray.toml", "mono");
+
+        let files: Vec<_> = project_files(&projects)
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.name, f.folder))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("acme".to_string(), None),
+                ("shop".to_string(), Some("clients".to_string())),
+                ("acme".to_string(), Some("clients/apps".to_string())),
+                ("mono".to_string(), Some("clients/apps".to_string())),
+                ("nova".to_string(), Some("clients/sites".to_string())),
+            ]
+        );
+
+        let world = load_world(&root.join("config"));
+        let folders: Vec<_> = world
+            .projects
+            .iter()
+            .map(|p| (p.project.name.as_str(), p.project.folder.as_deref()))
+            .collect();
+        assert_eq!(
+            folders,
+            [
+                ("acme", None),
+                ("shop", Some("clients")),
+                ("mono", Some("clients/apps")),
+                ("nova", Some("clients/sites")),
+            ]
+        );
+        assert_eq!(world.problems.len(), 1, "{:?}", world.problems);
+        assert!(
+            world.problems[0]
+                .message
+                .contains("already defines a project named acme")
         );
     }
 

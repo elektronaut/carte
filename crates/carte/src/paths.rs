@@ -58,7 +58,7 @@ impl Paths {
         self.config_dir.join("projects")
     }
 
-    /// The project's file, in whichever folder it is, or where a new one goes.
+    /// The project's file, in whichever folder at any depth, or where a new one goes.
     pub fn project_file(&self, name: &str) -> PathBuf {
         carte_core::discovery::project_files(&self.projects_dir())
             .ok()
@@ -237,6 +237,12 @@ mod tests {
         assert_eq!(
             paths.project_file("wiki"),
             paths.projects_dir().join("agency/wiki.toml")
+        );
+        std::fs::create_dir_all(paths.projects_dir().join("agency/sites")).unwrap();
+        std::fs::write(paths.projects_dir().join("agency/sites/nova.toml"), "").unwrap();
+        assert_eq!(
+            paths.project_file("nova"),
+            paths.projects_dir().join("agency/sites/nova.toml")
         );
         assert_eq!(
             paths.project_file("new"),

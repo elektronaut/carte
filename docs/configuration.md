@@ -92,7 +92,10 @@ is off.
 name, and appears in hostnames: at least three characters, lowercase
 letters, digits and dashes. Files in a subdirectory, like
 `projects/clients/shop.toml`, appear in that folder in the terminal UI;
-it doesn't change their names or hostnames.
+it doesn't change their names or hostnames. Folders can nest:
+`projects/clients/sites/nova.toml` appears in a `sites/` folder inside
+`clients/`. Names must be unique across all folders, since they are
+hostnames. Directories starting with a dot are skipped.
 
 ```toml
 root = "~/work"
@@ -241,7 +244,9 @@ With no `include`, each project's root is its one app, so
 - A project file with the same name as a generated project wins, and
   replaces it entirely.
 - The generated projects appear in the template's folder in the
-  terminal UI (`clients` above). The template's own file name only
+  terminal UI (`clients` above, or a nested one like `clients/sites`
+  for a template at `projects/clients/sites/static.toml`). The
+  template's own file name only
   identifies it: `carte project edit sites` opens it, and
   `carte project ls` shows which projects came from it.
 - Directory names that aren't valid project names, and names two
