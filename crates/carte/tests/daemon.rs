@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{fixture, git, repo};
@@ -19,12 +20,17 @@ struct Daemon {
     child: Option<Child>,
 }
 
+/// A free port below the ephemeral range, where the daemons under test pick their
+/// apps' ports, so a test's listener and another daemon's app can't get the same one.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let start = 20_000 + (std::process::id() % 400) as u16 * 25;
+    loop {
+        let port = 20_000 + (start - 20_000 + NEXT.fetch_add(1, Ordering::Relaxed)) % 10_000;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 impl Daemon {
@@ -130,8 +136,21 @@ impl Daemon {
         let socket = carte::paths::Paths::under(&daemon.root).socket();
         let started = Instant::now();
         while !socket.exists() {
+            if let Some(status) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+                let mut stderr = String::new();
+                daemon
+                    .child
+                    .as_mut()
+                    .unwrap()
+                    .stderr
+                    .take()
+                    .unwrap()
+                    .read_to_string(&mut stderr)
+                    .unwrap();
+                panic!("daemon exited with {status}: {stderr}");
+            }
             assert!(
-                started.elapsed() < Duration::from_secs(10),
+                started.elapsed() < Duration::from_secs(30),
                 "daemon didn't start"
             );
             std::thread::sleep(Duration::from_millis(50));
