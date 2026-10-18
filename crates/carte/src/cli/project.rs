@@ -114,7 +114,9 @@ fn add(paths: &Paths, args: AddArgs) -> anyhow::Result<ExitCode> {
             }
         } else if interactive {
             for (repo, app) in &unrunnable {
-                println!("{app} has no Procfile.dev, Procfile or config.ru.");
+                println!(
+                    "{app} has no Procfile.dev, Procfile, config.ru or package.json dev script."
+                );
                 let command = prompt::ask(
                     &format!("Web command for {app} (empty to leave it out)"),
                     None,
@@ -125,7 +127,7 @@ fn add(paths: &Paths, args: AddArgs) -> anyhow::Result<ExitCode> {
             }
         } else if single {
             bail!(
-                "no Procfile.dev, Procfile or config.ru in {}; pass --command \"<web command>\" \
+                "no Procfile.dev, Procfile, config.ru or package.json dev script in {}; pass --command \"<web command>\" \
                  to run it as its `web` process",
                 tilde(&dir)
             );
@@ -432,6 +434,7 @@ fn source_name(source: ProcessSource) -> &'static str {
         ProcessSource::ProcfileDev => "Procfile.dev",
         ProcessSource::Procfile => "Procfile",
         ProcessSource::ConfigRu => "config.ru",
+        ProcessSource::PackageJson => "package.json",
         ProcessSource::Config => "config",
         ProcessSource::RouteOnly => "fixed port",
     }

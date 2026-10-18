@@ -109,7 +109,8 @@ root = "~/code/myapp"
 
 and the app is at `https://myapp.localhost`. Its processes come from
 `Procfile.dev`, then `Procfile`. Without either, a `config.ru` runs
-`bundle exec puma -p $PORT`. Every process gets its own `PORT`.
+`bundle exec puma -p $PORT`, and a `package.json` runs its `dev` script.
+Every process gets its own `PORT`.
 
 A larger project:
 

@@ -490,11 +490,12 @@ fn decide(
 }
 
 /// Whether a directory has something to run of its own: a Procfile.dev, Procfile,
-/// config.ru, or a `carte.toml` with processes.
+/// config.ru, a `package.json` with a `dev` script, or a `carte.toml` with processes.
 pub fn is_runnable(dir: &Path) -> bool {
     ["Procfile.dev", "Procfile", "config.ru"]
         .iter()
         .any(|file| dir.join(file).is_file())
+        || crate::node::dev_script(dir).is_some()
         || config::load_repo_config(dir)
             .ok()
             .flatten()

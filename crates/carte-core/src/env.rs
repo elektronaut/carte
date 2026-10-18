@@ -208,6 +208,8 @@ pub struct EnvRequest<'a> {
     pub urls: &'a dyn UrlResolver,
     pub tld: &'a str,
     pub share_domain: Option<&'a str>,
+    /// The checkout's Vite reads its allowed-hosts variable as one host.
+    pub vite_one_host: bool,
     pub tld_length: u32,
     /// System roots plus the carte CA.
     pub ca_bundle: &'a Path,
@@ -475,6 +477,14 @@ fn vite_hosts(req: &EnvRequest) -> Vec<String> {
         }
     }
     hosts.extend(share_host(req));
+    if req.vite_one_host {
+        let localhost = req.tld == "localhost";
+        let one = match share_host(req) {
+            Some(share) if localhost => share,
+            _ => hosts.swap_remove(0),
+        };
+        return vec![one];
+    }
     hosts
 }
 
@@ -531,6 +541,7 @@ mod tests {
         stack: Stack,
         urls: Urls,
         share_domain: Option<&'static str>,
+        vite_one_host: bool,
         dirs: InstanceDirs,
     }
 
@@ -547,6 +558,7 @@ mod tests {
                     shared: vec![],
                 },
                 share_domain: None,
+                vite_one_host: false,
                 dirs: InstanceDirs {
                     state: "/state/data/nova/feature-x/nova-postcard-frontend".into(),
                     run: "/run/carte/abcdefgh".into(),
@@ -567,6 +579,7 @@ mod tests {
                 urls: &self.urls,
                 tld: "test",
                 share_domain: self.share_domain,
+                vite_one_host: self.vite_one_host,
                 tld_length: 3,
                 ca_bundle: Path::new("/Users/alex/.local/state/carte/bundle.pem"),
                 ca_cert: Path::new("/Users/alex/.local/state/carte/ca.pem"),
@@ -847,6 +860,14 @@ mod tests {
                 "example.dev",
             ],
         );
+    }
+
+    #[test]
+    fn older_vite_gets_one_host() {
+        let mut fx = Fixture::new();
+        fx.share_domain = Some("example.dev");
+        fx.vite_one_host = true;
+        assert_eq!(hosts_for(&fx).1, ".nova.test");
     }
 
     #[test]
@@ -1253,6 +1274,7 @@ mod tests {
                 urls: &urls,
                 tld: "test",
                 share_domain: None,
+                vite_one_host: false,
                 tld_length: 3,
                 ca_bundle: Path::new("/ca/bundle.pem"),
                 ca_cert: Path::new("/ca/ca.pem"),

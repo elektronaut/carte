@@ -280,6 +280,7 @@ pub fn render_subject(
         urls: &urls,
         tld: &machine.tld,
         share_domain: machine.share.as_ref().map(|s| s.domain.as_str()),
+        vite_one_host: carte_core::node::vite_takes_one_host(checkout.path()),
         tld_length: tld_length as u32,
         ca_bundle: &ca_bundle,
         ca_cert: &ca_cert,

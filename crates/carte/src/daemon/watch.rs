@@ -13,7 +13,15 @@ use tracing::{debug, warn};
 
 use crate::supervisor::Handle;
 
-const TOOL_FILES: [&str; 3] = ["mise.toml", ".mise.toml", ".tool-versions"];
+const TOOL_FILES: [&str; 7] = [
+    "mise.toml",
+    ".mise.toml",
+    ".tool-versions",
+    ".node-version",
+    ".nvmrc",
+    ".ruby-version",
+    ".python-version",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Change {
@@ -100,7 +108,7 @@ pub fn classify(
     let parent = path.parent()?;
     if matches!(
         name,
-        "Procfile.dev" | "Procfile" | "config.ru" | "carte.toml"
+        "Procfile.dev" | "Procfile" | "config.ru" | "package.json" | "carte.toml"
     ) && checkouts.contains_key(parent)
     {
         return Some(Change::Reload);
@@ -347,6 +355,24 @@ mod tests {
                 &scans()
             ),
             Some(Change::EnvChanged(PathBuf::from("/work/acme-web")))
+        );
+        assert_eq!(
+            classify(
+                Path::new("/work/acme-web/.node-version"),
+                config,
+                &c,
+                &scans()
+            ),
+            Some(Change::EnvChanged(PathBuf::from("/work/acme-web")))
+        );
+        assert_eq!(
+            classify(
+                Path::new("/work/acme-web-feature-x/package.json"),
+                config,
+                &c,
+                &scans()
+            ),
+            Some(Change::Reload)
         );
         assert_eq!(
             classify(

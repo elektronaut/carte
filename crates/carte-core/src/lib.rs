@@ -13,6 +13,7 @@ pub mod include;
 pub mod lifecycle;
 pub mod model;
 pub mod naming;
+pub mod node;
 pub mod procfile;
 pub mod prune;
 pub mod slug;

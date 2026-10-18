@@ -2824,6 +2824,7 @@ impl EnvInput {
             &self.key.stack,
         ) as u32;
         let share_domain = self.machine.share.as_ref().map(|s| s.domain.as_str());
+        let vite_one_host = carte_core::node::vite_takes_one_host(self.checkout.path());
         let mut out = Vec::new();
         for (idx, spec, port) in &self.procs {
             let request = EnvRequest {
@@ -2838,6 +2839,7 @@ impl EnvInput {
                 urls: &urls,
                 tld: &self.machine.tld,
                 share_domain,
+                vite_one_host,
                 tld_length,
                 ca_bundle: &self.ca_bundle,
                 ca_cert: &self.ca_cert,

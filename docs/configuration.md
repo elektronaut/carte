@@ -152,9 +152,11 @@ include = [
   matches, and a later entry can bring a match back. The last entry
   that matches a directory decides.
 - **A glob only picks directories with something to run**: a
-  `Procfile.dev`, `Procfile` or `config.ru`, or a `carte.toml` with
-  processes. Libraries and other directories next to your apps are
-  left out. A path without a glob is always an app. Globs match one
+  `Procfile.dev`, `Procfile` or `config.ru`, a `package.json` with a
+  `dev` script, or a `carte.toml` with processes. Other directories next
+  to your apps are left out; in a JS workspace, where libraries have
+  `dev` scripts too, match the apps' folder (`apps/*`) or leave a
+  library out with `!`. A path without a glob is always an app. Globs match one
   directory level each; `**` isn't supported.
 - **Matches are looked for in every checkout.** A pattern that reaches
   into a git repo is also matched in each of the repo's worktrees, so a
@@ -338,6 +340,8 @@ checkout:
 1. `Procfile.dev`
 2. `Procfile`
 3. `config.ru`, which runs `web: bundle exec puma -p $PORT`
+4. `package.json` with a `dev` script, which runs as `web` through the
+   package manager. See [Node apps](#node-apps)
 
 `[apps.<name>.processes.<process>]` tables change or add to that list.
 With `replace_processes = true`, only the processes configured here run.
@@ -620,34 +624,49 @@ there's nothing to remove.
 
 ### Node apps
 
-carte doesn't read `package.json`, so a Node app needs a `Procfile.dev`
-(or a `command` in the project file). Every process gets its port in
-`PORT`; dev servers that ignore it need it as a flag:
+Without a Procfile or `config.ru`, a `package.json` with a `dev` script
+runs as the `web` process: `pnpm run dev`, with the package manager
+taken from the nearest lockfile in the checkout or above it (up to the
+repo's root), then the `packageManager` field, then npm. carte doesn't
+install packages; run `pnpm install` (or your package manager's
+equivalent) in a new worktree yourself.
 
-```
-web: npx vite --port $PORT --strictPort
-```
+Every process gets its port in `PORT`. For dev servers that ignore it,
+carte adds the flags they need, unless the script sets a port itself:
 
-| Dev server | Command |
+| The `dev` script starts | carte adds |
 | --- | --- |
-| Next.js | `next dev` reads `PORT` itself |
-| Vite | `vite --port $PORT --strictPort` |
-| Astro | `astro dev --port $PORT` |
-| Anything else | Check that it reads `PORT`, or pass it as a flag |
+| `vite`, `react-router dev` | `--port $PORT --strictPort` |
+| `astro dev`, `ng serve`, `webpack serve`, `rsbuild dev`, `vinxi dev` | `--port $PORT` |
+| `next dev` | `-H 127.0.0.1`: it reads `PORT`, but otherwise listens on every network interface |
+| Anything else (Nuxt reads `PORT`) | Nothing |
 
-A fixed port in the web command (`--port 5173`, `-p 3000`) is replaced
-with `$PORT` automatically.
+In a Procfile, pass the flags yourself (`web: pnpm exec vite --port
+$PORT --strictPort`). A fixed port in the web command (`--port 5173`,
+`-p 3000`) is replaced with `$PORT` automatically.
 
-carte passes the `.test` hostname through to the app, and recent dev
-servers refuse hostnames they don't know:
+Every dev server above accepts `.localhost` hostnames as they are. For
+another TLD, or a share domain:
 
-- **Vite** (and Astro, which runs on it) accepts them without config:
-  carte sets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, which Vite adds to
-  `server.allowedHosts`. Vite 6.1 to 8.0 read it as a single hostname,
-  so there it only works while it holds one domain: an app with aliases,
-  or a machine with a share domain, needs `server.allowedHosts` set.
-- **Next.js:** list the hostnames in `allowedDevOrigins` in
-  `next.config.js`, as in `["*.acme.test"]`, so hot reloading works.
+- **Vite** and the frameworks built on it accept them: carte sets
+  `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, which Vite adds to
+  `server.allowedHosts`. Before 8.1, Vite reads it as one hostname, so
+  carte passes only the project's domain (or the share domain, on
+  `.localhost`); aliases and the rest need `server.allowedHosts`.
+  Angular's dev server runs on Vite too.
+- **Next.js** refuses its dev resources, hot reloading included, for
+  origins outside `allowedDevOrigins`. carte drops the `Origin` header
+  of same-origin requests for `/_next/` and `/__nextjs`, which Next
+  lets through, so nothing needs configuring.
+- **webpack-dev-server and Rsbuild** need the domain in their
+  `allowedHosts`, like `[".acme.test"]`. When an app refuses a hostname,
+  carte's error page says which setting to add it to.
+
+The default `shell` env provider runs a login shell, so a Node version
+from `.node-version` or `.nvmrc` needs a version manager that works
+there: mise's shims (`mise activate --shims` in `.zprofile`), asdf or
+Volta. `mise activate`, nvm and fnm set up in `.zshrc` only run in
+interactive shells.
 
 ### Policies
 
@@ -696,7 +715,8 @@ Each process's environment is built in layers, later ones winning:
 | `NODE_EXTRA_CA_CERTS` | carte's CA |
 | `DISABLE_SPRING` | `1` |
 
-When `mise.toml` or `.tool-versions` changes, running apps are marked
+When `mise.toml`, `.tool-versions` or a version file (`.node-version`,
+`.nvmrc`, `.ruby-version`, `.python-version`) changes, running apps are marked
 "env changed" rather than restarted. `carte env <app>` prints the result
 with where each value came from.
 

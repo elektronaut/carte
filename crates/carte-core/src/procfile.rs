@@ -13,6 +13,8 @@ pub enum ProcessSource {
     Procfile,
     /// No Procfile, but a `config.ru`: `web` runs puma.
     ConfigRu,
+    /// No Procfile or `config.ru`, but a `package.json` with a `dev` script: `web` runs it.
+    PackageJson,
     /// Only processes from config.
     Config,
     /// A fixed-port app without processes.
@@ -72,7 +74,7 @@ pub enum ProcfileError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("{} has no Procfile.dev, Procfile or config.ru, and no processes are configured", path.display())]
+    #[error("{} has no Procfile.dev, Procfile, config.ru or package.json dev script, and no processes are configured", path.display())]
     NotRunnable { path: PathBuf },
     #[error("process {process:?} has no command")]
     MissingCommand { process: String },
@@ -198,6 +200,11 @@ fn load_any(checkout: &Path, settings: &AppSettings) -> Result<ProcessList, Proc
         (
             ProcessSource::ConfigRu,
             vec![("web".to_string(), "bundle exec puma -p $PORT".to_string())],
+        )
+    } else if let Some(command) = crate::node::dev_command(checkout) {
+        (
+            ProcessSource::PackageJson,
+            vec![("web".to_string(), command)],
         )
     } else {
         (ProcessSource::Config, Vec::new())
