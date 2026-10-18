@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.2.0](https://github.com/elektronaut/carte/compare/v0.1.0...v0.2.0) (2026-10-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **setup:** the default TLD is now localhost. Machines that relied on the .test default need `tld = "test"` in config.toml, or `carte setup --tld test`.
+* **core:** `repos` is replaced by `root` and `include`, and the `name` override by `[apps.X] path`. `repos = "~/work/acme-*"` becomes `root = "~/work"` and `include = "acme-*"`; a single repo is `root = "~/work/shop"`. Glob matches without a Procfile.dev, Procfile, config.ru or processes in carte.toml are no longer apps.
+* **core:** stacks, and with them hostnames, CARTE_STACK, CARTE_CHECKOUT, {{stack}}, {{stack.id}}, state directories and shared hostnames, are named after worktree folders rather than branches. A worktree at ../acme-billing-feature-x on branch feature-x was the feature-x stack and is now acme-billing-feature-x. State kept under the old stack names is left for `carte prune`.
+
+### Features
+
+* **cli:** remove leftover instance directories with carte prune ([477286f](https://github.com/elektronaut/carte/commit/477286fadd7a3831f18ade1b478ac784605a9821))
+* **cli:** restart the daemon launchd runs with carte daemon restart ([679f8a0](https://github.com/elektronaut/carte/commit/679f8a064ee166bb632f4c7ac0166d74afae572f))
+* **cli:** run commands with an app's env through carte exec ([943d5b1](https://github.com/elektronaut/carte/commit/943d5b124fd9e6faf0e8fcbb8f4b232c600d1751))
+* **core:** add a restart policy to processes ([24fd4a0](https://github.com/elektronaut/carte/commit/24fd4a0c8661238ed52de63355dd896025a2cbe0))
+* **core:** add kind and after to processes ([f5bd0bb](https://github.com/elektronaut/carte/commit/f5bd0bb78b114c868e656bbf146945611bfab674))
+* **core:** declare processes for many apps and let them provide env ([2b36a14](https://github.com/elektronaut/carte/commit/2b36a14567b2eb3e2aed901da9fd3e0f43605cde))
+* **core:** find apps with root and include, per checkout ([ee95adf](https://github.com/elektronaut/carte/commit/ee95adff19b6137c909b157f050d32a4dd8a3d5b))
+* **core:** find project files in nested folders ([828831a](https://github.com/elektronaut/carte/commit/828831a54bde003076ce51fb62d8073114b05da2))
+* **core:** give each instance state and run directories and a stack id ([d7a77ac](https://github.com/elektronaut/carte/commit/d7a77ace1fa11e686c2cee2932b5939b27fadfe5))
+* **core:** let repos name their apps and branches configure theirs ([021e4ab](https://github.com/elektronaut/carte/commit/021e4ab57b4d9a652745629a8a3606942d38448c))
+* **core:** make a project per directory from a template ([f71cd58](https://github.com/elektronaut/carte/commit/f71cd583f0c2363f7e597fb2b73522c1d7d856b2))
+* **core:** name stacks after worktree folders instead of branches ([d1414d1](https://github.com/elektronaut/carte/commit/d1414d1f06d30e90db589572015cb0bffcbab201))
+* **core:** run a package.json dev script when there's no Procfile ([76e52fb](https://github.com/elektronaut/carte/commit/76e52fb03bef4c0b1ab56e59240d764eaf4d8d50))
+* **daemon:** listen on IPv6 loopback too ([b2791c1](https://github.com/elektronaut/carte/commit/b2791c116d46ba899fe3a5cbf7d82059d5425d3e))
+* **daemon:** rename carte's own state override to CARTE_STATE_HOME ([786233e](https://github.com/elektronaut/carte/commit/786233e43c8c62256e2ec331f844497913e834c3))
+* **daemon:** restart crashed services with a backoff ([6677cf4](https://github.com/elektronaut/carte/commit/6677cf41db3abb55c1aa1a8f5d48bb9728bd1ddd))
+* **daemon:** restart every process that crashes after the start ([64b7c0d](https://github.com/elektronaut/carte/commit/64b7c0db315cb47993dedd390946916cf2d50eea))
+* **daemon:** start services, then tasks, then the rest ([ae7faa5](https://github.com/elektronaut/carte/commit/ae7faa5e958f1eb56e3198578beec2be6a0141e3))
+* **daemon:** tear down stacks whose worktrees are gone ([414e714](https://github.com/elektronaut/carte/commit/414e714eefb54692ed3e36ffef7a7a512b13f614))
+* **daemon:** warm apps that usually open next ([62b367e](https://github.com/elektronaut/carte/commit/62b367e4bea6f72077008ee27bc80d4a1c0ade45))
+* **proxy:** let Next.js hot reloading through on any hostname ([857ec1d](https://github.com/elektronaut/carte/commit/857ec1d8082a47879d05d8d99a18078def8c20f2))
+* **proxy:** serve files from an app's folder ahead of the app ([d55d2dc](https://github.com/elektronaut/carte/commit/d55d2dc48c0889d3339b7581aa8bb8b07dfe72dd))
+* **setup:** serve apps under .localhost by default ([b8fb489](https://github.com/elektronaut/carte/commit/b8fb489ac8daafb54ce1bbbafaaf2a87e4277a25))
+* **tui:** collapse stacks by default ([a2d8132](https://github.com/elektronaut/carte/commit/a2d81326655d5a84880e7665a9cc14d04b10f1b4))
+* **tui:** nest folders in the project tree ([d025303](https://github.com/elektronaut/carte/commit/d025303ff0db1b58712a2b688895bcb6daeb2d30))
+
+
+### Bug Fixes
+
+* **cli:** keep the caller's env for what carte exec only inherits from the daemon ([f04cdb7](https://github.com/elektronaut/carte/commit/f04cdb7fe3667b0b7d770b40556e90577bdfa447))
+* **cli:** show the daemon's run directories in carte env ([f354c19](https://github.com/elektronaut/carte/commit/f354c193e5dd594821083121886377b57571e46a))
+* **core:** allow every hostname of an instance in Rails and Vite host checks ([f14137e](https://github.com/elektronaut/carte/commit/f14137ec529791f7d0d3ad7f16979648052eee27))
+* **core:** apply command-less project processes only where they exist ([79d442b](https://github.com/elektronaut/carte/commit/79d442b39dfe2c3b3fb6027206ab7dab0164678d))
+* **core:** apply template app tables only where the app exists ([555b9a1](https://github.com/elektronaut/carte/commit/555b9a1ed915aa2c26396cc287704bbfd760c3cd))
+* **core:** walk up from a worktree folder only while it has the repo's name ([c442b46](https://github.com/elektronaut/carte/commit/c442b468cb608d9674a4005c91a7e0637c18f979))
+* **daemon:** keep a torn-down stack's folders when its worktree comes back ([942ecad](https://github.com/elektronaut/carte/commit/942ecadd7a498abfd4ed0718c9d253cee46b1c67))
+* **daemon:** keep later tiers waiting when a stopping boot step is restarted ([37ffd8a](https://github.com/elektronaut/carte/commit/37ffd8ada1a1a479e9aa833828ce1f40f7923916))
+* **daemon:** keep pidfile folders and other cartes' run directories in prune ([fab6028](https://github.com/elektronaut/carte/commit/fab602823d6f4e9cc67ae1e99f62871152d8d52a))
+* **daemon:** keep teardowns going past problems with a single stack ([c46d349](https://github.com/elektronaut/carte/commit/c46d349cddda145e8a49c7b25526ebecf8abffe6))
+* **daemon:** let one parked copy take over a checkout process when its owner stops ([21cf199](https://github.com/elektronaut/carte/commit/21cf1995f705ee4f6ebf02cdb4ed8bc5dc8c825b))
+* **daemon:** refuse run directories that are symlinks or another user's ([f9bbffa](https://github.com/elektronaut/carte/commit/f9bbffad04ddfb19fde15a01609624079588f9d4))
+* **daemon:** restart crashed instances and boot steps in order ([c9d2731](https://github.com/elektronaut/carte/commit/c9d273135ae63c286eb3982508c619fcab7e8cd6))
+* **daemon:** run teardowns of branch-only apps in their repo's main checkout ([de580df](https://github.com/elektronaut/carte/commit/de580df13872b11389791be37154fa95fa8bb43b))
+* **daemon:** start a process asked for by name while stopping with the restart ([247c796](https://github.com/elektronaut/carte/commit/247c79631e3a2af190eab30f8e3383b04d010ddd))
+* **daemon:** start every app on main when the main stack is named ([22cbcde](https://github.com/elektronaut/carte/commit/22cbcde90200b4c9aa980a50c0c90f581a9dfbac))
+* **setup:** give the daemon 40s to stop before launchd kills it ([282c0c6](https://github.com/elektronaut/carte/commit/282c0c615dac62fdfcc85b1a1c336a7c7138852a))
+
 ## 0.1.0 (2026-10-17)
 
 
