@@ -668,16 +668,16 @@ prunable gitdir file points to non-existent location
     fn folders_named_like_the_repo_take_the_parents_name() {
         assert_eq!(
             names(
-                "make-start",
+                "acme-start",
                 &[
-                    "/Users/me/Dev/make/workspaces/checkout-flow/make-start",
-                    "/Users/me/Dev/make/workspaces/Hotfix/make-start",
+                    "/Users/me/Dev/acme/workspaces/checkout-flow/acme-start",
+                    "/Users/me/Dev/acme/workspaces/Hotfix/acme-start",
                 ]
             ),
             ["checkout-flow", "hotfix"]
         );
         assert_eq!(
-            names("Make-Start", &["/w/make-start/make-start"]),
+            names("Acme-Start", &["/w/acme-start/acme-start"]),
             ["w"],
             "every ancestor named like the repo is skipped"
         );

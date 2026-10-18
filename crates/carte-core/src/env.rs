@@ -1164,18 +1164,18 @@ mod tests {
     }
 
     #[test]
-    fn the_make_config_gives_redis_to_the_apps_it_lists() {
+    fn the_acme_config_gives_redis_to_the_apps_it_lists() {
         let file = crate::config::parse_project(
-            Path::new("/Users/alex/.config/carte/projects/make.toml"),
+            Path::new("/Users/alex/.config/carte/projects/acme.toml"),
             r#"
-            repos = "~/work/make-*"
-            strip_prefix = "make-"
+            repos = "~/work/acme-*"
+            strip_prefix = "acme-"
 
             [processes.redis]
             apps = [
-              "make-start", "make-newsmail-api", "make-sms-api", "make-pmta-logger",
-              "make-sender-api", "make-subscribers-api", "make-integration-mystore",
-              "make-calendar", "make-mobile",
+              "acme-start", "acme-mailer-api", "acme-sms-api", "acme-mta-logger",
+              "acme-sender-api", "acme-subscribers-api", "acme-integration-shop",
+              "acme-calendar", "acme-mobile",
             ]
             command = "mkdir -p $CARTE_STATE_DIR/redis && exec redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --dir $CARTE_STATE_DIR/redis --appendonly yes --save ''"
             kind = "service"
@@ -1186,16 +1186,16 @@ mod tests {
         )
         .unwrap();
         let discovered = [
-            "make-start",
-            "make-newsmail-api",
-            "make-sms-api",
-            "make-pmta-logger",
-            "make-sender-api",
-            "make-subscribers-api",
-            "make-integration-mystore",
-            "make-calendar",
-            "make-mobile",
-            "make-admin",
+            "acme-start",
+            "acme-mailer-api",
+            "acme-sms-api",
+            "acme-mta-logger",
+            "acme-sender-api",
+            "acme-subscribers-api",
+            "acme-integration-shop",
+            "acme-calendar",
+            "acme-mobile",
+            "acme-admin",
         ]
         .into_iter()
         .map(|name| crate::config::DiscoveredApp {
@@ -1212,7 +1212,7 @@ mod tests {
             ("worker".to_string(), "bundle exec sidekiq".to_string()),
         ];
         let dirs = InstanceDirs {
-            state: "/state/data/make/feature-x/make-start".into(),
+            state: "/state/data/acme/feature-x/acme-start".into(),
             run: "/run/carte/abcdefgh".into(),
         };
         let urls = Urls {
@@ -1263,7 +1263,7 @@ mod tests {
             )
         };
 
-        let (names, processes, worker) = render("make-start", "worker");
+        let (names, processes, worker) = render("acme-start", "worker");
         assert_eq!(names, ["web", "worker", "redis"]);
         let redis = processes.iter().find(|p| p.name == "redis").unwrap();
         assert!(redis.is_service());
@@ -1278,14 +1278,14 @@ mod tests {
         assert_eq!(url.value, "unix:///run/carte/abcdefgh/redis.sock");
         assert_eq!(url.source.to_string(), "provided by redis");
 
-        let (_, _, server) = render("make-start", "redis");
+        let (_, _, server) = render("acme-start", "redis");
         assert_eq!(
             server.value("CARTE_STATE_DIR"),
-            Some("/state/data/make/feature-x/make-start")
+            Some("/state/data/acme/feature-x/acme-start")
         );
         assert_eq!(server.value("CARTE_RUN_DIR"), Some("/run/carte/abcdefgh"));
 
-        let (names, _, admin) = render("make-admin", "worker");
+        let (names, _, admin) = render("acme-admin", "worker");
         assert_eq!(names, ["web", "worker"]);
         assert_eq!(admin.value("REDIS_URL"), None);
     }
