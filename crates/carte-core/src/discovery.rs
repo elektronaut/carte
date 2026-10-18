@@ -1,6 +1,6 @@
 //! Finding app checkouts and their worktrees on disk.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -11,6 +11,7 @@ use crate::include;
 use crate::model::{AppRef, Problem, ProjectState, Worktree, World};
 use crate::naming;
 use crate::procfile;
+use crate::slug;
 use crate::slug::slugify;
 
 #[derive(Debug, Error)]
@@ -295,6 +296,7 @@ pub fn load_world(config_dir: &Path) -> World {
         }
     };
 
+    let mut templates = Vec::new();
     for ProjectFileEntry { name, folder, path } in files {
         if let Some(other) = world.project(&name) {
             world.problems.push(Problem {
@@ -310,6 +312,7 @@ pub fn load_world(config_dir: &Path) -> World {
             continue;
         }
         match config::load_project_file(&path) {
+            Ok(file) if !file.projects.is_empty() => templates.push((file, folder)),
             Ok(file) => {
                 let (mut state, problems) = discover_project(file);
                 state.project.folder = folder;
@@ -324,8 +327,85 @@ pub fn load_world(config_dir: &Path) -> World {
             }),
         }
     }
+    let mut generated = BTreeSet::new();
+    for (file, folder) in templates {
+        expand_template(&mut world, &mut generated, file, folder);
+    }
     resolve_elsewhere(&mut world);
     world
+}
+
+/// Adds a project for each directory a template's `projects` entries match, made from
+/// the template with the directory as its root. A project file of the same name wins.
+/// A directory a wildcard matched is left out unless it has an app with something to run.
+fn expand_template(
+    world: &mut World,
+    generated: &mut BTreeSet<String>,
+    file: ProjectFile,
+    folder: Option<String>,
+) {
+    let template = file.name.clone();
+    let problem = |project: &str, message: String| Problem {
+        project: Some(project.to_string()),
+        app: None,
+        stack: None,
+        message,
+    };
+    let (dirs, scans, messages) = include::expand_projects(file.root.as_deref(), &file.projects);
+    world.scan_dirs.extend(scans);
+    world
+        .problems
+        .extend(messages.into_iter().map(|m| problem(&template, m)));
+    for (dir, wildcard) in dirs {
+        let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if generated.contains(&name) {
+            world.problems.push(problem(
+                &name,
+                format!(
+                    "{} is skipped: another template already made a project named {name}",
+                    dir.display()
+                ),
+            ));
+            continue;
+        }
+        if world.project(&name).is_some() {
+            continue;
+        }
+        if let Err(err) = slug::validate_project_name(&name) {
+            if !wildcard || include::is_runnable(&dir) {
+                world.problems.push(problem(
+                    &template,
+                    format!(
+                        "{} is skipped: {err}; give it a project file of its own",
+                        dir.display()
+                    ),
+                ));
+            }
+            continue;
+        }
+        let project = ProjectFile {
+            name: name.clone(),
+            root: Some(dir.to_string_lossy().into_owned()),
+            projects: Vec::new(),
+            ..file.clone()
+        };
+        let (mut state, problems) = discover_project(project);
+        if wildcard
+            && !state
+                .project
+                .apps
+                .iter()
+                .any(|app| include::is_runnable(&state.any_checkout(app)))
+        {
+            continue;
+        }
+        state.project.folder = folder.clone();
+        generated.insert(name);
+        world.projects.push(state);
+        world.problems.extend(problems);
+    }
 }
 
 pub struct ProjectFileEntry {
@@ -918,6 +998,64 @@ prunable gitdir file points to non-existent location
                 .unwrap_err()
                 .contains("no Procfile.dev")
         );
+    }
+
+    #[test]
+    fn templates_make_a_project_per_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let apps = root.join("apps");
+        for (name, runnable) in [
+            ("wiki", true),
+            ("shop", true),
+            ("lib", false),
+            ("My_Site", true),
+            ("archived-blog", true),
+        ] {
+            repo(&apps.join(name));
+            if runnable {
+                std::fs::write(apps.join(name).join("Procfile"), "web: x\n").unwrap();
+            }
+        }
+        let projects = root.join("config/projects");
+        std::fs::create_dir_all(projects.join("clients")).unwrap();
+        std::fs::write(
+            projects.join("clients/apps.toml"),
+            format!(
+                "root = \"{}\"\nprojects = [\"*\", \"!archived-*\"]\nidle_timeout = \"30m\"\n\n[apps.wiki]\naliases = [\"old-wiki\"]\n",
+                apps.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join("shop.toml"),
+            format!("root = \"{}\"\n", apps.join("shop").display()),
+        )
+        .unwrap();
+
+        let world = load_world(&root.join("config"));
+        let found: Vec<_> = world
+            .projects
+            .iter()
+            .map(|p| {
+                (
+                    p.project.name.as_str(),
+                    p.project.folder.as_deref(),
+                    p.project.idle_timeout,
+                )
+            })
+            .collect();
+        let half_hour = Some(std::time::Duration::from_secs(1800));
+        assert_eq!(
+            found,
+            [("shop", None, None), ("wiki", Some("clients"), half_hour),]
+        );
+        let wiki = world.project("wiki").unwrap();
+        assert_eq!(wiki.project.apps[0].name, "wiki");
+        assert_eq!(wiki.project.apps[0].settings.aliases, ["old-wiki"]);
+        assert_eq!(world.problems.len(), 1, "{:?}", world.problems);
+        assert!(world.problems[0].message.contains("My_Site is skipped"));
+        assert!(world.scan_dirs.contains(&apps));
     }
 
     #[test]

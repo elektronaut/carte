@@ -132,6 +132,9 @@ policy = "disabled"
 - A monorepo works the same way: `root = "~/work/mono"` and
   `include = "apps/*"`. Each worktree of it is a stack, with the apps
   that worktree has.
+- For a directory full of unrelated apps, `projects = "*"` makes the
+  file a template with a project per directory. See
+  [Templates](docs/configuration.md#templates).
 - `strip_prefix` shortens hostnames: `acme-billing` is
   `billing.acme.test`. An app named like its project is just
   `acme.test`.

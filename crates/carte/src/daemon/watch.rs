@@ -27,6 +27,9 @@ pub enum Change {
 /// checkout's root (tool and process files, removal) and its `tmp` (restart.txt).
 pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> {
     let mut set = BTreeSet::from([(config_dir.to_path_buf(), true)]);
+    for dir in &world.scan_dirs {
+        set.insert((dir.clone(), false));
+    }
     for state in &world.projects {
         for repo in state.repo_stacks.keys() {
             let git = repo.join(".git");
@@ -130,6 +133,7 @@ fn scan_dirs(world: &World) -> BTreeSet<PathBuf> {
         .projects
         .iter()
         .flat_map(|state| state.scan_dirs.iter())
+        .chain(&world.scan_dirs)
         .flat_map(|dir| [canonical(dir), dir.clone()])
         .collect()
 }

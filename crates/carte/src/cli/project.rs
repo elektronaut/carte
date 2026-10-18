@@ -526,8 +526,15 @@ fn ls(paths: &Paths, json: bool) -> anyhow::Result<ExitCode> {
             } else {
                 project.stacks.join(", ")
             };
+            let template = project
+                .config_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy())
+                .filter(|stem| *stem != project.name.as_str())
+                .map(|stem| format!("  (from {stem})"))
+                .unwrap_or_default();
             println!(
-                "{:width$}  {:>4}  {stacks}",
+                "{:width$}  {:>4}  {stacks}{template}",
                 project.name,
                 project.apps.len()
             );
@@ -586,6 +593,21 @@ fn edit(paths: &Paths, name: &str) -> anyhow::Result<ExitCode> {
         let text = fs::read_to_string(&path)?;
         if text == original {
             println!("No changes.");
+            return Ok(ExitCode::SUCCESS);
+        }
+        if let Ok(file) = config::parse_project(&path, &text)
+            && !file.projects.is_empty()
+        {
+            let (dirs, _, problems) =
+                include::expand_projects(file.root.as_deref(), &file.projects);
+            for problem in &problems {
+                println!("problem: {problem}");
+            }
+            println!(
+                "{} is a template: its projects entries match {} directories.",
+                tilde(&path),
+                dirs.len()
+            );
             return Ok(ExitCode::SUCCESS);
         }
         match validate(&path, &text) {

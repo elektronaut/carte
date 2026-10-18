@@ -400,7 +400,7 @@ mod tests {
                 problem("acme", Some("acme-web"), Some("x"), "same name"),
                 problem("nova", Some("nova-api"), Some("x"), "named like an app"),
                 problem("nova", Some("nova-api"), None, "git worktree list failed"),
-                problem("wiki", None, None, "repos entry matches nothing"),
+                problem("wiki", None, None, "include entry matches nothing"),
             ],
             ..World::default()
         };
@@ -413,7 +413,7 @@ mod tests {
                 ),
                 (
                     "wiki".to_string(),
-                    "repos entry matches nothing".to_string()
+                    "include entry matches nothing".to_string()
                 ),
             ])
         );

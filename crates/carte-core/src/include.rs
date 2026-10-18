@@ -257,6 +257,50 @@ pub fn expand(
     out
 }
 
+/// The directories a template's `projects` entries match, each with whether a
+/// wildcard picked it, and the directories new ones appear in. Linked worktrees
+/// are skipped.
+pub fn expand_projects(
+    root: Option<&str>,
+    projects: &[String],
+) -> (Vec<(PathBuf, bool)>, BTreeSet<PathBuf>, Vec<String>) {
+    let root = root.map(|r| normalize(&expand_home(r)));
+    let mut problems = Vec::new();
+    let mut entries = Vec::new();
+    for text in projects {
+        match entry(text, None, root.as_deref()) {
+            Ok(entry) => entries.push(entry),
+            Err(message) => problems.push(message.replacen("include entry", "projects entry", 1)),
+        }
+    }
+    let mut scans = BTreeSet::new();
+    let mut found: Vec<PathBuf> = Vec::new();
+    for entry in entries.iter().filter(|e| !e.negate) {
+        let matched = dirs(&entry.pattern);
+        if matched.is_empty() {
+            problems.push(format!("projects entry {:?} matches nothing", entry.text));
+        }
+        found.extend(matched);
+        if entry.wildcard {
+            scans.extend(scan_dir(&entry.pattern));
+        }
+    }
+    found.sort();
+    found.dedup();
+    let picked = found
+        .into_iter()
+        .filter(|dir| !(dir.join(".git").exists() && !is_primary_checkout(dir)))
+        .filter_map(|dir| {
+            let last = entries
+                .iter()
+                .rev()
+                .find(|e| e.matcher.matches_path_with(&dir, MATCH))?;
+            (!last.negate).then_some((dir, last.wildcard))
+        })
+        .collect();
+    (picked, scans, problems)
+}
+
 fn entry(text: &str, name: Option<String>, root: Option<&Path>) -> Result<Entry, String> {
     let (negate, body) = match text.strip_prefix('!') {
         Some(rest) if name.is_none() => (true, rest),

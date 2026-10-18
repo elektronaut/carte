@@ -207,6 +207,9 @@ pub struct ProjectFile {
     pub root: Option<String>,
     /// Paths or globs, unexpanded; entries starting with `!` remove matches.
     pub include: Vec<String>,
+    /// Paths or globs of directories that each become a project made from this
+    /// file; non-empty makes the file a template.
+    pub projects: Vec<String>,
     pub strip_prefix: Option<String>,
     pub env_provider: Option<EnvProviderKind>,
     pub env: Vec<EnvTemplate>,
@@ -234,6 +237,8 @@ struct RawProject {
     root: Option<String>,
     #[serde(default)]
     include: OneOrMany,
+    #[serde(default)]
+    projects: OneOrMany,
     strip_prefix: Option<String>,
     env_provider: Option<EnvProviderKind>,
     #[serde(default)]
@@ -447,6 +452,7 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         path: path.to_path_buf(),
         root: raw.root,
         include: raw.include.0,
+        projects: raw.projects.0,
         strip_prefix: raw.strip_prefix.filter(|p| !p.is_empty()),
         env_provider: raw.env_provider,
         env: raw.env.0,
@@ -528,6 +534,7 @@ pub fn assemble_project(
         processes: project_processes,
         root: _,
         include: _,
+        projects: _,
     } = file;
     let mut problems = Vec::new();
     let problem = |app: &str, message: String| Problem {

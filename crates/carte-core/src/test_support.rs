@@ -146,5 +146,6 @@ pub fn world() -> World {
         },
         projects: vec![nova(), eventportal(), acme()],
         problems: Vec::new(),
+        scan_dirs: Default::default(),
     }
 }

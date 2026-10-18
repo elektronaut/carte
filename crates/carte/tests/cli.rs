@@ -697,3 +697,22 @@ fn removes_a_project_with_yes() {
     let out = sb.run(&["project", "rm", "shop", "--yes"]);
     assert!(!out.success);
 }
+
+#[test]
+fn lists_projects_made_from_a_template() {
+    let sb = Sandbox::new();
+    sb.repo("sites/wiki", &[("config.ru", "run App\n")]);
+    sb.repo("sites/blog", &[("Procfile", "web: bin/serve\n")]);
+    sb.repo("sites/lib", &[]);
+    sb.write_project("sites", "root = \"~/sites\"\nprojects = \"*\"\n");
+
+    let out = sb.run(&["project", "ls"]);
+    assert!(out.success, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("blog        1  -  (from sites)"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("wiki        1  -  (from sites)"));
+    assert!(!out.stdout.contains("lib"), "{}", out.stdout);
+}

@@ -121,6 +121,7 @@ root = "~/work/shop"
 | --- | --- | --- |
 | `root` | none | The directory `include` entries and app paths are relative to. Without `include`, the root itself is the project's one app |
 | `include` | the root | Where the apps are: a path or glob, or a list of them. See [Finding apps](#finding-apps) |
+| `projects` | none | Makes the file a template for a project per directory. See [Templates](#templates) |
 | `strip_prefix` | none | Removed from directory names to get the short names used in hostnames |
 | `env_provider` | detected | Where the base environment comes from: `mise`, `direnv`, `shell` or `none`. See [Environment](#environment) |
 | `env` | none | Env templates for every app. See [Env templates](#env-templates) |
@@ -180,6 +181,43 @@ path = "acme-billing"
 The table's key is then the app's name, and the directory belongs to it
 even when a glob also matches it. Renaming an app changes its hostnames
 and its state directory; `carte prune` cleans up the old one.
+
+### Templates
+
+A project file with `projects` is a template: each directory its entries
+match becomes a project of its own, named after the directory, with the
+directory as its `root`. Every other key in the file applies to each of
+them.
+
+```toml
+# ~/.config/carte/projects/clients/sites.toml
+root = "~/clients/sites"
+projects = ["*", "!archived-*"]
+idle_timeout = "30m"
+
+[apps.wiki]
+aliases = ["old-wiki"]
+```
+
+With no `include`, each project's root is its one app, so
+`~/clients/sites/wiki` is served at `wiki.test`. With `include =
+"apps/*"`, each matched monorepo becomes a project with those apps.
+
+- `projects` entries work like `include` entries: paths and globs
+  relative to `root`, `!` to leave matches out, in order. A directory a
+  glob matches only becomes a project when it has an app with something
+  to run; a path without a glob always does. New directories join as
+  they appear.
+- `[apps.<name>]` tables apply in every project that has an app of
+  that name.
+- A project file with the same name as a generated project wins, and
+  replaces it entirely.
+- The generated projects appear in the template's folder in the
+  terminal UI (`clients` above). The template's own file name only
+  identifies it: `carte project edit sites` opens it, and
+  `carte project ls` shows which projects came from it.
+- Directory names that aren't valid project names, and names two
+  templates both generate, are reported.
 
 ### Names and hostnames
 

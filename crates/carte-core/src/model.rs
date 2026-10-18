@@ -491,6 +491,8 @@ pub struct World {
     pub machine: MachineConfig,
     pub projects: Vec<ProjectState>,
     pub problems: Vec<Problem>,
+    /// Directories where templates' new projects can appear.
+    pub scan_dirs: BTreeSet<PathBuf>,
 }
 
 impl World {
