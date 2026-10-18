@@ -1,22 +1,22 @@
 ---
 name: carte
-description: Run, restart and debug web apps served by carte, the local daemon that runs each app's processes on demand behind https://<app>.test hostnames, one stack per git worktree. Use when working in a repo whose app is served by carte, when a `.test` URL or a `carte` command comes up, or before starting a dev server (bin/dev, rails s, npm run dev, foreman, overmind).
+description: Run, restart and debug web apps served by carte, the local daemon that runs each app's processes on demand behind https://<app>.localhost hostnames (or another TLD, such as .test), one stack per git worktree. Use when working in a repo whose app is served by carte, when such a URL or a `carte` command comes up, or before starting a dev server (bin/dev, rails s, npm run dev, foreman, overmind).
 ---
 
 # carte
 
 carte runs the app for you. Every app in a carte project has a URL like
-`https://billing.acme.test`; the first request starts all of its processes
+`https://billing.acme.localhost`; the first request starts all of its processes
 (web, workers, asset watchers) and carte stops them again when idle. Each
 git worktree gets its own hostname, such as
-`https://billing.feature-x.acme.test`. The stack name (`feature-x`) comes
+`https://billing.feature-x.acme.localhost`. The stack name (`feature-x`) comes
 from the worktree's folder, not its branch; a folder named like the repo
 takes the name of the folder above. Worktrees of different repos with the
 same name form one stack.
 
 ## Don't start servers yourself
 
-Never run `bin/dev`, `rails s`, `npm run dev`, `foreman` or `overmind` for an
+Never run `bin/dev`, `rails s`, `npm run dev`, `pnpm dev`, `foreman` or `overmind` for an
 app carte serves. They fight carte over ports and don't get carte's URLs or
 environment. Use the app's URL, or `carte up`, instead.
 
@@ -44,8 +44,12 @@ carte restart /worker     # one process
 error and the last log lines if it isn't. Restart after:
 
 - changes the app doesn't reload by itself (initializers, gems, config)
-- changes to `Procfile.dev`, `Procfile`, `mise.toml`, `.tool-versions` or
-  env files; check the result with `carte env`
+- changes to `Procfile.dev`, `Procfile`, the `dev` script in `package.json`,
+  `mise.toml`, `.tool-versions`, `.node-version` or env files; check the
+  result with `carte env`
+
+carte doesn't install packages: in a new worktree, run `pnpm install` (or
+`bundle install`) yourself before the first request.
 
 `touch tmp/restart.txt` also restarts the app.
 
