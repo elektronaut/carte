@@ -1,6 +1,6 @@
 # carte
 
-A local daemon that runs each app's process group on demand, routes `*.test` hostnames to git worktrees, and stops idle apps. Rust workspace:
+A local daemon that runs each app's process group on demand, routes `*.localhost` hostnames to git worktrees, and stops idle apps. Rust workspace:
 
 - `crates/carte-core`: configuration, naming, resolution, templates, env and lifecycle policies. No long-running IO.
 - `crates/carte-api`: types exchanged over the daemon's Unix socket; also the CLI's `--json` output.
