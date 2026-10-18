@@ -97,6 +97,11 @@ impl Paths {
         self.state_dir.join("ca-bundle.pem")
     }
 
+    /// What learned warming knows about which apps open after which.
+    pub fn warming(&self) -> PathBuf {
+        self.state_dir.join("warming.json")
+    }
+
     /// Where instances' state and run directories go.
     pub fn dir_roots(&self) -> DirRoots {
         DirRoots {

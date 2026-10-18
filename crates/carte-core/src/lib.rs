@@ -19,6 +19,7 @@ pub mod prune;
 pub mod slug;
 pub mod teardown;
 pub mod template;
+pub mod warming;
 
 #[cfg(test)]
 mod test_support;

@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HOST, HeaderName, ORIGIN, UPGRADE};
+use http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HOST, HeaderName, ORIGIN, REFERER, UPGRADE};
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
@@ -80,6 +80,7 @@ pub(crate) async fn handle(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     let method = request.method().clone();
+    let referrer = referrer_host(request.headers());
     let route_request = RouteRequest {
         host: &host,
         tls: inbound.tls,
@@ -87,6 +88,7 @@ pub(crate) async fn handle(
         method: &method,
         path: &path,
         authorization: authorization.as_deref(),
+        referrer: referrer.as_deref(),
     };
     let route = shared.router.route(route_request).await;
     Ok(match route {
@@ -245,6 +247,15 @@ fn request_host<B>(request: &Request<B>) -> Option<String> {
             Some(host.to_string())
         })
         .filter(|host| !host.is_empty())
+}
+
+/// The host of the page a request came from: its `Origin`, or else its `Referer`.
+fn referrer_host(headers: &HeaderMap) -> Option<String> {
+    [ORIGIN, REFERER].iter().find_map(|name| {
+        let uri: Uri = headers.get(name)?.to_str().ok()?.parse().ok()?;
+        uri.scheme()?;
+        uri.host().map(str::to_string)
+    })
 }
 
 fn upstream_uri(port: u16, original: &Uri) -> Uri {
@@ -439,6 +450,27 @@ mod tests {
             headers.append(*name, HeaderValue::from_static(value));
         }
         headers
+    }
+
+    #[test]
+    fn the_referrer_is_the_origin_or_the_referer() {
+        let both = headers(&[
+            ("referer", "https://web.shop.localhost/cart?x=1"),
+            ("origin", "https://billing.shop.localhost:8443"),
+        ]);
+        assert_eq!(
+            referrer_host(&both).as_deref(),
+            Some("billing.shop.localhost")
+        );
+        let referer = headers(&[
+            ("origin", "null"),
+            ("referer", "https://web.shop.localhost/cart"),
+        ]);
+        assert_eq!(
+            referrer_host(&referer).as_deref(),
+            Some("web.shop.localhost")
+        );
+        assert_eq!(referrer_host(&headers(&[])), None);
     }
 
     #[test]

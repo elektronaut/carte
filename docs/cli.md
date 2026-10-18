@@ -177,6 +177,7 @@ An **Instance** is:
 | `last_error`, `last_event` | Null when there's none |
 | `boot` | `{ elapsed_ms, waiting_for }` while starting |
 | `env_changed` | Its tool versions changed since it started |
+| `warms` | `[{ app, hits, opens }]`: the apps opening it [warms](configuration.md#learned-warming), each followed `hits` of its last `opens` opens; left out when empty |
 | `memory_bytes`, `cpu_percent` | Summed over its processes |
 
 **`carte logs --json`** prints one line per log line:

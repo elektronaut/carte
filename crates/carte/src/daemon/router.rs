@@ -23,12 +23,17 @@ impl Router for SupervisorRouter {
     fn route<'a>(&'a self, request: RouteRequest<'a>) -> BoxFuture<'a, Route> {
         Box::pin(async move {
             let world = self.supervisor.world();
+            let mut referrer = None;
             let key = if request.kind == ListenerKind::Share {
                 match self.shared_key(&world, request) {
                     Ok(key) => key,
                     Err(page) => return Route::Error(page),
                 }
             } else {
+                referrer = request
+                    .referrer
+                    .and_then(|host| naming::resolve_host(&world, host).ok())
+                    .map(|resolved| resolved.key);
                 match naming::resolve_host(&world, request.host) {
                     Ok(resolved) => resolved.key,
                     Err(not_found) => {
@@ -56,7 +61,8 @@ impl Router for SupervisorRouter {
                 }
                 None => {}
             }
-            match tokio::time::timeout(self.hold, self.supervisor.ensure_ready(key.clone())).await {
+            let ready = self.supervisor.request(key.clone(), referrer);
+            match tokio::time::timeout(self.hold, ready).await {
                 Ok(Ok(upstream)) => Route::Upstream {
                     port: upstream.port,
                     guard: Box::new(Guard::new(self.supervisor.clone(), key)),

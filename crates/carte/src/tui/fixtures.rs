@@ -62,6 +62,7 @@ pub fn instance(app: &str, stack: &str, checkout: &str, state: InstanceState) ->
         env_changed: false,
         last_event: None,
         boot: None,
+        warms: Vec::new(),
     }
 }
 

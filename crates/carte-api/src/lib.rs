@@ -227,6 +227,17 @@ pub struct InstanceStatus {
     /// How far a start has come, while it is starting.
     #[serde(default)]
     pub boot: Option<BootProgress>,
+    /// The apps an open of it starts ahead, from what usually opens next.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warms: Vec<Warm>,
+}
+
+/// An app that followed `hits` of an app's last `opens` opens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Warm {
+    pub app: String,
+    pub hits: u32,
+    pub opens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

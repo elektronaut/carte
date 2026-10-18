@@ -5,13 +5,14 @@ use std::time::Instant;
 
 use carte_api::{
     AppInfo, BootProgress, Event, Hold, InstanceState, InstanceStatus, Policy as ApiPolicy,
-    ProcessState, ProcessStatus, ProjectStatus, Snapshot, StackStatus, TunnelStatus,
+    ProcessState, ProcessStatus, ProjectStatus, Snapshot, StackStatus, TunnelStatus, Warm,
 };
 use carte_core::lifecycle;
 use carte_core::model::{
     App, Checkout, InstanceKey, Policy, ProjectState, Readiness, Stack, World,
 };
 use carte_core::naming;
+use carte_core::warming::Warming;
 
 use super::actor::{Instance, Overrides, Proc, effective_policy};
 use super::share::{self, Shares};
@@ -24,6 +25,7 @@ pub(super) struct Input<'a> {
     pub tunnel: Option<&'a TunnelStatus>,
     /// The latest event about each instance.
     pub latest: &'a BTreeMap<InstanceKey, Event>,
+    pub warming: &'a Warming,
     pub now: Instant,
 }
 
@@ -97,6 +99,24 @@ pub(super) fn build(input: &Input) -> Snapshot {
     }
 }
 
+/// The apps an open of `app` in `stack` would warm.
+fn warms(warming: &Warming, state: &ProjectState, app: &App, stack: &Stack) -> Vec<Warm> {
+    warming
+        .warms(&state.project.name, &app.name)
+        .into_iter()
+        .filter(|edge| {
+            state.project.app(&edge.app).is_some_and(|target| {
+                state.checkout(target, stack).is_some() && !target.settings.never_warm
+            })
+        })
+        .map(|edge| Warm {
+            app: edge.app,
+            hits: edge.hits as u32,
+            opens: edge.opens as u32,
+        })
+        .collect()
+}
+
 fn stack_status(
     input: &Input,
     state: &ProjectState,
@@ -136,6 +156,7 @@ fn stack_status(
                     .then(|| naming::public_url(config, state, app, &stack).ok())
                     .flatten()
             });
+            let warms = warms(input.warming, state, app, &stack);
             let Some(inst) = instances.get(&key) else {
                 let processes = stopped_processes(input, state, app, &stack, &key, &[]);
                 return Some(InstanceStatus {
@@ -155,6 +176,7 @@ fn stack_status(
                     env_changed: false,
                     last_event: latest.get(&key).cloned(),
                     boot: None,
+                    warms,
                 });
             };
             let mut holds = Vec::new();
@@ -234,6 +256,7 @@ fn stack_status(
                     elapsed_ms: now.saturating_duration_since(inst.started_at).as_millis() as u64,
                     waiting_for: waiting_for(&inst.procs),
                 }),
+                warms,
             })
         })
         .collect();

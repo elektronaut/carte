@@ -16,6 +16,7 @@ use carte_core::lifecycle::{self, Capacity, EvictionReason, Targets, Usage};
 use carte_core::model::{
     App, Checkout, InstanceKey, Policy, ProcessSpec, ProjectState, Restart, Scope, Stack, World,
 };
+use carte_core::warming::{Edge, Warming};
 use carte_core::{naming, procfile};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
@@ -86,6 +87,10 @@ pub(super) struct Instance {
     restart_forced: BTreeSet<String>,
     /// When the latest start began.
     pub started_at: Instant,
+    /// It had a proxied request since it started.
+    opened: bool,
+    /// The app whose open warmed it.
+    warmed_after: Option<String>,
 }
 
 /// Why an instance starts, for its `started` event.
@@ -97,6 +102,8 @@ enum Why {
     /// An instance that depends on it started.
     Dependency(InstanceKey),
     Share,
+    /// It usually opens after this instance, which just opened.
+    Warm(InstanceKey),
 }
 
 pub(super) struct Proc {
@@ -179,6 +186,8 @@ impl Instance {
             forced: BTreeSet::new(),
             restart_forced: BTreeSet::new(),
             started_at: Instant::now(),
+            opened: false,
+            warmed_after: None,
         }
     }
 
@@ -279,6 +288,9 @@ struct Actor {
     tunnel: Option<TunnelStatus>,
     events: EventLog,
     teardowns: Teardowns,
+    warming: Warming,
+    /// `warming` changed since it was last written.
+    warming_changed: bool,
 }
 
 pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Options) -> Handle {
@@ -293,6 +305,10 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         state: TunnelState::Idle,
         message: None,
     });
+    let warming = std::fs::read_to_string(paths.warming())
+        .ok()
+        .and_then(|text| Warming::from_json(&text))
+        .unwrap_or_default();
     let initial = Arc::new(snapshot::build(&snapshot::Input {
         world: &world,
         instances: &BTreeMap::new(),
@@ -300,6 +316,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         shares: &BTreeMap::new(),
         tunnel: tunnel.as_ref(),
         latest: &BTreeMap::new(),
+        warming: &warming,
         now: Instant::now(),
     }));
     let (snapshot_tx, snapshot_rx) = watch::channel(initial);
@@ -330,6 +347,8 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         tunnel,
         events: EventLog::new(event_tx.clone()),
         teardowns: Teardowns::default(),
+        warming,
+        warming_changed: false,
     };
     let tick_tx = tx.clone();
     let tick = actor.options.tick;
@@ -373,7 +392,16 @@ impl Actor {
 
     fn handle(&mut self, msg: Msg) {
         match msg {
-            Msg::EnsureReady { key, reply } => self.ensure_ready(key, reply),
+            Msg::EnsureReady {
+                key,
+                reply,
+                request,
+            } => {
+                self.ensure_ready(key.clone(), reply);
+                if let Some(referrer) = request {
+                    self.requested(&key, referrer.as_ref());
+                }
+            }
             Msg::Activity(key, activity) => self.activity(&key, activity),
             Msg::Control { request, reply } => {
                 let _ = reply.send(self.control(request));
@@ -440,6 +468,7 @@ impl Actor {
                 }
             }
             Msg::Shutdown(reply) => {
+                self.save_warming();
                 self.shutdown = Some(reply);
                 let keys: Vec<_> = self.instances.keys().cloned().collect();
                 for key in keys {
@@ -452,6 +481,7 @@ impl Actor {
             Msg::Prune { orphans, reply } => {
                 let running = self.running();
                 let _ = reply.send(prune::detach(orphans, &running, &self.paths.dir_roots()));
+                self.forget_gone_apps();
             }
             Msg::DetachStack {
                 project,
@@ -532,6 +562,7 @@ impl Actor {
             shares: &self.shares,
             tunnel: self.tunnel.as_ref(),
             latest: self.events.latest(),
+            warming: &self.warming,
             now: Instant::now(),
         });
         self.snapshot_tx.send_replace(Arc::new(snapshot));
@@ -728,6 +759,10 @@ impl Actor {
         inst.started_at = Instant::now();
         inst.restart_pending = false;
         inst.restart_announced = false;
+        if !matches!(why, Why::Restart) {
+            inst.opened = false;
+            inst.warmed_after = None;
+        }
         self.dirty = true;
 
         if let Some(port) = route_port {
@@ -808,6 +843,10 @@ impl Actor {
                 format!("for {}", events::instance(dependent).label())
             }
             Why::Share => "to keep a pinned share running".to_string(),
+            Why::Warm(opened) => {
+                subjects.push(events::instance(opened));
+                format!("warmed after {} opened", events::instance(opened).label())
+            }
         };
         self.event(EventKind::Started, message, subjects);
     }
@@ -1528,6 +1567,12 @@ impl Actor {
             {
                 let why = format!("idle for {}", carte_core::duration::format(timeout));
                 to_stop.insert(usage.key.clone(), why);
+                let inst = &self.instances[&usage.key];
+                if let Some(from) = inst.warmed_after.as_ref().filter(|_| !inst.opened) {
+                    self.warming_changed |=
+                        self.warming
+                            .missed(&usage.key.project, from, &usage.key.app);
+                }
             }
         }
         let limits = &self.world.machine.limits;
@@ -1562,6 +1607,97 @@ impl Actor {
             self.dirty = true;
         }
         self.check_teardowns();
+        self.save_warming();
+    }
+
+    // Learned warming
+
+    /// Notes a proxied request: what it came from, and whether it opens the instance,
+    /// which starts the apps that usually open next.
+    fn requested(&mut self, key: &InstanceKey, referrer: Option<&InstanceKey>) {
+        let Some(inst) = self.instances.get_mut(key) else {
+            return;
+        };
+        if !inst.is_active() {
+            return;
+        }
+        let first = !std::mem::replace(&mut inst.opened, true);
+        let stack = key.stack.slug().to_string();
+        if let Some(from) = referrer.filter(|r| r.project == key.project && r.stack == key.stack) {
+            self.warming_changed |=
+                self.warming
+                    .referred(&key.project, &stack, &key.app, &from.app);
+        }
+        if first {
+            let warm = self
+                .warming
+                .opened(&key.project, &stack, &key.app, Instant::now());
+            self.warming_changed = true;
+            self.warm(key, warm);
+        }
+    }
+
+    /// Starts the apps an open of `opened` warms, in its stack, while there's room.
+    fn warm(&mut self, opened: &InstanceKey, edges: Vec<Edge>) {
+        for edge in edges {
+            let target = InstanceKey {
+                project: opened.project.clone(),
+                app: edge.app,
+                stack: opened.stack.clone(),
+            };
+            let Some(state) = self.world.project(&target.project) else {
+                return;
+            };
+            let warmable = state.project.app(&target.app).is_some_and(|app| {
+                state.checkout(app, &target.stack).is_some() && !app.settings.never_warm
+            });
+            let running = self
+                .instances
+                .get(&target)
+                .is_some_and(|inst| inst.is_active() || inst.any_running());
+            if !warmable || running {
+                continue;
+            }
+            if !self.room_to_warm() {
+                return;
+            }
+            if self.start(&target, None, Why::Warm(opened.clone())).is_ok()
+                && let Some(inst) = self.instances.get_mut(&target)
+            {
+                inst.warmed_after = Some(opened.app.clone());
+            }
+        }
+    }
+
+    fn room_to_warm(&self) -> bool {
+        let limits = &self.world.machine.limits;
+        let targets = Targets {
+            memory: limits.memory_target,
+            instances: limits.instance_target,
+            pty_reserve: limits.pty_reserve,
+        };
+        lifecycle::room_to_warm(&self.usages(), targets, total_ram())
+    }
+
+    /// Forgets apps and projects that are gone.
+    fn forget_gone_apps(&mut self) {
+        let world = self.world.clone();
+        self.warming_changed |= self.warming.retain(|project, app| {
+            world
+                .project(project)
+                .is_some_and(|state| state.project.app(app).is_some())
+        });
+    }
+
+    fn save_warming(&mut self) {
+        if !std::mem::take(&mut self.warming_changed) {
+            return;
+        }
+        let path = self.paths.warming();
+        let partial = path.with_extension("json.partial");
+        if std::fs::write(&partial, self.warming.to_json()).is_ok() {
+            let _ = std::fs::rename(&partial, &path);
+        }
     }
 
     // Teardown
@@ -2603,6 +2739,7 @@ impl Actor {
         for (key, why) in gone {
             self.stop(&key, Some(why));
         }
+        self.forget_gone_apps();
         self.teardowns.stale = true;
         self.check_teardowns();
         self.dirty = true;

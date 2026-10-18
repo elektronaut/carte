@@ -282,6 +282,7 @@ pub struct AppConfig {
     pub policy: Option<Policy>,
     pub port: Option<u16>,
     pub serve_files: Option<String>,
+    pub warm: Option<bool>,
     pub replace_processes: Option<bool>,
     #[serde(default, deserialize_with = "process_table")]
     pub processes: BTreeMap<String, ProcessOverride>,
@@ -311,6 +312,7 @@ impl AppConfig {
             policy: self.policy.or(base.policy),
             port: self.port.or(base.port),
             serve_files: self.serve_files.or(base.serve_files),
+            warm: self.warm.or(base.warm),
             replace_processes: self.replace_processes.or(base.replace_processes),
             processes,
         }
@@ -328,6 +330,7 @@ impl AppConfig {
             policy: self.policy,
             port: self.port,
             serve_files: self.serve_files.map(PathBuf::from),
+            never_warm: self.warm == Some(false),
             processes: ProcessConfig {
                 replace: self.replace_processes.unwrap_or(false),
                 entries: self.processes,
@@ -1628,6 +1631,18 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn warm_false_opts_an_app_out_of_warming() {
+        let repo = parse_repo_config(Path::new("carte.toml"), "warm = false\n").unwrap();
+        assert!(repo.clone().into_settings().never_warm);
+        let file = project("[apps.app-one]\nwarm = true\n[apps.app-two]\n").unwrap();
+        let one = file.apps["app-one"].clone().merged_over(repo.clone());
+        assert!(!one.into_settings().never_warm);
+        let two = file.apps["app-two"].clone().merged_over(repo);
+        assert!(two.into_settings().never_warm);
+        assert!(!AppConfig::default().into_settings().never_warm);
     }
 
     #[test]

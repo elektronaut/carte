@@ -64,10 +64,7 @@ pub fn evictions(
     targets: Targets,
     capacity: Capacity,
 ) -> Vec<(InstanceKey, EvictionReason)> {
-    let memory_target = match targets.memory {
-        MemoryTarget::PercentOfRam(pct) => capacity.total_ram_bytes / 100 * u64::from(pct),
-        MemoryTarget::Bytes(bytes) => bytes,
-    };
+    let memory_target = memory_target_bytes(targets.memory, capacity.total_ram_bytes);
     let pty_budget = capacity.pty_max.saturating_sub(targets.pty_reserve);
 
     let mut memory: u64 = usages.iter().map(|u| u.memory_bytes).sum();
@@ -94,6 +91,23 @@ pub fn evictions(
         out.push((candidate.key.clone(), reason));
     }
     out
+}
+
+fn memory_target_bytes(target: MemoryTarget, total_ram_bytes: u64) -> u64 {
+    match target {
+        MemoryTarget::PercentOfRam(pct) => total_ram_bytes / 100 * u64::from(pct),
+        MemoryTarget::Bytes(bytes) => bytes,
+    }
+}
+
+/// Whether an instance may start ahead of need: memory is within its target and one
+/// more instance stays within the instance target.
+pub fn room_to_warm(usages: &[Usage], targets: Targets, total_ram_bytes: u64) -> bool {
+    let memory: u64 = usages.iter().map(|u| u.memory_bytes).sum();
+    memory <= memory_target_bytes(targets.memory, total_ram_bytes)
+        && targets
+            .instances
+            .is_none_or(|max| (usages.len() as u32) < max)
 }
 
 /// Whether one more instance may start under the hard ceiling for runaway loops.
@@ -322,6 +336,28 @@ mod tests {
             evictions(&usages, targets(), low_ptys),
             vec![(key("nova-a"), EvictionReason::Ptys)]
         );
+    }
+
+    #[test]
+    fn warming_needs_room_under_both_targets() {
+        let now = Instant::now();
+        let usages = vec![usage("a", 10, 4096, now), usage("b", 20, 4096, now)];
+        assert!(room_to_warm(&usages, targets(), 32 * GB));
+        let low_memory = Targets {
+            memory: MemoryTarget::Bytes(6 * GB),
+            ..targets()
+        };
+        assert!(!room_to_warm(&usages, low_memory, 32 * GB));
+        let few = Targets {
+            instances: Some(2),
+            ..targets()
+        };
+        assert!(!room_to_warm(&usages, few, 32 * GB));
+        let three = Targets {
+            instances: Some(3),
+            ..targets()
+        };
+        assert!(room_to_warm(&usages, three, 32 * GB));
     }
 
     #[test]

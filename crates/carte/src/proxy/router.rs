@@ -30,6 +30,8 @@ pub struct RouteRequest<'a> {
     pub path: &'a str,
     /// The `Authorization` header, for routers that check credentials themselves.
     pub authorization: Option<&'a str>,
+    /// The host of the page the request came from, by its `Origin` or `Referer`.
+    pub referrer: Option<&'a str>,
 }
 
 pub enum Route {

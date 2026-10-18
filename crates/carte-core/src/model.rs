@@ -166,6 +166,8 @@ pub struct AppSettings {
     pub port: Option<u16>,
     /// A folder in the checkout whose files the proxy serves ahead of the app.
     pub serve_files: Option<PathBuf>,
+    /// `warm = false`: never started ahead of a request.
+    pub never_warm: bool,
     pub processes: ProcessConfig,
 }
 

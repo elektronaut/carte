@@ -2195,3 +2195,89 @@ async fn one_parked_copy_takes_over_a_checkout_watcher_when_its_owner_stops() {
     assert_eq!(running(&handle.snapshot()), 1);
     handle.shutdown().await;
 }
+
+/// Opens `first` then `second` by request, then stops the project.
+async fn open_in_turn(handle: &Handle, first: &str, second: &str) {
+    for app in [first, second] {
+        handle.request(key(app, Stack::Main), None).await.unwrap();
+    }
+    handle.control(control("acme", Action::Down)).await.unwrap();
+    wait_for(handle, "everything stopped", |s| {
+        [first, second]
+            .iter()
+            .all(|app| status(s, app, "main").state == InstanceState::Stopped)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn apps_that_usually_open_next_are_warmed() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: FIXTURE_NAME=web exec {fixture}\n");
+    setup.app("acme-billing", "web: FIXTURE_NAME=billing exec {fixture}\n");
+    setup.project("");
+    let handle = setup.start();
+
+    for _ in 0..3 {
+        open_in_turn(&handle, "acme-web", "acme-billing").await;
+    }
+    let warms = |s: &carte_api::Snapshot| status(s, "acme-web", "main").warms.clone();
+    assert_eq!(
+        warms(&handle.snapshot()),
+        [carte_api::Warm {
+            app: "acme-billing".into(),
+            hits: 3,
+            opens: 3,
+        }]
+    );
+
+    handle
+        .request(key("acme-web", Stack::Main), None)
+        .await
+        .unwrap();
+    wait_for(&handle, "billing warmed", |s| {
+        status(s, "acme-billing", "main").state == InstanceState::Ready
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.message == "warmed after acme-web opened"),
+        "{events:#?}"
+    );
+
+    handle.shutdown().await;
+    assert!(setup.paths.warming().is_file());
+    let handle = setup.start();
+    assert_eq!(warms(&handle.snapshot()).len(), 1);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn apps_with_warm_off_are_never_warmed() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: FIXTURE_NAME=web exec {fixture}\n");
+    setup.app("acme-billing", "web: FIXTURE_NAME=billing exec {fixture}\n");
+    setup.project("[apps.acme-billing]\nwarm = false\n");
+    let handle = setup.start();
+
+    for _ in 0..3 {
+        open_in_turn(&handle, "acme-web", "acme-billing").await;
+    }
+    assert!(
+        status(&handle.snapshot(), "acme-web", "main")
+            .warms
+            .is_empty()
+    );
+    handle
+        .request(key("acme-web", Stack::Main), None)
+        .await
+        .unwrap();
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        status(&snapshot, "acme-billing", "main").state,
+        InstanceState::Stopped
+    );
+    handle.shutdown().await;
+}

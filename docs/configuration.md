@@ -303,8 +303,8 @@ key; `env` and `processes` are merged entry by entry. The project's
 `carte.toml` is read in each checkout, so a branch can change how its
 app runs: in a worktree, that worktree's `env`, `env_files`,
 `processes` and `replace_processes` apply. The other keys (`aliases`,
-`subdomains`, `depends_on`, `policy`, `port`) shape the whole project,
-so they come from the main checkout's file.
+`subdomains`, `depends_on`, `policy`, `port`, `warm`) shape the whole
+project, so they come from the main checkout's file.
 
 ```toml
 [apps.events]
@@ -330,6 +330,7 @@ TZ = "Europe/Oslo"
 | `policy` | `"auto"` | Default policy for the app's processes. See [Policies](#policies) |
 | `port` | none | Route to a fixed port instead of running processes, for an app you start yourself |
 | `serve_files` | none | A folder in the checkout, like `"public"`, whose files carte serves ahead of the app. See [Serving files](#serving-files) |
+| `warm` | `true` | `false` keeps carte from starting the app ahead of a request. See [Learned warming](#learned-warming) |
 | `replace_processes` | `false` | Ignore the Procfile and run only the processes configured here |
 | `processes` | none | Per-process settings. See [Processes](#processes) |
 
@@ -364,6 +365,30 @@ serve_files = "public"
 The folder is relative to the checkout; `"."` serves the checkout
 itself. Set it at the top of a project file or template to give every
 app in it the same folder.
+
+### Learned warming
+
+carte learns which apps you open after which, and starts them ahead of
+time. An app is opened by its first request after it starts. When you
+open `billing` within two minutes of `shop`, in the same stack, carte
+notes that `billing` followed that open of `shop`. A request to
+`billing` from a page of `shop` (by its `Origin` or `Referer`) counts
+too, however long after.
+
+carte keeps each app's last 10 opens. When `billing` followed at least
+half of them, and at least 3, opening `shop` starts `billing` in the
+same stack. What's learned on main applies to new worktrees right away.
+
+A warmed app is an ordinary start: it idles out as usual and counts
+toward the [limits](#limits). Nothing is warmed while memory or the
+instance count is over its target. A warmed app that idles out without
+a request counts against the guess, so guesses that don't help fade.
+Nothing fades while you don't use an app.
+
+`carte status shop` shows what it warms, as `billing (8/10)`, and
+`carte events` says why a warmed app started. What carte has learned is
+kept in `warming.json` in the state directory. `warm = false` keeps an
+app from being warmed.
 
 ## Processes
 

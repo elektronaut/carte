@@ -168,6 +168,14 @@ pub fn render_status(snapshot: &Snapshot, instances: &[InstanceStatus]) -> Strin
         if !holds.is_empty() {
             rows.push(("held by", holds.join(", ")));
         }
+        if !inst.warms.is_empty() {
+            let warms: Vec<String> = inst
+                .warms
+                .iter()
+                .map(|w| format!("{} ({}/{})", w.app, w.hits, w.opens))
+                .collect();
+            rows.push(("warms", warms.join(", ")));
+        }
         if let Some(secs) = inst.idle_in_secs {
             rows.push((
                 "idle in",
@@ -790,6 +798,18 @@ mod tests {
         billing.holds = vec![Hold::Connections { count: 2 }];
         billing.idle_in_secs = Some(840);
         billing.last_error = Some("worker exited with code 1".into());
+        billing.warms = vec![
+            carte_api::Warm {
+                app: "nova-frontend".into(),
+                hits: 8,
+                opens: 10,
+            },
+            carte_api::Warm {
+                app: "nova-auth".into(),
+                hits: 5,
+                opens: 10,
+            },
+        ];
         let instances = vec![snapshot.projects[0].stacks[0].instances[0].clone()];
         assert_eq!(
             render_status(&snapshot, &instances),
@@ -800,6 +820,7 @@ nova-billing  ready
   checkout    /work/nova-billing
   processes   web running :54321, worker exited 1
   held by     2 connections
+  warms       nova-frontend (8/10), nova-auth (5/10)
   idle in     14m
   last error  worker exited with code 1
 "
