@@ -4,9 +4,10 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HOST, HeaderName, UPGRADE};
+use bytes::Bytes;
+use http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HOST, HeaderName, ORIGIN, UPGRADE};
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, Version};
-use http_body_util::Empty;
+use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use hyper::ext::Protocol;
 use hyper_util::client::legacy::Client;
@@ -110,6 +111,11 @@ async fn forward(
     let downstream = upgrade.then(|| hyper::upgrade::on(&mut request));
 
     strip_hop_by_hop(request.headers_mut(), upgrade);
+    drop_next_dev_origin(
+        request.headers_mut(),
+        route_request.host,
+        route_request.path,
+    );
     if h2_websocket {
         websocket_over_http1(&mut request);
     }
@@ -130,6 +136,8 @@ async fn forward(
         Err(error) => {
             let error = if error.is_connect() {
                 UpstreamError::Connect(connect_error(&error))
+            } else if is_parse_error(&error) {
+                UpstreamError::NotHttp(error_chain(&error))
             } else {
                 UpstreamError::Request(error_chain(&error))
             };
@@ -173,7 +181,51 @@ async fn forward(
     if is_event_stream(response.headers()) {
         guard.long_lived();
     }
+    let small = response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+        .is_some_and(|length| length <= 8192);
+    if response.status() == StatusCode::FORBIDDEN && small {
+        let (parts, body) = response.into_parts();
+        let bytes = body
+            .collect()
+            .await
+            .map(|collected| collected.to_bytes())
+            .unwrap_or_default();
+        if let Some(page) = host_check_page(&bytes, route_request.host) {
+            return render(&page, &request_headers);
+        }
+        return Response::from_parts(parts, boxed(GuardedBody::new(Full::new(bytes), guard)));
+    }
     response.map(|body| boxed(GuardedBody::new(body, guard)))
+}
+
+/// carte's page for a dev server's refusal of the request's hostname, saying which
+/// setting to add it to.
+fn host_check_page(body: &Bytes, host: &str) -> Option<ErrorPage> {
+    let body = std::str::from_utf8(body).ok()?;
+    let setting = if body.contains("angular.json") {
+        "`allowedHosts` under the `serve` target's options in angular.json"
+    } else if body.contains("Blocked request: disallowed or invalid Host header") {
+        "`server.allowedHosts` in the Rsbuild config"
+    } else if body.contains("Blocked request. This host") {
+        "`server.allowedHosts` in vite.config"
+    } else if body.trim() == "Invalid Host header" {
+        "`devServer.allowedHosts` in the webpack config"
+    } else {
+        return None;
+    };
+    let name = host.rsplit_once(':').map_or(host, |(name, _)| name);
+    let domain = name.split_once('.').map_or(name, |(_, rest)| rest);
+    Some(ErrorPage::new(
+        StatusCode::FORBIDDEN,
+        "The app refused this hostname",
+        format!(
+            "The dev server doesn't accept requests for {name}. Add it, or `.{domain}` for \
+             every name under it, to {setting}, then restart the app."
+        ),
+    ))
 }
 
 fn render(page: &ErrorPage, request_headers: &HeaderMap) -> Response<ProxyBody> {
@@ -331,6 +383,38 @@ fn connect_error(error: &hyper_util::client::legacy::Error) -> io::Error {
     io::Error::other(error_chain(error))
 }
 
+fn is_parse_error(error: &hyper_util::client::legacy::Error) -> bool {
+    let mut source = error.source();
+    while let Some(current) = source {
+        if current
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(hyper::Error::is_parse)
+        {
+            return true;
+        }
+        source = current.source();
+    }
+    false
+}
+
+/// Removes `Origin` from same-origin requests for Next.js's dev resources. Next refuses
+/// them, its hot reloading included, when the origin isn't in `allowedDevOrigins`, but
+/// lets requests without one through.
+fn drop_next_dev_origin(headers: &mut HeaderMap, host: &str, path: &str) {
+    let path = path.split('?').next().unwrap_or_default();
+    if !(path.contains("/_next/") || path.contains("/__nextjs")) {
+        return;
+    }
+    let same_origin = headers
+        .get(ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|origin| origin.split_once("://"))
+        .is_some_and(|(_, authority)| authority.eq_ignore_ascii_case(host));
+    if same_origin {
+        headers.remove(ORIGIN);
+    }
+}
+
 fn error_chain(error: &dyn std::error::Error) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
@@ -369,6 +453,72 @@ mod tests {
         strip_hop_by_hop(&mut headers, false);
         let names: Vec<_> = headers.keys().map(HeaderName::as_str).collect();
         assert_eq!(names, ["accept"]);
+    }
+
+    #[test]
+    fn explains_a_dev_servers_host_check() {
+        let page = |body: &'static str| {
+            host_check_page(&Bytes::from_static(body.as_bytes()), "web.acme.test:8443")
+                .map(|page| page.detail)
+        };
+        assert_eq!(
+            page("Invalid Host header").unwrap(),
+            "The dev server doesn't accept requests for web.acme.test. Add it, or `.acme.test` \
+             for every name under it, to `devServer.allowedHosts` in the webpack config, then \
+             restart the app."
+        );
+        assert!(
+            page("Blocked request. This host (\"web.acme.test\") is not allowed.")
+                .unwrap()
+                .contains("vite.config")
+        );
+        assert!(page("<p>add it to <code>allowedHosts</code> under the <code>serve</code> target in <code>angular.json</code></p> Blocked request. This host").unwrap().contains("angular.json"));
+        assert!(page("Forbidden").is_none());
+    }
+
+    #[test]
+    fn drops_a_same_origin_origin_for_next_dev_resources() {
+        let origin = |value: &'static str, host: &str, path: &str| {
+            let mut headers = headers(&[("origin", value)]);
+            drop_next_dev_origin(&mut headers, host, path);
+            headers.contains_key(ORIGIN)
+        };
+        assert!(!origin(
+            "https://web.acme.test",
+            "web.acme.test",
+            "/_next/hmr"
+        ));
+        assert!(!origin(
+            "https://Web.Acme.test",
+            "web.acme.test",
+            "/_next/hmr?id=1"
+        ));
+        assert!(!origin(
+            "https://web.acme.test:8443",
+            "web.acme.test:8443",
+            "/docs/_next/static/a.js"
+        ));
+        assert!(!origin(
+            "https://shop.share.example",
+            "shop.share.example",
+            "/__nextjs_original-stack-frames"
+        ));
+        assert!(origin(
+            "https://evil.example",
+            "web.acme.test",
+            "/_next/hmr"
+        ));
+        assert!(origin(
+            "https://web.acme.test:8443",
+            "web.acme.test",
+            "/_next/hmr"
+        ));
+        assert!(origin("https://web.acme.test", "web.acme.test", "/cable"));
+        assert!(origin(
+            "https://web.acme.test",
+            "web.acme.test",
+            "/?next=/_next/"
+        ));
     }
 
     #[test]

@@ -60,6 +60,8 @@ pub enum UpstreamError {
     /// The connection was made but the request failed, e.g. the app closed it
     /// before responding.
     Request(String),
+    /// The app answered with something that doesn't parse as HTTP.
+    NotHttp(String),
 }
 
 /// Decides where requests go. Shared by all listeners of a [`super::Proxy`].
@@ -91,6 +93,15 @@ pub trait Router: Send + Sync + 'static {
                 StatusCode::BAD_GATEWAY,
                 "App failed to respond",
                 format!("The request to port {port} failed: {error}"),
+            ),
+            UpstreamError::NotHttp(error) => ErrorPage::new(
+                StatusCode::BAD_GATEWAY,
+                "App sent an invalid response",
+                format!(
+                    "The app on port {port} answered with something that isn't HTTP ({error}). \
+                     Dev servers do this when they refuse a request, such as Next.js for a \
+                     host that isn't in its allowedDevOrigins."
+                ),
             ),
         }
     }
