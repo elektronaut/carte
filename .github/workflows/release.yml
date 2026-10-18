@@ -1,7 +1,7 @@
 name: Release
-# Runs after CI passes on a push to main, or by hand for a tag. A
-# workflow_run workflow runs from the default branch's copy of this file,
-# with the repository's secrets.
+# Runs after CI passes on a push to main, when a release is published, or
+# by hand for a tag. A workflow_run workflow runs from the default branch's
+# copy of this file, with the repository's secrets.
 #
 # Publishing doesn't depend on whether this run's release-please created
 # the release. Each run reads the version on main, and once its tag exists,
@@ -17,6 +17,9 @@ on:
       - completed
     branches:
       - main
+  release:
+    types:
+      - published
   workflow_dispatch:
     inputs:
       tag:
@@ -55,7 +58,7 @@ jobs:
     needs: release-please
     if: >-
       always() &&
-      (github.event_name == 'workflow_dispatch' || needs.release-please.result == 'success')
+      (github.event_name != 'workflow_run' || needs.release-please.result == 'success')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -68,10 +71,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6.1.0
         with:
-          ref: ${{ inputs.tag || github.event.workflow_run.head_sha }}
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.event.workflow_run.head_sha }}
       - id: check
         env:
-          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TAG: ${{ inputs.tag || github.event.release.tag_name }}
           GH_TOKEN: ${{ github.token }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
@@ -123,7 +126,7 @@ jobs:
   binaries:
     name: Build ${{ matrix.target }}
     needs: check
-    if: needs.check.outputs.binaries == 'true'
+    if: always() && needs.check.result == 'success' && needs.check.outputs.binaries == 'true'
     strategy:
       matrix:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
@@ -163,11 +166,17 @@ jobs:
 
   # In dependency order; cargo waits for each to reach the index. Each
   # crate on crates.io trusts this workflow file (trusted publishing), which
-  # trades the job's OIDC token for a short-lived crates.io token.
+  # trades the job's OIDC token for a short-lived crates.io token. crates.io
+  # refuses tokens to workflow_run runs, so the release and dispatch runs
+  # publish.
   crates:
     name: Publish crates
     needs: check
-    if: needs.check.outputs.crates != ''
+    if: >-
+      always() &&
+      needs.check.result == 'success' &&
+      needs.check.outputs.crates != '' &&
+      github.event_name != 'workflow_run'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
