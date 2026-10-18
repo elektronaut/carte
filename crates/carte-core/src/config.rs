@@ -221,6 +221,8 @@ pub struct ProjectFile {
     pub apps: BTreeMap<String, AppConfig>,
     /// `[processes.<name>]` tables, declared for many apps at once.
     pub processes: BTreeMap<String, ProjectProcess>,
+    /// Made by a template, whose `[apps.X]` tables only apply where X is an app.
+    pub from_template: bool,
 }
 
 /// A process declared in a project file's `[processes]`.
@@ -484,6 +486,7 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         teardown_delay: raw.teardown_delay.map(|d| d.0),
         apps: raw.apps,
         processes: raw.processes,
+        from_template: false,
     })
 }
 
@@ -577,6 +580,7 @@ pub fn assemble_project(
         root: _,
         include: _,
         projects: _,
+        from_template,
     } = file;
     let mut problems = Vec::new();
     let problem = |app: &str, message: String| Problem {
@@ -618,7 +622,7 @@ pub fn assemble_project(
                 },
                 table,
             });
-        } else {
+        } else if !from_template {
             problems.push(problem(
                 &name,
                 format!("[apps.{name}] does not match any app in the project"),

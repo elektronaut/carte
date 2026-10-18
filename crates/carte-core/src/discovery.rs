@@ -411,6 +411,12 @@ fn expand_template(
     world
         .problems
         .extend(messages.into_iter().map(|m| problem(&template, m)));
+    let mut unmatched: BTreeSet<String> = file
+        .apps
+        .iter()
+        .filter(|(_, table)| table.path.is_none() && table.port.is_none())
+        .map(|(name, _)| name.clone())
+        .collect();
     for (dir, wildcard) in dirs {
         let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
@@ -444,6 +450,7 @@ fn expand_template(
             name: name.clone(),
             root: Some(dir.to_string_lossy().into_owned()),
             projects: Vec::new(),
+            from_template: true,
             ..file.clone()
         };
         let (mut state, problems) = discover_project(project);
@@ -457,9 +464,16 @@ fn expand_template(
             continue;
         }
         state.project.folder = folder.clone();
+        unmatched.retain(|table| state.project.app(table).is_none());
         generated.insert(name);
         world.projects.push(state);
         world.problems.extend(problems);
+    }
+    for table in unmatched {
+        world.problems.push(problem(
+            &template,
+            format!("[apps.{table}] does not match any app in the template's projects"),
+        ));
     }
 }
 
@@ -1111,6 +1125,38 @@ prunable gitdir file points to non-existent location
         assert_eq!(world.problems.len(), 1, "{:?}", world.problems);
         assert!(world.problems[0].message.contains("My_Site is skipped"));
         assert!(world.scan_dirs.contains(&apps));
+    }
+
+    #[test]
+    fn template_app_tables_only_apply_where_the_app_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let sites = root.join("sites");
+        for name in ["wiki", "shop"] {
+            repo(&sites.join(name));
+            std::fs::write(sites.join(name).join("Procfile"), "web: x\n").unwrap();
+        }
+        let projects = root.join("config/projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(
+            projects.join("sites.toml"),
+            format!(
+                "root = \"{}\"\nprojects = \"*\"\n\n[apps.wiki]\naliases = [\"old-wiki\"]\n\n[apps.nova]\naliases = [\"old-nova\"]\n",
+                sites.display()
+            ),
+        )
+        .unwrap();
+
+        let world = load_world(&root.join("config"));
+        assert_eq!(world.projects.len(), 2);
+        let wiki = world.project("wiki").unwrap();
+        assert_eq!(wiki.project.apps[0].settings.aliases, ["old-wiki"]);
+        let messages: Vec<_> = world.problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["[apps.nova] does not match any app in the template's projects"]
+        );
+        assert_eq!(world.problems[0].project.as_deref(), Some("sites"));
     }
 
     #[test]

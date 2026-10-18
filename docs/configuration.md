@@ -235,7 +235,7 @@ With no `include`, each project's root is its one app, so
   to run; a path without a glob always does. New directories join as
   they appear.
 - `[apps.<name>]` tables apply in every project that has an app of
-  that name.
+  that name. One that matches no app in any of them is reported.
 - A project file with the same name as a generated project wins, and
   replaces it entirely.
 - The generated projects appear in the template's folder in the
