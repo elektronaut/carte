@@ -457,7 +457,14 @@ fn latest_event<'a>(app: &'a App, id: &NodeId) -> Option<&'a Event> {
         .iter()
         .flat_map(|s| &s.projects)
         .filter(|p| project.is_none_or(|name| p.name == name))
-        .filter(|p| folder.is_none_or(|f| p.folder.as_deref() == Some(f)))
+        .filter(|p| {
+            folder.is_none_or(|f| {
+                p.folder.as_deref().is_some_and(|pf| {
+                    pf.strip_prefix(f)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+                })
+            })
+        })
         .flat_map(|p| &p.stacks)
         .filter(|s| stack.is_none_or(|name| s.name == *name))
         .flat_map(|s| &s.instances)

@@ -1444,7 +1444,7 @@ mod tests {
     #[test]
     fn starts_on_the_app_it_was_opened_in() {
         let mut snapshot = sample();
-        snapshot.projects[0].folder = Some("clients".into());
+        snapshot.projects[0].folder = Some("clients/apps".into());
         let now = Instant::now();
         let mut app = App::new(now);
         let here = NodeId::Instance {
@@ -1460,6 +1460,10 @@ mod tests {
         assert_eq!(app.selected, Some(here.clone()));
         assert_eq!(follows(&commands), ["nova-frontend@feature-x"]);
         assert!(app.fold.is_expanded(&app.roots[0]), "its folder opened");
+        assert!(
+            app.fold.is_expanded(&app.roots[0].children[0]),
+            "and the nested one"
+        );
 
         press(&mut app, now, KeyCode::Up);
         app.update(Event::Snapshot(Box::new(snapshot)), now);

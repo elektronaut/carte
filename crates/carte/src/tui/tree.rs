@@ -1,7 +1,7 @@
 //! The folder ▸ project ▸ stack ▸ app ▸ process tree built from a snapshot, and the
 //! rows it shows once collapsed nodes, filters and folding are applied.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use carte_api::{
     Hold, InstanceState, InstanceStatus, Policy, ProcessState, ProcessStatus, ProjectStatus,
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "level", rename_all = "snake_case")]
 pub enum NodeId {
-    /// A subdirectory of `projects/`, only for grouping.
+    /// A subdirectory of `projects/`, only for grouping, by its `/`-separated path.
     Folder {
         folder: String,
     },
@@ -196,40 +196,55 @@ impl Node {
     }
 }
 
-/// Folders first, by name, then the projects outside any folder.
+/// Folders first, by name, then the projects outside any folder, at every level.
 pub fn build(snapshot: &Snapshot) -> Vec<Node> {
-    let mut folders: Vec<(String, Vec<Node>)> = Vec::new();
-    let mut loose = Vec::new();
+    let mut root = Dir::default();
     for project in &snapshot.projects {
         let node = project_node(snapshot, project).collapse();
-        match &project.folder {
-            Some(folder) => match folders.iter_mut().find(|(name, _)| name == folder) {
-                Some((_, nodes)) => nodes.push(node),
-                None => folders.push((folder.clone(), vec![node])),
-            },
-            None => loose.push(node),
+        let mut dir = &mut root;
+        for segment in project.folder.iter().flat_map(|f| f.split('/')) {
+            dir = dir.folders.entry(segment.to_string()).or_default();
         }
+        dir.projects.push(node);
     }
-    folders.sort_by(|a, b| a.0.cmp(&b.0));
-    folders
-        .into_iter()
-        .map(|(folder, children)| folder_node(folder, children))
-        .chain(loose)
-        .collect()
+    root.into_nodes(None)
 }
 
-fn folder_node(folder: String, children: Vec<Node>) -> Node {
+#[derive(Default)]
+struct Dir {
+    folders: BTreeMap<String, Dir>,
+    projects: Vec<Node>,
+}
+
+impl Dir {
+    fn into_nodes(self, path: Option<&str>) -> Vec<Node> {
+        let folders: Vec<Node> = self
+            .folders
+            .into_iter()
+            .map(|(name, dir)| {
+                let folder = match path {
+                    Some(parent) => format!("{parent}/{name}"),
+                    None => name.clone(),
+                };
+                let children = dir.into_nodes(Some(&folder));
+                folder_node(folder, &name, children)
+            })
+            .collect();
+        folders.into_iter().chain(self.projects).collect()
+    }
+}
+
+/// `folder` is the full path below `projects/`, `name` its last segment.
+fn folder_node(folder: String, name: &str, children: Vec<Node>) -> Node {
     let mut status = aggregate(&children);
     status.problems = children.iter().map(|c| c.status.problems).sum();
     Node {
         children,
         status,
         ..Node::leaf(
-            NodeId::Folder {
-                folder: folder.clone(),
-            },
-            &format!("{folder}/"),
-            &folder,
+            NodeId::Folder { folder },
+            &format!("{name}/"),
+            name,
             Status::new(State::Stopped),
         )
     }
@@ -723,6 +738,56 @@ mod tests {
                 }
             ),
             None
+        );
+    }
+
+    #[test]
+    fn folders_nest_and_aggregate_everything_below() {
+        let single = |name: &str, folder: Option<&str>, state| {
+            let mut p = project(
+                name,
+                &[name],
+                vec![stack("main", vec![instance(name, "main", "main", state)])],
+            );
+            p.folder = folder.map(str::to_string);
+            p
+        };
+        let mut snap = snapshot(vec![
+            single("acme", None, InstanceState::Stopped),
+            single("shop", Some("clients/sites"), InstanceState::Crashed),
+            single("nova", Some("clients/apps"), InstanceState::Ready),
+            single("mono", Some("clients"), InstanceState::Stopped),
+        ]);
+        snap.problems.push(carte_api::Problem {
+            project: Some("shop".into()),
+            app: None,
+            message: "broken".into(),
+        });
+        let roots = build(&snap);
+        let mut fold = Fold::default();
+        assert_eq!(labels(&roots, &fold), ["clients/", "acme"]);
+        assert_eq!(roots[0].status.state, State::Crashed);
+        assert_eq!((roots[0].status.running, roots[0].status.total), (1, 3));
+        assert_eq!(roots[0].status.problems, 1);
+
+        let folder = |path: &str| NodeId::Folder {
+            folder: path.into(),
+        };
+        fold.expanded.insert(folder("clients"), true);
+        assert_eq!(
+            labels(&roots, &fold),
+            ["clients/", "  apps/", "  sites/", "  mono", "acme"]
+        );
+        assert_eq!(roots[0].children[0].id(), &folder("clients/apps"));
+        assert_eq!(roots[0].children[0].status.state, State::Ready);
+        assert_eq!(roots[0].children[1].status.problems, 1);
+
+        fold.expanded.insert(folder("clients/sites"), true);
+        assert_eq!(
+            labels(&roots, &fold),
+            [
+                "clients/", "  apps/", "  sites/", "    shop", "  mono", "acme"
+            ]
         );
     }
 
