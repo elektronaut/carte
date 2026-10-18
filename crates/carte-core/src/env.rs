@@ -1168,7 +1168,8 @@ mod tests {
         let file = crate::config::parse_project(
             Path::new("/Users/alex/.config/carte/projects/acme.toml"),
             r#"
-            repos = "~/work/acme-*"
+            root = "~/work"
+            include = "acme-*"
             strip_prefix = "acme-"
 
             [processes.redis]
@@ -1200,7 +1201,10 @@ mod tests {
         .into_iter()
         .map(|name| crate::config::DiscoveredApp {
             name: name.into(),
+            naming: crate::config::Naming::Directory,
             path: Path::new("/Users/alex/work").join(name),
+            repo: None,
+            branch_only: false,
             repo_config: None,
         })
         .collect();

@@ -96,7 +96,7 @@ impl Daemon {
         std::fs::write(
             config.join("projects/acme.toml"),
             format!(
-                "repos = \"{}/work/acme-*\"\nstrip_prefix = \"acme-\"\nenv_provider = \"none\"\n{extra_project}",
+                "root = \"{}/work\"\ninclude = \"acme-*\"\nstrip_prefix = \"acme-\"\nenv_provider = \"none\"\n{extra_project}",
                 root.display()
             ),
         )
@@ -471,7 +471,7 @@ fn config_changes_are_picked_up() {
     std::fs::write(
         daemon.root.join("config/projects/shop.toml"),
         format!(
-            "repos = \"{}/other/shop\"\nenv_provider = \"none\"\n",
+            "root = \"{}/other/shop\"\nenv_provider = \"none\"\n",
             daemon.root.display()
         ),
     )
@@ -548,7 +548,7 @@ fn exec_gets_the_ports_of_running_services() {
     std::fs::write(
         daemon.root.join("config/projects/shop.toml"),
         format!(
-            "repos = \"{}/other/shop\"\nenv_provider = \"none\"\n\n\
+            "root = \"{}/other/shop\"\nenv_provider = \"none\"\n\n\
              [processes.cache]\ncommand = \"FIXTURE_NAME=cache exec {fixture}\"\nkind = \"service\"\n\
              [processes.cache.provides]\nCACHE_URL = \"http://127.0.0.1:{{{{port}}}}\"\n",
             daemon.root.display()
@@ -907,7 +907,10 @@ fn prune_removes_leftovers_of_what_no_longer_exists() {
     std::fs::create_dir_all(&unknown).unwrap();
     std::fs::write(
         daemon.root.join("config/projects/broken.toml"),
-        format!("repos = \"{}/nothing-*\"\n", daemon.root.display()),
+        format!(
+            "root = \"{}\"\ninclude = \"nothing-*\"\n",
+            daemon.root.display()
+        ),
     )
     .unwrap();
 
@@ -1219,8 +1222,8 @@ fn a_problem_with_the_project_pauses_the_teardown_and_names_it() {
     let text = std::fs::read_to_string(&project_file).unwrap();
     let missing = daemon.root.join("work/missing");
     let text = text.replacen(
-        "repos = \"",
-        &format!("repos = [\"{}\", \"", missing.display()),
+        "include = \"",
+        &format!("include = [\"{}\", \"", missing.display()),
         1,
     );
     let text = text.replacen("acme-*\"\n", "acme-*\"]\n", 1);
@@ -1232,7 +1235,7 @@ fn a_problem_with_the_project_pauses_the_teardown_and_names_it() {
     assert!(
         paused
             .message
-            .contains("project acme has a problem: repos entry")
+            .contains("project acme has a problem: include entry")
             && paused.message.contains("work/missing"),
         "{}",
         paused.message

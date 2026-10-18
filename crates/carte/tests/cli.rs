@@ -127,7 +127,7 @@ fn adds_a_single_repo() {
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         fs::read_to_string(sb.project_file("myapp")).unwrap(),
-        "repos = \"~/myapp\"\n"
+        "root = \"~/myapp\"\n"
     );
     assert!(out.stdout.contains("https://myapp.test"), "{}", out.stdout);
     assert!(out.stdout.contains("web, css (Procfile.dev)"));
@@ -173,7 +173,7 @@ fn refuses_to_overwrite_a_project() {
     let repo = sb.repo("myapp", &[("config.ru", "run App\n")]);
     let path = repo.to_str().unwrap();
     assert!(sb.run(&["project", "add", path, "--yes"]).success);
-    fs::write(sb.project_file("myapp"), "repos = \"~/myapp\"\n# mine\n").unwrap();
+    fs::write(sb.project_file("myapp"), "root = \"~/myapp\"\n# mine\n").unwrap();
 
     let out = sb.run(&["project", "add", path, "--yes"]);
     assert!(!out.success);
@@ -181,7 +181,7 @@ fn refuses_to_overwrite_a_project() {
     assert!(out.stderr.contains("carte project edit myapp"));
     assert_eq!(
         fs::read_to_string(sb.project_file("myapp")).unwrap(),
-        "repos = \"~/myapp\"\n# mine\n"
+        "root = \"~/myapp\"\n# mine\n"
     );
 }
 
@@ -198,7 +198,7 @@ fn requires_a_name_when_the_directory_name_is_invalid() {
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         fs::read_to_string(sb.project_file("my-app")).unwrap(),
-        "repos = \"~/My_App\"\n\n[apps.My_App]\nname = \"my-app\"\n"
+        "root = \"~/My_App\"\n"
     );
     assert!(out.stdout.contains("https://my-app.test"), "{}", out.stdout);
 }
@@ -214,10 +214,18 @@ fn adds_a_directory_of_repos_with_a_prefix() {
     let work = work.to_str().unwrap();
 
     let out = sb.run(&["project", "add", work, "--yes"]);
-    assert!(!out.success);
-    assert!(out.stderr.contains("nova-search"), "{}", out.stderr);
-    assert!(out.stderr.contains("--command"));
-    assert!(!sb.project_file("work").exists());
+    assert!(out.success, "{}", out.stderr);
+    assert!(
+        out.stdout
+            .contains("Left out (nothing to run): nova-search"),
+        "{}",
+        out.stdout
+    );
+    assert_eq!(
+        fs::read_to_string(sb.project_file("work")).unwrap(),
+        "root = \"~/work\"\ninclude = \"nova-*\"\nstrip_prefix = \"nova-\"\n"
+    );
+    fs::remove_file(sb.project_file("work")).unwrap();
 
     let out = sb.run(&[
         "project",
@@ -230,7 +238,7 @@ fn adds_a_directory_of_repos_with_a_prefix() {
     assert!(out.success, "{}", out.stderr);
     assert_eq!(
         fs::read_to_string(sb.project_file("work")).unwrap(),
-        "repos = \"~/work/nova-*\"\nstrip_prefix = \"nova-\"\n\n\
+        "root = \"~/work\"\ninclude = [\"nova-*\", \"nova-search\"]\nstrip_prefix = \"nova-\"\n\n\
          [apps.nova-search.processes.web]\ncommand = \"bin/search -p $PORT\"\n"
     );
     assert!(out.stdout.contains("Left out (no \"nova-\" prefix): other"));
@@ -263,7 +271,7 @@ fn takes_the_prefix_and_name_from_flags() {
     assert!(
         fs::read_to_string(sb.project_file("acme"))
             .unwrap()
-            .contains("repos = \"~/work/acme-*\"")
+            .contains("root = \"~/work\"\ninclude = \"acme-*\"")
     );
 }
 
@@ -284,8 +292,8 @@ fn lists_projects_as_json() {
             "../feature-x/shop",
         ],
     );
-    sb.write_project("shop", "repos = [\"~/shop\", \"~/tools\"]\n");
-    sb.write_project("broken", "repos = \n");
+    sb.write_project("shop", "root = \"~\"\ninclude = [\"shop\", \"tools\"]\n");
+    sb.write_project("broken", "root = \n");
 
     let out = sb.run(&["project", "ls", "--json"]);
     assert!(out.success, "{}", out.stderr);
@@ -324,7 +332,7 @@ fn env_project(sb: &Sandbox) -> PathBuf {
     );
     sb.write_project(
         "shop",
-        "repos = \"~/shop\"\nenv_provider = \"none\"\n\n[env]\nGREETING = \"hello {{app.name}}\"\n\n\
+        "root = \"~/shop\"\nenv_provider = \"none\"\n\n[env]\nGREETING = \"hello {{app.name}}\"\n\n\
          [apps.shop]\nenv_files = [\".env\"]\n",
     );
     repo
@@ -423,7 +431,7 @@ fn shows_provided_values_with_their_process() {
     );
     sb.write_project(
         "shop",
-        "repos = \"~/shop\"\nenv_provider = \"none\"\n\n\
+        "root = \"~/shop\"\nenv_provider = \"none\"\n\n\
          [processes.redis]\ncommand = \"redis-server --port $PORT\"\nkind = \"service\"\n\
          [processes.redis.provides]\nREDIS_URL = \"unix://{{run_dir}}/redis.sock\"\n\n\
          [apps.shop]\nenv_files = [\".env\"]\n",
@@ -570,7 +578,7 @@ fn exec_leaves_teardowns_out() {
     let repo = sb.repo("shop", &[("Procfile", "web: bin/serve\n")]);
     sb.write_project(
         "shop",
-        "repos = \"~/shop\"\nenv_provider = \"none\"\n\n\
+        "root = \"~/shop\"\nenv_provider = \"none\"\n\n\
          [processes.drop-db]\ncommand = \"dropdb x\"\nkind = \"teardown\"\n\
          [processes.drop-db.provides]\nDROPPED = \"yes\"\n",
     );
@@ -599,7 +607,7 @@ fn exec_refuses_while_a_provider_is_down() {
     );
     sb.write_project(
         "shop",
-        "repos = \"~/shop\"\nenv_provider = \"none\"\n\n\
+        "root = \"~/shop\"\nenv_provider = \"none\"\n\n\
          [processes.redis]\ncommand = \"redis-server --port $PORT\"\nkind = \"service\"\n\
          [processes.redis.provides]\nREDIS_URL = \"unix://{{run_dir}}/redis.sock\"\n\n\
          [apps.shop]\nenv_files = [\".env\"]\n",
@@ -649,24 +657,20 @@ fn edit_validates_the_saved_file() {
     let sb = Sandbox::new();
     env_project(&sb);
 
-    let out = edit(&sb, "repos = \"~/shop\"\nenv_provider = \"none\"");
+    let out = edit(&sb, "root = \"~/shop\"\nenv_provider = \"none\"");
     assert!(out.success, "{}", out.stderr);
     assert!(out.stdout.contains("is valid: 1 apps"), "{}", out.stdout);
 
-    let out = edit(&sb, "repos = \"~/shop\"\nenv_provider = \"none\"");
+    let out = edit(&sb, "root = \"~/shop\"\nenv_provider = \"none\"");
     assert!(out.stdout.contains("No changes."));
 
-    let out = edit(&sb, "repos = [");
+    let out = edit(&sb, "root = [");
     assert!(!out.success);
     assert!(out.stdout.contains("error:"), "{}", out.stdout);
 
-    let out = edit(&sb, "repos = \"~/nothing-here\"");
+    let out = edit(&sb, "root = \"~/nothing-here\"");
     assert!(out.success);
-    assert!(
-        out.stdout.contains("matches no git repositories"),
-        "{}",
-        out.stdout
-    );
+    assert!(out.stdout.contains("doesn't exist"), "{}", out.stdout);
 }
 
 #[test]

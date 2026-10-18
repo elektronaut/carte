@@ -156,7 +156,9 @@ pub fn locate(world: &World, dir: &Path) -> Option<Location> {
         .flat_map(|state| {
             state.project.apps.iter().flat_map(move |app| {
                 let worktrees = state.worktrees.get(&app.name).into_iter().flatten();
-                std::iter::once((app.path.as_path(), Stack::Main))
+                (!app.branch_only)
+                    .then_some((app.path.as_path(), Stack::Main))
+                    .into_iter()
                     .chain(worktrees.map(|wt| (wt.path.as_path(), Stack::Branch(wt.slug.clone()))))
                     .filter(|(path, _)| dir.starts_with(path))
                     .map(move |(path, stack)| {

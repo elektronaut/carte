@@ -378,6 +378,8 @@ pub(crate) mod tests {
             name: name.into(),
             short: name.strip_prefix("nova-").unwrap_or(name).into(),
             path: PathBuf::from("/Users/alex/work").join(name),
+            repo: None,
+            branch_only: false,
             settings: AppSettings::default(),
         }
     }

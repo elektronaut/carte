@@ -73,7 +73,7 @@ so it names the stacks whose teardown never ran or failed, whose external
 resources may remain.
 
 It leaves alone anything of a running instance, and every project whose
-configuration or discovery has a problem (a `repos` entry that matches
+configuration or discovery has a problem (an `include` entry that matches
 nothing, a failing `git worktree list`), and says so. Several cartes
 (with different state directories) can share the run root, so a run
 directory that no project names is only removed when the `.owner` file

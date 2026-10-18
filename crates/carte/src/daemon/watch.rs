@@ -22,22 +22,30 @@ pub enum Change {
     EnvChanged(PathBuf),
 }
 
-/// What to watch for a world: the config directory recursively, and per app the
-/// git directory (new worktrees), each checkout's root (tool and process files, removal) and
-/// its `tmp` (restart.txt).
+/// What to watch for a world: the config directory recursively, each repo's git
+/// directory (new worktrees), the directories new apps appear in, and per app each
+/// checkout's root (tool and process files, removal) and its `tmp` (restart.txt).
 pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> {
     let mut set = BTreeSet::from([(config_dir.to_path_buf(), true)]);
     for state in &world.projects {
-        for app in &state.project.apps {
-            if app.path.as_os_str().is_empty() {
-                continue;
-            }
-            let git = app.path.join(".git");
+        for repo in state.repo_stacks.keys() {
+            let git = repo.join(".git");
             set.insert((git.clone(), false));
             if git.join("worktrees").is_dir() {
                 set.insert((git.join("worktrees"), false));
             }
-            let mut checkouts = vec![app.path.clone()];
+        }
+        for dir in &state.scan_dirs {
+            set.insert((dir.clone(), false));
+        }
+        for app in &state.project.apps {
+            if app.path.as_os_str().is_empty() {
+                continue;
+            }
+            let mut checkouts: Vec<PathBuf> = (!app.branch_only)
+                .then(|| app.path.clone())
+                .into_iter()
+                .collect();
             checkouts.extend(
                 state
                     .worktrees
@@ -57,15 +65,22 @@ pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> 
     set
 }
 
-/// What a changed path means. File events carry real paths, so `config_dir` and the
-/// checkouts' keys are canonical; the checkouts' values are the paths the supervisor
-/// knows them by.
+/// What a changed path means. File events carry real paths, so `config_dir`, the
+/// checkouts' keys and the scan directories are canonical; the checkouts' values are
+/// the paths the supervisor knows them by.
 pub fn classify(
     path: &Path,
     config_dirs: &[PathBuf],
     checkouts: &BTreeMap<PathBuf, PathBuf>,
+    scan_dirs: &BTreeSet<PathBuf>,
 ) -> Option<Change> {
     if config_dirs.iter().any(|dir| path.starts_with(dir)) {
+        return Some(Change::Reload);
+    }
+    if path
+        .parent()
+        .is_some_and(|parent| scan_dirs.contains(parent))
+    {
         return Some(Change::Reload);
     }
     if path.components().any(|c| c.as_os_str() == ".git") {
@@ -101,11 +116,22 @@ fn checkouts(world: &World) -> BTreeMap<PathBuf, PathBuf> {
                 .project
                 .apps
                 .iter()
+                .filter(|app| !app.branch_only)
                 .map(|app| app.path.clone())
                 .chain(state.worktrees.values().flatten().map(|wt| wt.path.clone()))
         })
         .filter(|p| !p.as_os_str().is_empty());
     keyed(paths)
+}
+
+/// Every directory new apps appear in, by its configured and its canonical path.
+fn scan_dirs(world: &World) -> BTreeSet<PathBuf> {
+    world
+        .projects
+        .iter()
+        .flat_map(|state| state.scan_dirs.iter())
+        .flat_map(|dir| [canonical(dir), dir.clone()])
+        .collect()
 }
 
 fn keyed(paths: impl Iterator<Item = PathBuf>) -> BTreeMap<PathBuf, PathBuf> {
@@ -150,6 +176,7 @@ pub fn run(
     let mut world = supervisor.world();
     let config_dirs = vec![canonical(&config_dir), config_dir.clone()];
     let mut known = checkouts(&world);
+    let mut scans = scan_dirs(&world);
     update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
     Some(async move {
         let mut interval = tokio::time::interval(rescan);
@@ -159,10 +186,10 @@ pub fn run(
             let mut changes = BTreeSet::new();
             tokio::select! {
                 Some(path) = rx.recv() => {
-                    changes.extend(classify(&path, &config_dirs, &known));
+                    changes.extend(classify(&path, &config_dirs, &known, &scans));
                     tokio::time::sleep(Duration::from_millis(300)).await;
                     while let Ok(path) = rx.try_recv() {
-                        changes.extend(classify(&path, &config_dirs, &known));
+                        changes.extend(classify(&path, &config_dirs, &known, &scans));
                     }
                 }
                 _ = interval.tick() => {
@@ -188,6 +215,7 @@ pub fn run(
                     world = std::sync::Arc::new(fresh.clone());
                     supervisor.reload(fresh);
                     known = checkouts(&world);
+                    scans = scan_dirs(&world);
                     update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
                 }
             }
@@ -227,52 +255,96 @@ mod tests {
             .collect()
     }
 
+    fn scans() -> BTreeSet<PathBuf> {
+        BTreeSet::from([PathBuf::from("/work/mono/apps")])
+    }
+
+    #[test]
+    fn new_directories_in_scan_dirs_reload() {
+        assert_eq!(
+            classify(
+                Path::new("/work/mono/apps/new"),
+                &[PathBuf::from("/config")],
+                &checkouts(),
+                &scans()
+            ),
+            Some(Change::Reload)
+        );
+    }
+
     #[test]
     fn classifies_changes() {
         let config = &[PathBuf::from("/config")];
         let c = checkouts();
         assert_eq!(
-            classify(Path::new("/config/projects/acme.toml"), config, &c),
+            classify(
+                Path::new("/config/projects/acme.toml"),
+                config,
+                &c,
+                &scans()
+            ),
             Some(Change::Reload)
         );
         assert_eq!(
-            classify(Path::new("/work/acme-web/.git/worktrees/x"), config, &c),
+            classify(
+                Path::new("/work/acme-web/.git/worktrees/x"),
+                config,
+                &c,
+                &scans()
+            ),
             Some(Change::Reload)
         );
         assert_eq!(
-            classify(Path::new("/work/acme-web-feature-x"), config, &c),
+            classify(Path::new("/work/acme-web-feature-x"), config, &c, &scans()),
             Some(Change::Reload)
         );
         assert_eq!(
             classify(
                 Path::new("/work/acme-web-feature-x/tmp/restart.txt"),
                 config,
-                &c
+                &c,
+                &scans()
             ),
             Some(Change::Restart(PathBuf::from("/work/acme-web-feature-x")))
         );
         assert_eq!(
-            classify(Path::new("/work/acme-web/.tool-versions"), config, &c),
+            classify(
+                Path::new("/work/acme-web/.tool-versions"),
+                config,
+                &c,
+                &scans()
+            ),
             Some(Change::EnvChanged(PathBuf::from("/work/acme-web")))
         );
         assert_eq!(
             classify(
                 Path::new("/work/acme-web-feature-x/Procfile.dev"),
                 config,
-                &c
+                &c,
+                &scans()
             ),
             Some(Change::Reload)
         );
         assert_eq!(
-            classify(Path::new("/work/acme-web/app/Procfile"), config, &c),
+            classify(
+                Path::new("/work/acme-web/app/Procfile"),
+                config,
+                &c,
+                &scans()
+            ),
             None
         );
         assert_eq!(
-            classify(Path::new("/work/acme-web/app/models/x.rb"), config, &c),
+            classify(
+                Path::new("/work/acme-web/app/models/x.rb"),
+                config,
+                &c,
+                &scans()
+            ),
             None
         );
         assert_eq!(
-            classify(Path::new("/work/acme-web/tmp/cache"), config, &c),
+            classify(Path::new("/work/acme-web/tmp/cache"), config, &c, &scans()),
             None
         );
     }
@@ -291,7 +363,7 @@ mod tests {
             configured.join("tmp/restart.txt"),
         ] {
             assert_eq!(
-                classify(&event, config, &map),
+                classify(&event, config, &map, &scans()),
                 Some(Change::Restart(configured.clone())),
                 "{}",
                 event.display()

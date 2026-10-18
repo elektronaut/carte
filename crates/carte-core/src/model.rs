@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -123,14 +123,20 @@ impl Project {
     }
 }
 
-/// One repo in a project. `name` is the directory name and the app's identity.
+/// An app of a project: a directory found by `include`, named by `[apps.X] path`, or
+/// the project's root. `name` is its identity: the directory name, the table's key, or
+/// the project's name for the root.
 #[derive(Debug, Clone, PartialEq)]
 pub struct App {
     pub name: String,
-    /// The hostname label: `name` with the project's prefix stripped, or the `name` override.
+    /// The hostname label: `name`, with the project's prefix stripped from directory names.
     pub short: String,
-    /// The primary checkout.
+    /// Where the app is in the main checkout, which may not have it (`branch_only`).
     pub path: PathBuf,
+    /// The main checkout of the repo the app is in; `None` outside git.
+    pub repo: Option<PathBuf>,
+    /// Found only in worktrees, so it has no instance on main.
+    pub branch_only: bool,
     pub settings: AppSettings,
 }
 
@@ -384,11 +390,15 @@ pub struct ProjectState {
     pub worktrees: BTreeMap<String, Vec<Worktree>>,
     /// Each checkout's process list as read at load, by checkout path.
     pub processes: BTreeMap<PathBuf, Result<ProcessList, String>>,
+    /// The stacks of each repo the project's apps are in, by its main checkout.
+    pub repo_stacks: BTreeMap<PathBuf, BTreeSet<String>>,
+    /// Directories in every checkout where new apps can appear.
+    pub scan_dirs: BTreeSet<PathBuf>,
 }
 
 impl ProjectState {
     /// The names of every stack in the project.
-    pub fn stacks(&self) -> std::collections::BTreeSet<String> {
+    pub fn stacks(&self) -> BTreeSet<String> {
         self.worktrees
             .values()
             .flatten()
@@ -400,24 +410,78 @@ impl ProjectState {
         self.worktrees.values().flatten().any(|wt| wt.slug == slug)
     }
 
-    /// The checkout an app runs from in a stack: its own worktree, else main.
-    pub fn checkout(&self, app: &App, stack: &Stack) -> Checkout {
-        if let Stack::Branch(slug) = stack
-            && let Some(wt) = self
+    /// The checkout an app runs from in a stack: its own worktree, else main. `None`
+    /// when the stack has a worktree of the app's repo without the app, or the app is
+    /// only on branches and the stack has no worktree of it.
+    pub fn checkout(&self, app: &App, stack: &Stack) -> Option<Checkout> {
+        if let Stack::Branch(slug) = stack {
+            if let Some(wt) = self
                 .worktrees
                 .get(&app.name)
                 .and_then(|wts| wts.iter().find(|wt| &wt.slug == slug))
-        {
-            return Checkout::Worktree(wt.clone());
+            {
+                return Some(Checkout::Worktree(wt.clone()));
+            }
+            if app
+                .repo
+                .as_ref()
+                .and_then(|repo| self.repo_stacks.get(repo))
+                .is_some_and(|stacks| stacks.contains(slug))
+            {
+                return None;
+            }
         }
-        Checkout::Main {
+        (!app.branch_only).then(|| Checkout::Main {
             path: app.path.clone(),
+        })
+    }
+
+    /// Why an app has no instance in a stack, and where it has one.
+    pub fn not_in_stack(&self, app: &App, stack: &Stack) -> String {
+        let stacks: Vec<String> = self
+            .stacks_of(app)
+            .iter()
+            .map(|s| s.slug().to_string())
+            .collect();
+        let elsewhere = match stacks.as_slice() {
+            [] => String::new(),
+            [one] => format!("; it's in {one}"),
+            many => format!("; it's in {}", many.join(", ")),
+        };
+        format!(
+            "{} isn't in the {} stack{elsewhere}",
+            app.name,
+            stack.slug()
+        )
+    }
+
+    /// The app's main checkout, or its first worktree when it's only on branches.
+    pub fn any_checkout(&self, app: &App) -> PathBuf {
+        if !app.branch_only {
+            return app.path.clone();
         }
+        self.worktrees
+            .get(&app.name)
+            .and_then(|wts| wts.first())
+            .map_or_else(|| app.path.clone(), |wt| wt.path.clone())
+    }
+
+    /// Whether an app has an instance in a stack.
+    pub fn runs_in(&self, app: &App, stack: &Stack) -> bool {
+        self.checkout(app, stack).is_some()
+    }
+
+    /// The stacks an app has an instance in, main first.
+    pub fn stacks_of(&self, app: &App) -> Vec<Stack> {
+        std::iter::once(Stack::Main)
+            .chain(self.stacks().into_iter().map(Stack::Branch))
+            .filter(|stack| self.runs_in(app, stack))
+            .collect()
     }
 
     /// The process list of an app's checkout in a stack, as read at load.
     pub fn process_list(&self, app: &App, stack: &Stack) -> Option<&Result<ProcessList, String>> {
-        self.processes.get(self.checkout(app, stack).path())
+        self.processes.get(self.checkout(app, stack)?.path())
     }
 }
 

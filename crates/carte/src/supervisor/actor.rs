@@ -643,7 +643,12 @@ impl Actor {
             ));
         }
         let (state, app) = self.lookup(key)?;
-        let checkout = state.checkout(app, &key.stack);
+        let checkout = state.checkout(app, &key.stack).ok_or_else(|| {
+            BootFailure::new(
+                format!("{} isn't in this stack", app.name),
+                state.not_in_stack(app, &key.stack),
+            )
+        })?;
         let deps = lifecycle::dependencies(&self.world, key);
         let route_port = app.settings.port;
         let list = procfile::load(checkout.path(), &app.settings)
@@ -2576,14 +2581,18 @@ impl Actor {
                     None => "its project is gone",
                     Some(state) => match state.project.app(&inst.key.app) {
                         None => "its app is gone",
-                        Some(app)
-                            if inst.checkout.as_ref().is_some_and(|c| {
-                                c.path() != state.checkout(app, &inst.key.stack).path()
-                            }) =>
-                        {
-                            "its checkout moved"
-                        }
-                        Some(_) => return None,
+                        Some(app) => match state.checkout(app, &inst.key.stack) {
+                            None => "its app is gone from the stack",
+                            Some(current)
+                                if inst
+                                    .checkout
+                                    .as_ref()
+                                    .is_some_and(|c| c.path() != current.path()) =>
+                            {
+                                "its checkout moved"
+                            }
+                            Some(_) => return None,
+                        },
                     },
                 };
                 Some((inst.key.clone(), why))

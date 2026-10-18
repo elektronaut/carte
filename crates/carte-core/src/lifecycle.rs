@@ -217,6 +217,8 @@ mod tests {
                     name: (*name).into(),
                     short: name.trim_start_matches("nova-").into(),
                     path: PathBuf::from("/work").join(name),
+                    repo: None,
+                    branch_only: false,
                     settings: AppSettings {
                         depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
                         ..Default::default()
@@ -350,6 +352,8 @@ mod tests {
                     project,
                     worktrees: Default::default(),
                     processes: Default::default(),
+                    repo_stacks: Default::default(),
+                    scan_dirs: Default::default(),
                 })
                 .collect(),
             ..Default::default()

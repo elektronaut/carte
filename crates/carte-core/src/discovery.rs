@@ -7,6 +7,7 @@ use std::process::Command;
 use thiserror::Error;
 
 use crate::config::{self, DiscoveredApp, ProjectFile};
+use crate::include;
 use crate::model::{AppRef, Problem, ProjectState, Worktree, World};
 use crate::naming;
 use crate::procfile;
@@ -49,38 +50,6 @@ pub fn is_primary_checkout(dir: &Path) -> bool {
             .is_some_and(|gitdir| gitdir.trim().contains("/worktrees/")),
         Err(_) => false,
     }
-}
-
-/// Expands `repos` entries (paths or globs, `~` allowed) into primary checkouts,
-/// sorted and deduplicated. Also returns messages for entries that found nothing.
-pub fn expand_repos(patterns: &[String]) -> (Vec<PathBuf>, Vec<String>) {
-    let mut dirs = Vec::new();
-    let mut problems = Vec::new();
-    for pattern in patterns {
-        let expanded = expand_home(pattern);
-        let expanded = expanded.to_string_lossy();
-        let paths = match glob::glob(&expanded) {
-            Ok(paths) => paths.filter_map(Result::ok),
-            Err(err) => {
-                problems.push(format!(
-                    "repos entry {pattern:?} is not a valid glob: {err}"
-                ));
-                continue;
-            }
-        };
-        let found: Vec<PathBuf> = paths
-            .filter(|p| p.is_dir() && is_primary_checkout(p))
-            .collect();
-        if found.is_empty() {
-            problems.push(format!(
-                "repos entry {pattern:?} matches no git repositories"
-            ));
-        }
-        dirs.extend(found);
-    }
-    dirs.sort();
-    dirs.dedup();
-    (dirs, problems)
 }
 
 /// One entry of `git worktree list --porcelain`.
@@ -203,93 +172,78 @@ pub fn list_worktrees(main_checkout: &Path) -> Result<Vec<Worktree>, DiscoveryEr
     Ok(linked_worktrees(&parse_worktree_list(&stdout)))
 }
 
-/// Expands a project's repos, reads each app's `carte.toml`, assembles the project
-/// and lists each app's worktrees.
+/// Finds a project's apps in each checkout, reads each app's `carte.toml` and
+/// process lists, and assembles the project.
 pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
     let project_name = file.name.clone();
-    let problem = |app: Option<&str>, message: String| Problem {
-        project: Some(project_name.clone()),
-        app: app.map(str::to_string),
-        stack: None,
-        message,
+    let named: Vec<(String, String)> = file
+        .apps
+        .iter()
+        .filter_map(|(name, table)| table.path.clone().map(|path| (name.clone(), path)))
+        .collect();
+    let only_ports =
+        file.root.is_none() && file.include.is_empty() && named.is_empty() && !file.apps.is_empty();
+    let expanded = if only_ports {
+        include::Expanded::default()
+    } else {
+        include::expand(&project_name, file.root.as_deref(), &file.include, &named)
     };
-    let stack_problem = |app: &str, stack: &str, message: String| Problem {
-        stack: Some(stack.to_string()),
-        ..problem(Some(app), message)
-    };
-    let (dirs, repo_problems) = expand_repos(&file.repos);
-    let mut problems: Vec<Problem> = repo_problems
+    let mut problems: Vec<Problem> = expanded
+        .problems
         .into_iter()
-        .map(|m| problem(None, m))
+        .map(|issue| Problem {
+            project: Some(project_name.clone()),
+            app: issue.app,
+            stack: issue.stack,
+            message: issue.message,
+        })
         .collect();
 
-    let discovered = dirs
+    let mut worktrees = BTreeMap::new();
+    let discovered = expanded
+        .apps
         .into_iter()
-        .filter_map(|path| {
-            let name = path.file_name()?.to_string_lossy().into_owned();
-            let repo_config = config::load_repo_config(&path).unwrap_or_else(|err| {
-                problems.push(problem(Some(&name), err.to_string()));
-                None
+        .map(|found| {
+            let config_dir = if found.in_main {
+                Some(found.path.clone())
+            } else {
+                found.worktrees.first().map(|wt| wt.path.clone())
+            };
+            let repo_config = config_dir.and_then(|dir| {
+                config::load_repo_config(&dir).unwrap_or_else(|err| {
+                    problems.push(Problem {
+                        project: Some(project_name.clone()),
+                        app: Some(found.name.clone()),
+                        stack: None,
+                        message: err.to_string(),
+                    });
+                    None
+                })
             });
-            Some(DiscoveredApp {
-                name,
-                path,
+            if !found.worktrees.is_empty() {
+                worktrees.insert(found.name.clone(), found.worktrees);
+            }
+            DiscoveredApp {
+                name: found.name,
+                naming: found.naming,
+                path: found.path,
+                repo: found.repo,
+                branch_only: !found.in_main,
                 repo_config,
-            })
+            }
         })
         .collect();
     let (project, assembly_problems) = config::assemble_project(file, discovered);
     problems.extend(assembly_problems);
+    worktrees.retain(|name, _| project.app(name).is_some());
 
-    let mut worktrees = BTreeMap::new();
-    for app in project
-        .apps
-        .iter()
-        .filter(|a| !a.path.as_os_str().is_empty())
-    {
-        let wts = match list_worktrees(&app.path) {
-            Ok(wts) => wts,
-            Err(err) => {
-                problems.push(problem(Some(&app.name), err.to_string()));
-                continue;
-            }
-        };
-        let (wts, on_main): (Vec<Worktree>, Vec<Worktree>) =
-            wts.into_iter().partition(|wt| wt.slug != "main");
-        for wt in on_main {
-            problems.push(stack_problem(
-                &app.name,
-                "main",
-                format!(
-                    "worktree {} is skipped: its stack would be named main, like the main checkout's; rename its folder",
-                    wt.path.display()
-                ),
-            ));
-        }
-        for (i, wt) in wts.iter().enumerate() {
-            if let Some(other) = wts[..i].iter().find(|o| o.slug == wt.slug) {
-                problems.push(stack_problem(
-                    &app.name,
-                    &wt.slug,
-                    format!(
-                        "worktrees {} and {} have the same stack name ({}); rename one of their folders",
-                        other.path.display(),
-                        wt.path.display(),
-                        wt.slug
-                    ),
-                ));
-            }
-        }
-        if !wts.is_empty() {
-            worktrees.insert(app.name.clone(), wts);
-        }
-    }
     let processes = project
         .apps
         .iter()
         .filter(|a| !a.path.as_os_str().is_empty())
         .flat_map(|app| {
-            let checkouts = std::iter::once(app.path.clone()).chain(
+            let main = (!app.branch_only).then(|| app.path.clone());
+            let checkouts = main.into_iter().chain(
                 worktrees
                     .get(&app.name)
                     .into_iter()
@@ -306,6 +260,8 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
         project,
         worktrees,
         processes,
+        repo_stacks: expanded.repo_stacks,
+        scan_dirs: expanded.scan_dirs,
     };
     problems.extend(naming::collisions(&state));
     (state, problems)
@@ -742,7 +698,7 @@ prunable gitdir file points to non-existent location
         let file = |path: &str, repo: &str| {
             std::fs::write(
                 projects.join(path),
-                format!("repos = \"{}/work/{repo}\"\n", root.display()),
+                format!("root = \"{}/work/{repo}\"\n", root.display()),
             )
             .unwrap();
         };
@@ -781,6 +737,12 @@ prunable gitdir file points to non-existent location
         let work = root.join("work");
         repo(&work.join("nova-frontend"));
         repo(&work.join("nova-billing"));
+        std::fs::write(work.join("nova-frontend/Procfile"), "web: bin/web\n").unwrap();
+        git(&work.join("nova-frontend"), &["add", "Procfile"]);
+        git(
+            &work.join("nova-frontend"),
+            &["commit", "-q", "-m", "procfile"],
+        );
         std::fs::create_dir_all(work.join("nova-notes")).unwrap();
         git(
             &work.join("nova-frontend"),
@@ -816,7 +778,7 @@ prunable gitdir file points to non-existent location
         );
         std::fs::write(
             work.join("nova-billing/carte.toml"),
-            "name = \"invoices\"\n[processes.web]\ncommand = \"bin/web\"\n",
+            "[processes.web]\ncommand = \"bin/web\"\n",
         )
         .unwrap();
 
@@ -825,17 +787,13 @@ prunable gitdir file points to non-existent location
         std::fs::write(
             config_dir.join("projects/nova.toml"),
             format!(
-                "repos = \"{}/nova-*\"\nstrip_prefix = \"nova-\"\n[apps.nova-frontend]\ndepends_on = [\"invoices\"]\n",
+                "root = \"{}\"\ninclude = \"nova-*\"\nstrip_prefix = \"nova-\"\n[apps.invoices]\npath = \"nova-billing\"\n[apps.nova-frontend]\ndepends_on = [\"invoices\"]\n",
                 work.display()
             ),
         )
         .unwrap();
-        std::fs::write(
-            config_dir.join("projects/xy.toml"),
-            "repos = \"/nowhere\"\n",
-        )
-        .unwrap();
-        std::fs::write(config_dir.join("projects/broken.toml"), "repos = 3\n").unwrap();
+        std::fs::write(config_dir.join("projects/xy.toml"), "root = \"/nowhere\"\n").unwrap();
+        std::fs::write(config_dir.join("projects/broken.toml"), "root = 3\n").unwrap();
 
         let world = load_world(&config_dir);
         assert_eq!(world.projects.len(), 1);
@@ -848,11 +806,11 @@ prunable gitdir file points to non-existent location
             .collect();
         assert_eq!(
             apps,
-            vec![("nova-billing", "invoices"), ("nova-frontend", "frontend")]
+            vec![("invoices", "invoices"), ("nova-frontend", "frontend")]
         );
         let frontend = state.project.app("nova-frontend").unwrap();
-        assert_eq!(frontend.settings.depends_on, vec!["nova-billing"]);
-        let billing = state.project.app("nova-billing").unwrap();
+        assert_eq!(frontend.settings.depends_on, vec!["invoices"]);
+        let billing = state.project.app("invoices").unwrap();
         assert_eq!(
             billing.settings.processes.entries["web"].command.as_deref(),
             Some("bin/web")
@@ -872,7 +830,7 @@ prunable gitdir file points to non-existent location
                 },
             ]
         );
-        assert_eq!(state.worktrees["nova-billing"][0].slug, "feature-x");
+        assert_eq!(state.worktrees["invoices"][0].slug, "feature-x");
         assert_eq!(
             state.stacks().into_iter().collect::<Vec<_>>(),
             vec!["feature-x", "nova-frontend-detached"]
@@ -920,7 +878,7 @@ prunable gitdir file points to non-existent location
         std::fs::write(
             config_dir.join("projects/shop.toml"),
             format!(
-                "repos = [\"{0}/shop\", \"{0}/notes\"]\n[apps.shop.processes.worker]\npolicy = \"disabled\"\n",
+                "root = \"{0}\"\ninclude = [\"shop\", \"notes\"]\n[apps.shop.processes.worker]\npolicy = \"disabled\"\n",
                 work.display()
             ),
         )
@@ -963,6 +921,54 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
+    fn monorepo_stacks_have_the_apps_their_worktree_has() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let mono = root.join("mono");
+        repo(&mono);
+        for app in ["web", "old"] {
+            std::fs::create_dir_all(mono.join("apps").join(app)).unwrap();
+            std::fs::write(mono.join("apps").join(app).join("Procfile"), "web: x\n").unwrap();
+        }
+        git(&mono, &["add", "-A"]);
+        git(&mono, &["commit", "-q", "-m", "apps"]);
+        git(&mono, &["worktree", "add", "-q", "-b", "fx", "../mono-fx"]);
+        let fx = root.join("mono-fx");
+        std::fs::remove_dir_all(fx.join("apps/old")).unwrap();
+        std::fs::create_dir_all(fx.join("apps/new")).unwrap();
+        std::fs::write(fx.join("apps/new/Procfile"), "web: x\n").unwrap();
+        repo(&root.join("auth"));
+        std::fs::write(root.join("auth/Procfile"), "web: x\n").unwrap();
+
+        let file = config::parse_project(
+            &root.join("mono.toml"),
+            &format!(
+                "root = \"{}\"\ninclude = [\"mono/apps/*\", \"auth\"]\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        let (state, problems) = discover_project(file);
+        assert!(problems.is_empty(), "{problems:?}");
+        let fx_stack = Stack::Branch("mono-fx".into());
+        let path = |name: &str, stack: &Stack| {
+            let app = state.project.app(name).unwrap();
+            state.checkout(app, stack).map(|c| c.path().clone())
+        };
+        assert_eq!(path("web", &fx_stack), Some(fx.join("apps/web")));
+        assert_eq!(path("new", &fx_stack), Some(fx.join("apps/new")));
+        assert_eq!(path("new", &Stack::Main), None);
+        assert_eq!(path("old", &fx_stack), None);
+        assert_eq!(path("old", &Stack::Main), Some(mono.join("apps/old")));
+        assert_eq!(path("auth", &fx_stack), Some(root.join("auth")));
+        let new = state.project.app("new").unwrap();
+        assert_eq!(
+            state.not_in_stack(new, &Stack::Main),
+            "new isn't in the main stack; it's in mono-fx"
+        );
+    }
+
+    #[test]
     fn reports_stacks_named_like_an_app_or_main_or_shared_by_a_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
@@ -982,7 +988,7 @@ prunable gitdir file points to non-existent location
         let file = config::parse_project(
             &root.join("acme.toml"),
             &format!(
-                "repos = [\"{0}/acme-web\", \"{0}/acme-api\", \"{0}/missing\"]\nstrip_prefix = \"acme-\"\n",
+                "root = \"{0}\"\ninclude = [\"acme-web\", \"acme-api\", \"missing\"]\nstrip_prefix = \"acme-\"\n",
                 root.display()
             ),
         )
@@ -996,46 +1002,32 @@ prunable gitdir file points to non-existent location
         assert_eq!(
             found,
             [
+                (None, Some("main")),
+                (None, Some("feature")),
                 (None, None),
-                (Some("acme-web"), Some("main")),
-                (Some("acme-web"), Some("feature")),
                 (Some("acme-api"), Some("api")),
             ],
             "{problems:?}"
         );
-        assert!(problems[0].message.contains("\"") && problems[0].message.contains("missing"));
         assert!(
-            problems[1]
+            problems[0]
                 .message
                 .contains("its stack would be named main"),
             "{}",
-            problems[1].message
+            problems[0].message
         );
         assert!(
-            problems[2]
+            problems[1]
                 .message
                 .contains("have the same stack name (feature)"),
             "{}",
-            problems[2].message
+            problems[1].message
         );
+        assert!(problems[2].message.contains("\"missing\""));
         assert!(problems[3].message.contains("same name as app acme-api"));
         assert_eq!(
             state.stacks().into_iter().collect::<Vec<_>>(),
             vec!["api", "feature"]
         );
-    }
-
-    #[test]
-    fn linked_worktree_dirs_are_not_apps() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().canonicalize().unwrap();
-        repo(&root.join("app"));
-        git(
-            &root.join("app"),
-            &["worktree", "add", "-q", "-b", "x", "../app-x"],
-        );
-        let (dirs, problems) = expand_repos(&[format!("{}/*", root.display())]);
-        assert_eq!(dirs, vec![root.join("app")]);
-        assert!(problems.is_empty());
     }
 }

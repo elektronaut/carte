@@ -8,7 +8,9 @@ use carte_api::{
     ProcessState, ProcessStatus, ProjectStatus, Snapshot, StackStatus, TunnelStatus,
 };
 use carte_core::lifecycle;
-use carte_core::model::{App, InstanceKey, Policy, ProjectState, Readiness, Stack, World};
+use carte_core::model::{
+    App, Checkout, InstanceKey, Policy, ProjectState, Readiness, Stack, World,
+};
 use carte_core::naming;
 
 use super::actor::{Instance, Overrides, Proc, effective_policy};
@@ -114,13 +116,19 @@ fn stack_status(
     let instances = project
         .apps
         .iter()
-        .map(|app| {
+        .filter_map(|app| {
             let key = InstanceKey {
                 project: project.name.clone(),
                 app: app.name.clone(),
                 stack: stack.clone(),
             };
             let checkout = state.checkout(app, &stack);
+            if checkout.is_none() && !instances.contains_key(&key) {
+                return None;
+            }
+            let checkout = checkout.unwrap_or_else(|| Checkout::Main {
+                path: app.path.clone(),
+            });
             let url = naming::instance_url(&world.machine, project, app, &stack);
             let public_url = world.machine.share.as_ref().and_then(|config| {
                 share::shared_apps(shares, &project.name, &stack)
@@ -130,7 +138,7 @@ fn stack_status(
             });
             let Some(inst) = instances.get(&key) else {
                 let processes = stopped_processes(input, state, app, &stack, &key, &[]);
-                return InstanceStatus {
+                return Some(InstanceStatus {
                     app: app.name.clone(),
                     stack: stack.slug().to_string(),
                     checkout: checkout.slug().to_string(),
@@ -147,7 +155,7 @@ fn stack_status(
                     env_changed: false,
                     last_event: latest.get(&key).cloned(),
                     boot: None,
-                };
+                });
             };
             let mut holds = Vec::new();
             let pinned = inst
@@ -206,7 +214,7 @@ fn stack_status(
                     })
                     .collect()
             };
-            InstanceStatus {
+            Some(InstanceStatus {
                 app: app.name.clone(),
                 stack: stack.slug().to_string(),
                 checkout: checkout.slug().to_string(),
@@ -226,7 +234,7 @@ fn stack_status(
                     elapsed_ms: now.saturating_duration_since(inst.started_at).as_millis() as u64,
                     waiting_for: waiting_for(&inst.procs),
                 }),
-            }
+            })
         })
         .collect();
     StackStatus {

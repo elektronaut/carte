@@ -146,12 +146,11 @@ struct Draft {
 
 #[derive(Debug, Clone)]
 struct DraftApp {
-    /// The full app name: the directory name, or the link name for a port.
+    /// The app's name: the project's, as the project's root or a port.
     name: String,
     links: Vec<String>,
     path: Option<PathBuf>,
     port: Option<u16>,
-    short: Option<String>,
     env_files: Vec<String>,
 }
 
@@ -275,17 +274,14 @@ impl<'a> Importer<'a> {
             return Ok(None);
         };
         self.taken.insert(name.clone());
-        let dir_name = dir_name(&link.path);
-        let short = (dir_name != name).then(|| name.clone());
         let env_files = self.env_files(&link);
         Ok(Some(Draft {
-            name,
+            name: name.clone(),
             apps: vec![DraftApp {
-                name: dir_name,
+                name,
                 links: link.names,
                 path: Some(link.path),
                 port: None,
-                short,
                 env_files,
             }],
         }))
@@ -334,7 +330,6 @@ impl<'a> Importer<'a> {
                 links: vec![port.name],
                 path: None,
                 port: Some(port.port),
-                short: None,
                 env_files: Vec::new(),
             }],
         }))
@@ -398,12 +393,6 @@ impl<'a> Importer<'a> {
     }
 }
 
-fn dir_name(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default()
-}
-
 fn valid_project_name(name: &str) -> Option<String> {
     let lower = name.to_ascii_lowercase();
     if slug::validate_project_name(&lower).is_ok() {
@@ -430,15 +419,12 @@ fn string_array<'s>(items: impl IntoIterator<Item = &'s str>) -> Array {
 fn project_text(draft: &Draft, aliases: &BTreeMap<String, Vec<String>>) -> String {
     let mut doc = DocumentMut::new();
     if let Some(path) = draft.apps.iter().find_map(|a| a.path.as_deref()) {
-        doc["repos"] = value(tilde(path));
+        doc["root"] = value(tilde(path));
     }
     let mut apps = Table::new();
     apps.set_implicit(true);
     for app in &draft.apps {
         let mut table = Table::new();
-        if let Some(short) = &app.short {
-            table["name"] = value(short.as_str());
-        }
         if let Some(port) = app.port {
             table["port"] = value(i64::from(port));
         }
@@ -653,7 +639,7 @@ mod tests {
             .map(|l| {
                 (
                     l.names.iter().map(String::as_str).collect(),
-                    dir_name(&l.path),
+                    l.path.file_name().unwrap().to_string_lossy().into_owned(),
                 )
             })
             .collect();
@@ -717,17 +703,17 @@ mod tests {
 
         assert_eq!(
             built[0].text,
-            format!("repos = \"{root}/clients/blog/develop\"\n\n[apps.develop]\nname = \"blog\"\n")
+            format!("root = \"{root}/clients/blog/develop\"\n")
         );
         assert_eq!(
             built[1].text,
-            format!("repos = \"{root}/work/apps/shop-admin\"\n")
+            format!("root = \"{root}/work/apps/shop-admin\"\n")
         );
         assert_eq!(
             built[3].text,
             format!(
-                "repos = \"{root}/work/apps/shop-web\"\n\n\
-                 [apps.shop-web]\nname = \"storefront\"\naliases = [\"web\"]\nenv_files = [\".env\", \".powenv\"]\n"
+                "root = \"{root}/work/apps/shop-web\"\n\n\
+                 [apps.storefront]\naliases = [\"web\"]\nenv_files = [\".env\", \".powenv\"]\n"
             )
         );
         assert_eq!(built[4].text, "[apps.legacy]\nport = 3005\n");
@@ -761,13 +747,10 @@ mod tests {
         let fixture = fixture();
         let paths = Paths::under(&fixture.root.join("carte"));
         fs::create_dir_all(paths.projects_dir()).unwrap();
-        fs::write(paths.project_file("blog"), "repos = \"/elsewhere\"\n").unwrap();
+        fs::write(paths.project_file("blog"), "root = \"/elsewhere\"\n").unwrap();
         fs::write(
             paths.project_file("mine"),
-            format!(
-                "repos = \"{}/work/apps/shop-api\"\n",
-                fixture.root.display()
-            ),
+            format!("root = \"{}/work/apps/shop-api\"\n", fixture.root.display()),
         )
         .unwrap();
         let (built, skipped, _) = import(&fixture, &paths);

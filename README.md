@@ -86,7 +86,7 @@ before. puma-dev's own files stay untouched, and
 
 ## Projects
 
-A project is a group of repos that belong together. Each project is a
+A project is a group of apps that belong together. Each project is a
 file in `~/.config/carte/projects/`. For a single app, this is enough:
 
 ```sh
@@ -97,7 +97,7 @@ carte project add .
 That writes `~/.config/carte/projects/myapp.toml` with one line:
 
 ```toml
-repos = "~/code/myapp"
+root = "~/code/myapp"
 ```
 
 and the app is at `https://myapp.test`. Its processes come from
@@ -108,7 +108,8 @@ A larger project:
 
 ```toml
 # ~/.config/carte/projects/acme.toml
-repos = "~/work/acme-*"
+root = "~/work"
+include = "acme-*"
 strip_prefix = "acme-"
 requires = ["tcp://localhost:5432"]
 
@@ -123,8 +124,14 @@ depends_on = ["billing", "accounts"]
 policy = "disabled"
 ```
 
-- `repos` is a path, a glob, or a list of them. New repos that match a
-  glob join the project.
+- `root` is where the project lives, and `include` lists the
+  directories under it that are apps: paths and globs, with `!` in
+  front to leave matches out. A glob only picks directories with
+  something to run, and new ones join as they appear. Without
+  `include`, the root is the one app, named after the project.
+- A monorepo works the same way: `root = "~/work/mono"` and
+  `include = "apps/*"`. Each worktree of it is a stack, with the apps
+  that worktree has.
 - `strip_prefix` shortens hostnames: `acme-billing` is
   `billing.acme.test`. An app named like its project is just
   `acme.test`.

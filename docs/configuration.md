@@ -5,7 +5,7 @@ carte reads three kinds of TOML files:
 | File | Holds |
 | --- | --- |
 | `~/.config/carte/config.toml` | Machine settings: TLD, ports, idle timeout, limits, sharing |
-| `~/.config/carte/projects/<name>.toml` | One project: its repos, env and per-app settings |
+| `~/.config/carte/projects/<name>.toml` | One project: where its apps are, env and per-app settings |
 | `carte.toml` in a repo | Defaults for that app, which can be committed |
 
 The config directory is `~/.config/carte` and carte's state (logs, the
@@ -94,7 +94,8 @@ letters, digits and dashes. Files in a subdirectory, like
 it doesn't change their names or hostnames.
 
 ```toml
-repos = "~/work/acme-*"
+root = "~/work"
+include = "acme-*"
 strip_prefix = "acme-"
 requires = ["tcp://localhost:5432", "tcp://localhost:6379"]
 idle_timeout = "30m"
@@ -110,15 +111,16 @@ depends_on = ["billing", "accounts"]
 policy = "disabled"
 ```
 
-Apps can also be listed one by one, or mixed with globs:
+A project of one app needs only its root:
 
 ```toml
-repos = ["~/work/acme-billing", "~/work/acme-frontend", "~/clients/acme/*"]
+root = "~/work/shop"
 ```
 
 | Key | Default | |
 | --- | --- | --- |
-| `repos` | required | A path or glob, or a list mixing both. Each match that is a git repository (not a worktree) is an app. Repos that start matching a glob later join the project; an entry that matches nothing is reported |
+| `root` | none | The directory `include` entries and app paths are relative to. Without `include`, the root itself is the project's one app |
+| `include` | the root | Where the apps are: a path or glob, or a list of them. See [Finding apps](#finding-apps) |
 | `strip_prefix` | none | Removed from directory names to get the short names used in hostnames |
 | `env_provider` | detected | Where the base environment comes from: `mise`, `direnv`, `shell` or `none`. See [Environment](#environment) |
 | `env` | none | Env templates for every app. See [Env templates](#env-templates) |
@@ -126,14 +128,65 @@ repos = ["~/work/acme-billing", "~/work/acme-frontend", "~/clients/acme/*"]
 | `scheme` | `"https"` | The scheme of URLs carte injects. `"http"` for apps that misbehave behind HTTPS |
 | `idle_timeout` | machine's | Overrides the machine's idle timeout for this project |
 | `teardown_delay` | machine's | Overrides the machine's teardown delay for this project |
-| `apps` | none | Per-app settings, keyed by directory name. See [Apps](#apps) |
+| `apps` | none | Per-app settings, keyed by app name. See [Apps](#apps) |
 | `processes` | none | Processes declared for many apps at once. See [Project-level processes](#project-level-processes) |
+
+### Finding apps
+
+`include` entries are paths and globs, relative to `root` unless they
+start with `~` or `/`. Each directory they match is an app:
+
+```toml
+root = "~/work"
+include = [
+  "acme-*",                # separate repos
+  "mono/apps/*",           # apps inside a monorepo
+  "!mono/apps/docs",       # but not this one
+  "sites/handbook",        # a directory outside git
+]
+```
+
+- **Entries apply in order.** One starting with `!` leaves out what it
+  matches, and a later entry can bring a match back. The last entry
+  that matches a directory decides.
+- **A glob only picks directories with something to run**: a
+  `Procfile.dev`, `Procfile` or `config.ru`, or a `carte.toml` with
+  processes. Libraries and other directories next to your apps are
+  left out. A path without a glob is always an app. Globs match one
+  directory level each; `**` isn't supported.
+- **Matches are looked for in every checkout.** A pattern that reaches
+  into a git repo is also matched in each of the repo's worktrees, so a
+  stack has exactly the apps its worktree has: an app added on a branch
+  exists only in that stack, and one deleted on a branch is gone from
+  it. Asking for such an app where it doesn't exist says which stacks
+  have it. Apps in other repos that have no worktree in a stack run
+  from their main checkout there.
+- **Directories outside git** are apps too, without worktrees. They run
+  from their directory in every stack.
+- **Linked worktrees** that a glob reaches are skipped: they belong to
+  their repo's stacks.
+- New directories and repos that match a glob join the project as they
+  appear. An entry that matches nothing is reported.
+
+An app that `include` finds is named after its directory. To give one a
+different name, or to add an app `include` doesn't find, name it with
+`path`:
+
+```toml
+[apps.billing]
+path = "acme-billing"
+```
+
+The table's key is then the app's name, and the directory belongs to it
+even when a glob also matches it. Renaming an app changes its hostnames
+and its state directory; `carte prune` cleans up the old one.
 
 ### Names and hostnames
 
-An app's name is its directory name, and its short name is that name
-with `strip_prefix` removed (or `name`, if set). Hostnames are built from
-short names, project and stack:
+An app's name is its directory name, the key of the `[apps.X]` table
+that names it with `path`, or the project's name for the project's root.
+Its short name is the name, with `strip_prefix` removed from directory
+names. Hostnames are built from short names, project and stack:
 
 | | Hostname |
 | --- | --- |
@@ -171,27 +224,27 @@ reported as unreachable.
 
 ## Apps
 
-`[apps.<directory name>]` tables in a project file, or the top level of a
-repo's `carte.toml`. When both set a key, the project file wins, key by
+`[apps.<name>]` tables in a project file, or the top level of an app's
+`carte.toml`. When both set a key, the project file wins, key by
 key; `env` and `processes` are merged entry by entry. The project's
 [`[processes]`](#project-level-processes) sit between the two.
 
 ```toml
-[apps.acme-events]
-name = "events"
+[apps.events]
+path = "acme-events"
 subdomains = true
 aliases = ["acme-events"]
 env_files = [".env"]
 depends_on = ["accounts", "mail.other-project"]
 policy = "pinned"
 
-[apps.acme-events.env]
+[apps.events.env]
 TZ = "Europe/Oslo"
 ```
 
 | Key | Default | |
 | --- | --- | --- |
-| `name` | directory name minus `strip_prefix` | The short name used in hostnames |
+| `path` | none | Project files only: the app's directory, which names it after the table. See [Finding apps](#finding-apps) |
 | `env` | none | Env templates for this app, over the project's |
 | `env_files` | none | Files of `KEY=VALUE` lines, relative to the checkout, read in order |
 | `depends_on` | none | Apps this app calls. See below |
@@ -466,7 +519,7 @@ DATABASE = "billing_{{stack | snake}}"
   pending teardowns in memory: a daemon restart forgets them.
 - **Discovery.** Nothing is torn down in a project whose configuration
   or discovery has a problem, such as a failing `git worktree list` or
-  a `repos` entry that matches nothing, or in a stack whose
+  an `include` entry that matches nothing, or in a stack whose
   `stack.toml` can't be read. A pending teardown then pauses
   (`teardown-paused` in `carte events`, with the problem): its delay
   keeps counting, but it only runs once carte can tell again that the

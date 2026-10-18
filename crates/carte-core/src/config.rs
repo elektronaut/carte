@@ -198,13 +198,15 @@ pub fn load_machine_config(path: &Path) -> Result<MachineConfig, ConfigError> {
 
 // Project files
 
-/// A parsed project file, before its repos are discovered.
+/// A parsed project file, before its apps are discovered.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectFile {
     pub name: String,
     pub path: PathBuf,
-    /// Paths or globs, unexpanded.
-    pub repos: Vec<String>,
+    /// The directory relative `include` entries and app paths start from, unexpanded.
+    pub root: Option<String>,
+    /// Paths or globs, unexpanded; entries starting with `!` remove matches.
+    pub include: Vec<String>,
     pub strip_prefix: Option<String>,
     pub env_provider: Option<EnvProviderKind>,
     pub env: Vec<EnvTemplate>,
@@ -229,8 +231,9 @@ pub struct ProjectProcess {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawProject {
+    root: Option<String>,
     #[serde(default)]
-    repos: OneOrMany,
+    include: OneOrMany,
     strip_prefix: Option<String>,
     env_provider: Option<EnvProviderKind>,
     #[serde(default)]
@@ -251,8 +254,8 @@ struct RawProject {
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
-    /// Short-name override.
-    pub name: Option<String>,
+    /// Where a named app is, relative to the project's root; project files only.
+    pub path: Option<String>,
     #[serde(default, deserialize_with = "env_table")]
     pub env: Vec<EnvTemplate>,
     pub env_files: Option<Vec<String>>,
@@ -279,7 +282,7 @@ impl AppConfig {
             processes.insert(name, merged);
         }
         AppConfig {
-            name: self.name.or(base.name),
+            path: self.path.or(base.path),
             env: merge_env(base.env, self.env),
             env_files: self.env_files.or(base.env_files),
             depends_on: self.depends_on.or(base.depends_on),
@@ -429,11 +432,21 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         path: path.to_path_buf(),
         message: err.to_string(),
     })?;
+    if text
+        .parse::<toml::Table>()
+        .is_ok_and(|table| table.contains_key("repos"))
+    {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            message: "`repos` is replaced by `root` and `include`: `repos = \"~/work/acme-*\"` is now `root = \"~/work\"` and `include = \"acme-*\"`, and a single repo is just `root = \"~/work/shop\"`".into(),
+        });
+    }
     let raw: RawProject = from_toml(path, text)?;
     Ok(ProjectFile {
         name,
         path: path.to_path_buf(),
-        repos: raw.repos.0,
+        root: raw.root,
+        include: raw.include.0,
         strip_prefix: raw.strip_prefix.filter(|p| !p.is_empty()),
         env_provider: raw.env_provider,
         env: raw.env.0,
@@ -452,7 +465,14 @@ pub fn load_project_file(path: &Path) -> Result<ProjectFile, ConfigError> {
 
 /// Parses a repo's `carte.toml`, which has the shape of one `[apps.X]` table.
 pub fn parse_repo_config(path: &Path, text: &str) -> Result<AppConfig, ConfigError> {
-    from_toml(path, text)
+    let config: AppConfig = from_toml(path, text)?;
+    if config.path.is_some() {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            message: "`path` only applies to a project file's [apps.X]".into(),
+        });
+    }
+    Ok(config)
 }
 
 /// Reads `carte.toml` from a checkout, if it has one.
@@ -464,13 +484,26 @@ pub fn load_repo_config(checkout: &Path) -> Result<Option<AppConfig>, ConfigErro
     parse_repo_config(&path, &read(&path)?).map(Some)
 }
 
-/// An app directory found by expanding a project's `repos`.
+/// An app found by discovery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiscoveredApp {
-    /// The directory name.
     pub name: String,
+    /// How it got its name, which decides its short name.
+    pub naming: Naming,
     pub path: PathBuf,
+    pub repo: Option<PathBuf>,
+    pub branch_only: bool,
     pub repo_config: Option<AppConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Naming {
+    /// After its directory; the project's `strip_prefix` applies.
+    Directory,
+    /// By an `[apps.X] path`.
+    Named,
+    /// The project's root, named after the project.
+    Root,
 }
 
 /// Builds a project from its file and discovered app directories, merging each
@@ -493,7 +526,8 @@ pub fn assemble_project(
         teardown_delay,
         apps: mut app_tables,
         processes: project_processes,
-        repos: _,
+        root: _,
+        include: _,
     } = file;
     let mut problems = Vec::new();
     let problem = |app: &str, message: String| Problem {
@@ -503,35 +537,50 @@ pub fn assemble_project(
         message,
     };
 
-    let mut candidates: Vec<(String, PathBuf, AppConfig, Option<AppConfig>)> = discovered
+    let mut candidates: Vec<Candidate> = discovered
         .into_iter()
         .map(|d| {
             let table = app_tables.remove(&d.name).unwrap_or_default();
-            (d.name, d.path, table, d.repo_config)
+            let short = match d.naming {
+                Naming::Directory => short_name(&d.name, strip_prefix.as_deref()),
+                Naming::Named | Naming::Root => d.name.clone(),
+            };
+            Candidate {
+                short,
+                table,
+                discovered: d,
+            }
         })
         .collect();
     for (name, table) in std::mem::take(&mut app_tables) {
+        if table.path.is_some() {
+            continue;
+        }
         if table.port.is_some() {
-            candidates.push((name, PathBuf::new(), table, None));
+            candidates.push(Candidate {
+                short: short_name(&name, strip_prefix.as_deref()),
+                discovered: DiscoveredApp {
+                    name,
+                    naming: Naming::Directory,
+                    path: PathBuf::new(),
+                    repo: None,
+                    branch_only: false,
+                    repo_config: None,
+                },
+                table,
+            });
         } else {
             problems.push(problem(
                 &name,
-                format!("[apps.{name}] does not match any repo in the project"),
+                format!("[apps.{name}] does not match any app in the project"),
             ));
         }
     }
-    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates.sort_by(|a, b| a.discovered.name.cmp(&b.discovered.name));
 
     let short_names: Vec<(String, String)> = candidates
         .iter()
-        .map(|(name, _, table, repo)| {
-            let override_name = table
-                .name
-                .as_deref()
-                .or(repo.as_ref().and_then(|r| r.name.as_deref()));
-            let short = short_name(name, override_name, strip_prefix.as_deref());
-            (name.clone(), short)
-        })
+        .map(|c| (c.discovered.name.clone(), c.short.clone()))
         .collect();
     let mut declared: Vec<(String, Option<BTreeSet<String>>, ProcessOverride)> = Vec::new();
     for (process, ProjectProcess { apps, process: ov }) in project_processes {
@@ -558,7 +607,21 @@ pub fn assemble_project(
         });
         declared.push((process, targets, ov));
     }
-    let candidates = candidates.into_iter().map(|(name, path, table, repo)| {
+    let mut apps: Vec<App> = Vec::new();
+    for Candidate {
+        short,
+        table,
+        discovered,
+    } in candidates
+    {
+        let DiscoveredApp {
+            name,
+            path,
+            repo,
+            branch_only,
+            repo_config,
+            ..
+        } = discovered;
         let project_wide = AppConfig {
             processes: declared
                 .iter()
@@ -567,21 +630,11 @@ pub fn assemble_project(
                 .collect(),
             ..AppConfig::default()
         };
-        let config = table.merged_over(project_wide.merged_over(repo.unwrap_or_default()));
-        (name, path, config)
-    });
-
-    let mut apps: Vec<App> = Vec::new();
-    for (name, path, mut config) in candidates {
+        let config = table.merged_over(project_wide.merged_over(repo_config.unwrap_or_default()));
         if apps.iter().any(|a| a.name == name) {
             problems.push(problem(&name, format!("app {name:?} is found twice")));
             continue;
         }
-        let short = short_name(
-            &name,
-            config.name.take().as_deref(),
-            strip_prefix.as_deref(),
-        );
         if let Err(err) = slug::validate_app_short_name(&short) {
             problems.push(problem(&name, err.to_string()));
             continue;
@@ -597,6 +650,8 @@ pub fn assemble_project(
             name,
             short,
             path,
+            repo,
+            branch_only,
             settings: config.into_settings(),
         });
     }
@@ -659,17 +714,20 @@ pub fn assemble_project(
     (project, problems)
 }
 
-/// The hostname label of an app: its `name` override, else the directory name
-/// without the project's prefix.
-fn short_name(name: &str, override_name: Option<&str>, strip_prefix: Option<&str>) -> String {
-    match override_name {
-        Some(short) => short.to_string(),
-        None => strip_prefix
-            .and_then(|p| name.strip_prefix(p))
-            .filter(|s| !s.is_empty())
-            .unwrap_or(name)
-            .to_string(),
-    }
+struct Candidate {
+    short: String,
+    table: AppConfig,
+    discovered: DiscoveredApp,
+}
+
+/// The hostname label of an app named after its directory: the name without the
+/// project's prefix.
+fn short_name(name: &str, strip_prefix: Option<&str>) -> String {
+    strip_prefix
+        .and_then(|p| name.strip_prefix(p))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(name)
+        .to_string()
 }
 
 fn check_dns_label(label: &str) -> Result<(), String> {
@@ -912,8 +970,19 @@ mod tests {
     fn discovered(name: &str) -> DiscoveredApp {
         DiscoveredApp {
             name: name.into(),
+            naming: Naming::Directory,
             path: PathBuf::from(format!("/work/{name}")),
+            repo: None,
+            branch_only: false,
             repo_config: None,
+        }
+    }
+
+    fn named(name: &str, dir: &str) -> DiscoveredApp {
+        DiscoveredApp {
+            naming: Naming::Named,
+            path: PathBuf::from(format!("/work/{dir}")),
+            ..discovered(name)
         }
     }
 
@@ -1021,7 +1090,8 @@ mod tests {
     fn parses_project_file() {
         let file = project(
             r#"
-            repos = "~/work/nova-*"
+            root = "~/work"
+            include = "nova-*"
             strip_prefix = "nova-"
             env_provider = "mise"
             requires = ["tcp://localhost:5432"]
@@ -1035,8 +1105,8 @@ mod tests {
             A_NUMBER = 3
             BEFORE = "z"
 
-            [apps.nova-postcard-api]
-            name = "api"
+            [apps.api]
+            path = "nova-postcard-api"
             env_files = [".env"]
             depends_on = ["nova-billing"]
             aliases = ["nova-postcard-api"]
@@ -1044,10 +1114,10 @@ mod tests {
             policy = "pinned"
             replace_processes = true
 
-            [apps.nova-postcard-api.env]
+            [apps.api.env]
             POSTCARD_API_URL = "{{url:nova-postcard-api}}"
 
-            [apps.nova-postcard-api.processes.web]
+            [apps.api.processes.web]
             command = "bin/rails s"
             cwd = "backend"
             http = true
@@ -1060,7 +1130,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(file.name, "nova");
-        assert_eq!(file.repos, vec!["~/work/nova-*"]);
+        assert_eq!(file.root.as_deref(), Some("~/work"));
+        assert_eq!(file.include, vec!["nova-*"]);
         assert_eq!(file.strip_prefix.as_deref(), Some("nova-"));
         assert_eq!(file.env_provider, Some(EnvProviderKind::Mise));
         assert_eq!(file.scheme, Scheme::Http);
@@ -1075,8 +1146,8 @@ mod tests {
                 ("BEFORE", "z"),
             ])
         );
-        let app = &file.apps["nova-postcard-api"];
-        assert_eq!(app.name.as_deref(), Some("api"));
+        let app = &file.apps["api"];
+        assert_eq!(app.path.as_deref(), Some("nova-postcard-api"));
         assert_eq!(app.replace_processes, Some(true));
         assert_eq!(app.policy, Some(Policy::Pinned));
         let web = &app.processes["web"];
@@ -1088,22 +1159,41 @@ mod tests {
     }
 
     #[test]
-    fn repos_accepts_a_list() {
-        let file = project("repos = [\"~/a\", \"/b/*\"]").unwrap();
-        assert_eq!(file.repos, vec!["~/a", "/b/*"]);
+    fn explains_that_repos_is_replaced() {
+        let err = project("repos = \"~/work/acme-*\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("`repos` is replaced by `root` and `include`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn include_accepts_a_list() {
+        let file = project("include = [\"~/a\", \"/b/*\", \"!/b/c\"]").unwrap();
+        assert_eq!(file.include, vec!["~/a", "/b/*", "!/b/c"]);
+    }
+
+    #[test]
+    fn path_only_applies_in_project_files() {
+        let err = parse_repo_config(Path::new("/r/carte.toml"), "path = \"x\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("only applies"), "{err}");
     }
 
     #[test]
     fn project_errors_point_at_file_and_key() {
         let err =
-            project("repos = \"x\"\n[apps.foo.processes.web]\ncommand = \"x\"\npty = \"yes\"\n")
+            project("root = \"x\"\n[apps.foo.processes.web]\ncommand = \"x\"\npty = \"yes\"\n")
                 .unwrap_err()
                 .to_string();
         assert!(err.starts_with("/c/projects/nova.toml:4:"), "{err}");
         assert!(err.contains("[apps.foo.processes.web]"), "{err}");
         assert!(err.contains("`pty = \"yes\"`"), "{err}");
 
-        let err = project("repos = \"x\"\nenv = \"mise\"\n")
+        let err = project("root = \"x\"\nenv = \"mise\"\n")
             .unwrap_err()
             .to_string();
         assert!(err.contains(":2:"), "{err}");
@@ -1404,8 +1494,6 @@ mod tests {
             [processes.none]
             apps = []
             command = "true"
-            [apps.nova-postcard-api]
-            name = "api"
             "#,
         )
         .unwrap();
@@ -1413,7 +1501,7 @@ mod tests {
             file,
             vec![
                 discovered("nova-billing"),
-                discovered("nova-postcard-api"),
+                named("api", "nova-postcard-api"),
                 discovered("nova-frontend"),
             ],
         );
@@ -1429,7 +1517,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(processes("nova-billing"), ["mail", "redis"]);
-        assert_eq!(processes("nova-postcard-api"), ["mail", "redis"]);
+        assert_eq!(processes("api"), ["mail", "redis"]);
         assert_eq!(processes("nova-frontend"), ["mail"]);
         assert_eq!(
             problems,
@@ -1504,11 +1592,10 @@ mod tests {
         let file = project(
             r#"
             strip_prefix = "nova-"
-            [apps.nova-billing]
-            name = "invoices"
-            depends_on = ["frontend", "nova-billing", "nova-nope"]
+            [apps.invoices]
+            depends_on = ["frontend", "invoices", "nova-nope"]
             [apps.nova-frontend]
-            depends_on = ["invoices", "nova-billing"]
+            depends_on = ["invoices", "invoices"]
             aliases = ["nova-frontend", "Bad_Alias"]
             [apps.legacy]
             port = 3000
@@ -1521,7 +1608,7 @@ mod tests {
             file,
             vec![
                 discovered("nova-frontend"),
-                discovered("nova-billing"),
+                named("invoices", "nova-billing"),
                 discovered("nova"),
             ],
         );
@@ -1533,9 +1620,9 @@ mod tests {
         assert_eq!(
             shorts,
             vec![
+                ("invoices", "invoices"),
                 ("legacy", "legacy"),
                 ("nova", "nova"),
-                ("nova-billing", "invoices"),
                 ("nova-frontend", "frontend"),
             ]
         );
@@ -1543,14 +1630,14 @@ mod tests {
         assert_eq!(project.app("legacy").unwrap().settings.port, Some(3000));
         assert_eq!(
             project.app("nova-frontend").unwrap().settings.depends_on,
-            vec!["nova-billing"]
+            vec!["invoices"]
         );
         assert_eq!(
             project.app("nova-frontend").unwrap().settings.aliases,
             vec!["nova-frontend"]
         );
         assert_eq!(
-            project.app("nova-billing").unwrap().settings.depends_on,
+            project.app("invoices").unwrap().settings.depends_on,
             vec!["nova-frontend"]
         );
         let messages: Vec<_> = problems.iter().map(|p| p.message.as_str()).collect();
@@ -1558,11 +1645,7 @@ mod tests {
         assert!(messages.iter().any(|m| m.contains("[apps.nova-missing]")));
         assert!(messages.iter().any(|m| m.contains("depend on itself")));
         assert_eq!(
-            project
-                .app("nova-billing")
-                .unwrap()
-                .settings
-                .unresolved_deps,
+            project.app("invoices").unwrap().settings.unresolved_deps,
             vec!["nova-nope"],
             "names outside the project resolve once every project is loaded"
         );
@@ -1579,8 +1662,6 @@ mod tests {
         let file = project(
             r#"
             strip_prefix = "nova-"
-            [apps.nova-other]
-            name = "api"
             "#,
         )
         .unwrap();
@@ -1589,15 +1670,15 @@ mod tests {
             vec![
                 discovered("nova-ab"),
                 discovered("nova-api"),
-                discovered("nova-other"),
+                named("api", "nova-other"),
                 discovered("nova-x--y"),
             ],
         );
         let names: Vec<_> = project.apps.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["nova-api"]);
+        assert_eq!(names, vec!["api"]);
         assert_eq!(problems.len(), 3);
         assert_eq!(problems[0].app.as_deref(), Some("nova-ab"));
-        assert!(problems[1].message.contains("already used by nova-api"));
+        assert!(problems[1].message.contains("already used by api"));
         assert!(problems[2].message.contains("\"--\""));
     }
 }

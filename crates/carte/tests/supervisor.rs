@@ -42,9 +42,9 @@ impl Setup {
     }
 
     fn project(&self, toml: &str) {
-        let repos = self.root.join("work").display().to_string();
+        let work = self.root.join("work").display().to_string();
         let text = format!(
-            "repos = \"{repos}/acme-*\"\nstrip_prefix = \"acme-\"\nenv_provider = \"none\"\n{toml}"
+            "root = \"{work}\"\ninclude = \"acme-*\"\nstrip_prefix = \"acme-\"\nenv_provider = \"none\"\n{toml}"
         );
         std::fs::write(self.paths.project_file("acme"), text).unwrap();
     }
@@ -377,7 +377,7 @@ async fn dependencies_reach_other_projects_main_stack() {
     std::fs::write(
         setup.paths.project_file("auth"),
         format!(
-            "repos = \"{}/work/auth\"\nenv_provider = \"none\"\n",
+            "root = \"{}/work/auth\"\nenv_provider = \"none\"\n",
             setup.root.display()
         ),
     )

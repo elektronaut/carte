@@ -9,6 +9,7 @@ pub mod dirs;
 pub mod discovery;
 pub mod duration;
 pub mod env;
+pub mod include;
 pub mod lifecycle;
 pub mod model;
 pub mod naming;

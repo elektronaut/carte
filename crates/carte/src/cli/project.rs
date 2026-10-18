@@ -7,9 +7,9 @@ use std::process::{Command, ExitCode};
 use anyhow::{Context, anyhow, bail};
 use carte_api::{AppInfo, ProjectList, ProjectSummary};
 use carte_core::model::{MachineConfig, Problem, ProjectState, Stack};
-use carte_core::procfile::{self, ProcessSource, ProcfileError};
-use carte_core::{config, discovery, naming, slug};
-use toml_edit::{DocumentMut, Item, Table, value};
+use carte_core::procfile::{self, ProcessSource};
+use carte_core::{config, discovery, include, naming, slug};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 use super::ProjectCommand;
 use super::prompt::{self, tilde};
@@ -63,19 +63,16 @@ fn add(paths: &Paths, args: AddArgs) -> anyhow::Result<ExitCode> {
         .unwrap_or_default();
 
     let single = discovery::is_primary_checkout(&dir);
-    let (repos, strip_prefix, repo_names) = if single {
-        (
-            tilde(&dir),
-            args.strip_prefix.clone(),
-            vec![dir_name.clone()],
-        )
+    let (include, strip_prefix, repo_names) = if single {
+        (None, None, vec![dir_name.clone()])
     } else if dir.join(".git").exists() {
         bail!(
             "{} is a linked worktree; add the repo's primary checkout instead",
             tilde(&dir)
         );
     } else {
-        repos_in_dir(&dir, args.strip_prefix.clone(), interactive)?
+        let (pattern, prefix, names) = repos_in_dir(&dir, args.strip_prefix.clone(), interactive)?;
+        (Some(pattern), prefix, names)
     };
 
     let name = choose_name(args.name.as_deref(), &dir_name, interactive)?;
@@ -87,50 +84,73 @@ fn add(paths: &Paths, args: AddArgs) -> anyhow::Result<ExitCode> {
         );
     }
 
-    let mut entries = name_overrides(&repo_names, strip_prefix.as_deref(), &name, single);
-    let mut text = project_toml(&repos, strip_prefix.as_deref(), &entries);
-    let (mut state, mut problems) = discover(&file_path, &text)?;
-
-    let unrunnable: Vec<String> = state
-        .project
-        .apps
+    let mut entries = if single {
+        BTreeMap::new()
+    } else {
+        named_apps(&repo_names, strip_prefix.as_deref())
+    };
+    let app_name = |repo: &str| -> String {
+        if single {
+            return name.clone();
+        }
+        entries
+            .iter()
+            .find(|(_, e)| e.path.as_deref() == Some(repo))
+            .map_or_else(|| repo.to_string(), |(app, _)| app.clone())
+    };
+    let unrunnable: Vec<(String, String)> = repo_names
         .iter()
-        .filter(|app| {
-            matches!(
-                procfile::load(&app.path, &app.settings),
-                Err(ProcfileError::NotRunnable { .. })
-            )
+        .filter(|repo| {
+            let path = if single { dir.clone() } else { dir.join(repo) };
+            !include::is_runnable(&path)
         })
-        .map(|app| app.name.clone())
+        .map(|repo| (repo.clone(), app_name(repo)))
         .collect();
+    let mut commands: Vec<(String, String, String)> = Vec::new();
     if !unrunnable.is_empty() {
         if let Some(command) = &args.command {
-            for app in &unrunnable {
-                entries.entry(app.clone()).or_default().web_command = Some(command.clone());
+            for (repo, app) in &unrunnable {
+                commands.push((repo.clone(), app.clone(), command.clone()));
             }
         } else if interactive {
-            for app in &unrunnable {
+            for (repo, app) in &unrunnable {
                 println!("{app} has no Procfile.dev, Procfile or config.ru.");
                 let command = prompt::ask(
-                    &format!("Web command for {app} (empty to leave it unrunnable)"),
+                    &format!("Web command for {app} (empty to leave it out)"),
                     None,
                 )?;
                 if !command.is_empty() {
-                    entries.entry(app.clone()).or_default().web_command = Some(command);
+                    commands.push((repo.clone(), app.clone(), command));
                 }
             }
-        } else {
+        } else if single {
             bail!(
                 "no Procfile.dev, Procfile or config.ru in {}; pass --command \"<web command>\" \
-                 to run it as their `web` process",
-                unrunnable.join(", ")
+                 to run it as its `web` process",
+                tilde(&dir)
             );
         }
-        if entries.values().any(|e| e.web_command.is_some()) {
-            text = project_toml(&repos, strip_prefix.as_deref(), &entries);
-            (state, problems) = discover(&file_path, &text)?;
+    }
+    let mut include: Vec<String> = include.into_iter().collect();
+    for (repo, app, command) in commands {
+        if !single && !entries.contains_key(&app) {
+            include.push(repo);
+        }
+        entries.entry(app).or_default().web_command = Some(command);
+    }
+    if !single {
+        let left_out: Vec<&str> = unrunnable
+            .iter()
+            .filter(|(_, app)| entries.get(app).is_none_or(|e| e.web_command.is_none()))
+            .map(|(_, app)| app.as_str())
+            .collect();
+        if !left_out.is_empty() {
+            println!("Left out (nothing to run): {}", left_out.join(", "));
         }
     }
+    let root = tilde(&dir);
+    let text = project_toml(&root, &include, strip_prefix.as_deref(), &entries);
+    let (state, problems) = discover(&file_path, &text)?;
 
     print_summary(&machine, &state, &problems, &file_path, &text);
     if state.project.apps.is_empty() {
@@ -152,8 +172,8 @@ fn add(paths: &Paths, args: AddArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Lists the repos in `dir` and settles the `repos` glob and `strip_prefix`;
-/// also returns the names of the repos the glob matches.
+/// Lists the repos in `dir` and settles the `include` pattern and `strip_prefix`;
+/// also returns the names of the repos the pattern matches.
 fn repos_in_dir(
     dir: &Path,
     strip_prefix: Option<String>,
@@ -209,8 +229,8 @@ fn repos_in_dir(
         }
         names.retain(|n| n.starts_with(prefix.as_str()));
     }
-    let pattern = dir.join(format!("{}*", prefix.as_deref().unwrap_or("")));
-    Ok((tilde(&pattern), prefix, names))
+    let pattern = format!("{}*", prefix.as_deref().unwrap_or(""));
+    Ok((pattern, prefix, names))
 }
 
 /// The `xxx-` prefix shared by the most repos (more than half of them), the longest on a
@@ -272,18 +292,24 @@ fn choose_name(given: Option<&str>, dir_name: &str, interactive: bool) -> anyhow
 /// What `add` writes into an app's table.
 #[derive(Default)]
 pub(super) struct AppEntry {
-    /// A short-name override for a directory name that isn't a valid hostname label.
-    pub(super) name: Option<String>,
+    /// The directory of an app named for a directory name that isn't a valid hostname label.
+    pub(super) path: Option<String>,
     pub(super) web_command: Option<String>,
 }
 
 fn project_toml(
-    repos: &str,
+    root: &str,
+    include: &[String],
     strip_prefix: Option<&str>,
     entries: &BTreeMap<String, AppEntry>,
 ) -> String {
     let mut doc = DocumentMut::new();
-    doc["repos"] = value(repos);
+    doc["root"] = value(root);
+    match include {
+        [] => {}
+        [one] => doc["include"] = value(one.as_str()),
+        many => doc["include"] = value(many.iter().map(String::as_str).collect::<Array>()),
+    }
     if let Some(prefix) = strip_prefix {
         doc["strip_prefix"] = value(prefix);
     }
@@ -293,10 +319,10 @@ fn project_toml(
         for (app, entry) in entries {
             let mut app_table = Table::new();
             app_table.set_implicit(true);
-            if let Some(name) = &entry.name {
+            if let Some(path) = &entry.path {
                 app_table.set_implicit(false);
                 app_table.decor_mut().set_prefix("\n");
-                app_table["name"] = value(name.as_str());
+                app_table["path"] = value(path.as_str());
             }
             if let Some(command) = &entry.web_command {
                 let mut web = Table::new();
@@ -314,12 +340,10 @@ fn project_toml(
     doc.to_string()
 }
 
-/// Short-name overrides for repos whose name, after the prefix, isn't a valid label.
-pub(super) fn name_overrides(
+/// Named apps for repos whose name, after the prefix, isn't a valid label.
+pub(super) fn named_apps(
     repos: &[String],
     strip_prefix: Option<&str>,
-    project: &str,
-    single: bool,
 ) -> BTreeMap<String, AppEntry> {
     repos
         .iter()
@@ -331,17 +355,13 @@ pub(super) fn name_overrides(
             if slug::validate_app_short_name(short).is_ok() {
                 return None;
             }
-            let fixed = if single {
-                project.to_string()
-            } else {
-                slug::slugify(short)
-            };
+            let fixed = slug::slugify(short);
             slug::validate_app_short_name(&fixed).ok()?;
             let entry = AppEntry {
-                name: Some(fixed),
+                path: Some(repo.clone()),
                 web_command: None,
             };
-            Some((repo.clone(), entry))
+            Some((fixed, entry))
         })
         .collect()
 }
@@ -376,7 +396,7 @@ pub(super) fn print_summary(
     let mut notices: Vec<(String, Vec<&str>)> = Vec::new();
     for app in &project.apps {
         let url = naming::instance_url(machine, project, app, &Stack::Main);
-        let processes = match procfile::load(&app.path, &app.settings) {
+        let processes = match procfile::load(&state.any_checkout(app), &app.settings) {
             Ok(list) => {
                 for notice in list.notices.iter().map(ToString::to_string) {
                     match notices.iter_mut().find(|(n, _)| *n == notice) {
@@ -448,7 +468,7 @@ fn project_list(paths: &Paths) -> ProjectList {
                     name: app.name.clone(),
                     short: app.short.clone(),
                     path: app.path.clone(),
-                    runnable: procfile::load(&app.path, &app.settings).is_ok(),
+                    runnable: procfile::load(&state.any_checkout(app), &app.settings).is_ok(),
                 })
                 .collect(),
             stacks: state.stacks().into_iter().collect(),
@@ -661,38 +681,44 @@ mod tests {
             (
                 "nova-api".to_string(),
                 AppEntry {
-                    name: None,
+                    path: None,
                     web_command: Some("bin/serve -p $PORT".into()),
                 },
             ),
             (
-                "nova-web_app".to_string(),
+                "web-app".to_string(),
                 AppEntry {
-                    name: Some("web-app".into()),
+                    path: Some("nova-web_app".into()),
                     web_command: Some("bin/web".into()),
                 },
             ),
         ]);
         assert_eq!(
-            project_toml("~/work/nova-*", Some("nova-"), &entries),
-            "repos = \"~/work/nova-*\"\nstrip_prefix = \"nova-\"\n\n\
+            project_toml(
+                "~/work",
+                &names(&["nova-*", "nova-api"]),
+                Some("nova-"),
+                &entries
+            ),
+            "root = \"~/work\"\ninclude = [\"nova-*\", \"nova-api\"]\nstrip_prefix = \"nova-\"\n\n\
              [apps.nova-api.processes.web]\ncommand = \"bin/serve -p $PORT\"\n\n\
-             [apps.nova-web_app]\nname = \"web-app\"\n\n\
-             [apps.nova-web_app.processes.web]\ncommand = \"bin/web\"\n"
+             [apps.web-app]\npath = \"nova-web_app\"\n\n\
+             [apps.web-app.processes.web]\ncommand = \"bin/web\"\n"
+        );
+        assert_eq!(
+            project_toml("~/work/shop", &[], None, &BTreeMap::new()),
+            "root = \"~/work/shop\"\n"
         );
     }
 
     #[test]
-    fn fixes_invalid_app_names() {
+    fn names_apps_whose_directory_isnt_a_valid_label() {
         let repos = names(&["nova-web_app", "nova-api", "nova-x"]);
-        let entries = name_overrides(&repos, Some("nova-"), "nova", false);
+        let entries = named_apps(&repos, Some("nova-"));
         let fixed: Vec<(&str, Option<&str>)> = entries
             .iter()
-            .map(|(repo, e)| (repo.as_str(), e.name.as_deref()))
+            .map(|(app, e)| (app.as_str(), e.path.as_deref()))
             .collect();
-        assert_eq!(fixed, [("nova-web_app", Some("web-app"))]);
-
-        let entries = name_overrides(&names(&["My_App"]), None, "my-app", true);
-        assert_eq!(entries["My_App"].name.as_deref(), Some("my-app"));
+        assert_eq!(fixed, [("web-app", Some("nova-web_app"))]);
     }
 }

@@ -11,6 +11,8 @@ pub fn app(name: &str, short: &str, path: &str) -> App {
         name: name.into(),
         short: short.into(),
         path: PathBuf::from(path),
+        repo: None,
+        branch_only: false,
         settings: AppSettings::default(),
     }
 }
@@ -48,6 +50,8 @@ pub fn state(project: Project, worktrees: Vec<(&str, Vec<Worktree>)>) -> Project
             .map(|(app, wts)| (app.to_string(), wts))
             .collect::<BTreeMap<_, _>>(),
         processes: BTreeMap::new(),
+        repo_stacks: BTreeMap::new(),
+        scan_dirs: Default::default(),
     }
 }
 

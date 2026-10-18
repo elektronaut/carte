@@ -166,7 +166,9 @@ pub fn render_subject(
         .project
         .app(&key.app)
         .ok_or_else(|| anyhow!("unknown app {}", key.app))?;
-    let checkout = state.checkout(app, &key.stack);
+    let checkout = state
+        .checkout(app, &key.stack)
+        .ok_or_else(|| Failure::new(Exit::NotFound, state.not_in_stack(app, &key.stack)))?;
     let branch = match &checkout {
         Checkout::Worktree(wt) => wt.branch.clone().unwrap_or_default(),
         Checkout::Main { path } => current_branch(path),
@@ -416,7 +418,7 @@ mod tests {
         std::fs::write(
             paths.project_file("shop"),
             format!(
-                "repos = \"{}\"\nenv_provider = \"none\"\n\n[apps.shop.env]\nTERM = \"from-template\"\n",
+                "root = \"{}\"\nenv_provider = \"none\"\n\n[apps.shop.env]\nTERM = \"from-template\"\n",
                 repo.display()
             ),
         )
