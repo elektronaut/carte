@@ -217,6 +217,8 @@ pub struct ProjectFile {
     pub scheme: Scheme,
     pub idle_timeout: Option<Duration>,
     pub teardown_delay: Option<Duration>,
+    /// The default `serve_files` of the project's apps.
+    pub serve_files: Option<String>,
     /// `[apps.<full name>]` tables.
     pub apps: BTreeMap<String, AppConfig>,
     /// `[processes.<name>]` tables, declared for many apps at once.
@@ -251,6 +253,7 @@ struct RawProject {
     scheme: Scheme,
     idle_timeout: Option<DurationValue>,
     teardown_delay: Option<DurationValue>,
+    serve_files: Option<String>,
     #[serde(default)]
     apps: BTreeMap<String, AppConfig>,
     #[serde(default, deserialize_with = "project_process_table")]
@@ -278,6 +281,7 @@ pub struct AppConfig {
     pub subdomains: Option<bool>,
     pub policy: Option<Policy>,
     pub port: Option<u16>,
+    pub serve_files: Option<String>,
     pub replace_processes: Option<bool>,
     #[serde(default, deserialize_with = "process_table")]
     pub processes: BTreeMap<String, ProcessOverride>,
@@ -306,6 +310,7 @@ impl AppConfig {
             subdomains: self.subdomains.or(base.subdomains),
             policy: self.policy.or(base.policy),
             port: self.port.or(base.port),
+            serve_files: self.serve_files.or(base.serve_files),
             replace_processes: self.replace_processes.or(base.replace_processes),
             processes,
         }
@@ -322,6 +327,7 @@ impl AppConfig {
             subdomains: self.subdomains.unwrap_or(false),
             policy: self.policy,
             port: self.port,
+            serve_files: self.serve_files.map(PathBuf::from),
             processes: ProcessConfig {
                 replace: self.replace_processes.unwrap_or(false),
                 entries: self.processes,
@@ -484,6 +490,7 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         scheme: raw.scheme,
         idle_timeout: raw.idle_timeout.map(|d| d.0),
         teardown_delay: raw.teardown_delay.map(|d| d.0),
+        serve_files: raw.serve_files,
         apps: raw.apps,
         processes: raw.processes,
         from_template: false,
@@ -575,6 +582,7 @@ pub fn assemble_project(
         scheme,
         idle_timeout,
         teardown_delay,
+        serve_files,
         apps: mut app_tables,
         processes: project_processes,
         root: _,
@@ -681,12 +689,20 @@ pub fn assemble_project(
                 .filter(|(_, targets, _)| targets.as_ref().is_none_or(|t| t.contains(&name)))
                 .map(|(process, _, ov)| (process.clone(), ov.clone()))
                 .collect(),
+            serve_files: serve_files.clone(),
             ..AppConfig::default()
         };
         let config = table.merged_over(project_wide.merged_over(repo_config.unwrap_or_default()));
         if apps.iter().any(|a| a.name == name) {
             problems.push(problem(&name, format!("app {name:?} is found twice")));
             continue;
+        }
+        let mut config = config;
+        if let Some(dir) = config.serve_files.take() {
+            match check_serve_files(&dir) {
+                Ok(()) => config.serve_files = Some(dir),
+                Err(message) => problems.push(problem(&name, message)),
+            }
         }
         if let Err(err) = slug::validate_app_short_name(&short) {
             problems.push(problem(&name, err.to_string()));
@@ -765,6 +781,22 @@ pub fn assemble_project(
         apps,
     };
     (project, problems)
+}
+
+/// `serve_files` must name a folder inside the checkout.
+fn check_serve_files(dir: &str) -> Result<(), String> {
+    let path = Path::new(dir);
+    if dir.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "serve_files {dir:?} must be a folder inside the checkout, like \"public\""
+        ));
+    }
+    Ok(())
 }
 
 struct Candidate {

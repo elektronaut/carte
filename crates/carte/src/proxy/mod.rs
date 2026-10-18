@@ -5,6 +5,7 @@
 mod body;
 mod cookies;
 mod error_page;
+pub mod files;
 mod forward;
 mod listener;
 mod router;

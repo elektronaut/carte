@@ -176,11 +176,13 @@ pub fn render_subject(
     };
 
     let list = procfile::load(checkout.path(), &app.settings)?;
-    if list.source == ProcessSource::RouteOnly {
-        bail!(
+    match list.source {
+        ProcessSource::RouteOnly => bail!(
             "{} only routes to a fixed port; it runs no processes",
             app.name
-        );
+        ),
+        ProcessSource::ServeFiles => bail!("{} only serves files; it runs no processes", app.name),
+        _ => {}
     }
     let names = || {
         list.processes

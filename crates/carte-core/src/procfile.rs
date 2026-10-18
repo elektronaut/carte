@@ -19,6 +19,8 @@ pub enum ProcessSource {
     Config,
     /// A fixed-port app without processes.
     RouteOnly,
+    /// Nothing to run, only files to serve.
+    ServeFiles,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,8 +150,16 @@ pub fn parse_procfile(text: &str) -> ParsedProcfile {
 
 /// Reads the base process list for a checkout and applies the app's config.
 pub fn load(checkout: &Path, settings: &AppSettings) -> Result<ProcessList, ProcfileError> {
-    let list = load_any(checkout, settings)?;
-    if list.processes.is_empty() && list.source != ProcessSource::RouteOnly {
+    let mut list = load_any(checkout, settings)?;
+    if list.processes.is_empty() && settings.serve_files.is_some() {
+        list.source = ProcessSource::ServeFiles;
+    }
+    if list.processes.is_empty()
+        && !matches!(
+            list.source,
+            ProcessSource::RouteOnly | ProcessSource::ServeFiles
+        )
+    {
         return Err(ProcfileError::NotRunnable {
             path: checkout.to_path_buf(),
         });

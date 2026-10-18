@@ -5,6 +5,7 @@ use std::time::Duration;
 use carte_api::ExternalRequest;
 use carte_core::model::{InstanceKey, World};
 use carte_core::naming;
+use carte_core::procfile::ProcessSource;
 use http::StatusCode;
 
 use crate::proxy::{
@@ -39,6 +40,22 @@ impl Router for SupervisorRouter {
                     }
                 }
             };
+            match served_files(&world, &key, request) {
+                Some(Served::File(path)) => {
+                    return Route::File {
+                        path,
+                        guard: Box::new(Guard::new(self.supervisor.clone(), key)),
+                    };
+                }
+                Some(Served::Missing) => {
+                    return Route::Error(ErrorPage::new(
+                        StatusCode::NOT_FOUND,
+                        "Not found",
+                        format!("{} has no file at {}", key.app, request.path),
+                    ));
+                }
+                None => {}
+            }
             match tokio::time::timeout(self.hold, self.supervisor.ensure_ready(key.clone())).await {
                 Ok(Ok(upstream)) => Route::Upstream {
                     port: upstream.port,
@@ -117,6 +134,33 @@ impl SupervisorRouter {
         }
         Ok(key)
     }
+}
+
+enum Served {
+    File(std::path::PathBuf),
+    /// The app only serves files, and this one isn't there.
+    Missing,
+}
+
+/// A GET or HEAD for a file in the app's `serve_files` folder, in the checkout of the
+/// request's stack. `None` sends the request on to the app.
+fn served_files(world: &World, key: &InstanceKey, request: RouteRequest<'_>) -> Option<Served> {
+    if !matches!(*request.method, http::Method::GET | http::Method::HEAD) {
+        return None;
+    }
+    let state = world.project(&key.project)?;
+    let app = state.project.app(&key.app)?;
+    let app = state.app_at(app, &key.stack);
+    let dir = app.settings.serve_files.as_ref()?;
+    let checkout = state.checkout(app, &key.stack)?;
+    if let Some(path) = crate::proxy::files::find(&checkout.path().join(dir), request.path) {
+        return Some(Served::File(path));
+    }
+    let files_only = matches!(
+        state.process_list(app, &key.stack),
+        Some(Ok(list)) if list.source == ProcessSource::ServeFiles
+    );
+    files_only.then_some(Served::Missing)
 }
 
 struct Guard {

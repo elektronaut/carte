@@ -94,6 +94,9 @@ pub(crate) async fn handle(
         Route::Upstream { port, guard } => {
             forward(&shared, &inbound, route_request, port, guard, request).await
         }
+        Route::File { path, guard } => {
+            super::files::respond(&path, request.method(), request.headers(), guard).await
+        }
     })
 }
 

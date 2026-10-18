@@ -56,6 +56,7 @@ impl Daemon {
         let mut daemon = Self::start_configured(
             false,
             "",
+            |_| {},
             &format!(
                 "\n[share]\nprovider = \"{provider}\"\ndomain = \"{domain}\"\nport = {share_port}\n"
             ),
@@ -67,15 +68,25 @@ impl Daemon {
     /// With `linked_config`, the config directory is reached through a symlink, like
     /// a config under `/tmp` on macOS.
     fn start_with(linked_config: bool) -> Self {
-        Self::start_configured(linked_config, "", "")
+        Self::start_configured(linked_config, "", |_| {}, "")
     }
 
     /// With `extra_project` added to the acme project file.
     fn start_with_project(extra_project: &str) -> Self {
-        Self::start_configured(false, extra_project, "")
+        Self::start_configured(false, extra_project, |_| {}, "")
     }
 
-    fn start_configured(linked_config: bool, extra_project: &str, extra_config: &str) -> Self {
+    /// With `extra_project`, after `prepare` has set up more files under `work`.
+    fn start_prepared(extra_project: &str, prepare: impl FnOnce(&std::path::Path)) -> Self {
+        Self::start_configured(false, extra_project, prepare, "")
+    }
+
+    fn start_configured(
+        linked_config: bool,
+        extra_project: &str,
+        prepare: impl FnOnce(&std::path::Path),
+        extra_config: &str,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let fixture = fixture().display().to_string();
@@ -86,6 +97,7 @@ impl Daemon {
             ),
         );
         std::fs::create_dir_all(root.join("work/acme-web/tmp")).unwrap();
+        prepare(&root.join("work"));
         let config = root.join("config");
         if linked_config {
             std::fs::create_dir_all(root.join("real-config/projects")).unwrap();
@@ -286,6 +298,44 @@ fn boots_an_app_on_the_first_request_and_stops_it_on_sigterm() {
         );
     }
     assert!(!carte::paths::Paths::under(&daemon.root).socket().exists());
+}
+
+#[test]
+fn serves_files_ahead_of_the_app_and_without_one() {
+    let daemon = Daemon::start_prepared(
+        "\n[apps.acme-web]\nserve_files = \"public\"\n\n[apps.docs]\npath = \"docs\"\nserve_files = \".\"\n",
+        |work| {
+            std::fs::create_dir_all(work.join("acme-web/public")).unwrap();
+            std::fs::write(work.join("acme-web/public/robots.txt"), "User-agent: *\n").unwrap();
+            std::fs::create_dir_all(work.join("docs/guide")).unwrap();
+            std::fs::write(work.join("docs/index.html"), "<h1>Docs</h1>").unwrap();
+            std::fs::write(work.join("docs/guide.html"), "<h1>Guide</h1>").unwrap();
+        },
+    );
+
+    let robots = daemon.request("web.acme.test", "/robots.txt");
+    assert!(robots.starts_with("HTTP/1.1 200"), "{robots}");
+    assert!(robots.contains("User-agent: *"), "{robots}");
+    assert!(robots.contains("content-type: text/plain"), "{robots}");
+    let snapshot = snapshot(&daemon);
+    assert!(
+        snapshot.projects[0].stacks[0]
+            .instances
+            .iter()
+            .all(|i| i.processes.iter().all(|p| p.pid.is_none())),
+        "a file doesn't start the app"
+    );
+
+    let page = daemon.request("web.acme.test", "/");
+    assert!(page.contains("\"name\":\"web\""), "{page}");
+
+    let docs = daemon.request("docs.acme.test", "/");
+    assert!(docs.starts_with("HTTP/1.1 200"), "{docs}");
+    assert!(docs.contains("<h1>Docs</h1>"), "{docs}");
+    let guide = daemon.request("docs.acme.test", "/guide");
+    assert!(guide.contains("<h1>Guide</h1>"), "{guide}");
+    let missing = daemon.request("docs.acme.test", "/nope");
+    assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
 }
 
 #[test]

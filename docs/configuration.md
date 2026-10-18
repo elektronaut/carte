@@ -130,6 +130,7 @@ root = "~/work/shop"
 | `scheme` | `"https"` | The scheme of URLs carte injects. `"http"` for apps that misbehave behind HTTPS |
 | `idle_timeout` | machine's | Overrides the machine's idle timeout for this project |
 | `teardown_delay` | machine's | Overrides the machine's teardown delay for this project |
+| `serve_files` | none | The default [`serve_files`](#serving-files) of the project's apps |
 | `apps` | none | Per-app settings, keyed by app name. See [Apps](#apps) |
 | `processes` | none | Processes declared for many apps at once. See [Project-level processes](#project-level-processes) |
 
@@ -153,7 +154,8 @@ include = [
   that matches a directory decides.
 - **A glob only picks directories with something to run**: a
   `Procfile.dev`, `Procfile` or `config.ru`, a `package.json` with a
-  `dev` script, or a `carte.toml` with processes. Other directories next
+  `dev` script, or a `carte.toml` with processes or `serve_files`. In a
+  template, the project's `serve_files` folder counts too. Other directories next
   to your apps are left out; in a JS workspace, where libraries have
   `dev` scripts too, match the apps' folder (`apps/*`) or leave a
   library out with `!`. A path without a glob is always an app. Globs match one
@@ -322,6 +324,7 @@ TZ = "Europe/Oslo"
 | `subdomains` | `false` | Pass extra labels on the left (`oslo.events.acme.localhost`) through to the app instead of returning 404 |
 | `policy` | `"auto"` | Default policy for the app's processes. See [Policies](#policies) |
 | `port` | none | Route to a fixed port instead of running processes, for an app you start yourself |
+| `serve_files` | none | A folder in the checkout, like `"public"`, whose files carte serves ahead of the app. See [Serving files](#serving-files) |
 | `replace_processes` | `false` | Ignore the Procfile and run only the processes configured here |
 | `processes` | none | Per-process settings. See [Processes](#processes) |
 
@@ -331,6 +334,31 @@ project by their full or short name. An app of another project is named by
 its project, when that project has one app or an app named like the
 project, or as `app.project`. Those always run on their project's main
 stack.
+
+### Serving files
+
+With `serve_files`, carte answers GET and HEAD requests for files in
+that folder itself, and passes everything else on to the app, the way
+puma-dev serves `public/`:
+
+```toml
+[apps.shop]
+serve_files = "public"
+```
+
+- A path is looked up like Rails does: `/about` tries `about`,
+  `about.html` and `about/index.html`, so `/` serves `index.html`.
+- A file is served without starting the app, so assets and error pages
+  load while it boots or after it crashes.
+- An app with `serve_files` and nothing to run is a static site: carte
+  serves its files, and a path with no file gets a 404.
+- Each worktree serves the folder in its own checkout.
+- Dotfiles (other than `.well-known`) and links that lead outside the
+  folder are never served, also when the app is shared.
+
+The folder is relative to the checkout; `"."` serves the checkout
+itself. Set it at the top of a project file or template to give every
+app in it the same folder.
 
 ## Processes
 

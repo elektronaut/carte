@@ -455,11 +455,15 @@ fn expand_template(
         };
         let (mut state, problems) = discover_project(project);
         if wildcard
-            && !state
-                .project
-                .apps
-                .iter()
-                .any(|app| include::is_runnable(&state.any_checkout(app)))
+            && !state.project.apps.iter().any(|app| {
+                let checkout = state.any_checkout(app);
+                include::is_runnable(&checkout)
+                    || app
+                        .settings
+                        .serve_files
+                        .as_ref()
+                        .is_some_and(|dir| checkout.join(dir).is_dir())
+            })
         {
             continue;
         }

@@ -39,6 +39,11 @@ pub enum Route {
         port: u16,
         guard: Box<dyn ActivityGuard>,
     },
+    /// Answer with a file from the app's `serve_files` folder.
+    File {
+        path: std::path::PathBuf,
+        guard: Box<dyn ActivityGuard>,
+    },
     Error(ErrorPage),
 }
 

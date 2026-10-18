@@ -437,6 +437,7 @@ fn source_name(source: ProcessSource) -> &'static str {
         ProcessSource::PackageJson => "package.json",
         ProcessSource::Config => "config",
         ProcessSource::RouteOnly => "fixed port",
+        ProcessSource::ServeFiles => "files only",
     }
 }
 

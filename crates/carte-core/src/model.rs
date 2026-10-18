@@ -164,6 +164,8 @@ pub struct AppSettings {
     pub policy: Option<Policy>,
     /// A route-only app (imported puma-dev port file): no processes, fixed port.
     pub port: Option<u16>,
+    /// A folder in the checkout whose files the proxy serves ahead of the app.
+    pub serve_files: Option<PathBuf>,
     pub processes: ProcessConfig,
 }
 

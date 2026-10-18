@@ -490,7 +490,8 @@ fn decide(
 }
 
 /// Whether a directory has something to run of its own: a Procfile.dev, Procfile,
-/// config.ru, a `package.json` with a `dev` script, or a `carte.toml` with processes.
+/// config.ru, a `package.json` with a `dev` script, or a `carte.toml` with processes
+/// or `serve_files`.
 pub fn is_runnable(dir: &Path) -> bool {
     ["Procfile.dev", "Procfile", "config.ru"]
         .iter()
@@ -499,7 +500,9 @@ pub fn is_runnable(dir: &Path) -> bool {
         || config::load_repo_config(dir)
             .ok()
             .flatten()
-            .is_some_and(|c| c.processes.values().any(|p| p.command.is_some()))
+            .is_some_and(|c| {
+                c.processes.values().any(|p| p.command.is_some()) || c.serve_files.is_some()
+            })
 }
 
 /// The worktrees that can have stacks, with problems for those that can't.
