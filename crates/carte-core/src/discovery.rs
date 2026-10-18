@@ -201,7 +201,7 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
         .collect();
 
     let mut worktrees = BTreeMap::new();
-    let discovered = expanded
+    let discovered: Vec<DiscoveredApp> = expanded
         .apps
         .into_iter()
         .map(|found| {
@@ -234,9 +234,10 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
             }
         })
         .collect();
-    let (project, assembly_problems) = config::assemble_project(file, discovered);
+    let (project, assembly_problems) = config::assemble_project(file.clone(), discovered.clone());
     problems.extend(assembly_problems);
     worktrees.retain(|name, _| project.app(name).is_some());
+    let checkout_apps = checkout_apps(&file, &discovered, &project, &worktrees, &mut problems);
 
     let processes = project
         .apps
@@ -252,7 +253,10 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
                     .map(|wt| wt.path.clone()),
             );
             checkouts.map(|path| {
-                let list = procfile::load(&path, &app.settings).map_err(|err| err.to_string());
+                let settings = checkout_apps
+                    .get(&path)
+                    .map_or(&app.settings, |a| &a.settings);
+                let list = procfile::load(&path, settings).map_err(|err| err.to_string());
                 (path, list)
             })
         })
@@ -261,11 +265,62 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
         project,
         worktrees,
         processes,
-        repo_stacks: expanded.repo_stacks,
+        repo_worktrees: expanded.repo_worktrees,
         scan_dirs: expanded.scan_dirs,
+        checkout_apps,
     };
     problems.extend(naming::collisions(&state));
     (state, problems)
+}
+
+/// The apps of worktrees whose `carte.toml` differs from the one the app's settings
+/// come from, with that file's processes, env and env files. The rest of an app's
+/// settings shape the whole project, so they stay as configured.
+fn checkout_apps(
+    file: &ProjectFile,
+    discovered: &[DiscoveredApp],
+    project: &crate::model::Project,
+    worktrees: &BTreeMap<String, Vec<Worktree>>,
+    problems: &mut Vec<Problem>,
+) -> BTreeMap<PathBuf, crate::model::App> {
+    let mut apps = BTreeMap::new();
+    for (name, wts) in worktrees {
+        let (Some(index), Some(app)) = (
+            discovered.iter().position(|d| &d.name == name),
+            project.app(name),
+        ) else {
+            continue;
+        };
+        for wt in wts {
+            let config = match config::load_repo_config(&wt.path) {
+                Ok(config) => config,
+                Err(err) => {
+                    problems.push(Problem {
+                        project: Some(project.name.clone()),
+                        app: Some(name.clone()),
+                        stack: Some(wt.slug.clone()),
+                        message: err.to_string(),
+                    });
+                    continue;
+                }
+            };
+            if config == discovered[index].repo_config {
+                continue;
+            }
+            let mut variant = discovered.to_vec();
+            variant[index].repo_config = config;
+            let (assembled, _) = config::assemble_project(file.clone(), variant);
+            let Some(there) = assembled.app(name) else {
+                continue;
+            };
+            let mut app = app.clone();
+            app.settings.env = there.settings.env.clone();
+            app.settings.env_files = there.settings.env_files.clone();
+            app.settings.processes = there.settings.processes.clone();
+            apps.insert(wt.path.clone(), app);
+        }
+    }
+    apps
 }
 
 /// Loads `config.toml`, every project file in `projects/` and what they find on disk.
@@ -1059,6 +1114,57 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
+    fn a_worktrees_carte_toml_sets_its_processes_and_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let shop = root.join("shop");
+        repo(&shop);
+        std::fs::write(
+            shop.join("carte.toml"),
+            "aliases = [\"store\"]\n[env]\nMODE = \"main\"\n[processes.web]\ncommand = \"bin/web\"\n",
+        )
+        .unwrap();
+        git(&shop, &["add", "-A"]);
+        git(&shop, &["commit", "-q", "-m", "config"]);
+        git(&shop, &["worktree", "add", "-q", "-b", "fx", "../shop-fx"]);
+        let fx = root.join("shop-fx");
+        std::fs::write(
+            fx.join("carte.toml"),
+            "aliases = [\"elsewhere\"]\n[env]\nMODE = \"branch\"\n[processes.web]\ncommand = \"bin/web --new\"\n",
+        )
+        .unwrap();
+
+        let file = config::parse_project(
+            &root.join("shop.toml"),
+            &format!("root = \"{}\"\n", shop.display()),
+        )
+        .unwrap();
+        let (state, problems) = discover_project(file);
+        assert!(problems.is_empty(), "{problems:?}");
+        let app = state.project.app("shop").unwrap();
+        let fx_stack = Stack::Branch("shop-fx".into());
+        let web = |stack: &Stack| {
+            state
+                .process_list(app, stack)
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .processes[0]
+                .command
+                .clone()
+        };
+        assert_eq!(web(&Stack::Main), "bin/web");
+        assert_eq!(web(&fx_stack), "bin/web --new");
+        let there = state.app_at(app, &fx_stack);
+        assert_eq!(there.settings.env[0].value, "branch");
+        assert_eq!(there.settings.aliases, ["store"]);
+        assert_eq!(
+            state.app_at(app, &Stack::Main).settings.env[0].value,
+            "main"
+        );
+    }
+
+    #[test]
     fn monorepo_stacks_have_the_apps_their_worktree_has() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
@@ -1104,6 +1210,19 @@ prunable gitdir file points to non-existent location
             state.not_in_stack(new, &Stack::Main),
             "new isn't in the main stack; it's in mono-fx"
         );
+
+        let world = World {
+            projects: vec![state],
+            ..World::default()
+        };
+        let here = crate::address::locate(&world, &fx).unwrap();
+        assert_eq!((here.app, here.stack), (None, fx_stack.clone()));
+        let here = crate::address::locate(&world, &fx.join("apps/web/lib")).unwrap();
+        assert_eq!(here.app.as_deref(), Some("web"));
+        let target =
+            crate::address::resolve(&world, &crate::address::Address::default(), Some(&fx))
+                .unwrap();
+        assert_eq!((target.app, target.stack), (None, Some(fx_stack)));
     }
 
     #[test]

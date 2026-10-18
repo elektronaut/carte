@@ -166,6 +166,7 @@ pub fn render_subject(
         .project
         .app(&key.app)
         .ok_or_else(|| anyhow!("unknown app {}", key.app))?;
+    let app = state.app_at(app, &key.stack);
     let checkout = state
         .checkout(app, &key.stack)
         .ok_or_else(|| Failure::new(Exit::NotFound, state.not_in_stack(app, &key.stack)))?;

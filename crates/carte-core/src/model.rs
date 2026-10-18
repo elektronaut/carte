@@ -390,10 +390,15 @@ pub struct ProjectState {
     pub worktrees: BTreeMap<String, Vec<Worktree>>,
     /// Each checkout's process list as read at load, by checkout path.
     pub processes: BTreeMap<PathBuf, Result<ProcessList, String>>,
-    /// The stacks of each repo the project's apps are in, by its main checkout.
-    pub repo_stacks: BTreeMap<PathBuf, BTreeSet<String>>,
+    /// The worktrees of each repo the project's apps are in, by its main checkout:
+    /// each worktree's path by its stack.
+    pub repo_worktrees: BTreeMap<PathBuf, BTreeMap<String, PathBuf>>,
     /// Directories in every checkout where new apps can appear.
     pub scan_dirs: BTreeSet<PathBuf>,
+    /// Apps as configured in worktrees whose `carte.toml` differs from the one their
+    /// settings come from, by checkout path: those take that file's processes, env and
+    /// env files.
+    pub checkout_apps: BTreeMap<PathBuf, App>,
 }
 
 impl ProjectState {
@@ -425,8 +430,8 @@ impl ProjectState {
             if app
                 .repo
                 .as_ref()
-                .and_then(|repo| self.repo_stacks.get(repo))
-                .is_some_and(|stacks| stacks.contains(slug))
+                .and_then(|repo| self.repo_worktrees.get(repo))
+                .is_some_and(|worktrees| worktrees.contains_key(slug))
             {
                 return None;
             }
@@ -464,6 +469,13 @@ impl ProjectState {
             .get(&app.name)
             .and_then(|wts| wts.first())
             .map_or_else(|| app.path.clone(), |wt| wt.path.clone())
+    }
+
+    /// The app as configured in its checkout in a stack.
+    pub fn app_at<'a>(&'a self, app: &'a App, stack: &Stack) -> &'a App {
+        self.checkout(app, stack)
+            .and_then(|checkout| self.checkout_apps.get(checkout.path()))
+            .unwrap_or(app)
     }
 
     /// Whether an app has an instance in a stack.

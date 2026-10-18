@@ -60,10 +60,17 @@ fn here(paths: &Paths) -> Option<tree::NodeId> {
     let cwd = std::env::current_dir().ok()?.canonicalize().ok()?;
     let world = carte_core::discovery::load_world(&paths.config_dir);
     let location = carte_core::address::locate(&world, &cwd)?;
-    Some(tree::NodeId::Instance {
-        project: location.project,
-        stack: location.stack.slug().to_string(),
-        app: location.app,
+    let stack = location.stack.slug().to_string();
+    Some(match location.app {
+        Some(app) => tree::NodeId::Instance {
+            project: location.project,
+            stack,
+            app,
+        },
+        None => tree::NodeId::Stack {
+            project: location.project,
+            stack,
+        },
     })
 }
 

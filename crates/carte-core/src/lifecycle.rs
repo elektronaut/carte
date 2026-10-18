@@ -352,8 +352,9 @@ mod tests {
                     project,
                     worktrees: Default::default(),
                     processes: Default::default(),
-                    repo_stacks: Default::default(),
+                    repo_worktrees: Default::default(),
                     scan_dirs: Default::default(),
+                    checkout_apps: Default::default(),
                 })
                 .collect(),
             ..Default::default()

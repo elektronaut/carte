@@ -259,8 +259,15 @@ struct RawProject {
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
-    /// Where a named app is, relative to the project's root; project files only.
+    /// Where a named app is, relative to the project's root, or to the repo in a
+    /// repo's `carte.toml`.
     pub path: Option<String>,
+    /// A repo's `carte.toml` only: the apps inside the repo, relative to it.
+    #[serde(default, deserialize_with = "one_or_many")]
+    pub include: Vec<String>,
+    /// A repo's `carte.toml` only: apps inside the repo named with `path`.
+    #[serde(default)]
+    pub apps: BTreeMap<String, AppConfig>,
     #[serde(default, deserialize_with = "env_table")]
     pub env: Vec<EnvTemplate>,
     pub env_files: Option<Vec<String>>,
@@ -288,6 +295,8 @@ impl AppConfig {
         }
         AppConfig {
             path: self.path.or(base.path),
+            include: Vec::new(),
+            apps: BTreeMap::new(),
             env: merge_env(base.env, self.env),
             env_files: self.env_files.or(base.env_files),
             depends_on: self.depends_on.or(base.depends_on),
@@ -447,6 +456,19 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         });
     }
     let raw: RawProject = from_toml(path, text)?;
+    if let Some(name) = raw
+        .apps
+        .iter()
+        .find(|(_, app)| app.declares_apps())
+        .map(|(name, _)| name)
+    {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            message: format!(
+                "[apps.{name}]: `include` and `apps` only apply to a repo's carte.toml; use the project's `include`"
+            ),
+        });
+    }
     Ok(ProjectFile {
         name,
         path: path.to_path_buf(),
@@ -469,16 +491,36 @@ pub fn load_project_file(path: &Path) -> Result<ProjectFile, ConfigError> {
     parse_project(path, &read(path)?)
 }
 
-/// Parses a repo's `carte.toml`, which has the shape of one `[apps.X]` table.
+/// Parses a repo's `carte.toml`: the shape of one `[apps.X]` table, plus `include`
+/// and `[apps.X] path` naming the apps inside the repo.
 pub fn parse_repo_config(path: &Path, text: &str) -> Result<AppConfig, ConfigError> {
     let config: AppConfig = from_toml(path, text)?;
+    let invalid = |message: String| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        message,
+    };
     if config.path.is_some() {
-        return Err(ConfigError::Invalid {
-            path: path.to_path_buf(),
-            message: "`path` only applies to a project file's [apps.X]".into(),
-        });
+        return Err(invalid("`path` only applies to an [apps.X] table".into()));
+    }
+    for (name, app) in &config.apps {
+        let only_path = AppConfig {
+            path: app.path.clone(),
+            ..AppConfig::default()
+        };
+        if app.path.is_none() || *app != only_path {
+            return Err(invalid(format!(
+                "[apps.{name}] in carte.toml only takes `path`; its settings go in the app's own carte.toml"
+            )));
+        }
     }
     Ok(config)
+}
+
+impl AppConfig {
+    /// Whether a repo's `carte.toml` names the apps inside the repo.
+    pub fn declares_apps(&self) -> bool {
+        !self.include.is_empty() || !self.apps.is_empty()
+    }
 }
 
 /// Reads `carte.toml` from a checkout, if it has one.
@@ -910,6 +952,10 @@ impl<'de> Deserialize<'de> for OneOrMany {
 /// An `[env]` table, in file order. Values may be strings, numbers or booleans.
 #[derive(Default)]
 struct EnvTable(Vec<EnvTemplate>);
+
+fn one_or_many<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    OneOrMany::deserialize(d).map(|list| list.0)
+}
 
 fn env_table<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<EnvTemplate>, D::Error> {
     EnvTable::deserialize(d).map(|t| t.0)

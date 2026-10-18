@@ -169,6 +169,29 @@ include = [
 - New directories and repos that match a glob join the project as they
   appear. An entry that matches nothing is reported.
 
+A repo can name its own apps in the `carte.toml` at its root, so the
+project file only needs to point at it. When `include` (or the implied
+root) picks a repo whose `carte.toml` has `include` or `[apps.X]` tables
+with a `path`, those are the repo's apps, relative to the repo, instead
+of the repo itself:
+
+```toml
+# carte.toml at the root of ~/work/mono
+include = ["apps/*", "!apps/docs"]
+
+[apps.backend]
+path = "services/api"
+```
+
+```toml
+# ~/.config/carte/projects/mono.toml
+root = "~/work/mono"
+```
+
+Each checkout's own `carte.toml` decides, so a branch that adds an app
+to it has that app in its stack. In this file, `[apps.X]` tables only
+take `path`; an app's settings go in its own directory's `carte.toml`.
+
 An app that `include` finds is named after its directory. To give one a
 different name, or to add an app `include` doesn't find, name it with
 `path`:
@@ -266,6 +289,12 @@ reported as unreachable.
 `carte.toml`. When both set a key, the project file wins, key by
 key; `env` and `processes` are merged entry by entry. The project's
 [`[processes]`](#project-level-processes) sit between the two.
+
+`carte.toml` is read in each checkout, so a branch can change how its
+app runs: in a worktree, that worktree's `env`, `env_files`,
+`processes` and `replace_processes` apply. The other keys (`aliases`,
+`subdomains`, `depends_on`, `policy`, `port`) shape the whole project,
+so they come from the main checkout's file.
 
 ```toml
 [apps.events]
@@ -566,7 +595,8 @@ DATABASE = "billing_{{stack | snake}}"
 - **Where.** Instances still running in the stack, such as apps without
   a worktree running from their main checkout, are stopped first. Then
   each app with a teardown process runs it once, in the app's main
-  checkout (the worktree is gone), with the removed stack's environment:
+  checkout (the worktree is gone; for an app that is only on branches,
+  the main checkout of its repo), with the removed stack's environment:
   `{{stack}}`, `CARTE_STACK`, `{{state_dir}}`, `CARTE_STATE_DIR` and the
   rest are those of the app in that stack, `CARTE_BRANCH` is the last
   branch carte saw in the stack, and the provider runs in the main

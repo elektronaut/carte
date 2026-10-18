@@ -31,11 +31,15 @@ pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> 
         set.insert((dir.clone(), false));
     }
     for state in &world.projects {
-        for repo in state.repo_stacks.keys() {
+        for (repo, worktrees) in &state.repo_worktrees {
             let git = repo.join(".git");
             set.insert((git.clone(), false));
             if git.join("worktrees").is_dir() {
                 set.insert((git.join("worktrees"), false));
+            }
+            set.insert((repo.clone(), false));
+            for path in worktrees.values() {
+                set.insert((path.clone(), false));
             }
         }
         for dir in &state.scan_dirs {
@@ -94,7 +98,11 @@ pub fn classify(
     }
     let name = path.file_name()?.to_str()?;
     let parent = path.parent()?;
-    if matches!(name, "Procfile.dev" | "Procfile" | "config.ru") && checkouts.contains_key(parent) {
+    if matches!(
+        name,
+        "Procfile.dev" | "Procfile" | "config.ru" | "carte.toml"
+    ) && checkouts.contains_key(parent)
+    {
         return Some(Change::Reload);
     }
     if name == "restart.txt" && parent.file_name()? == "tmp" {
@@ -122,6 +130,13 @@ fn checkouts(world: &World) -> BTreeMap<PathBuf, PathBuf> {
                 .filter(|app| !app.branch_only)
                 .map(|app| app.path.clone())
                 .chain(state.worktrees.values().flatten().map(|wt| wt.path.clone()))
+                .chain(
+                    state
+                        .repo_worktrees
+                        .iter()
+                        .flat_map(|(repo, wts)| std::iter::once(repo).chain(wts.values()))
+                        .cloned(),
+                )
         })
         .filter(|p| !p.as_os_str().is_empty());
     keyed(paths)
@@ -261,6 +276,19 @@ mod tests {
 
     fn scans() -> BTreeSet<PathBuf> {
         BTreeSet::from([PathBuf::from("/work/mono/apps")])
+    }
+
+    #[test]
+    fn a_changed_carte_toml_reloads() {
+        assert_eq!(
+            classify(
+                Path::new("/work/acme-web-feature-x/carte.toml"),
+                &[PathBuf::from("/config")],
+                &checkouts(),
+                &scans()
+            ),
+            Some(Change::Reload)
+        );
     }
 
     #[test]

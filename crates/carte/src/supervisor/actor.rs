@@ -643,6 +643,7 @@ impl Actor {
             ));
         }
         let (state, app) = self.lookup(key)?;
+        let app = state.app_at(app, &key.stack);
         let checkout = state.checkout(app, &key.stack).ok_or_else(|| {
             BootFailure::new(
                 format!("{} isn't in this stack", app.name),
@@ -840,6 +841,7 @@ impl Actor {
         let Ok((state, app)) = self.lookup(key) else {
             return;
         };
+        let app = state.app_at(app, &key.stack);
         let inst = &self.instances[key];
         let Some(checkout) = inst.checkout.clone() else {
             return;

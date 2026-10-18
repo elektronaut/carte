@@ -11,7 +11,7 @@ where every part is optional and inferred from the current directory:
 
 | Address | Means |
 | --- | --- |
-| *(none)* | The app whose checkout you're in, on its stack |
+| *(none)* | The app whose checkout you're in, on its stack; in a repo's checkout outside its apps, such as a monorepo's root, every app of that stack |
 | `billing` | The app on main |
 | `billing@feature-x` | The app in the `feature-x` stack |
 | `@feature-x` | Every app in the stack |

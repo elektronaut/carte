@@ -139,8 +139,9 @@ mod tests {
             },
             worktrees: map,
             processes: BTreeMap::new(),
-            repo_stacks: BTreeMap::new(),
+            repo_worktrees: BTreeMap::new(),
             scan_dirs: Default::default(),
+            checkout_apps: BTreeMap::new(),
         }
     }
 

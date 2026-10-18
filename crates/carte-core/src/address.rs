@@ -115,7 +115,8 @@ impl Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     pub project: String,
-    pub app: String,
+    /// `None` in a repo's checkout outside its apps, such as a monorepo's root.
+    pub app: Option<String>,
     pub stack: Stack,
 }
 
@@ -148,30 +149,44 @@ fn candidate_list(candidates: &[String]) -> String {
 }
 
 /// Finds the app checkout (main or a worktree) containing `dir`, preferring the deepest,
-/// since worktrees can live inside the main checkout.
+/// since worktrees can live inside the main checkout. Outside any app but inside a
+/// checkout of one of a project's repos, such as a monorepo's root, it finds the stack
+/// without an app.
 pub fn locate(world: &World, dir: &Path) -> Option<Location> {
     world
         .projects
         .iter()
         .flat_map(|state| {
-            state.project.apps.iter().flat_map(move |app| {
+            let apps = state.project.apps.iter().flat_map(move |app| {
                 let worktrees = state.worktrees.get(&app.name).into_iter().flatten();
                 (!app.branch_only)
                     .then_some((app.path.as_path(), Stack::Main))
                     .into_iter()
                     .chain(worktrees.map(|wt| (wt.path.as_path(), Stack::Branch(wt.slug.clone()))))
-                    .filter(|(path, _)| dir.starts_with(path))
-                    .map(move |(path, stack)| {
-                        let location = Location {
-                            project: state.project.name.clone(),
-                            app: app.name.clone(),
-                            stack,
-                        };
-                        (path.components().count(), location)
-                    })
-            })
+                    .map(move |(path, stack)| (path, stack, Some(app.name.clone())))
+            });
+            let repos = state.repo_worktrees.iter().flat_map(|(repo, worktrees)| {
+                std::iter::once((repo.as_path(), Stack::Main))
+                    .chain(
+                        worktrees
+                            .iter()
+                            .map(|(slug, path)| (path.as_path(), Stack::Branch(slug.clone()))),
+                    )
+                    .map(|(path, stack)| (path, stack, None))
+            });
+            apps.chain(repos)
+                .filter(|(path, _, _)| !path.as_os_str().is_empty() && dir.starts_with(path))
+                .map(move |(path, stack, app)| {
+                    let rank = (path.components().count(), app.is_some());
+                    let location = Location {
+                        project: state.project.name.clone(),
+                        app,
+                        stack,
+                    };
+                    (rank, location)
+                })
         })
-        .max_by_key(|(depth, _)| *depth)
+        .max_by_key(|(rank, _)| *rank)
         .map(|(_, location)| location)
 }
 
@@ -197,7 +212,7 @@ pub fn resolve(
             let app = address
                 .stack
                 .is_none()
-                .then(|| state.project.app(&here.app))
+                .then(|| here.app.as_deref().and_then(|app| state.project.app(app)))
                 .flatten();
             (Some(state), app)
         }
@@ -216,10 +231,17 @@ pub fn resolve(
             (state, Some(stack), address.process.clone())
         }
         (None, Some(state)) => {
-            let stack = app.map(|_| match &here {
-                Some(here) if here.project == state.project.name => here.stack.clone(),
-                _ => Stack::Main,
-            });
+            let here = here
+                .as_ref()
+                .filter(|here| here.project == state.project.name);
+            let stack = match (app, here) {
+                (Some(_), Some(here)) => Some(here.stack.clone()),
+                (Some(_), None) => Some(Stack::Main),
+                (None, Some(here)) if address.app.is_none() && here.app.is_none() => {
+                    Some(here.stack.clone())
+                }
+                (None, _) => None,
+            };
             (state, stack, address.process.clone())
         }
         (None, None) => unreachable!("no stack and no project returns NoContext"),
@@ -953,7 +975,7 @@ mod tests {
             ),
             Some(Location {
                 project: "acme".into(),
-                app: "acme-api".into(),
+                app: Some("acme-api".into()),
                 stack: branch("feature-x"),
             })
         );

@@ -50,8 +50,9 @@ pub fn state(project: Project, worktrees: Vec<(&str, Vec<Worktree>)>) -> Project
             .map(|(app, wts)| (app.to_string(), wts))
             .collect::<BTreeMap<_, _>>(),
         processes: BTreeMap::new(),
-        repo_stacks: BTreeMap::new(),
+        repo_worktrees: BTreeMap::new(),
         scan_dirs: Default::default(),
+        checkout_apps: BTreeMap::new(),
     }
 }
 

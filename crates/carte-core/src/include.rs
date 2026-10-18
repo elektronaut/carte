@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 use glob::{MatchOptions, Pattern};
 
@@ -25,7 +26,7 @@ pub struct Found {
 #[derive(Debug, Default)]
 pub struct Expanded {
     pub apps: Vec<Found>,
-    pub repo_stacks: BTreeMap<PathBuf, BTreeSet<String>>,
+    pub repo_worktrees: BTreeMap<PathBuf, BTreeMap<String, PathBuf>>,
     pub scan_dirs: BTreeSet<PathBuf>,
     pub problems: Vec<Issue>,
 }
@@ -65,6 +66,8 @@ struct Candidate {
     dir: PathBuf,
     repo: Option<PathBuf>,
     worktree: Option<Worktree>,
+    /// The entries of the repo's `carte.toml` that found it, when it names its apps.
+    declared: Option<Rc<Vec<Entry>>>,
 }
 
 const MATCH: MatchOptions = MatchOptions {
@@ -120,6 +123,7 @@ pub fn expand(
 
     let mut repos: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
     let mut candidates = Vec::new();
+    let mut declaring = BTreeSet::new();
     for entry in entries.iter().filter(|e| !e.negate) {
         let components: Vec<Component> = entry.pattern.components().collect();
         for depth in 1..=components.len() {
@@ -138,6 +142,7 @@ pub fn expand(
                     dir,
                     repo: None,
                     worktree: None,
+                    declared: None,
                 });
             }
         }
@@ -154,14 +159,37 @@ pub fn expand(
                 Vec::new()
             }
         };
-        out.repo_stacks.insert(
+        out.repo_worktrees.insert(
             repo.clone(),
-            worktrees.iter().map(|wt| wt.slug.clone()).collect(),
+            worktrees
+                .iter()
+                .map(|wt| (wt.slug.clone(), wt.path.clone()))
+                .collect(),
         );
         let checkouts = std::iter::once((repo.clone(), None))
             .chain(worktrees.into_iter().map(|wt| (wt.path.clone(), Some(wt))));
         for (checkout, worktree) in checkouts {
             for pattern in &patterns {
+                if pattern.as_os_str().is_empty()
+                    && let Some(declared) = declared_entries(&checkout, &repo, &mut out.problems)
+                {
+                    let itself = Candidate {
+                        path: repo.clone(),
+                        dir: checkout.clone(),
+                        repo: Some(repo.clone()),
+                        worktree: worktree.clone(),
+                        declared: None,
+                    };
+                    if selects(&entries, &itself) {
+                        declaring.insert(repo.clone());
+                        candidates.extend(declared_candidates(
+                            &declared,
+                            &itself,
+                            &mut out.scan_dirs,
+                        ));
+                    }
+                    continue;
+                }
                 let pattern = normalize(&checkout.join(pattern));
                 if worktree.is_some()
                     && pattern
@@ -182,6 +210,7 @@ pub fn expand(
                         dir,
                         repo: Some(repo.clone()),
                         worktree: worktree.clone(),
+                        declared: None,
                     });
                 }
             }
@@ -195,7 +224,8 @@ pub fn expand(
         if !seen.insert((candidate.path.clone(), checkout)) {
             continue;
         }
-        let Some((name, naming)) = decide(&entries, &candidate, project, root.as_deref()) else {
+        let decided_by = candidate.declared.as_deref().unwrap_or(&entries);
+        let Some((name, naming)) = decide(decided_by, &candidate, project, root.as_deref()) else {
             continue;
         };
         let app = found
@@ -221,10 +251,13 @@ pub fn expand(
         if entry.negate {
             continue;
         }
-        let matched = found.keys().any(|path| match &entry.name {
-            Some(_) => *path == entry.pattern,
-            None => entry.matcher.matches_path_with(path, MATCH),
-        });
+        let matched = found
+            .keys()
+            .chain(&declaring)
+            .any(|path| match &entry.name {
+                Some(_) => *path == entry.pattern,
+                None => entry.matcher.matches_path_with(path, MATCH),
+            });
         if !matched {
             out.problems.push(Issue::new(match &entry.name {
                 Some(name) => format!("[apps.{name}] path {:?} is not in any checkout", entry.text),
@@ -299,6 +332,87 @@ pub fn expand_projects(
         })
         .collect();
     (picked, scans, problems)
+}
+
+/// The entries of a checkout's `carte.toml` when it names the apps inside its repo,
+/// resolved against the repo's main checkout.
+fn declared_entries(
+    checkout: &Path,
+    repo: &Path,
+    problems: &mut Vec<Issue>,
+) -> Option<Rc<Vec<Entry>>> {
+    let config = match config::load_repo_config(checkout) {
+        Ok(Some(config)) if config.declares_apps() => config,
+        Ok(_) => return None,
+        Err(err) => {
+            problems.push(Issue::new(err.to_string()));
+            return None;
+        }
+    };
+    let texts = config.include.iter().map(|t| (t.clone(), None)).chain(
+        config
+            .apps
+            .iter()
+            .filter_map(|(name, app)| Some((app.path.clone()?, Some(name.clone())))),
+    );
+    let mut entries = Vec::new();
+    for (text, name) in texts {
+        match entry(&text, name, Some(repo)) {
+            Ok(entry) => entries.push(entry),
+            Err(message) => problems.push(Issue::new(format!(
+                "{}: {message}",
+                checkout.join(config::REPO_CONFIG).display()
+            ))),
+        }
+    }
+    Some(Rc::new(entries))
+}
+
+/// The directories a repo's own entries find in one of its checkouts.
+fn declared_candidates(
+    declared: &Rc<Vec<Entry>>,
+    itself: &Candidate,
+    scan_dirs: &mut BTreeSet<PathBuf>,
+) -> Vec<Candidate> {
+    let mut found = Vec::new();
+    for entry in declared.iter().filter(|e| !e.negate) {
+        let Ok(inside) = entry.pattern.strip_prefix(&itself.path) else {
+            continue;
+        };
+        let pattern = normalize(&itself.dir.join(inside));
+        if entry.wildcard {
+            scan_dirs.extend(scan_dir(&pattern));
+        }
+        for dir in dirs(&pattern) {
+            if nested_git(&itself.dir, &dir) {
+                continue;
+            }
+            let Ok(inside) = dir.strip_prefix(&itself.dir) else {
+                continue;
+            };
+            found.push(Candidate {
+                path: normalize(&itself.path.join(inside)),
+                dir,
+                repo: itself.repo.clone(),
+                worktree: itself.worktree.clone(),
+                declared: Some(declared.clone()),
+            });
+        }
+    }
+    found
+}
+
+/// Whether the project's entries pick a directory, whatever it has to run.
+fn selects(entries: &[Entry], candidate: &Candidate) -> bool {
+    entries
+        .iter()
+        .any(|e| e.name.is_some() && e.pattern == candidate.path)
+        || entries
+            .iter()
+            .rev()
+            .filter(|e| e.name.is_none())
+            .find(|e| e.matcher.matches_path_with(&candidate.path, MATCH))
+            .is_some_and(|e| !e.negate)
 }
 
 fn entry(text: &str, name: Option<String>, root: Option<&Path>) -> Result<Entry, String> {
@@ -604,8 +718,8 @@ mod tests {
         let web = &out.apps[1];
         assert_eq!(web.worktrees[0].path, work.join("fx/acme-web"));
         assert_eq!(
-            out.repo_stacks[&work.join("acme-web")],
-            BTreeSet::from(["fx".into()])
+            out.repo_worktrees[&work.join("acme-web")],
+            BTreeMap::from([("fx".into(), work.join("fx/acme-web"))])
         );
     }
 
@@ -644,6 +758,39 @@ mod tests {
         assert!(out.scan_dirs.contains(&mono.join("apps")));
         assert!(out.scan_dirs.contains(&fx.join("apps")));
         assert!(out.problems.is_empty(), "{:?}", out.problems);
+    }
+
+    #[test]
+    fn a_repo_can_name_its_own_apps_per_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().canonicalize().unwrap();
+        let mono = tmp.join("mono");
+        repo(&mono);
+        app(&mono.join("apps/web"));
+        app(&mono.join("apps/docs"));
+        app(&mono.join("services/api"));
+        fs::write(
+            mono.join("carte.toml"),
+            "include = [\"apps/*\", \"!apps/docs\"]\n\n[apps.backend]\npath = \"services/api\"\n",
+        )
+        .unwrap();
+        commit_all(&mono);
+        git(&mono, &["worktree", "add", "-q", "-b", "fx", "../mono-fx"]);
+        let fx = tmp.join("mono-fx");
+        fs::write(fx.join("carte.toml"), "include = \"apps/*\"\n").unwrap();
+
+        let out = expand("mono", Some(&mono.to_string_lossy()), &[], &[]);
+        assert!(out.problems.is_empty(), "{:?}", out.problems);
+        assert_eq!(
+            summary(&out),
+            [
+                ("docs".into(), false, vec!["mono-fx".into()]),
+                ("web".into(), true, vec!["mono-fx".into()]),
+                ("backend".into(), true, vec![]),
+            ]
+        );
+        assert_eq!(out.apps[2].naming, Naming::Named);
+        assert!(out.scan_dirs.contains(&fx.join("apps")));
     }
 
     #[test]
