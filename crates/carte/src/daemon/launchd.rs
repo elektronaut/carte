@@ -3,21 +3,30 @@
 use std::io;
 use std::net::{SocketAddr, TcpListener};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::proxy::{Listener, ListenerOptions, Proxy};
 
-/// The proxy's listeners for the launchd socket `name`, or a socket bound to `addr`
-/// when the daemon wasn't started by launchd with such a socket.
+/// The proxy's listeners for the launchd socket `name`, or sockets bound to `addrs`
+/// when the daemon wasn't started by launchd with such a socket. The first address
+/// must bind; the others are skipped with a warning when they can't.
 pub async fn proxy_listeners(
     proxy: &Proxy,
     name: &str,
-    addr: SocketAddr,
+    addrs: &[SocketAddr],
     options: ListenerOptions,
 ) -> io::Result<Vec<Listener>> {
     let activated = activate_socket(name)?;
     if activated.is_empty() {
-        return Ok(vec![proxy.bind(addr, options).await?]);
+        let mut listeners = Vec::new();
+        for (i, addr) in addrs.iter().enumerate() {
+            match proxy.bind(*addr, options.clone()).await {
+                Ok(listener) => listeners.push(listener),
+                Err(err) if i > 0 => warn!("not listening on {addr}: {err}"),
+                Err(err) => return Err(err),
+            }
+        }
+        return Ok(listeners);
     }
     activated
         .into_iter()

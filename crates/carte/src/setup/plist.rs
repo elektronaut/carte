@@ -88,12 +88,16 @@ impl Agent {
 
 fn socket(out: &mut String, name: &str, port: u16) {
     key(out, 2, name);
-    line(out, 2, "<dict>");
-    key_string(out, 3, "SockNodeName", "127.0.0.1");
-    key_string(out, 3, "SockServiceName", &port.to_string());
-    key_string(out, 3, "SockType", "stream");
-    key_string(out, 3, "SockFamily", "IPv4");
-    line(out, 2, "</dict>");
+    line(out, 2, "<array>");
+    for (node, family) in [("127.0.0.1", "IPv4"), ("::1", "IPv6")] {
+        line(out, 3, "<dict>");
+        key_string(out, 4, "SockNodeName", node);
+        key_string(out, 4, "SockServiceName", &port.to_string());
+        key_string(out, 4, "SockType", "stream");
+        key_string(out, 4, "SockFamily", family);
+        line(out, 3, "</dict>");
+    }
+    line(out, 2, "</array>");
 }
 
 fn line(out: &mut String, depth: usize, text: &str) {
@@ -146,11 +150,15 @@ mod tests {
             "<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Users/me/.local/bin:/Users/me/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>",
             "<key>CARTE_STATE_HOME</key>\n    <string>/Users/me/.local/state/R&amp;D &lt;carte&gt;</string>",
             "<key>StandardErrorPath</key>\n  <string>/Users/me/.local/state/R&amp;D &lt;carte&gt;/carte.log</string>",
-            "    <key>http</key>\n    <dict>\n      <key>SockNodeName</key>\n      <string>127.0.0.1</string>\n      \
-             <key>SockServiceName</key>\n      <string>80</string>\n      <key>SockType</key>\n      \
-             <string>stream</string>\n      <key>SockFamily</key>\n      <string>IPv4</string>\n    </dict>\n",
-            "<key>https</key>\n    <dict>\n      <key>SockNodeName</key>\n      <string>127.0.0.1</string>\n      \
-             <key>SockServiceName</key>\n      <string>443</string>",
+            "    <key>http</key>\n    <array>\n      <dict>\n        <key>SockNodeName</key>\n        \
+             <string>127.0.0.1</string>\n        <key>SockServiceName</key>\n        <string>80</string>\n        \
+             <key>SockType</key>\n        <string>stream</string>\n        <key>SockFamily</key>\n        \
+             <string>IPv4</string>\n      </dict>\n      <dict>\n        <key>SockNodeName</key>\n        \
+             <string>::1</string>\n        <key>SockServiceName</key>\n        <string>80</string>\n        \
+             <key>SockType</key>\n        <string>stream</string>\n        <key>SockFamily</key>\n        \
+             <string>IPv6</string>\n      </dict>\n    </array>\n",
+            "<key>https</key>\n    <array>\n      <dict>\n        <key>SockNodeName</key>\n        \
+             <string>127.0.0.1</string>\n        <key>SockServiceName</key>\n        <string>443</string>",
         ] {
             assert!(plist.contains(expected), "missing {expected:?} in\n{plist}");
         }

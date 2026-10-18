@@ -6,7 +6,7 @@ mod router;
 pub mod tunnel;
 pub mod watch;
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,6 +76,12 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let supervisor = supervisor::start(world, paths.clone(), Spawner::current()?, options);
 
     let loopback = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let loopbacks = |port| {
+        [
+            loopback(port),
+            SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+        ]
+    };
     let dns = DnsServer::bind(loopback(machine.dns_port), Responder::new(&tlds)?)
         .await
         .with_context(|| format!("binding DNS on {}", loopback(machine.dns_port)))?;
@@ -95,7 +101,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let http = launchd::proxy_listeners(
         &proxy,
         "http",
-        loopback(machine.http_port),
+        &loopbacks(machine.http_port),
         ListenerOptions::local(),
     )
     .await
@@ -103,7 +109,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let https = launchd::proxy_listeners(
         &proxy,
         "https",
-        loopback(machine.https_port),
+        &loopbacks(machine.https_port),
         ListenerOptions::local().tls(tls_config),
     )
     .await

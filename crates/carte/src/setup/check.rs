@@ -329,12 +329,13 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
         ("https port", "TCP", machine.https_port),
         ("dns port", "UDP", machine.dns_port),
     ] {
-        port_line(&mut report, label, port, &port_users(protocol, port));
+        let users = port_users(protocol, port);
+        port_line(&mut report, label, port, &users, protocol == "TCP");
     }
     report
 }
 
-fn port_line(report: &mut Report, label: &str, port: u16, users: &[PortUser]) {
+fn port_line(report: &mut Report, label: &str, port: u16, users: &[PortUser], dual_stack: bool) {
     let list = |users: &[PortUser]| {
         users
             .iter()
@@ -346,12 +347,17 @@ fn port_line(report: &mut Report, label: &str, port: u16, users: &[PortUser]) {
     if users.is_empty() {
         report.push(Status::Missing, &label, "nothing listening");
     } else if users.iter().all(PortUser::is_carte) {
-        let status = if users.iter().all(PortUser::loopback_only) {
-            Status::Ok
+        if !users.iter().all(PortUser::loopback_only) {
+            report.push(Status::Warn, &label, list(users));
+        } else if dual_stack && !users.iter().any(|u| u.address.starts_with("[::1]")) {
+            report.push(
+                Status::Warn,
+                &label,
+                format!("{} (not on [::1]; run `carte setup`)", list(users)),
+            );
         } else {
-            Status::Warn
-        };
-        report.push(status, &label, list(users));
+            report.push(Status::Ok, &label, list(users));
+        }
     } else {
         report.push(Status::Warn, &label, list(users));
     }
@@ -389,7 +395,7 @@ pub fn verify(env: &SetupEnv) -> Report {
         ("https port", machine.https_port),
     ] {
         let users = port_users("TCP", port);
-        port_line(&mut report, label, port, &users);
+        port_line(&mut report, label, port, &users, true);
         if users.iter().any(|u| u.is_carte() && !u.loopback_only()) {
             report.push(
                 Status::Warn,
@@ -506,10 +512,14 @@ mod tests {
         };
         let status = |users: &[PortUser]| {
             let mut report = Report::default();
-            port_line(&mut report, "http port", 80, users);
+            port_line(&mut report, "http port", 80, users, true);
             report.lines[0].status
         };
-        assert_eq!(status(&[carte("127.0.0.1:80")]), Status::Ok);
+        assert_eq!(
+            status(&[carte("127.0.0.1:80"), carte("[::1]:80")]),
+            Status::Ok
+        );
+        assert_eq!(status(&[carte("127.0.0.1:80")]), Status::Warn);
         assert_eq!(status(&[carte("*:80")]), Status::Warn);
         assert_eq!(status(&[]), Status::Missing);
         let other = PortUser {

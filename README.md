@@ -66,7 +66,8 @@ Setup does this once per machine, asking for your password where needed:
 
 - sends `.test` lookups to carte's DNS server (`/etc/resolver/test`)
 - creates a local certificate authority and trusts it
-- installs a LaunchAgent that runs the daemon on ports 80 and 443
+- installs a LaunchAgent that runs the daemon on ports 80 and 443, on
+  127.0.0.1 and ::1
 - stops puma-dev, if it's running, and leaves `~/.puma-dev` alone
 
 `carte setup --check` reports what's in place, and

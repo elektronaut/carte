@@ -27,7 +27,9 @@ fn free_port() -> u16 {
     let start = 20_000 + (std::process::id() % 400) as u16 * 25;
     loop {
         let port = 20_000 + (start - 20_000 + NEXT.fetch_add(1, Ordering::Relaxed)) % 10_000;
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+            && std::net::TcpListener::bind(("::1", port)).is_ok()
+        {
             return port;
         }
     }
@@ -190,7 +192,11 @@ impl Daemon {
     }
 
     fn request(&self, host: &str, path: &str) -> String {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.http_port)).unwrap();
+        self.request_on("127.0.0.1", host, path)
+    }
+
+    fn request_on(&self, ip: &str, host: &str, path: &str) -> String {
+        let mut stream = TcpStream::connect((ip, self.http_port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
@@ -280,6 +286,13 @@ fn boots_an_app_on_the_first_request_and_stops_it_on_sigterm() {
         );
     }
     assert!(!carte::paths::Paths::under(&daemon.root).socket().exists());
+}
+
+#[test]
+fn answers_on_ipv6_loopback() {
+    let daemon = Daemon::start();
+    let response = daemon.request_on("::1", "web.acme.test", "/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
 }
 
 #[test]
