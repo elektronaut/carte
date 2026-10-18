@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use carte_api::{EventKind, EventSubject, LogLine};
 use carte_core::dirs::StackRecord;
-use carte_core::model::{Checkout, InstanceKey, MachineConfig, ProjectState, Stack};
+use carte_core::model::{App, Checkout, InstanceKey, MachineConfig, ProjectState, Stack};
 use carte_core::{duration, procfile, teardown};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{info, warn};
@@ -281,7 +281,8 @@ impl Job {
     fn env_inputs(&self) -> Vec<(String, Result<EnvInput, String>)> {
         let mut inputs = Vec::new();
         for app in &self.state.project.apps {
-            let specs = match procfile::teardowns(&app.path, &app.settings) {
+            let path = teardown_dir(app);
+            let specs = match procfile::teardowns(&path, &app.settings) {
                 Ok(specs) if specs.is_empty() => continue,
                 Ok(specs) => specs,
                 Err(err) => {
@@ -312,9 +313,7 @@ impl Job {
                 Ok(EnvInput {
                     state: self.state.clone(),
                     app: app.clone(),
-                    checkout: Checkout::Main {
-                        path: app.path.clone(),
-                    },
+                    checkout: Checkout::Main { path: path.clone() },
                     machine: self.machine.clone(),
                     procs,
                     processes: Vec::new(),
@@ -445,11 +444,40 @@ impl Job {
     }
 }
 
+/// Where an app's teardowns run: its main checkout, or for an app that is only on
+/// branches, its repo's main checkout.
+fn teardown_dir(app: &App) -> PathBuf {
+    if app.path.is_dir() {
+        return app.path.clone();
+    }
+    app.repo
+        .clone()
+        .filter(|repo| repo.is_dir())
+        .unwrap_or_else(|| app.path.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn branch_only_apps_tear_down_in_their_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("mono");
+        fs::create_dir_all(repo.join("apps/web")).unwrap();
+        let app = |path: &str| App {
+            name: "new".into(),
+            short: "new".into(),
+            path: repo.join(path),
+            repo: Some(repo.clone()),
+            branch_only: true,
+            settings: Default::default(),
+        };
+        assert_eq!(teardown_dir(&app("apps/new")), repo);
+        assert_eq!(teardown_dir(&app("apps/web")), repo.join("apps/web"));
+    }
 
     fn candidate(stack_dir: &Path, troubled: Option<&str>) -> Candidate {
         Candidate {
