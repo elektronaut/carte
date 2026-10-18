@@ -117,6 +117,16 @@ fn key_string(out: &mut String, depth: usize, name: &str, value: &str) {
     string(out, depth, value);
 }
 
+/// Whether an installed LaunchAgent runs the daemon with `state_dir` as its state
+/// directory, and so answers on that directory's socket.
+pub fn runs_with_state(plist: &str, state_dir: &Path) -> bool {
+    let value = format!(
+        "<key>CARTE_STATE_HOME</key>\n    <string>{}</string>",
+        escape(&state_dir.to_string_lossy())
+    );
+    plist.contains(&value)
+}
+
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -126,6 +136,13 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tells_which_state_directory_the_agent_serves() {
+        let plist = agent().to_plist();
+        assert!(runs_with_state(&plist, &agent().state_dir));
+        assert!(!runs_with_state(&plist, Path::new("/tmp/trial/state")));
+    }
 
     fn agent() -> Agent {
         Agent {

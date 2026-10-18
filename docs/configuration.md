@@ -19,7 +19,7 @@ reported instead of ignored.
 
 The daemon reloads files when they change. A file with an error keeps
 its last working version, and `carte ls` and the terminal UI show the
-error. Changes to `[share]` need a daemon restart.
+error. Changes to `[share]` need a daemon restart (`carte daemon restart`).
 
 **Durations** are strings of numbers with units `d`, `h`, `m` and `s`:
 `"15m"`, `"1h30m"`. **Sizes** are a number of bytes, or a string with a

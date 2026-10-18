@@ -141,6 +141,23 @@ pub fn launchd_loaded(service: &str) -> bool {
             .is_ok_and(|s| s.success())
 }
 
+/// The pid of the process launchd runs for `service`, asked read-only.
+pub fn launchd_pid(service: &str) -> Option<u32> {
+    let output = Command::new("launchctl")
+        .args(["print", service])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    parse_launchd_pid(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_launchd_pid(text: &str) -> Option<u32> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("pid = "))
+        .and_then(|pid| pid.trim().parse().ok())
+}
+
 /// The `nameserver` and `port` of a resolver file.
 pub fn parse_resolver(text: &str) -> (Option<&str>, Option<u16>) {
     let mut nameserver = None;
@@ -500,6 +517,13 @@ pub fn fallback(env: &SetupEnv) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_pid_from_launchctl_print() {
+        let text = "gui/501/no.elektronaut.carte = {\n\tactive count = 2\n\tstate = running\n\tpid = 32003\n\tprogram = /x/carte\n}\n";
+        assert_eq!(parse_launchd_pid(text), Some(32003));
+        assert_eq!(parse_launchd_pid("state = not running\n"), None);
+    }
 
     #[test]
     fn parses_lsof_field_output() {

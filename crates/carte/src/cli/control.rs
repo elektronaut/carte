@@ -54,6 +54,56 @@ pub fn daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+pub fn restart_daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
+    use crate::setup::plist::{LABEL, runs_with_state};
+    if !cfg!(target_os = "macos") {
+        bail!("`carte daemon restart` restarts carte's LaunchAgent, which only exists on macOS");
+    }
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let service = format!("gui/{}/{LABEL}", unsafe { libc::getuid() });
+    if !crate::setup::check::launchd_loaded(&service) {
+        bail!("carte's LaunchAgent isn't loaded; run `carte setup` to install it");
+    }
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let plist = std::fs::read_to_string(home.join(format!("Library/LaunchAgents/{LABEL}.plist")))
+        .unwrap_or_default();
+    if !runs_with_state(&plist, &paths.state_dir) {
+        bail!(
+            "carte's LaunchAgent doesn't run the daemon for {}; restart that one yourself",
+            paths.state_dir.display()
+        );
+    }
+    let before = crate::setup::check::launchd_pid(&service);
+    let status = std::process::Command::new("launchctl")
+        .args(["kickstart", "-k", &service])
+        .status()?;
+    if !status.success() {
+        bail!("`launchctl kickstart -k {service}` failed");
+    }
+    let client = Client::new(&paths.socket());
+    let runtime = runtime()?;
+    let started = std::time::Instant::now();
+    loop {
+        let pid = crate::setup::check::launchd_pid(&service);
+        if pid.is_some()
+            && pid != before
+            && runtime
+                .block_on(client.get::<Snapshot>(paths::SNAPSHOT))
+                .is_ok()
+        {
+            break;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(15) {
+            bail!("carte restarted but doesn't answer yet; see `carte setup --check`");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    println!("Restarted carte");
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn ls(paths: &Paths, all: bool, json: bool) -> anyhow::Result<ExitCode> {
     let snapshot: Snapshot =
         runtime()?.block_on(Client::new(&paths.socket()).get(paths::SNAPSHOT))?;

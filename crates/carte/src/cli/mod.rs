@@ -92,8 +92,11 @@ pub enum Command {
     Import(ImportCommand),
     /// Watch and control everything in a terminal UI.
     Tui,
-    /// Run the daemon in the foreground.
-    Daemon,
+    /// Run the daemon in the foreground, or manage the one launchd runs.
+    Daemon {
+        #[command(subcommand)]
+        command: Option<DaemonCommand>,
+    },
     /// Serve the Model Context Protocol over stdio, for coding agents.
     Mcp {
         /// Also offer start, restart and stop.
@@ -326,9 +329,18 @@ pub enum ProjectCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+pub enum DaemonCommand {
+    /// Restart the daemon launchd runs, so it picks up a new build or `[share]` changes.
+    Restart,
+}
+
 pub fn run(cli: Cli) -> ExitCode {
     let paths = Paths::from_env();
-    if !matches!(cli.command, Some(Command::Shim { .. } | Command::Daemon)) {
+    if !matches!(
+        cli.command,
+        Some(Command::Shim { .. } | Command::Daemon { command: None })
+    ) {
         // SAFETY: called before any other thread exists.
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
         refresh_skill();
@@ -344,7 +356,10 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Shim { fd, command } => {
             return ExitCode::from(crate::shim::run(fd, &command) as u8);
         }
-        Command::Daemon => control::daemon(&paths),
+        Command::Daemon { command: None } => control::daemon(&paths),
+        Command::Daemon {
+            command: Some(DaemonCommand::Restart),
+        } => control::restart_daemon(&paths),
         Command::Mcp { control } => mcp::run(&paths, control),
         Command::Tui => crate::tui::run(&paths),
         Command::Ls { all } => control::ls(&paths, all, cli.json),
