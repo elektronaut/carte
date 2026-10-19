@@ -190,7 +190,7 @@ An **Instance** is:
 **`carte events --json`** prints one line per event:
 `{ seq, at_ms, kind, message, subjects: [{ project, stack, app, process }], boot_ms, exit_code }`,
 where `kind` is one of `started`, `ready`, `stopped`, `crashed`,
-`exited`, `restarted`, `config-reloaded`, `config-error`, `worktree-added`,
+`gave-up`, `exited`, `restarted`, `config-reloaded`, `config-error`, `worktree-added`,
 `worktree-removed`, `shared`, `unshared`, `share-expired`,
 `tunnel-connected`, `tunnel-failed`, `policy-changed`,
 `teardown-scheduled`, `teardown-paused`, `teardown-cancelled`, `teardown-finished` and

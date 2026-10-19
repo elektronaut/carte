@@ -1267,7 +1267,7 @@ impl Actor {
         if crashes >= 5 {
             proc.gave_up = true;
             self.event(
-                EventKind::Crashed,
+                EventKind::GaveUp,
                 format!("{name} crashed {crashes} times within a minute; it stays down"),
                 vec![events::process(key, &name)],
             );

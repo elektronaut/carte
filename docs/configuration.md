@@ -547,7 +547,7 @@ it has `restart = "never"`:
   `down: worker (gave up)`, and the terminal UI marks it `gave up`.
   Starting it by hand (`carte up app/worker`) clears that and starts
   counting again.
-- Restarts and the give-up show in `carte events`.
+- Restarts show in `carte events`, and the give-up as `gave up`.
 - Stopping it by hand, disabling it, stopping the instance or an idle
   stop never restart it, and cancel a restart that's waiting.
 - During the start, nothing is restarted: a service or task that fails

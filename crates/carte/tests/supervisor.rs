@@ -1747,7 +1747,7 @@ command = 'if [ -e {marker} ]; then echo crash >> {log}; exit 1; fi; touch {mark
     kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
     wait_for_events(&handle, "carte to give up", |lines| {
         lines.iter().any(|l| {
-            l == "acme-web/worker crashed: worker crashed 5 times within a minute; it stays down"
+            l == "acme-web/worker gave up: worker crashed 5 times within a minute; it stays down"
         })
     })
     .await;
