@@ -1783,10 +1783,12 @@ async fn a_crashed_instance_restarts_once_its_processes_have_stopped_services_la
     let setup = Setup::new();
     let path = setup.root.join("stop.log");
     let log = path.display();
+    let marker = setup.root.join("crashed");
     setup.app(
         "acme-web",
         &format!(
-            "web: exec {{fixture}}\nworker: trap 'sleep 0.3; echo worker >> {log}; exit 0' TERM; while :; do sleep 0.05; done\n"
+            "web: if [ ! -e {marker} ]; then touch {marker}; sleep 0.3; exit 1; fi; exec {{fixture}}\nworker: trap 'sleep 0.3; echo worker >> {log}; exit 0' TERM; while :; do sleep 0.05; done\n",
+            marker = marker.display()
         ),
     );
     setup.project(&format!(
@@ -1802,13 +1804,11 @@ kind = "service"
     handle
         .ensure_ready(key("acme-web", Stack::Main))
         .await
-        .unwrap();
-    let web = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
-    kill(Pid::from_raw(web as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
-    wait_for(&handle, "the crash", |s| {
-        status(s, "acme-web", "main").state == InstanceState::Crashed
-    })
-    .await;
+        .unwrap_err();
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Crashed
+    );
 
     handle
         .ensure_ready(key("acme-web", Stack::Main))
@@ -2047,6 +2047,223 @@ async fn a_crashed_worker_comes_back_on_its_own_port() {
             .any(|l| l == "acme-web/worker restarted: after a crash")
     })
     .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_crashed_web_process_restarts_alone_on_its_own_port() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");
+    setup.project("");
+    let handle = setup.start();
+
+    let upstream = handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let snapshot = handle.snapshot();
+    let before = process(&snapshot, "acme-web", "web").clone();
+    let worker = process(&snapshot, "acme-web", "worker").pid;
+    let pid = before.pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "web to come back", |s| {
+        let p = process(s, "acme-web", "web");
+        p.state == ProcessState::Running && p.pid.is_some_and(|p| p != pid)
+    })
+    .await;
+    assert_eq!(
+        handle
+            .ensure_ready(key("acme-web", Stack::Main))
+            .await
+            .unwrap(),
+        upstream
+    );
+    assert!(http_get(upstream.port, "/").contains("fixture"));
+    let snapshot = handle.snapshot();
+    let after = process(&snapshot, "acme-web", "web");
+    assert_eq!(after.port, before.port);
+    assert_eq!(after.restarts, before.restarts + 1);
+    assert_eq!(process(&snapshot, "acme-web", "worker").pid, worker);
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Ready
+    );
+    wait_for_events(&handle, "the restart", |lines| {
+        lines
+            .iter()
+            .any(|l| l == "acme-web/web restarted: after a crash")
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    let crashes: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == carte_api::EventKind::Crashed)
+        .collect();
+    assert_eq!(crashes.len(), 1, "{:#?}", event_lines(&events));
+    assert_eq!(crashes[0].subjects[0].process.as_deref(), Some("web"));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn requests_wait_while_the_web_process_restarts() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: FIXTURE_BOOT_DELAY_MS=300 exec {fixture}\nworker: exec {fixture}\n",
+    );
+    setup.project("");
+    let handle = setup.start_with_backoff(Duration::from_millis(500));
+
+    let upstream = handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "web to wait for its restart", |s| {
+        process(s, "acme-web", "web").restart_in_secs.is_some()
+    })
+    .await;
+    let mut request = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.request(key("acme-web", Stack::Main), None).await })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut request)
+            .await
+            .is_err(),
+        "the request didn't wait"
+    );
+    assert_eq!(request.await.unwrap().unwrap(), upstream);
+    assert!(http_get(upstream.port, "/").contains("fixture"));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_clean_exit_of_the_web_process_restarts_it() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: trap 'kill $!; exit 0' TERM; {fixture} & wait\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+
+    let upstream = handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGTERM).unwrap();
+    wait_for_events(&handle, "the exit and restart", |lines| {
+        lines
+            .iter()
+            .any(|l| l == "acme-web/web exited: web exited with code 0")
+            && lines
+                .iter()
+                .any(|l| l == "acme-web/web restarted: after a crash")
+    })
+    .await;
+    assert_eq!(
+        handle
+            .ensure_ready(key("acme-web", Stack::Main))
+            .await
+            .unwrap(),
+        upstream
+    );
+    assert!(http_get(upstream.port, "/").contains("fixture"));
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == carte_api::EventKind::Crashed),
+        "{:#?}",
+        event_lines(&events)
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_web_process_that_keeps_crashing_stops_the_instance_until_started_by_hand() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: if [ -e {marker} ]; then echo crashing; exit 1; fi; touch {marker}; exec {{fixture}}\nworker: exec {{fixture}}\n",
+            marker = marker.display()
+        ),
+    );
+    setup.project("");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for_events(&handle, "carte to give up", |lines| {
+        lines.iter().any(|l| {
+            l == "acme-web/web gave up: web crashed 5 times within a minute; it stays down"
+        })
+    })
+    .await;
+    wait_for(&handle, "the instance to stop", |s| {
+        let inst = status(s, "acme-web", "main");
+        inst.state == InstanceState::Crashed && inst.processes.iter().all(|p| p.pid.is_none())
+    })
+    .await;
+    let snapshot = handle.snapshot();
+    let web = process(&snapshot, "acme-web", "web");
+    assert!(
+        matches!(web.state, ProcessState::Exited { code: Some(1), .. }),
+        "{web:?}"
+    );
+    assert!(web.gave_up);
+    assert_eq!(
+        process(&snapshot, "acme-web", "worker").state,
+        ProcessState::Stopped
+    );
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .filter(|e| e.kind == carte_api::EventKind::Crashed)
+            .all(|e| e.subjects[0].process.is_some()),
+        "{:#?}",
+        event_lines(&events)
+    );
+
+    let failure = handle
+        .request(key("acme-web", Stack::Main), None)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.title, "acme-web@main crashed");
+    assert!(
+        failure.detail.contains("crashed 5 times within a minute"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.log.iter().any(|l| l.contains("crashing")),
+        "{failure:?}"
+    );
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Crashed
+    );
+
+    std::fs::remove_file(&marker).unwrap();
+    let response = handle
+        .control(waiting("web", Action::Restart))
+        .await
+        .unwrap();
+    assert!(response.failures.is_empty(), "{response:?}");
+    handle
+        .request(key("acme-web", Stack::Main), None)
+        .await
+        .unwrap();
+    assert!(!process(&handle.snapshot(), "acme-web", "web").gave_up);
     handle.shutdown().await;
 }
 

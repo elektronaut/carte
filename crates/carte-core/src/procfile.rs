@@ -95,7 +95,7 @@ pub enum ProcfileError {
     #[error("process {process:?} is a teardown, which runs on its own: remove `after`")]
     TeardownAfter { process: String },
     #[error(
-        "process {process:?} serves HTTP, so it can't have `restart`: its crash stops the instance, and the next request starts it"
+        "process {process:?} serves HTTP, so it can't have `restart`: carte always restarts it when it exits"
     )]
     RestartOnHttp { process: String },
     #[error("process {process:?} is a teardown, which runs once: remove `restart`")]
@@ -319,7 +319,8 @@ pub fn build(
 }
 
 /// The restart policy a process gets: `on-failure` for services and ordinary
-/// processes, `never` for the HTTP process, tasks and teardowns.
+/// processes, `never` for tasks and teardowns. The HTTP process gets `never` too,
+/// though the supervisor restarts it whenever it exits after the start.
 fn restart(
     name: &str,
     http: bool,

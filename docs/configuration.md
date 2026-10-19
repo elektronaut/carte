@@ -431,7 +431,7 @@ MAILCATCHER_SMTP = "1025"
 | `policy` | the app's | See [Policies](#policies) |
 | `kind` | none | `"service"` or `"task"`, which start before the other processes, or `"teardown"`, which runs once a stack is removed. See [Services and tasks](#services-and-tasks) and [Teardown](#teardown) |
 | `after` | none | Processes of the same kind this one starts after, like `["migrate"]` |
-| `restart` | `"on-failure"`; `"never"` for tasks | `"on-failure"` restarts the process when it crashes after the start; `"never"` leaves it down. Not allowed on the HTTP process or a teardown. See [Crashes](#crashes) |
+| `restart` | `"on-failure"`; `"never"` for tasks | `"on-failure"` restarts the process when it crashes after the start; `"never"` leaves it down. Not allowed on the HTTP process, which is always restarted, or a teardown. See [Crashes](#crashes) |
 | `provides` | none | Env templates set on every process of the instance, like a server's socket URL. See [Services and tasks](#services-and-tasks) |
 
 Every process gets its own `PORT`. A fixed port in the HTTP process's
@@ -554,9 +554,13 @@ it has `restart = "never"`:
   fails the start, as described in [Services and tasks](#services-and-tasks),
   and another process that crashes stays down.
 - Tasks default to `restart = "never"`, and `"on-failure"` isn't allowed
-  on them: they run once per start. The HTTP process takes no
-  `restart`: its crash crashes the instance, and the next request starts
-  it again.
+  on them: they run once per start.
+- The HTTP process takes no `restart`: it's restarted alone whenever it
+  exits, with code 0 too, since nothing else answers on its port.
+  Requests that arrive meanwhile wait until it's ready again. When
+  carte gives up on it, the instance stops, and requests get the error
+  page with its log instead of starting it, until you start it by hand
+  (`carte up` or `carte restart`).
 - A process with `scope = "checkout"` is restarted by the instance
   running it. Once it has exited, while it waits to restart or stays
   down, the other instances sharing the checkout don't start their own

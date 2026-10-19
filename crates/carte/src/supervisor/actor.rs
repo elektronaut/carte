@@ -93,6 +93,8 @@ pub(super) struct Instance {
     opened: bool,
     /// The app whose open warmed it.
     warmed_after: Option<String>,
+    /// Its HTTP process crashed too often: requests get this until it's started by hand.
+    gave_up: Option<BootFailure>,
 }
 
 /// Why an instance starts, for its `started` event.
@@ -192,11 +194,19 @@ impl Instance {
             started_at: Instant::now(),
             opened: false,
             warmed_after: None,
+            gave_up: None,
         }
     }
 
     fn is_active(&self) -> bool {
         matches!(self.state, InstanceState::Starting | InstanceState::Ready)
+    }
+
+    /// Ready, with its HTTP process up: not waiting to restart or to pass its
+    /// readiness check again after a crash.
+    fn serving(&self) -> bool {
+        self.state == InstanceState::Ready
+            && (self.route_port.is_some() || self.http().is_none_or(|p| p.is_running() && p.ready))
     }
 
     fn http(&self) -> Option<&Proc> {
@@ -612,14 +622,15 @@ impl Actor {
     ) {
         if let Some(inst) = self.instances.get_mut(&key) {
             match inst.state {
-                InstanceState::Ready => {
+                InstanceState::Ready if inst.serving() => {
                     let _ = reply.send(
                         inst.upstream()
                             .ok_or_else(|| BootFailure::no_web_process(&key.app)),
                     );
                     return;
                 }
-                InstanceState::Starting => {
+                InstanceState::Starting | InstanceState::Ready => {
+                    inst.last_activity = Instant::now();
                     inst.waiters.push(reply);
                     return;
                 }
@@ -652,13 +663,20 @@ impl Actor {
 
     /// Starts an instance and its dependencies. `force` starts a disabled process once.
     /// A crashed or stopping instance whose processes still run is restarted once they
-    /// have exited, services last.
+    /// have exited, services last. An instance carte gave up on starts only by hand.
     fn start(
         &mut self,
         key: &InstanceKey,
         force: Option<&str>,
         why: Why,
     ) -> Result<(), BootFailure> {
+        if let Some(inst) = self.instances.get_mut(key) {
+            if matches!(why, Why::Manual | Why::Restart) {
+                inst.gave_up = None;
+            } else if let Some(failure) = &inst.gave_up {
+                return Err(failure.clone());
+            }
+        }
         if let Some(inst) = self.instances.get_mut(key)
             && matches!(inst.state, InstanceState::Crashed | InstanceState::Stopping)
             && inst.any_running()
@@ -1189,12 +1207,12 @@ impl Actor {
         let name = name.as_str();
         let http = proc.spec.http;
         let boot_step = proc.spec.kind.is_some();
-        let on_failure = proc.spec.restart == Restart::OnFailure && code != Some(0);
+        let restarts = http || (proc.spec.restart == Restart::OnFailure && code != Some(0));
         let done = proc.state == ProcessState::Done;
         let restarting = proc.restart;
         match inst.state {
             InstanceState::Starting | InstanceState::Ready if done => self.advance(key),
-            InstanceState::Starting | InstanceState::Ready if http && !manual => {
+            InstanceState::Starting if http && !manual => {
                 self.crash(key, code, Some(idx), message);
             }
             InstanceState::Starting if boot_step && !manual => {
@@ -1231,7 +1249,7 @@ impl Actor {
                 let ready = inst.state == InstanceState::Ready;
                 if restart {
                     let _ = self.start_process(key, name);
-                } else if on_failure && ready && !manual {
+                } else if restarts && ready && !manual {
                     self.schedule_restart(key, idx);
                 }
                 self.advance(key);
@@ -1248,7 +1266,8 @@ impl Actor {
     }
 
     /// Restarts a crashed process after a wait that doubles with each crash: 1, 2, 4
-    /// and 8 times the first; gives up at the fifth crash within a minute.
+    /// and 8 times the first; gives up at the fifth crash within a minute, and on the
+    /// HTTP process stops the instance.
     fn schedule_restart(&mut self, key: &InstanceKey, idx: usize) {
         let backoff = self.options.restart_backoff;
         let Some(proc) = self
@@ -1266,11 +1285,16 @@ impl Actor {
         let name = proc.spec.name.clone();
         if crashes >= 5 {
             proc.gave_up = true;
+            let http = proc.spec.http;
+            let message = format!("{name} crashed {crashes} times within a minute; it stays down");
             self.event(
                 EventKind::GaveUp,
-                format!("{name} crashed {crashes} times within a minute; it stays down"),
+                message.clone(),
                 vec![events::process(key, &name)],
             );
+            if http {
+                self.give_up(key, idx, message);
+            }
             return;
         }
         let delay = backoff * 2u32.pow(crashes - 1);
@@ -1344,6 +1368,14 @@ impl Actor {
         match result {
             Ok(()) => {
                 proc.ready = true;
+                if !starting
+                    && inst.serving()
+                    && let Some(upstream) = inst.upstream()
+                {
+                    for waiter in inst.waiters.drain(..) {
+                        let _ = waiter.send(Ok(upstream));
+                    }
+                }
                 self.advance(key);
             }
             Err(message) if starting || proc.spec.http => {
@@ -1391,6 +1423,27 @@ impl Actor {
         self.dirty = true;
     }
 
+    /// Stops an instance whose HTTP process kept crashing; until it's started by hand,
+    /// requests get the error page with the process's log.
+    fn give_up(&mut self, key: &InstanceKey, idx: usize, message: String) {
+        let grace = self.options.grace;
+        let Some(inst) = self.instances.get_mut(key) else {
+            return;
+        };
+        let label = inst.label();
+        let mut failure = BootFailure::new(
+            format!("{label} crashed"),
+            format!("{message}. Run `carte restart {label}` to start it again."),
+        );
+        failure.log = inst.procs[idx].log.lock().unwrap().tail(40);
+        inst.state = InstanceState::Crashed;
+        inst.last_error = Some(message);
+        inst.fail_waiters(failure.clone());
+        inst.gave_up = Some(failure);
+        inst.signal_stop(grace, false);
+        self.dirty = true;
+    }
+
     /// Stops an instance. `why` names the reason for its `stopped` or, with a restart
     /// pending, `restarted` event; `None` records nothing.
     fn stop(&mut self, key: &InstanceKey, why: Option<&str>) {
@@ -1411,11 +1464,15 @@ impl Actor {
             self.events.push(kind, why, vec![events::instance(key)]);
         }
         let inst = self.instances.get_mut(key).expect("instance");
-        if inst.state == InstanceState::Starting {
-            let mut failure = BootFailure::new(
-                format!("{} was stopped", inst.label()),
-                "It was stopped while starting.",
-            );
+        let detail = match inst.state {
+            InstanceState::Starting => Some("It was stopped while starting."),
+            InstanceState::Ready if !inst.restart_pending => {
+                Some("It was stopped while its web process restarted.")
+            }
+            _ => None,
+        };
+        if let Some(detail) = detail {
+            let mut failure = BootFailure::new(format!("{} was stopped", inst.label()), detail);
             failure.transient = true;
             inst.fail_waiters(failure);
         }
