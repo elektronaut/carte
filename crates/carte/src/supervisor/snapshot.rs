@@ -197,6 +197,11 @@ fn stack_status(
                     count: inst.connections,
                 });
             }
+            if !inst.execs.is_empty() {
+                holds.push(Hold::Exec {
+                    count: inst.execs.len() as u32,
+                });
+            }
             for dependent in holders.get(&key).into_iter().flatten() {
                 let app = if dependent.stack == key.stack {
                     dependent.app.clone()

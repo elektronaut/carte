@@ -1,8 +1,12 @@
 //! `carte exec`: a command in the foreground with an instance's env.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, ExitCode};
+use std::time::Duration;
 
 use super::ExecArgs;
 use crate::exit::{Exit, Failure};
@@ -20,6 +24,16 @@ pub fn run(paths: &Paths, args: ExecArgs) -> anyhow::Result<ExitCode> {
         .canonicalize()
         .unwrap_or_else(|_| rendered.checkout.clone());
     let cwd = std::env::current_dir()?.canonicalize()?;
+    let _hold = (daemon && rendered.active)
+        .then(|| {
+            let target = carte_api::Address {
+                address: rendered.address.clone(),
+                cwd: Some(cwd.clone()),
+                project: args.target.project.clone(),
+            };
+            hold(paths.socket(), &target)
+        })
+        .flatten();
     let dir = if cwd.starts_with(&checkout) {
         cwd
     } else {
@@ -41,6 +55,34 @@ pub fn run(paths: &Paths, args: ExecArgs) -> anyhow::Result<ExitCode> {
     } else {
         126
     }))
+}
+
+/// A connection to the daemon that keeps the instance from idling out while it is
+/// open. It survives the exec, so the hold lasts until the command and anything that
+/// inherited it exit. `None` when the daemon doesn't take the hold.
+fn hold(socket: PathBuf, target: &carte_api::Address) -> Option<UnixStream> {
+    let mut stream = UnixStream::connect(socket).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .ok()?;
+    let body = serde_json::to_vec(target).ok()?;
+    let head = format!(
+        "POST {} HTTP/1.1\r\nhost: carte\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+        carte_api::paths::HOLD,
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).ok()?;
+    stream.write_all(&body).ok()?;
+    let mut status = [0; 12];
+    stream.read_exact(&mut status).ok()?;
+    if &status[9..] != b"200" {
+        return None;
+    }
+    stream.set_read_timeout(None).ok()?;
+    stream.set_write_timeout(None).ok()?;
+    crate::process::set_cloexec(stream.as_raw_fd(), false).ok()?;
+    Some(stream)
 }
 
 /// Why a command won't run while processes that provide its env are down.

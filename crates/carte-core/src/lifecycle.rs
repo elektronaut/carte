@@ -12,6 +12,8 @@ pub struct Usage {
     pub requests_in_flight: u32,
     /// Open upgraded connections (WebSocket, SSE).
     pub connections: u32,
+    /// Commands run with `carte exec` that are still running.
+    pub execs: u32,
     /// Running instances that depend on this one.
     pub held_by: Vec<InstanceKey>,
     pub last_activity: Instant,
@@ -25,6 +27,7 @@ impl Usage {
         self.pinned
             || self.requests_in_flight > 0
             || self.connections > 0
+            || self.execs > 0
             || !self.held_by.is_empty()
     }
 }
@@ -206,6 +209,7 @@ mod tests {
             pinned: false,
             requests_in_flight: 0,
             connections: 0,
+            execs: 0,
             held_by: vec![],
             last_activity: now - Duration::from_secs(age_secs),
             memory_bytes: memory_mb * 1024 * 1024,
@@ -271,15 +275,17 @@ mod tests {
     }
 
     #[test]
-    fn connections_dependents_and_pins_keep_an_instance_alive() {
+    fn connections_execs_dependents_and_pins_keep_an_instance_alive() {
         let now = Instant::now();
         let mut connected = usage("nova-frontend", 3600, 500, now);
         connected.connections = 2;
+        let mut exec = usage("nova-auth", 3600, 500, now);
+        exec.execs = 1;
         let mut held = usage("nova-billing", 3600, 500, now);
         held.held_by = vec![key("nova-frontend")];
         let mut pinned = usage("nova-api", 3600, 500, now);
         pinned.pinned = true;
-        for u in [connected, held, pinned] {
+        for u in [connected, exec, held, pinned] {
             assert_eq!(idle_deadline(&u, Duration::from_secs(900)), None);
         }
     }

@@ -687,6 +687,33 @@ fn exec_gets_the_ports_of_running_services() {
 }
 
 #[test]
+fn exec_keeps_the_app_from_idling_out_until_the_command_ends() {
+    let daemon = Daemon::start_with_project("idle_timeout = \"2s\"\n");
+    let web = || snapshot(&daemon).projects[0].stacks[0].instances[0].clone();
+    daemon.run(&["exec", "--no-check", "web", "--", "true"]);
+    assert_eq!(web().state, carte_api::InstanceState::Stopped);
+
+    daemon.run(&["up", "web"]);
+    let mut exec = daemon
+        .command(&["exec", "web", "--", "sleep", "6"])
+        .spawn()
+        .unwrap();
+    eventually("the exec hold", || {
+        web().holds == [carte_api::Hold::Exec { count: 1 }]
+    });
+    let status = stdout(&daemon.run(&["status", "web"]));
+    assert!(status.contains("held by    1 exec\n"), "{status}");
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(web().state, carte_api::InstanceState::Ready);
+
+    assert!(exec.wait().unwrap().success());
+    eventually("web to idle out", || {
+        web().state == carte_api::InstanceState::Stopped
+    });
+    assert!(web().holds.is_empty());
+}
+
+#[test]
 fn the_daemon_renders_a_process_env() {
     let daemon = Daemon::start();
     let socket = carte::paths::Paths::under(&daemon.root).socket();

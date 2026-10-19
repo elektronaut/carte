@@ -92,7 +92,7 @@ carte exec -p worker -- bin/rails runner '…'   # one process's env, PORT inclu
 ```
 
 If it refuses because a service isn't running, run the `carte up` it
-suggests, then retry. Don't use `--no-check` unless the command doesn't
+suggests, then retry. While the command runs, the app doesn't idle out. Don't use `--no-check` unless the command doesn't
 need the service.
 
 ## When something fails

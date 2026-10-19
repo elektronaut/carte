@@ -27,6 +27,9 @@ pub mod paths {
     pub const EVENTS: &str = "/v1/events";
     /// GET lists leftovers as a `PruneList`; POST a `PruneRequest` removes them.
     pub const PRUNE: &str = "/v1/prune";
+    /// POST an `Address`: keeps that running instance from idling out until the client
+    /// closes the connection. The response never ends.
+    pub const HOLD: &str = "/v1/hold";
 }
 
 /// A CLI address (`app@stack/process`, any part optional) and the directory it was
@@ -268,9 +271,19 @@ pub enum InstanceState {
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum Hold {
     Pinned,
-    Requests { count: u32 },
-    Connections { count: u32 },
-    Dependent { app: String },
+    Requests {
+        count: u32,
+    },
+    Connections {
+        count: u32,
+    },
+    Dependent {
+        app: String,
+    },
+    /// Commands run with `carte exec`.
+    Exec {
+        count: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -676,6 +689,8 @@ mod tests {
         assert_eq!(state, r#"{"state":"exited","code":1,"signal":null}"#);
         let state = serde_json::to_string(&ProcessState::Done).unwrap();
         assert_eq!(state, r#"{"state":"done"}"#);
+        let hold = serde_json::to_string(&Hold::Exec { count: 1 }).unwrap();
+        assert_eq!(hold, r#"{"kind":"exec","count":1}"#);
     }
 
     #[test]

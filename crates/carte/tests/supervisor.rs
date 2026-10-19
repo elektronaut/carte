@@ -324,6 +324,57 @@ async fn connections_keep_an_instance_alive() {
 }
 
 #[tokio::test]
+async fn exec_holds_last_through_a_restart_and_end_with_a_stop() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("");
+    let handle = setup.start();
+    let web = key("acme-web", Stack::Main);
+    let target = |address: &str| Address {
+        address: address.into(),
+        cwd: None,
+        project: None,
+    };
+    let holds = |handle: &Handle| status(&handle.snapshot(), "acme-web", "main").holds.clone();
+    let execs = |count| vec![carte_api::Hold::Exec { count }];
+
+    assert!(handle.hold(target("web")).await.is_err());
+    handle.ensure_ready(web.clone()).await.unwrap();
+    let (key, first) = handle.hold(target("web")).await.unwrap();
+    assert_eq!(key, web);
+    wait_for(&handle, "the hold", |s| {
+        status(s, "acme-web", "main").holds == execs(1)
+    })
+    .await;
+
+    handle
+        .control(waiting("web", Action::Restart))
+        .await
+        .unwrap();
+    assert_eq!(holds(&handle), execs(1));
+
+    handle.control(control("web", Action::Down)).await.unwrap();
+    wait_for(&handle, "the stop", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Stopped
+    })
+    .await;
+    assert!(holds(&handle).is_empty());
+
+    handle.ensure_ready(web.clone()).await.unwrap();
+    let (_, second) = handle.hold(target("web")).await.unwrap();
+    handle.release(web.clone(), first);
+    handle.release(web.clone(), first);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(holds(&handle), execs(1));
+    handle.release(web, second);
+    wait_for(&handle, "the release", |s| {
+        status(s, "acme-web", "main").holds.is_empty()
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn dependencies_start_with_their_dependent_in_the_same_stack() {
     let setup = Setup::new();
     let web = setup.app("acme-web", WEB);
