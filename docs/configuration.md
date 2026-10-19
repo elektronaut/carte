@@ -535,7 +535,8 @@ Once an instance is ready, a process that crashes is restarted, unless
 it has `restart = "never"`:
 
 - A crash is a non-zero exit or death by a signal. A process that exits
-  with code 0 is done: it shows as `exited` and isn't restarted.
+  with code 0 is done: it shows as `exited` and isn't restarted, and
+  `carte events` records it as `exited`.
 - It's restarted on the same port with the same env, so sockets and
   URLs other processes use stay valid. carte waits 1s, 2s, 4s and 8s
   before the first four restarts; at the fifth crash within a minute it
