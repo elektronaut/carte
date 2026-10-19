@@ -109,7 +109,7 @@ impl Daemon {
         std::fs::write(
             config.join("config.toml"),
             format!(
-                "tld = \"test\"\nhttp_port = {http_port}\nhttps_port = {https_port}\ndns_port = {dns_port}\n{extra_config}"
+                "tld = \"test\"\nhttp_port = {http_port}\nhttps_port = {https_port}\ndns_port = {dns_port}\nnotifications = false\n{extra_config}"
             ),
         )
         .unwrap();

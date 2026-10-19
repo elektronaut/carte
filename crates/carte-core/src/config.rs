@@ -105,6 +105,7 @@ struct RawMachine {
     dns_port: Option<u16>,
     idle_timeout: Option<DurationValue>,
     teardown_delay: Option<DurationValue>,
+    notifications: Option<bool>,
     #[serde(default)]
     limits: RawLimits,
     share: Option<RawShare>,
@@ -165,6 +166,7 @@ pub fn parse_machine_config(path: &Path, text: &str) -> Result<MachineConfig, Co
         dns_port: raw.dns_port.unwrap_or(defaults.dns_port),
         idle_timeout: raw.idle_timeout.map_or(defaults.idle_timeout, |d| d.0),
         teardown_delay: raw.teardown_delay.map_or(defaults.teardown_delay, |d| d.0),
+        notifications: raw.notifications.unwrap_or(defaults.notifications),
         limits: Limits {
             memory_target: raw
                 .limits
@@ -1104,6 +1106,7 @@ mod tests {
             http_port = 8080
             idle_timeout = "30m"
             teardown_delay = "1m"
+            notifications = false
 
             [limits]
             memory_target = "16GB"
@@ -1123,6 +1126,7 @@ mod tests {
         assert_eq!(config.https_port, 443);
         assert_eq!(config.idle_timeout, Duration::from_secs(1800));
         assert_eq!(config.teardown_delay, Duration::from_secs(60));
+        assert!(!config.notifications);
         assert_eq!(
             config.limits,
             Limits {

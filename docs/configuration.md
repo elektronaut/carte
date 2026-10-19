@@ -53,6 +53,7 @@ domain = "dev.example.com"
 | `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` points to for a `tld` other than `localhost` |
 | `idle_timeout` | `"15m"` | How long an app runs without traffic before it's stopped; projects can override it |
 | `teardown_delay` | `"10m"` | How long a stack's worktrees must stay gone before its [teardown](#teardown) runs; projects can override it |
+| `notifications` | `true` | Desktop [notifications](#notifications) when a process crashes or carte gives up on it |
 
 Changing `tld` or the ports means running `carte setup` again;
 `carte setup --tld <tld>` changes `tld` and does the rest.
@@ -574,6 +575,20 @@ one process or, in the project's `[processes]`, for every app's:
 [processes.worker]
 restart = "never"
 ```
+
+### Notifications
+
+carte shows a desktop notification when a process crashes after its
+instance has started, and when it gives up restarting one. Clean exits,
+stops and failed starts, which show an error page, don't notify. After
+a crash notification, further crashes of that instance within 5 minutes
+come as one summary when the 5 minutes are up.
+
+On macOS, carte uses `terminal-notifier` if it's installed
+(`brew install terminal-notifier`), and clicking the notification opens
+the app; otherwise it uses macOS's built-in notifications. On Linux it
+uses `notify-send`. Set `notifications = false` in the
+[machine config](#machine-config) to turn them off.
 
 ### Project-level processes
 

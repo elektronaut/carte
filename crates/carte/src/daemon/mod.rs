@@ -2,6 +2,7 @@
 
 mod api;
 mod launchd;
+mod notifications;
 mod router;
 pub mod tunnel;
 pub mod watch;
@@ -139,6 +140,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         .map(|listener| tokio::spawn(listener.serve(shutdown.clone())))
         .collect();
 
+    tokio::spawn(notifications::run(supervisor.clone()));
     if let Some(watching) = watch::run(
         paths.config_dir.clone(),
         supervisor.clone(),

@@ -18,6 +18,8 @@ pub struct MachineConfig {
     pub teardown_delay: Duration,
     pub limits: Limits,
     pub share: Option<ShareConfig>,
+    /// Desktop notifications about crashes.
+    pub notifications: bool,
 }
 
 impl MachineConfig {
@@ -44,6 +46,7 @@ impl Default for MachineConfig {
             teardown_delay: Duration::from_secs(10 * 60),
             limits: Limits::default(),
             share: None,
+            notifications: true,
         }
     }
 }
