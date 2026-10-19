@@ -265,6 +265,11 @@ fn process_word(process: &carte_api::ProcessStatus) -> String {
     };
     let state = if process.gave_up {
         format!("{state}, gave up restarting")
+    } else if let Some(secs) = process.restart_in_secs {
+        format!(
+            "{state}, restarting in {}",
+            carte_core::duration::format(std::time::Duration::from_secs(secs))
+        )
     } else {
         state
     };
@@ -382,6 +387,12 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
         .map(|p| {
             if p.gave_up {
                 format!("{} (gave up)", p.name)
+            } else if let Some(secs) = p.restart_in_secs {
+                format!(
+                    "{} (restarting in {})",
+                    p.name,
+                    carte_core::duration::format(std::time::Duration::from_secs(secs))
+                )
             } else {
                 p.name.clone()
             }
@@ -896,6 +907,25 @@ nova-billing  ready
         );
         let ls = render_ls(&snapshot, false);
         assert!(ls.contains("down: worker (gave up)"), "{ls}");
+    }
+
+    #[test]
+    fn shows_when_a_crashed_process_restarts() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.processes[1].state = ProcessState::Exited {
+            code: Some(1),
+            signal: None,
+        };
+        billing.processes[1].restart_in_secs = Some(4);
+        let instances = vec![billing.clone()];
+        let status = render_status(&snapshot, &instances);
+        assert!(
+            status.contains("processes  web running, worker exited 1, restarting in 4s\n"),
+            "{status}"
+        );
+        let ls = render_ls(&snapshot, false);
+        assert!(ls.contains("down: worker (restarting in 4s)"), "{ls}");
     }
 
     #[test]

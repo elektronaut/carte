@@ -230,6 +230,12 @@ fn stack_status(
                             http: p.spec.http,
                             restarts: p.restarts,
                             gave_up: p.gave_up,
+                            restart_in_secs: p
+                                .restart_at
+                                .filter(|_| inst.state == InstanceState::Ready)
+                                .map(|at| {
+                                    at.saturating_duration_since(now).as_secs_f64().ceil() as u64
+                                }),
                             memory_bytes: p.memory_bytes,
                             cpu_percent: p.cpu_percent,
                         }
@@ -300,6 +306,7 @@ fn stopped_processes(
                 memory_bytes: 0,
                 cpu_percent: 0.0,
                 gave_up: false,
+                restart_in_secs: None,
             }
         })
         .collect()

@@ -133,8 +133,8 @@ pub(super) struct Proc {
     spawn: Option<SpawnSpec>,
     /// When it crashed within the last minute.
     crashes: Vec<Instant>,
-    /// It crashed and waits to be restarted.
-    pending_restart: bool,
+    /// It crashed and waits to be restarted at this time.
+    pub restart_at: Option<Instant>,
     /// It crashed too often and stays down until started again.
     pub gave_up: bool,
 }
@@ -226,6 +226,7 @@ impl Instance {
         for proc in &mut self.procs {
             proc.queued = false;
             proc.spawn = None;
+            proc.restart_at = None;
         }
         let others = self
             .procs
@@ -746,7 +747,7 @@ impl Actor {
                 queued: false,
                 spawn: None,
                 crashes: Vec::new(),
-                pending_restart: false,
+                restart_at: None,
                 gave_up: false,
                 memory_bytes: 0,
                 cpu_percent: 0.0,
@@ -866,7 +867,7 @@ impl Actor {
             .position(|p| p.spec.name == name)
             .ok_or_else(|| format!("{} has no process named {name}", inst.label()))?;
         let proc = &mut inst.procs[idx];
-        proc.pending_restart = false;
+        proc.restart_at = None;
         if std::mem::take(&mut proc.gave_up) {
             proc.crashes.clear();
         }
@@ -1265,9 +1266,10 @@ impl Actor {
             );
             return;
         }
-        proc.pending_restart = true;
-        let run = proc.run;
         let delay = backoff * 2u32.pow(crashes - 1);
+        proc.restart_at = Some(now + delay);
+        let run = proc.run;
+        self.dirty = true;
         let tx = self.tx.clone();
         let key = key.clone();
         tokio::spawn(async move {
@@ -1289,7 +1291,7 @@ impl Actor {
         let Some(proc) = inst.procs.get(idx) else {
             return;
         };
-        if proc.run != run || !proc.pending_restart || proc.is_running() {
+        if proc.run != run || proc.restart_at.is_none() || proc.is_running() {
             return;
         }
         let checkout = inst.checkout.as_ref().map(Checkout::path);
@@ -1304,7 +1306,7 @@ impl Actor {
                         .any(|p| p.spec.name == proc.spec.name && p.is_running())
             });
         let proc = &mut self.instances.get_mut(key).expect("instance").procs[idx];
-        proc.pending_restart = false;
+        proc.restart_at = None;
         if elsewhere {
             proc.deferred = true;
             self.dirty = true;
@@ -1436,7 +1438,7 @@ impl Actor {
             self.stop(key, why);
             return Ok(());
         }
-        proc.pending_restart = false;
+        proc.restart_at = None;
         let mut event = None;
         if inst.state == InstanceState::Starting
             && proc.spec.kind.is_some()

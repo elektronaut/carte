@@ -2095,6 +2095,58 @@ async fn stopping_a_crashed_process_cancels_its_restart() {
 }
 
 #[tokio::test]
+async fn status_counts_down_to_a_crashed_process_restarting() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");
+    setup.project("");
+    let handle = setup.start_with_backoff(Duration::from_secs(30));
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "worker")
+        .pid
+        .unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "the restart to wait", |s| {
+        process(s, "acme-web", "worker").restart_in_secs.is_some()
+    })
+    .await;
+    let worker = process(&handle.snapshot(), "acme-web", "worker").clone();
+    assert!(matches!(worker.restart_in_secs, Some(1..=30)), "{worker:?}");
+
+    handle
+        .control(control("web/worker", Action::Up))
+        .await
+        .unwrap();
+    wait_for(&handle, "the worker to run again", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    let worker = process(&handle.snapshot(), "acme-web", "worker").clone();
+    assert_eq!(worker.restart_in_secs, None);
+
+    let pid = worker.pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "the second restart to wait", |s| {
+        process(s, "acme-web", "worker")
+            .restart_in_secs
+            .is_some_and(|secs| secs > 30)
+    })
+    .await;
+    handle
+        .control(control("web/worker", Action::Down))
+        .await
+        .unwrap();
+    wait_for(&handle, "the restart to be cancelled", |s| {
+        process(s, "acme-web", "worker").restart_in_secs.is_none()
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_task_that_fails_after_the_start_isnt_restarted() {
     let setup = Setup::new();
     let marker = setup.root.join("migrated");

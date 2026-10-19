@@ -111,6 +111,8 @@ pub struct Status {
     /// carte stopped restarting the process, or one of the instance's; a badge on
     /// a running instance, the detail of a crashed process.
     pub gave_up: bool,
+    /// Seconds until carte restarts a crashed process.
+    pub restart_in_secs: Option<u64>,
 }
 
 impl Status {
@@ -129,6 +131,7 @@ impl Status {
             memory_bytes: 0,
             problems: 0,
             gave_up: false,
+            restart_in_secs: None,
         }
     }
 
@@ -413,6 +416,7 @@ fn process_node(instance: &NodeId, process: &ProcessStatus) -> Node {
         cpu_percent: process.cpu_percent,
         memory_bytes: process.memory_bytes,
         gave_up: process.gave_up,
+        restart_in_secs: process.restart_in_secs,
         ..Status::new(state)
     };
     Node::leaf(

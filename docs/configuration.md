@@ -539,8 +539,10 @@ it has `restart = "never"`:
   `carte events` records it as `exited`.
 - It's restarted on the same port with the same env, so sockets and
   URLs other processes use stay valid. carte waits 1s, 2s, 4s and 8s
-  before the first four restarts; at the fifth crash within a minute it
-  gives up, and the process stays down while the instance keeps running.
+  before the first four restarts. While it waits, `carte status` shows
+  `worker exited 1, restarting in 4s`, `carte ls` shows
+  `down: worker (restarting in 4s)`, and the terminal UI counts down
+  next to the process. At the fifth crash within a minute it gives up, and the process stays down while the instance keeps running.
   `carte status` shows it as `gave up restarting`, `carte ls` as
   `down: worker (gave up)`, and the terminal UI marks it `gave up`.
   Starting it by hand (`carte up app/worker`) clears that and starts

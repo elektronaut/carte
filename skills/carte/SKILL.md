@@ -110,7 +110,8 @@ A request to an app that failed to boot gets an error page with the last
 log lines. `carte events` answers "why did it stop or restart?".
 
 A worker or service that crashes after the start is restarted on its
-own; at the fifth crash within a minute carte gives up, and `carte status`
+own after a short wait, which `carte status` shows as `restarting in 2s`;
+at the fifth crash within a minute carte gives up, and `carte status`
 shows it as `gave up restarting`. Fix the cause, then `carte up /worker`.
 
 `carte env` hides values that come from the environment and env files,
