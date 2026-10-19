@@ -170,9 +170,7 @@ carte restart   # the app you're in, to apply changes now
 carte           # open the terminal UI
 ```
 
-`touch tmp/restart.txt` restarts an app too. Creating the file doesn't
-count, so Puma's `tmp_restart` plugin creating it on first boot doesn't
-restart the app; in a fresh checkout, touch it once more.
+`touch tmp/restart.txt` restarts an app too.
 
 The CLI also starts, stops, pins and inspects apps, and every command
 takes `--json`; see [docs/cli.md](docs/cli.md). Coding agents can use
