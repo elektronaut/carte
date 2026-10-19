@@ -756,7 +756,12 @@ pub fn assemble_project(
 
         let mut aliases = Vec::new();
         for alias in std::mem::take(&mut app.settings.aliases) {
-            if let Err(message) = check_hostname(&alias) {
+            if alias.contains('.') {
+                problems.push(problem(
+                    &app.name,
+                    format!("alias {alias:?}: an alias is one hostname label, like \"shop\""),
+                ));
+            } else if let Err(message) = check_dns_label(&alias) {
                 problems.push(problem(&app.name, format!("alias {alias:?}: {message}")));
             } else if !seen_aliases.insert(alias.clone()) {
                 problems.push(problem(
@@ -835,10 +840,6 @@ fn check_dns_label(label: &str) -> Result<(), String> {
         return Err("must not start or end with a dash".into());
     }
     Ok(())
-}
-
-fn check_hostname(name: &str) -> Result<(), String> {
-    name.split('.').try_for_each(check_dns_label)
 }
 
 // Value types
@@ -1700,7 +1701,7 @@ mod tests {
             depends_on = ["frontend", "invoices", "nova-nope"]
             [apps.nova-frontend]
             depends_on = ["invoices", "invoices"]
-            aliases = ["nova-frontend", "Bad_Alias"]
+            aliases = ["nova-frontend", "Bad_Alias", "shop.example"]
             [apps.legacy]
             port = 3000
             [apps.nova-missing]
@@ -1745,8 +1746,13 @@ mod tests {
             vec!["nova-frontend"]
         );
         let messages: Vec<_> = problems.iter().map(|p| p.message.as_str()).collect();
-        assert_eq!(problems.len(), 3, "{messages:?}");
+        assert_eq!(problems.len(), 4, "{messages:?}");
         assert!(messages.iter().any(|m| m.contains("[apps.nova-missing]")));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("alias \"shop.example\": an alias is one hostname label"))
+        );
         assert!(messages.iter().any(|m| m.contains("depend on itself")));
         assert_eq!(
             project.app("invoices").unwrap().settings.unresolved_deps,
@@ -1759,6 +1765,28 @@ mod tests {
                 .any(|m| m.contains("unknown app \"nova-nope\""))
         );
         assert!(messages.iter().any(|m| m.contains("Bad_Alias")));
+    }
+
+    #[test]
+    fn checks_aliases_from_a_repos_carte_toml() {
+        let repo = parse_repo_config(
+            Path::new("/work/shop/carte.toml"),
+            "aliases = [\"store\", \"shop.example\"]\n",
+        )
+        .unwrap();
+        let (project, problems) = assemble_project(
+            project("").unwrap(),
+            vec![DiscoveredApp {
+                repo_config: Some(repo),
+                ..discovered("shop")
+            }],
+        );
+        assert_eq!(project.app("shop").unwrap().settings.aliases, ["store"]);
+        let messages: Vec<_> = problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["alias \"shop.example\": an alias is one hostname label, like \"shop\""]
+        );
     }
 
     #[test]
