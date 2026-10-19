@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.0](https://github.com/elektronaut/carte/compare/v0.2.0...v0.3.0) (2026-10-19)
+
+
+### Features
+
+* **cli:** keep the app from idling out while carte exec runs ([a3f4d49](https://github.com/elektronaut/carte/commit/a3f4d495bd48d6796adbb0561e1dc86d994ba456))
+* **cli:** show when a crashed process restarts ([7f903cb](https://github.com/elektronaut/carte/commit/7f903cb3c0302909e00eb70410765a4ce21319d2))
+* **core:** add host: and public_host: env template lookups ([6f1ba05](https://github.com/elektronaut/carte/commit/6f1ba0599eef27e2b2dfb20fc437d9adc8877ce8))
+
+
+### Bug Fixes
+
+* **core:** layer mise env over a shell env that has mise's shims ([fa71bf4](https://github.com/elektronaut/carte/commit/fa71bf4a9c402ec09a5c98f15fc616d4fef4470e))
+* **core:** require an alias to be one hostname label ([35882bf](https://github.com/elektronaut/carte/commit/35882bf326bac45d292079e7dc1e11fd7ff4b810))
+* **daemon:** don't restart when tmp/restart.txt is created ([82eca59](https://github.com/elektronaut/carte/commit/82eca59e074a70003a9f6d9ecde83b8d84b74660))
+* **daemon:** record clean exits and deferred start reasons accurately ([57e7033](https://github.com/elektronaut/carte/commit/57e703341de6d2a3aa0fb86a9a94bd7cd176f60a))
+* **release:** include the README in the carte crate ([0ab3db3](https://github.com/elektronaut/carte/commit/0ab3db3a993059d5f420cd6f9029cb813721bc3c))
+* **setup:** wait for bootout and ignore puma-dev leftovers ([92f7456](https://github.com/elektronaut/carte/commit/92f74564c0062a463da2134d16103dd0d66a04db))
+
 ## [0.2.0](https://github.com/elektronaut/carte/compare/v0.1.0...v0.2.0) (2026-10-18)
 
 
