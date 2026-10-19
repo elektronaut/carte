@@ -19,6 +19,8 @@ pub struct CommandSpec {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
+    /// Replaces the daemon's environment when set.
+    pub env: Option<BTreeMap<String, String>>,
     pub timeout: Duration,
 }
 
@@ -36,7 +38,8 @@ pub trait CommandRunner {
     fn run(&self, spec: &CommandSpec) -> io::Result<CommandOutput>;
 }
 
-/// Runs commands with `std::process`, inheriting the daemon's environment.
+/// Runs commands with `std::process`, inheriting the daemon's environment
+/// unless the spec gives one.
 #[derive(Debug, Clone)]
 pub struct SystemRunner {
     pub search_path: Vec<PathBuf>,
@@ -67,7 +70,11 @@ impl CommandRunner for SystemRunner {
     }
 
     fn run(&self, spec: &CommandSpec) -> io::Result<CommandOutput> {
-        let mut child = Command::new(&spec.program)
+        let mut command = Command::new(&spec.program);
+        if let Some(env) = &spec.env {
+            command.env_clear().envs(env);
+        }
+        let mut child = command
             .args(&spec.args)
             .current_dir(&spec.cwd)
             .stdin(Stdio::null())
@@ -252,6 +259,7 @@ pub fn load_provider(
                 program: shell.into(),
                 args: vec!["-l".into(), "-c".into(), format!("echo {marker}; env -0")],
                 cwd: checkout.to_path_buf(),
+                env: None,
                 timeout: PROVIDER_TIMEOUT,
             };
             let output = execute(runner, kind, checkout, &spec)?;
@@ -271,9 +279,52 @@ pub fn load_provider(
                     env.set(key, value, source.clone());
                 }
             }
+            apply_mise_over_shims(&mut env, checkout, runner)?;
         }
     }
     Ok(env)
+}
+
+/// mise's shims run `mise exec`, which applies mise's `[env]` over the
+/// process's own env, so a shell env with shims on `PATH` gets `mise env`
+/// layered on top: its `PATH` reaches the tools without the shims.
+fn apply_mise_over_shims(
+    env: &mut Env,
+    checkout: &Path,
+    runner: &dyn CommandRunner,
+) -> Result<(), ProviderError> {
+    let shell_env = env.to_vars();
+    let data_dir_shims = shell_env
+        .get("MISE_DATA_DIR")
+        .map(|dir| Path::new(dir).join("shims"));
+    let has_shims = shell_env.get("PATH").is_some_and(|path| {
+        std::env::split_paths(path).any(|dir| {
+            dir.ends_with("mise/shims") || data_dir_shims.as_deref() == Some(dir.as_path())
+        })
+    });
+    if !has_shims {
+        return Ok(());
+    }
+    let Some(program) = runner.find_program("mise") else {
+        return Ok(());
+    };
+    let kind = EnvProviderKind::Mise;
+    let spec = CommandSpec {
+        program,
+        args: vec!["env".into(), "--json".into()],
+        cwd: checkout.to_path_buf(),
+        env: Some(shell_env),
+        timeout: PROVIDER_TIMEOUT,
+    };
+    let output = execute(runner, kind, checkout, &spec)?;
+    for (key, value) in parse_json(kind, checkout, &output.stdout)? {
+        if let Some(value) = value
+            && env.value(&key) != Some(value.as_str())
+        {
+            env.set(key, value, Source::Provider { provider: kind });
+        }
+    }
+    Ok(())
 }
 
 fn run(
@@ -292,6 +343,7 @@ fn run(
         program: path,
         args: args.iter().map(|a| a.to_string()).collect(),
         cwd: checkout.to_path_buf(),
+        env: None,
         timeout: PROVIDER_TIMEOUT,
     };
     execute(runner, kind, checkout, &spec)
@@ -696,6 +748,147 @@ pub(crate) mod tests {
         assert_eq!(call.cwd, Path::new("/w/nova-billing"));
     }
 
+    const SHELL_WITH_SHIMS: &str = "__CARTE_ENV__\nPATH=/Users/alex/.local/share/mise/shims:/usr/bin\0HOME=/Users/alex\0START_URL=http://localhost:3001\0";
+
+    #[test]
+    fn shell_with_mise_shims_gets_mise_env_on_top() {
+        let runner = FakeRunner {
+            programs: vec!["mise"],
+            ..Default::default()
+        }
+        .with("zsh", ok(SHELL_WITH_SHIMS))
+        .with(
+            "mise",
+            ok(r#"{"PATH":"/Users/alex/.local/share/mise/installs/ruby/3.4/bin:/Users/alex/.local/share/mise/shims:/usr/bin","START_URL":"http://localhost:3001","RUBY_YJIT_ENABLE":"1"}"#),
+        );
+        let env = load_provider(
+            EnvProviderKind::Shell,
+            Path::new("/w/make"),
+            &daemon_env(),
+            &runner,
+        )
+        .unwrap();
+        let mise = Source::Provider {
+            provider: EnvProviderKind::Mise,
+        };
+        let shell = Source::Provider {
+            provider: EnvProviderKind::Shell,
+        };
+        let path = env.get("PATH").unwrap();
+        assert!(
+            path.value
+                .starts_with("/Users/alex/.local/share/mise/installs")
+        );
+        assert_eq!(path.source, mise);
+        assert_eq!(
+            path.overrode[0].value,
+            "/Users/alex/.local/share/mise/shims:/usr/bin"
+        );
+        assert_eq!(path.overrode[0].source, shell);
+        assert_eq!(env.get("RUBY_YJIT_ENABLE").unwrap().source, mise);
+        let start_url = env.get("START_URL").unwrap();
+        assert_eq!(start_url.source, shell);
+        assert!(start_url.overrode.is_empty());
+
+        let calls = runner.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].program, Path::new("/opt/homebrew/bin/mise"));
+        assert_eq!(calls[1].args, ["env", "--json"]);
+        assert_eq!(calls[1].cwd, Path::new("/w/make"));
+        let base = calls[1].env.as_ref().unwrap();
+        assert_eq!(
+            base.get("PATH").map(String::as_str),
+            Some("/Users/alex/.local/share/mise/shims:/usr/bin")
+        );
+        assert_eq!(base.get("SHELL"), None);
+    }
+
+    #[test]
+    fn shell_finds_shims_in_mise_data_dir() {
+        let runner = FakeRunner {
+            programs: vec!["mise"],
+            ..Default::default()
+        }
+        .with(
+            "zsh",
+            ok("__CARTE_ENV__\nPATH=/opt/tools/shims:/usr/bin\0MISE_DATA_DIR=/opt/tools\0"),
+        )
+        .with(
+            "mise",
+            ok(r#"{"PATH":"/opt/tools/installs/node/22/bin:/usr/bin"}"#),
+        );
+        let env = load_provider(
+            EnvProviderKind::Shell,
+            Path::new("/w/x"),
+            &daemon_env(),
+            &runner,
+        )
+        .unwrap();
+        assert_eq!(
+            env.value("PATH"),
+            Some("/opt/tools/installs/node/22/bin:/usr/bin")
+        );
+    }
+
+    #[test]
+    fn shell_without_mise_shims_skips_mise() {
+        let runner = FakeRunner {
+            programs: vec!["mise"],
+            ..Default::default()
+        }
+        .with(
+            "zsh",
+            ok("__CARTE_ENV__\nPATH=/Users/alex/.rbenv/shims:/usr/bin\0"),
+        );
+        let env = load_provider(
+            EnvProviderKind::Shell,
+            Path::new("/w/x"),
+            &daemon_env(),
+            &runner,
+        )
+        .unwrap();
+        assert_eq!(env.value("PATH"), Some("/Users/alex/.rbenv/shims:/usr/bin"));
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn shell_with_mise_shims_but_no_mise_keeps_the_shell_env() {
+        let runner = FakeRunner::default().with("zsh", ok(SHELL_WITH_SHIMS));
+        let env = load_provider(
+            EnvProviderKind::Shell,
+            Path::new("/w/x"),
+            &daemon_env(),
+            &runner,
+        )
+        .unwrap();
+        assert_eq!(
+            env.value("PATH"),
+            Some("/Users/alex/.local/share/mise/shims:/usr/bin")
+        );
+        assert_eq!(runner.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn shell_with_mise_shims_reports_untrusted_mise_config() {
+        let runner = FakeRunner {
+            programs: vec!["mise"],
+            ..Default::default()
+        }
+        .with("zsh", ok(SHELL_WITH_SHIMS))
+        .with(
+            "mise",
+            failed("mise ERROR Config files in ~/Dev/make/mise.toml are not trusted."),
+        );
+        let err = load_provider(
+            EnvProviderKind::Shell,
+            Path::new("/w/x"),
+            &daemon_env(),
+            &runner,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProviderError::MiseUntrusted { .. }));
+    }
+
     #[test]
     fn shell_without_marker_is_bad_output() {
         let runner = FakeRunner::default().with("zsh", ok("nothing useful"));
@@ -736,6 +929,7 @@ pub(crate) mod tests {
                 program: sh.clone(),
                 args: vec!["-c".into(), "pwd; echo oops >&2; exit 3".into()],
                 cwd: "/".into(),
+                env: None,
                 timeout: Duration::from_secs(10),
             })
             .unwrap();
@@ -743,6 +937,23 @@ pub(crate) mod tests {
         assert_eq!(output.stdout, b"/\n");
         assert_eq!(output.stderr, "oops\n");
         assert!(runner.find_program("definitely-not-a-program").is_none());
+    }
+
+    #[test]
+    fn system_runner_replaces_the_env_when_given_one() {
+        let runner = SystemRunner {
+            search_path: vec!["/usr/bin".into()],
+        };
+        let output = runner
+            .run(&CommandSpec {
+                program: runner.find_program("env").unwrap(),
+                args: Vec::new(),
+                cwd: "/".into(),
+                env: Some(BTreeMap::from([("ONLY".into(), "this".into())])),
+                timeout: Duration::from_secs(10),
+            })
+            .unwrap();
+        assert_eq!(output.stdout, b"ONLY=this\n");
     }
 
     #[test]
@@ -756,6 +967,7 @@ pub(crate) mod tests {
                 program: "/bin/sleep".into(),
                 args: vec!["5".into()],
                 cwd: "/".into(),
+                env: None,
                 timeout: Duration::from_millis(100),
             })
             .unwrap_err();
