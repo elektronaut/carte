@@ -75,7 +75,9 @@ suggests importing first. Its plan then:
 Apps answer under `.localhost` either way.
 
 `~/.puma-dev`, puma-dev's LaunchAgent plist and its certificate authority
-are left alone.
+are left alone. A plist left behind after puma-dev itself was uninstalled
+doesn't count as puma-dev: setup doesn't touch it, and `carte setup --check`
+lists it as left behind.
 
 ## Going back
 
