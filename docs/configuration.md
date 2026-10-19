@@ -849,6 +849,8 @@ BILLING_URL = "{{url:billing}}"
 | `state_dir`, `run_dir` | The instance's [directories](#instance-directories), as in `CARTE_STATE_DIR` and `CARTE_RUN_DIR` |
 | `url:<app>` | Another app's URL in the same stack; `url:app` is the app itself |
 | `public_url:<app>` | Another app's public URL; an error while it isn't shared |
+| `host:<app>` | The hostname of `url:<app>`, without scheme or port: `billing.feature-x.acme.localhost` |
+| `public_host:<app>` | The hostname of `public_url:<app>`; an error while it isn't shared |
 
 Filters, applied in order:
 
@@ -868,4 +870,5 @@ every app a variable pointing at every other:
 # BILLING_URL, FRONTEND_URL, ACCOUNTS_URL, …
 ```
 
-A key template that uses `public_url:app` skips apps that aren't shared.
+A key template that uses `public_url:app` or `public_host:app` skips apps
+that aren't shared.

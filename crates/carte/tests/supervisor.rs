@@ -380,7 +380,7 @@ async fn dependencies_start_with_their_dependent_in_the_same_stack() {
     let web = setup.app("acme-web", WEB);
     setup.app(
         "acme-api",
-        "web: FIXTURE_NAME=api FIXTURE_ENV=CARTE_URL,CARTE_CHECKOUT exec {fixture}\n",
+        "web: FIXTURE_NAME=api FIXTURE_ENV=CARTE_URL,CARTE_CHECKOUT,DEV_HOST,WEB_HOST exec {fixture}\n",
     );
     git(
         &web,
@@ -393,7 +393,9 @@ async fn dependencies_start_with_their_dependent_in_the_same_stack() {
             "../feature-x/acme-web",
         ],
     );
-    setup.project("[apps.acme-web]\ndepends_on = [\"api\"]\n");
+    setup.project(
+        "[env]\nDEV_HOST = \"{{host:app}}\"\nWEB_HOST = \"{{host:web}}\"\n\n[apps.acme-web]\ndepends_on = [\"api\"]\n",
+    );
     let handle = setup.start();
 
     handle
@@ -410,6 +412,14 @@ async fn dependencies_start_with_their_dependent_in_the_same_stack() {
         "{body}"
     );
     assert!(body.contains("\"CARTE_CHECKOUT\":\"main\""), "{body}");
+    assert!(
+        body.contains(r#""DEV_HOST":"api.feature-x.acme.localhost""#),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#""WEB_HOST":"web.feature-x.acme.localhost""#),
+        "{body}"
+    );
 
     let snapshot = handle.snapshot();
     let web_x = status(&snapshot, "acme-web", "feature-x");
@@ -1064,15 +1074,22 @@ async fn sharing_a_running_app_restarts_it_with_its_public_url() {
     let setup = Setup::new();
     setup.app(
         "acme-web",
-        "web: FIXTURE_ENV=CARTE_PUBLIC_URL exec {fixture}\n",
+        "web: FIXTURE_ENV=CARTE_PUBLIC_URL,DEV_HOST,WEB_PUBLIC_HOST exec {fixture}\n",
     );
-    setup.project("");
+    setup.project(
+        "[env]\nDEV_HOST = \"{{host:app}}\"\n\"{{app.short | upper}}_PUBLIC_HOST\" = \"{{public_host:app}}\"\n",
+    );
     share_config(&setup);
     let handle = setup.start();
     let web = key("acme-web", Stack::Main);
 
     let before = handle.ensure_ready(web.clone()).await.unwrap();
-    assert!(!http_get(before.port, "/").contains("share.example"));
+    let body = http_get(before.port, "/");
+    assert!(!body.contains("share.example"), "{body}");
+    assert!(
+        body.contains(r#""DEV_HOST":"web.acme.localhost""#),
+        "{body}"
+    );
 
     handle.share(share_request("web", false)).await.unwrap();
     assert!(handle.shared_routes().contains_key(&web));
@@ -1086,6 +1103,10 @@ async fn sharing_a_running_app_restarts_it_with_its_public_url() {
     let after = handle.ensure_ready(web.clone()).await.unwrap();
     let body = http_get(after.port, "/");
     assert!(body.contains("https://web--acme.share.example"), "{body}");
+    assert!(
+        body.contains(r#""WEB_PUBLIC_HOST":"web--acme.share.example""#),
+        "{body}"
+    );
 
     handle
         .unshare(Address {

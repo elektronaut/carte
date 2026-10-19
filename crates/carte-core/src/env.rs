@@ -962,6 +962,41 @@ mod tests {
     }
 
     #[test]
+    fn key_templates_render_hosts_per_app() {
+        let mut fx = Fixture::new();
+        fx.urls.shared = vec!["nova-postcard-api"];
+        fx.project.env = vec![
+            tpl("{{app.short | upper}}_HOST", "{{host:app}}"),
+            tpl("{{app.short | upper}}_PUBLIC_HOST", "{{public_host:app}}"),
+        ];
+        let env = fx.render_empty();
+        assert_eq!(
+            env.value("POSTCARD_API_HOST"),
+            Some("postcard-api.feature-x.nova.test")
+        );
+        assert_eq!(
+            env.value("BILLING_HOST"),
+            Some("billing.feature-x.nova.test")
+        );
+        assert_eq!(
+            env.value("POSTCARD_API_PUBLIC_HOST"),
+            Some("postcard-api--feature-x--nova.example.dev")
+        );
+        assert_eq!(env.value("BILLING_PUBLIC_HOST"), None);
+    }
+
+    #[test]
+    fn public_host_in_an_ordinary_entry_is_an_error_while_not_shared() {
+        let mut fx = Fixture::new();
+        fx.project.env = vec![tpl("API_HOST", "{{public_host:postcard-api}}")];
+        let err = render_env(&fx.request(), Env::new(), &[]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "project (/Users/alex/.config/carte/projects/nova.toml) template \"API_HOST\": nova-postcard-api has no public URL because it is not shared at column 3 in \"{{public_host:postcard-api}}\""
+        );
+    }
+
+    #[test]
     fn public_url_in_an_ordinary_entry_is_an_error_while_not_shared() {
         let mut fx = Fixture::new();
         fx.project.env = vec![tpl("VITE_API_URL", "{{public_url:postcard-api}}")];

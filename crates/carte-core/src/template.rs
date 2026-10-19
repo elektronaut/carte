@@ -8,12 +8,15 @@ use thiserror::Error;
 use crate::dirs;
 use crate::model::{App, Project};
 
-/// Resolves the URLs that `url:<app>` and `public_url:<app>` expand to,
-/// for the stack being rendered.
+/// Resolves the URLs and hostnames that `url:<app>`, `public_url:<app>`,
+/// `host:<app>` and `public_host:<app>` expand to, for the stack being rendered.
 pub trait UrlResolver {
     fn url(&self, app: &App) -> String;
     /// `None` while the app is not shared.
     fn public_url(&self, app: &App) -> Option<String>;
+    fn host(&self, app: &App) -> String;
+    /// `None` while the app is not shared.
+    fn public_host(&self, app: &App) -> Option<String>;
 }
 
 /// Everything a template can refer to. `app` is the app that `app.name`,
@@ -66,7 +69,7 @@ pub enum TemplateErrorKind {
     #[error("expected a filter name after |")]
     EmptyFilter,
     #[error(
-        "unknown variable {0:?} (expected app.name, app.short, project, checkout, stack, stack.id, branch, port, state_dir, run_dir, url:<app> or public_url:<app>)"
+        "unknown variable {0:?} (expected app.name, app.short, project, checkout, stack, stack.id, branch, port, state_dir, run_dir, url:<app>, public_url:<app>, host:<app> or public_host:<app>)"
     )]
     UnknownVariable(String),
     #[error("unknown filter {0:?} (expected upper, snake or slug)")]
@@ -107,7 +110,12 @@ pub enum Expr {
     Port,
     StateDir,
     RunDir,
-    Url { app: AppRef, public: bool },
+    /// `url:`, `public_url:`, `host:` or `public_host:`.
+    Url {
+        app: AppRef,
+        public: bool,
+        host: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,9 +260,11 @@ pub fn render(source: &str, ctx: &Context) -> Result<String, TemplateError> {
 fn parse_expr(text: &str) -> Result<Expr, (usize, TemplateErrorKind)> {
     let unknown = || (0, TemplateErrorKind::UnknownVariable(text.to_string()));
     if let Some((lookup, app)) = text.split_once(':') {
-        let public = match lookup.trim_end() {
-            "url" => false,
-            "public_url" => true,
+        let (public, host) = match lookup.trim_end() {
+            "url" => (false, false),
+            "public_url" => (true, false),
+            "host" => (false, true),
+            "public_host" => (true, true),
             _ => return Err(unknown()),
         };
         let app_offset = lookup.len() + 1 + (app.len() - app.trim_start().len());
@@ -275,7 +285,7 @@ fn parse_expr(text: &str) -> Result<Expr, (usize, TemplateErrorKind)> {
             "app" => AppRef::Current,
             name => AppRef::Named(name.to_string()),
         };
-        return Ok(Expr::Url { app, public });
+        return Ok(Expr::Url { app, public, host });
     }
     Ok(match text {
         "app.name" => Expr::AppName,
@@ -304,7 +314,7 @@ fn eval(expr: &Expr, ctx: &Context) -> Result<String, TemplateErrorKind> {
         Expr::Port => ctx.port.to_string(),
         Expr::StateDir => ctx.state_dir.display().to_string(),
         Expr::RunDir => ctx.run_dir.display().to_string(),
-        Expr::Url { app, public } => {
+        Expr::Url { app, public, host } => {
             let app = match app {
                 AppRef::Current => ctx.app,
                 AppRef::Named(name) => ctx
@@ -313,12 +323,12 @@ fn eval(expr: &Expr, ctx: &Context) -> Result<String, TemplateErrorKind> {
                     .or_else(|| ctx.project.app_by_short(name))
                     .ok_or_else(|| TemplateErrorKind::UnknownApp(name.clone()))?,
             };
-            if *public {
-                ctx.urls
-                    .public_url(app)
-                    .ok_or_else(|| TemplateErrorKind::NotShared(app.name.clone()))?
-            } else {
-                ctx.urls.url(app)
+            let not_shared = || TemplateErrorKind::NotShared(app.name.clone());
+            match (public, host) {
+                (false, false) => ctx.urls.url(app),
+                (false, true) => ctx.urls.host(app),
+                (true, false) => ctx.urls.public_url(app).ok_or_else(not_shared)?,
+                (true, true) => ctx.urls.public_host(app).ok_or_else(not_shared)?,
             }
         }
     })
@@ -360,16 +370,24 @@ pub(crate) mod tests {
 
     impl UrlResolver for Urls {
         fn url(&self, app: &App) -> String {
-            match self.stack {
-                "main" => format!("https://{}.nova.test", app.short),
-                stack => format!("https://{}.{stack}.nova.test", app.short),
-            }
+            format!("https://{}", self.host(app))
         }
 
         fn public_url(&self, app: &App) -> Option<String> {
+            self.public_host(app).map(|host| format!("https://{host}"))
+        }
+
+        fn host(&self, app: &App) -> String {
+            match self.stack {
+                "main" => format!("{}.nova.test", app.short),
+                stack => format!("{}.{stack}.nova.test", app.short),
+            }
+        }
+
+        fn public_host(&self, app: &App) -> Option<String> {
             self.shared
                 .contains(&app.name.as_str())
-                .then(|| format!("https://{}--{}--nova.example.dev", app.short, self.stack))
+                .then(|| format!("{}--{}--nova.example.dev", app.short, self.stack))
         }
     }
 
@@ -506,6 +524,59 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn resolves_hosts_by_full_name_short_name_and_app() {
+        assert_eq!(
+            ok("{{host:nova-postcard-api}}"),
+            "postcard-api.feature-x.nova.test"
+        );
+        assert_eq!(ok("{{host:billing}}"), "billing.feature-x.nova.test");
+        assert_eq!(
+            ok("{{ host: app }}"),
+            "postcard-frontend.feature-x.nova.test"
+        );
+        assert_eq!(
+            ok("{{public_host:postcard-api}}"),
+            "postcard-api--feature-x--nova.example.dev"
+        );
+        assert_eq!(
+            ok("{{host:billing | upper}}"),
+            "BILLING_FEATURE_X_NOVA_TEST"
+        );
+    }
+
+    #[test]
+    fn parses_host_lookups() {
+        let expr = |source: &str| match &Template::parse(source).unwrap().parts[0] {
+            Part::Expr { expr, .. } => expr.clone(),
+            Part::Text(_) => unreachable!(),
+        };
+        assert_eq!(
+            expr("{{host:app}}"),
+            Expr::Url {
+                app: AppRef::Current,
+                public: false,
+                host: true,
+            }
+        );
+        assert_eq!(
+            expr("{{public_host:billing}}"),
+            Expr::Url {
+                app: AppRef::Named("billing".into()),
+                public: true,
+                host: true,
+            }
+        );
+        assert_eq!(
+            expr("{{url:billing}}"),
+            Expr::Url {
+                app: AppRef::Named("billing".into()),
+                public: false,
+                host: false,
+            }
+        );
+    }
+
+    #[test]
     fn with_app_rebinds_app() {
         let project = nova_project();
         let urls = Urls {
@@ -528,6 +599,7 @@ pub(crate) mod tests {
             render("{{app.short}} {{url:app}}", &ctx).unwrap(),
             "billing https://billing.nova.test"
         );
+        assert_eq!(render("{{host:app}}", &ctx).unwrap(), "billing.nova.test");
     }
 
     #[test]
@@ -595,6 +667,22 @@ pub(crate) mod tests {
             fail("{{url:bad app}}").kind,
             TemplateErrorKind::UnknownApp(_)
         ));
+        assert_eq!(
+            fail("{{host: }}").kind,
+            TemplateErrorKind::MissingApp("host".into())
+        );
+        assert_eq!(
+            fail("{{public_host:}}").kind,
+            TemplateErrorKind::MissingApp("public_host".into())
+        );
+        assert_eq!(
+            fail("{{host:nova-postcard-ap}}").kind,
+            TemplateErrorKind::UnknownApp("nova-postcard-ap".into())
+        );
+        assert_eq!(
+            fail("{{host:nova-postcard-ap}}").to_string(),
+            "unknown app \"nova-postcard-ap\" in this project at column 3 in \"{{host:nova-postcard-ap}}\""
+        );
     }
 
     #[test]
@@ -611,6 +699,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn reports_public_host_while_not_shared() {
+        let err = fail("{{public_host:billing}}");
+        assert_eq!(
+            err.kind,
+            TemplateErrorKind::NotShared("nova-billing".into())
+        );
+        assert_eq!(err.column(), 3);
+    }
+
+    #[test]
     fn columns_count_characters() {
         let err = fail("ø{{nope}}");
         assert_eq!(err.position, 4);
@@ -621,6 +719,8 @@ pub(crate) mod tests {
     fn parse_validates_without_context() {
         assert!(Template::parse("{{app.name | upper}}_URL").is_ok());
         assert!(Template::parse("{{url:anything}}").is_ok());
+        assert!(Template::parse("{{public_host:anything}}").is_ok());
+        assert!(Template::parse("{{hostname:anything}}").is_err());
         assert!(Template::parse("{{port | shout}}").is_err());
         assert!(Template::parse("{{app.name}}").unwrap().has_expressions());
         assert!(!Template::parse("plain").unwrap().has_expressions());
