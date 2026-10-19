@@ -58,13 +58,15 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
             env.machine.https_port,
             tilde(&env.puma_dev_dir),
         );
-        if import_first {
-            println!(
-                "You have {} apps in {} and no carte projects yet: run `carte import puma-dev` first.",
-                facts.puma_dev.links,
-                tilde(&env.puma_dev_dir)
-            );
-        }
+    }
+    if import_first {
+        println!(
+            "You have {} apps in {} and no carte projects yet: run `carte import puma-dev` first.",
+            facts.puma_dev.links,
+            tilde(&env.puma_dev_dir)
+        );
+    }
+    if !args.uninstall && (facts.puma_dev.installed() || import_first) {
         println!();
     }
 

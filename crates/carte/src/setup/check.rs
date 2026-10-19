@@ -345,7 +345,20 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
     }
 
     let puma_dev = &facts.puma_dev;
-    if puma_dev.installed() || puma_dev.links > 0 {
+    if !puma_dev.installed() && (puma_dev.plist || puma_dev.links > 0) {
+        let mut parts = vec!["not installed".to_string()];
+        if puma_dev.plist {
+            parts.push(format!("{} left behind", tilde(&env.puma_dev_plist())));
+        }
+        if puma_dev.links > 0 {
+            parts.push(format!(
+                "{} entries in {}",
+                puma_dev.links,
+                tilde(&env.puma_dev_dir)
+            ));
+        }
+        report.push(Status::Info, "puma-dev", parts.join(", "));
+    } else if puma_dev.installed() {
         let mut parts = Vec::new();
         if puma_dev.plist {
             parts.push(format!("{} present", tilde(&env.puma_dev_plist())));
@@ -502,6 +515,8 @@ pub fn fallback(env: &SetupEnv) -> String {
     format!(
         "- `launchctl print gui/{uid}/{LABEL}` shows whether launchd started carte and why it stopped; \
          its log is {log}.\n\
+         - If `launchctl bootstrap` failed with `5: Input/output error`, launchd still had carte \
+         loaded or was still stopping it; run `carte setup` again.\n\
          - If launchd didn't hand over ports {http} and {https} on 127.0.0.1, carte can still run on \
          high ports: set http_port = 8080 and https_port = 8443 in {config} and run `carte setup` \
          again; URLs then carry the port.\n\

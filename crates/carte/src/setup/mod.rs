@@ -12,6 +12,7 @@ use std::io::Write as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use carte_core::config;
@@ -164,6 +165,8 @@ pub enum CaState {
 pub struct PumaDev {
     pub plist: bool,
     pub loaded: bool,
+    /// Whether the program its LaunchAgent runs, or `puma-dev` on `PATH`, exists.
+    pub binary: bool,
     /// Entries in `~/.puma-dev`.
     pub links: usize,
     /// The domains its LaunchAgent serves, from `-d`.
@@ -171,8 +174,9 @@ pub struct PumaDev {
 }
 
 impl PumaDev {
+    /// A plist left behind after puma-dev itself was removed doesn't count.
     pub fn installed(&self) -> bool {
-        self.plist || self.loaded
+        self.loaded || self.binary
     }
 }
 
@@ -252,6 +256,13 @@ impl Facts {
             puma_dev: PumaDev {
                 plist: env.puma_dev_plist().exists(),
                 loaded: check::launchd_loaded(&env.service(PUMA_DEV_LABEL)),
+                binary: fs::read_to_string(env.puma_dev_plist())
+                    .ok()
+                    .and_then(|text| launch_agent_program(&text))
+                    .is_some_and(|program| program.is_file())
+                    || std::env::var_os("PATH").is_some_and(|path| {
+                        std::env::split_paths(&path).any(|dir| dir.join("puma-dev").is_file())
+                    }),
                 links: fs::read_dir(&env.puma_dev_dir)
                     .map(|entries| entries.filter_map(Result::ok).count())
                     .unwrap_or(0),
@@ -296,6 +307,14 @@ pub fn puma_dev_domains(plist: &str) -> Vec<String> {
         .filter(|d| !d.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// The program a LaunchAgent runs: the first of its `ProgramArguments`.
+pub fn launch_agent_program(plist: &str) -> Option<PathBuf> {
+    let (_, rest) = plist.split_once("<key>ProgramArguments</key>")?;
+    let (_, rest) = rest.split_once("<string>")?;
+    let (program, _) = rest.split_once("</string>")?;
+    Some(PathBuf::from(program.trim()))
 }
 
 /// Resolver files carte doesn't need: ones pointing at its DNS server, or written by
@@ -402,6 +421,11 @@ pub enum Action {
         path: PathBuf,
     },
     CreateCa,
+    /// Runs the command until it fails, or fails itself after `timeout`.
+    WaitUntilFails {
+        command: CommandLine,
+        timeout: Duration,
+    },
     /// Writes carte's skill and its marker into the directory.
     InstallSkill {
         dir: PathBuf,
@@ -429,6 +453,21 @@ impl Step {
                 stdin: None,
             },
         }
+    }
+
+    /// Stops a launchd service and waits until launchd no longer has it loaded.
+    fn bootout(description: impl Into<String>, env: &SetupEnv, label: &str) -> [Self; 2] {
+        let service = env.service(label);
+        [
+            Self::run(description, "launchctl", &["bootout", &service]),
+            Step {
+                description: format!("Wait for launchd to finish stopping {label}"),
+                action: Action::WaitUntilFails {
+                    command: CommandLine::new("launchctl", &["print", &service]),
+                    timeout: Duration::from_secs(60),
+                },
+            },
+        ]
     }
 
     fn sudo(description: impl Into<String>, program: &str, args: &[&str]) -> Self {
@@ -482,6 +521,13 @@ impl Step {
             Action::CreateCa => {
                 let _ = writeln!(out, "   write {}", tilde(&env.ca_cert()));
             }
+            Action::WaitUntilFails { command, timeout } => {
+                let _ = writeln!(
+                    out,
+                    "   wait until `{command}` fails, up to {}s",
+                    timeout.as_secs()
+                );
+            }
             Action::InstallSkill { dir } => {
                 let _ = writeln!(out, "   write {}", tilde(&dir.join("SKILL.md")));
             }
@@ -527,7 +573,7 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
     let mut plan = Plan::default();
     let steps = &mut plan.steps;
     let puma_dev = env.service(PUMA_DEV_LABEL);
-    if facts.puma_dev.plist {
+    if facts.puma_dev.plist && facts.puma_dev.installed() {
         steps.push(Step::run(
             "Keep puma-dev's LaunchAgent from starting at login (its plist and ~/.puma-dev stay)",
             "launchctl",
@@ -535,10 +581,10 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
         ));
     }
     if facts.puma_dev.loaded {
-        steps.push(Step::run(
+        steps.extend(Step::bootout(
             "Stop puma-dev so carte can take over its ports",
-            "launchctl",
-            &["bootout", &puma_dev],
+            env,
+            PUMA_DEV_LABEL,
         ));
     }
 
@@ -621,10 +667,10 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
     let plist_changed = facts.agent_plist.as_deref() != Some(plist.as_str());
     if plist_changed {
         if facts.agent_loaded {
-            steps.push(Step::run(
+            steps.extend(Step::bootout(
                 "Stop the running carte LaunchAgent to replace it",
-                "launchctl",
-                &["bootout", &env.service(LABEL)],
+                env,
+                LABEL,
             ));
         }
         steps.push(Step {
@@ -705,10 +751,10 @@ fn skill_steps(env: &SetupEnv, skill: &SkillFacts, plan: &mut Plan) {
 /// Takes down an agent installed under the old label.
 fn old_agent_steps(env: &SetupEnv, facts: &Facts, steps: &mut Vec<Step>) {
     if facts.old_agent.loaded {
-        steps.push(Step::run(
+        steps.extend(Step::bootout(
             format!("Stop carte's LaunchAgent under its old label, {OLD_LABEL}"),
-            "launchctl",
-            &["bootout", &env.service(OLD_LABEL)],
+            env,
+            OLD_LABEL,
         ));
     }
     if facts.old_agent.plist {
@@ -725,10 +771,10 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
     let mut plan = Plan::default();
     old_agent_steps(env, facts, &mut plan.steps);
     if facts.agent_loaded {
-        plan.steps.push(Step::run(
+        plan.steps.extend(Step::bootout(
             "Stop the carte daemon and its apps",
-            "launchctl",
-            &["bootout", &env.service(LABEL)],
+            env,
+            LABEL,
         ));
     }
     if facts.agent_plist.is_some() {
@@ -800,7 +846,7 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
         ));
     }
 
-    let puma_dev = if env.puma_dev_plist().exists() {
+    let puma_dev = if facts.puma_dev.plist && facts.puma_dev.binary {
         format!(
             "launchctl enable {service} && launchctl bootstrap {domain} {plist}",
             service = env.service(PUMA_DEV_LABEL),
@@ -884,6 +930,23 @@ fn run_step(step: &Step, env: &SetupEnv) -> anyhow::Result<()> {
             )?;
             crate::tls::bundle::rebuild(&env.paths.state_dir, &ca)?;
         }
+        Action::WaitUntilFails { command, timeout } => {
+            let start = Instant::now();
+            while command
+                .command()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .with_context(|| command.to_string())?
+                .success()
+            {
+                if start.elapsed() >= *timeout {
+                    bail!("`{command}` still succeeds after {}s", timeout.as_secs());
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
         Action::InstallSkill { dir } => {
             skill::install(dir).with_context(|| dir.display().to_string())?;
         }
@@ -962,6 +1025,7 @@ mod tests {
                 Action::WriteFile { path, .. } => format!("write {}", path.display()),
                 Action::RemoveFile { path } => format!("rm {}", path.display()),
                 Action::CreateCa => "create ca".into(),
+                Action::WaitUntilFails { command, .. } => format!("wait until {command} fails"),
                 Action::InstallSkill { dir } => format!("install skill {}", dir.display()),
                 Action::Symlink { link, target } => {
                     format!("ln -s {} {}", target.display(), link.display())
@@ -980,6 +1044,7 @@ mod tests {
             puma_dev: PumaDev {
                 plist: true,
                 loaded: true,
+                binary: true,
                 links: 3,
                 domains: vec!["test".into()],
             },
@@ -991,6 +1056,7 @@ mod tests {
             [
                 "launchctl disable gui/501/io.puma.dev",
                 "launchctl bootout gui/501/io.puma.dev",
+                "wait until launchctl print gui/501/io.puma.dev fails",
                 "sudo tee /r/resolver/test",
                 "create ca",
                 "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /r/state/ca.pem",
@@ -999,13 +1065,13 @@ mod tests {
                 "verify",
             ]
         );
-        assert!(plan.steps[2].needs_sudo());
-        assert!(!plan.steps[5].needs_sudo());
-        let Action::Run { stdin, .. } = &plan.steps[2].action else {
+        assert!(plan.steps[3].needs_sudo());
+        assert!(!plan.steps[6].needs_sudo());
+        let Action::Run { stdin, .. } = &plan.steps[3].action else {
             panic!()
         };
         assert_eq!(stdin.as_deref(), Some("nameserver 127.0.0.1\nport 9253\n"));
-        let Action::WriteFile { contents, .. } = &plan.steps[5].action else {
+        let Action::WriteFile { contents, .. } = &plan.steps[6].action else {
             panic!()
         };
         assert_eq!(*contents, env.agent().to_plist());
@@ -1013,7 +1079,8 @@ mod tests {
         assert!(plan.notes.is_empty());
 
         let shown = plan.render(&env, false);
-        assert!(shown.contains("3. Send .test lookups to carte's DNS server on port 9253\n   $ sudo tee /r/resolver/test\n     | nameserver 127.0.0.1\n     | port 9253\n"), "{shown}");
+        assert!(shown.contains("2. Stop puma-dev so carte can take over its ports\n   $ launchctl bootout gui/501/io.puma.dev\n3. Wait for launchd to finish stopping io.puma.dev\n   wait until `launchctl print gui/501/io.puma.dev` fails, up to 60s\n"), "{shown}");
+        assert!(shown.contains("4. Send .test lookups to carte's DNS server on port 9253\n   $ sudo tee /r/resolver/test\n     | nameserver 127.0.0.1\n     | port 9253\n"), "{shown}");
     }
 
     #[test]
@@ -1029,6 +1096,7 @@ mod tests {
             puma_dev: PumaDev {
                 plist: true,
                 loaded: true,
+                binary: true,
                 links: 3,
                 domains: vec!["test".into(), "localhost".into()],
             },
@@ -1036,17 +1104,18 @@ mod tests {
         };
         let plan = plan_install(&env, &facts);
         assert_eq!(
-            commands(&plan)[..4],
+            commands(&plan)[..5],
             [
                 "launchctl disable gui/501/io.puma.dev",
                 "launchctl bootout gui/501/io.puma.dev",
+                "wait until launchctl print gui/501/io.puma.dev fails",
                 "sudo rm -f /r/resolver/localhost",
                 "sudo rm -f /r/resolver/test",
             ]
         );
-        assert_eq!(commands(&plan)[4], "create ca");
+        assert_eq!(commands(&plan)[5], "create ca");
         assert_eq!(
-            plan.steps[3].description,
+            plan.steps[4].description,
             "Remove /etc/resolver/test: carte serves .localhost, not .test"
         );
         assert_eq!(previous_tlds(&env, &facts), ["test"]);
@@ -1138,6 +1207,7 @@ mod tests {
             [
                 "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /r/state/ca.pem",
                 "launchctl bootout gui/501/no.elektronaut.carte",
+                "wait until launchctl print gui/501/no.elektronaut.carte fails",
                 "write /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
                 "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
                 "verify",
@@ -1183,6 +1253,7 @@ mod tests {
             commands(&plan),
             [
                 "launchctl bootout gui/501/carte.daemon",
+                "wait until launchctl print gui/501/carte.daemon fails",
                 "rm /r/home/Library/LaunchAgents/carte.daemon.plist",
                 "write /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
                 "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
@@ -1190,9 +1261,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            commands(&plan_uninstall(&env, &facts))[..2],
+            commands(&plan_uninstall(&env, &facts))[..3],
             [
                 "launchctl bootout gui/501/carte.daemon",
+                "wait until launchctl print gui/501/carte.daemon fails",
                 "rm /r/home/Library/LaunchAgents/carte.daemon.plist",
             ]
         );
@@ -1229,6 +1301,7 @@ mod tests {
             commands(&plan),
             [
                 "launchctl bootout gui/501/no.elektronaut.carte".to_string(),
+                "wait until launchctl print gui/501/no.elektronaut.carte fails".to_string(),
                 format!("rm {root}/home/Library/LaunchAgents/no.elektronaut.carte.plist"),
                 format!("sudo rm -f {root}/resolver/test"),
                 format!("sudo security remove-trusted-cert -d {root}/state/ca.pem"),
@@ -1241,11 +1314,14 @@ mod tests {
         );
         assert!(plan.notes[0].contains("puma-dev -install"));
 
-        fs::create_dir_all(&env.launch_agents_dir).unwrap();
-        fs::write(env.puma_dev_plist(), "").unwrap();
         let puma_dev_resolver = Facts {
             resolvers: resolvers(&[("test", PUMA_DEV_RESOLVER)]),
             ca: CaState::Untrusted,
+            puma_dev: PumaDev {
+                plist: true,
+                binary: true,
+                ..PumaDev::default()
+            },
             ..fresh()
         };
         let plan = plan_uninstall(&env, &puma_dev_resolver);
@@ -1256,6 +1332,102 @@ mod tests {
             "{}",
             plan.notes[0]
         );
+
+        let leftover_plist = Facts {
+            puma_dev: PumaDev {
+                plist: true,
+                ..PumaDev::default()
+            },
+            ..puma_dev_resolver
+        };
+        let plan = plan_uninstall(&env, &leftover_plist);
+        assert!(
+            plan.notes[0].contains("`puma-dev -install`"),
+            "{}",
+            plan.notes[0]
+        );
+    }
+
+    #[test]
+    fn leaves_a_leftover_puma_dev_plist_alone() {
+        let env = env(Path::new("/r"));
+        let done = Facts {
+            ca: CaState::Trusted,
+            agent_plist: Some(env.agent().to_plist()),
+            agent_loaded: true,
+            ..fresh()
+        };
+        let leftover = Facts {
+            puma_dev: PumaDev {
+                plist: true,
+                ..PumaDev::default()
+            },
+            ..done.clone()
+        };
+        assert!(!leftover.puma_dev.installed());
+        assert_eq!(commands(&plan_install(&env, &leftover)), ["verify"]);
+        let report = check::check(&env, &leftover).to_string();
+        assert!(
+            report.contains("  puma-dev        not installed, /r/home/Library/LaunchAgents/io.puma.dev.plist left behind\n"),
+            "{report}"
+        );
+
+        let not_running = Facts {
+            puma_dev: PumaDev {
+                plist: true,
+                binary: true,
+                ..PumaDev::default()
+            },
+            ..done
+        };
+        assert!(not_running.puma_dev.installed());
+        assert_eq!(
+            commands(&plan_install(&env, &not_running)),
+            ["launchctl disable gui/501/io.puma.dev", "verify"]
+        );
+    }
+
+    #[test]
+    fn reads_a_launch_agents_program() {
+        let plist = "<dict>\n<key>Label</key>\n<string>io.puma.dev</string>\n\
+                     <key>ProgramArguments</key>\n<array>\n<string>/opt/homebrew/bin/puma-dev</string>\n\
+                     <string>-launchd</string>\n</array>";
+        assert_eq!(
+            launch_agent_program(plist),
+            Some(PathBuf::from("/opt/homebrew/bin/puma-dev"))
+        );
+        assert_eq!(launch_agent_program("<string>x</string>"), None);
+    }
+
+    #[test]
+    fn waits_until_a_command_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        let flag = dir.path().join("loaded");
+        fs::write(&flag, "").unwrap();
+        let wait = |timeout| Step {
+            description: "wait".into(),
+            action: Action::WaitUntilFails {
+                command: CommandLine::new("test", &["-e", &flag.to_string_lossy()]),
+                timeout,
+            },
+        };
+        let err = execute(&[wait(Duration::ZERO)], &env)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("still succeeds after 0s"), "{err}");
+
+        let remover = std::thread::spawn({
+            let flag = flag.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(300));
+                fs::remove_file(flag).unwrap();
+            }
+        });
+        let start = Instant::now();
+        execute(&[wait(Duration::from_secs(30))], &env).unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(250));
+        remover.join().unwrap();
     }
 
     #[test]
