@@ -1154,7 +1154,7 @@ impl Actor {
                 }
                 proc.stop = None;
                 let manual = proc.manual_stop || inst.state == InstanceState::Stopping;
-                proc.state = if manual && inst.state != InstanceState::Crashed {
+                proc.state = if manual {
                     ProcessState::Stopped
                 } else if proc.spec.is_task() && code == Some(0) {
                     ProcessState::Done
@@ -1379,6 +1379,9 @@ impl Actor {
         failure.log = log;
         inst.fail_waiters(failure);
         inst.signal_stop(self.options.grace, false);
+        if let Some(proc) = failed.and_then(|idx| inst.procs.get_mut(idx)) {
+            proc.manual_stop = false;
+        }
         self.events.push_event(
             EventKind::Crashed,
             message,

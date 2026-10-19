@@ -1971,6 +1971,53 @@ kind = "task"
 }
 
 #[tokio::test]
+async fn only_the_process_that_failed_shows_as_exited_after_a_crash() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: FIXTURE_BOOT_DELAY_MS=300 FIXTURE_CRASH=3 exec {fixture}\nworker: exec {fixture}\n",
+    );
+    setup.project(&format!(
+        "[apps.acme-web.processes.redis]\ncommand = 'exec {}'\nkind = \"service\"\n",
+        fixture().display()
+    ));
+    let handle = setup.start();
+
+    let failure = handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap_err();
+    assert!(failure.detail.contains("exited with code 3"), "{failure:?}");
+    wait_for(&handle, "everything to exit", |s| {
+        status(s, "acme-web", "main")
+            .processes
+            .iter()
+            .all(|p| p.pid.is_none())
+    })
+    .await;
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Crashed
+    );
+    assert_eq!(
+        process(&snapshot, "acme-web", "web").state,
+        ProcessState::Exited {
+            code: Some(3),
+            signal: None
+        }
+    );
+    for name in ["worker", "redis"] {
+        assert_eq!(
+            process(&snapshot, "acme-web", name).state,
+            ProcessState::Stopped,
+            "{name}"
+        );
+    }
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_crashed_worker_comes_back_on_its_own_port() {
     let setup = Setup::new();
     setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");
