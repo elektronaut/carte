@@ -139,7 +139,10 @@ carte exec billing@feature-x -- bin/rails runner 'ReportJob.perform_later'
   exiting with 3 when the daemon is down and 5 otherwise. `--no-check`
   runs the command anyway. Apps without `provides` don't need to be
   running.
-- It doesn't start the app or keep it from idling out.
+- It doesn't start the app. While the app runs, it doesn't idle out
+  until the command ends: `carte status` shows it as `held by 1 exec`.
+  Anything the command leaves running in the background keeps holding
+  it until that exits too. A stop or `carte down` still stops it.
 
 ## JSON output
 
@@ -173,7 +176,7 @@ An **Instance** is:
 | `url`, `public_url` | `public_url` is null unless shared |
 | `state` | `stopped`, `starting`, `ready`, `stopping` or `crashed` |
 | `processes` | `[{ name, state, policy, temporary, pid, port, http, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `state` is `stopped`, `starting`, `running`, `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
-| `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent", … }` |
+| `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec", … }`; `exec` counts `carte exec` commands still running |
 | `idle_in_secs` | Until idle shutdown, when counting down |
 | `last_error`, `last_event` | Null when there's none |
 | `boot` | `{ elapsed_ms, waiting_for }` while starting |

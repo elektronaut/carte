@@ -110,6 +110,13 @@ pub(crate) enum Msg {
         request: Option<Option<InstanceKey>>,
     },
     Activity(InstanceKey, Activity),
+    /// Keeps a running instance from idling out; answers with the instance and the
+    /// hold's id for `Release`.
+    Hold {
+        target: Address,
+        reply: oneshot::Sender<Result<(InstanceKey, u64), String>>,
+    },
+    Release(InstanceKey, u64),
     /// Answers with the instances the action applied to.
     Control {
         request: ControlRequest,
@@ -240,6 +247,19 @@ impl Handle {
 
     pub fn activity(&self, key: InstanceKey, activity: Activity) {
         self.send(Msg::Activity(key, activity));
+    }
+
+    /// Keeps the running instance an address names from idling out until
+    /// [`Handle::release`].
+    pub async fn hold(&self, target: Address) -> Result<(InstanceKey, u64), String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::Hold { target, reply });
+        rx.await
+            .unwrap_or_else(|_| Err("carte is shutting down".into()))
+    }
+
+    pub fn release(&self, key: InstanceKey, id: u64) {
+        self.send(Msg::Release(key, id));
     }
 
     /// Applies a control action; with `wait`, an `up` or `restart` answers once every

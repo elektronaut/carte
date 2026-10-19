@@ -285,6 +285,15 @@ fn hold_word(hold: &Hold) -> String {
         Hold::Requests { count } => format!("{count} requests"),
         Hold::Connections { count } => format!("{count} connections"),
         Hold::Dependent { app } => app.clone(),
+        Hold::Exec { count } => execs(*count),
+    }
+}
+
+fn execs(count: u32) -> String {
+    if count == 1 {
+        "1 exec".into()
+    } else {
+        format!("{count} execs")
     }
 }
 
@@ -407,6 +416,7 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
             Hold::Requests { count } => format!("{count} requests"),
             Hold::Connections { count } => format!("held by {count} connections"),
             Hold::Dependent { app } => format!("held by {app}"),
+            Hold::Exec { count } => format!("held by {}", execs(*count)),
         });
     }
     if let Some(secs) = inst.idle_in_secs {
@@ -926,6 +936,26 @@ nova-billing  ready
         );
         let ls = render_ls(&snapshot, false);
         assert!(ls.contains("down: worker (restarting in 4s)"), "{ls}");
+    }
+
+    #[test]
+    fn shows_commands_that_hold_an_instance() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.holds = vec![Hold::Exec { count: 1 }];
+        let instances = vec![billing.clone()];
+        let status = render_status(&snapshot, &instances);
+        assert!(status.contains("  held by    1 exec\n"), "{status}");
+        let ls = render_ls(&snapshot, false);
+        assert!(ls.contains("held by 1 exec"), "{ls}");
+
+        snapshot.projects[0].stacks[0].instances[0].holds =
+            vec![Hold::Connections { count: 2 }, Hold::Exec { count: 3 }];
+        let ls = render_ls(&snapshot, false);
+        assert!(
+            ls.contains("held by 2 connections, held by 3 execs"),
+            "{ls}"
+        );
     }
 
     #[test]

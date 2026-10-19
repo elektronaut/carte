@@ -76,6 +76,8 @@ pub(super) struct Instance {
     waiters: Vec<oneshot::Sender<Result<Upstream, BootFailure>>>,
     pub in_flight: u32,
     pub connections: u32,
+    /// Holds from `carte exec`, by id.
+    pub execs: BTreeSet<u64>,
     pub last_activity: Instant,
     pub last_error: Option<String>,
     pub env_changed: bool,
@@ -179,6 +181,7 @@ impl Instance {
             waiters: Vec::new(),
             in_flight: 0,
             connections: 0,
+            execs: BTreeSet::new(),
             last_activity: Instant::now(),
             last_error: None,
             env_changed: false,
@@ -405,6 +408,10 @@ impl Actor {
                 }
             }
             Msg::Activity(key, activity) => self.activity(&key, activity),
+            Msg::Hold { target, reply } => {
+                let _ = reply.send(self.hold(&target));
+            }
+            Msg::Release(key, id) => self.release(&key, id),
             Msg::Control { request, reply } => {
                 let _ = reply.send(self.control(request));
             }
@@ -1474,6 +1481,9 @@ impl Actor {
         inst.state = InstanceState::Stopped;
         inst.in_flight = 0;
         inst.connections = 0;
+        if !inst.restart_pending {
+            inst.execs.clear();
+        }
         inst.forced.clear();
         let restart_forced = std::mem::take(&mut inst.restart_forced);
         self.dirty = true;
@@ -1510,6 +1520,31 @@ impl Actor {
         inst.last_activity = Instant::now();
     }
 
+    fn hold(&mut self, target: &Address) -> Result<(InstanceKey, u64), String> {
+        let resolved = self.resolve(target)?;
+        let key = resolved
+            .instance()
+            .ok_or_else(|| format!("{:?} names no app", target.address))?;
+        if !self.instances.get(&key).is_some_and(Instance::is_active) {
+            return Err(format!("{}@{} isn't running", key.app, key.stack.slug()));
+        }
+        let id = self.next_id();
+        let inst = self.instances.get_mut(&key).expect("instance");
+        inst.execs.insert(id);
+        inst.last_activity = Instant::now();
+        self.dirty = true;
+        Ok((key, id))
+    }
+
+    fn release(&mut self, key: &InstanceKey, id: u64) {
+        if let Some(inst) = self.instances.get_mut(key)
+            && inst.execs.remove(&id)
+        {
+            inst.last_activity = Instant::now();
+            self.dirty = true;
+        }
+    }
+
     pub(super) fn usages(&self) -> Vec<Usage> {
         let mut usages = Vec::new();
         let active: Vec<InstanceKey> = self
@@ -1536,6 +1571,7 @@ impl Actor {
                     pinned,
                     requests_in_flight: inst.in_flight,
                     connections: inst.connections,
+                    execs: inst.execs.len() as u32,
                     held_by: holders.get(key).cloned().unwrap_or_default(),
                     last_activity: inst.last_activity,
                     memory_bytes: inst.procs.iter().map(|p| p.memory_bytes).sum(),

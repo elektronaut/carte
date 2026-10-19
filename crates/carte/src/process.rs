@@ -367,7 +367,7 @@ fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((read, write))
 }
 
-fn set_cloexec(fd: RawFd, on: bool) -> io::Result<()> {
+pub(crate) fn set_cloexec(fd: RawFd, on: bool) -> io::Result<()> {
     let flags = if on { libc::FD_CLOEXEC } else { 0 };
     if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
         return Err(io::Error::last_os_error());

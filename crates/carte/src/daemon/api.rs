@@ -43,6 +43,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::SHARE, post(share))
         .route(paths::UNSHARE, post(unshare))
         .route(paths::PRUNE, get(prune_list).post(prune))
+        .route(paths::HOLD, post(hold))
         .with_state(api)
 }
 
@@ -208,6 +209,23 @@ async fn unshare(State(api): State<Api>, Json(request): Json<UnshareRequest>) ->
         Ok(apps) => Json(apps).into_response(),
         Err(message) => error(StatusCode::BAD_REQUEST, message),
     }
+}
+
+/// Holds the instance until the client goes away, which drops the response body.
+async fn hold(State(api): State<Api>, Json(target): Json<Address>) -> Response {
+    if let Some(response) = unresolved(&api, &target) {
+        return response;
+    }
+    let (key, id) = match api.supervisor.hold(target).await {
+        Ok(hold) => hold,
+        Err(message) => return error(StatusCode::CONFLICT, message),
+    };
+    let (tx, rx) = mpsc::channel(1);
+    tokio::spawn(async move {
+        tx.closed().await;
+        api.supervisor.release(key, id);
+    });
+    stream(rx)
 }
 
 async fn prune_list(State(api): State<Api>) -> Response {

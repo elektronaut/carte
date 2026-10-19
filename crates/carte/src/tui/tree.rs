@@ -350,6 +350,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
             Hold::Requests { count } => Some(plural(*count, "request")),
             Hold::Connections { count } => Some(plural(*count, "connection")),
             Hold::Dependent { app } => Some(short(app)),
+            Hold::Exec { count } => Some(plural(*count, "exec")),
         })
         .collect();
     let mut status = Status {
@@ -965,6 +966,26 @@ mod tests {
         fold.expanded
             .insert(roots[0].children[0].id().clone(), true);
         assert_eq!(labels(&roots, &fold), ["nova", "  main", "    frontend"]);
+    }
+
+    #[test]
+    fn names_what_holds_an_instance() {
+        let mut web = instance("acme", "main", "main", InstanceState::Ready);
+        web.holds = vec![
+            Hold::Pinned,
+            Hold::Connections { count: 1 },
+            Hold::Exec { count: 1 },
+            Hold::Exec { count: 2 },
+        ];
+        let snap = snapshot(vec![project(
+            "acme",
+            &["acme"],
+            vec![stack("main", vec![web])],
+        )]);
+        assert_eq!(
+            build(&snap)[0].status.held_by,
+            ["1 connection", "1 exec", "2 execs"]
+        );
     }
 
     #[test]
