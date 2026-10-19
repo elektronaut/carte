@@ -51,7 +51,9 @@ error and the last log lines if it isn't. Restart after:
 carte doesn't install packages: in a new worktree, run `pnpm install` (or
 `bundle install`) yourself before the first request.
 
-`touch tmp/restart.txt` also restarts the app.
+`touch tmp/restart.txt` also restarts the app. Creating the file doesn't
+count (Puma's `tmp_restart` plugin creates it on first boot), so in a fresh
+checkout, touch it once more.
 
 Processes with `kind = "service"` (a Redis server, say) start and get ready
 first and stop last; `kind = "task"` processes (such as

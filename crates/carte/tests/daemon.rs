@@ -483,6 +483,42 @@ fn web_pid(daemon: &Daemon) -> Option<u32> {
         .and_then(|p| p.pid)
 }
 
+fn touch_later(path: &std::path::Path) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+}
+
+#[test]
+fn restart_txt_in_a_tmp_directory_created_later_restarts_the_instance() {
+    let daemon = Daemon::start_prepared("", |work| {
+        std::fs::remove_dir(work.join("acme-web/tmp")).unwrap();
+    });
+    assert!(
+        daemon
+            .request("web.acme.test", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+    let before = web_pid(&daemon).unwrap();
+    let tmp = daemon.root.join("work/acme-web/tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    std::fs::write(tmp.join("restart.txt"), "").unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        web_pid(&daemon),
+        Some(before),
+        "creating restart.txt restarted the instance"
+    );
+
+    touch_later(&tmp.join("restart.txt"));
+    eventually("a new web process", || {
+        web_pid(&daemon).is_some_and(|pid| pid != before)
+    });
+}
+
 #[test]
 fn touching_restart_txt_restarts_the_instance() {
     let daemon = Daemon::start();
@@ -492,17 +528,28 @@ fn touching_restart_txt_restarts_the_instance() {
             .starts_with("HTTP/1.1 200")
     );
     let before = web_pid(&daemon).unwrap();
-    std::fs::write(daemon.root.join("work/acme-web/tmp/restart.txt"), "").unwrap();
+    let restart_txt = daemon.root.join("work/acme-web/tmp/restart.txt");
+    std::fs::write(&restart_txt, "").unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(
+        web_pid(&daemon),
+        Some(before),
+        "creating restart.txt restarted the instance"
+    );
+
+    touch_later(&restart_txt);
     eventually("a new web process", || {
         web_pid(&daemon).is_some_and(|pid| pid != before)
     });
 
     let events = stdout(&daemon.run(&["events", "web"]));
     let lines: Vec<&str> = events.lines().collect();
-    assert!(
+    assert_eq!(
         lines
             .iter()
-            .any(|l| l.ends_with("  acme-web  restarted: tmp/restart.txt")),
+            .filter(|l| l.ends_with("  acme-web  restarted: tmp/restart.txt"))
+            .count(),
+        1,
         "{events}"
     );
     assert!(

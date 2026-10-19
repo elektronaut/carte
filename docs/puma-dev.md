@@ -19,7 +19,7 @@ carte setup
 | `.env`, `.powenv`, `.pumaenv` | `env_files` |
 | Starting on the first request | The same |
 | Stopping after 15 minutes idle | The same; see `idle_timeout` |
-| `touch tmp/restart.txt` | The same |
+| `touch tmp/restart.txt` | The same, except that creating the file doesn't count |
 
 ## What's different
 
@@ -30,6 +30,10 @@ carte setup
   without `export`, but runs no shell scripts. Move what `.powrc` or
   `~/.powconfig` sets into `env_files` or a project's `[env]`; the import
   points out each one it finds.
+- **Creating `tmp/restart.txt` doesn't restart the app**; only touching
+  a file that's already there does. Puma's `tmp_restart` plugin creates
+  it when Puma first boots in a checkout, and that shouldn't restart the
+  app. In a fresh checkout, touch it once more.
 - **Worktrees get their own hostnames.** Link only the primary checkout:
   carte finds its worktrees by itself.
 - **carte has its own certificate authority.** puma-dev's stays in place

@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use carte_core::discovery;
 use carte_core::model::World;
@@ -26,6 +26,7 @@ const TOOL_FILES: [&str; 7] = [
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Change {
     Reload,
+    Rewatch,
     Restart(PathBuf),
     EnvChanged(PathBuf),
 }
@@ -113,6 +114,9 @@ pub fn classify(
     {
         return Some(Change::Reload);
     }
+    if name == "tmp" && checkouts.contains_key(parent) {
+        return Some(Change::Rewatch);
+    }
     if name == "restart.txt" && parent.file_name()? == "tmp" {
         let checkout = checkouts.get(parent.parent()?)?;
         return Some(Change::Restart(checkout.clone()));
@@ -171,6 +175,41 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The last seen modification time of each checkout's `tmp/restart.txt`, `None`
+/// while it doesn't exist.
+#[derive(Debug, Default)]
+struct RestartFiles(BTreeMap<PathBuf, Option<SystemTime>>);
+
+impl RestartFiles {
+    /// Records the files of new checkouts and of checkouts whose file was missing,
+    /// and forgets checkouts that are gone.
+    fn arm<'a>(&mut self, checkouts: impl Iterator<Item = &'a PathBuf>) {
+        let checkouts: BTreeSet<&PathBuf> = checkouts.collect();
+        self.0.retain(|path, _| checkouts.contains(path));
+        for checkout in checkouts {
+            let mtime = self.0.entry(checkout.clone()).or_default();
+            if mtime.is_none() {
+                *mtime = restart_mtime(checkout);
+            }
+        }
+    }
+
+    /// Whether a change to the checkout's `tmp/restart.txt` restarts it: only a
+    /// newer modification time on a file that already existed does, so creating it
+    /// (as Puma's `tmp_restart` plugin does on boot) doesn't.
+    fn touched(&mut self, checkout: &Path) -> bool {
+        let current = restart_mtime(checkout);
+        let previous = self.0.insert(checkout.to_path_buf(), current).flatten();
+        matches!((previous, current), (Some(previous), Some(current)) if current > previous)
+    }
+}
+
+fn restart_mtime(checkout: &Path) -> Option<SystemTime> {
+    std::fs::metadata(checkout.join("tmp/restart.txt"))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
 /// Starts watching right away and returns the loop that handles changes until the
 /// supervisor goes away, rescanning everything every `rescan` as a backstop for
 /// missed events. `None` when file watching isn't available.
@@ -204,7 +243,9 @@ pub fn run(
     let config_dirs = vec![canonical(&config_dir), config_dir.clone()];
     let mut known = checkouts(&world);
     let mut scans = scan_dirs(&world);
+    let mut restart_files = RestartFiles::default();
     update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
+    restart_files.arm(known.values());
     Some(async move {
         let mut interval = tokio::time::interval(rescan);
         interval.tick().await;
@@ -227,7 +268,15 @@ pub fn run(
                 debug!(?change, "file change");
                 match change {
                     Change::Reload => {}
-                    Change::Restart(path) => supervisor.restart_checkout(path.clone()),
+                    Change::Rewatch => {
+                        update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
+                        restart_files.arm(known.values());
+                    }
+                    Change::Restart(path) => {
+                        if restart_files.touched(path) {
+                            supervisor.restart_checkout(path.clone());
+                        }
+                    }
                     Change::EnvChanged(path) => supervisor.env_changed(path.clone()),
                 }
             }
@@ -244,6 +293,7 @@ pub fn run(
                     known = checkouts(&world);
                     scans = scan_dirs(&world);
                     update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
+                    restart_files.arm(known.values());
                 }
             }
         }
@@ -405,6 +455,14 @@ mod tests {
             classify(Path::new("/work/acme-web/tmp/cache"), config, &c, &scans()),
             None
         );
+        assert_eq!(
+            classify(Path::new("/work/acme-web/tmp"), config, &c, &scans()),
+            Some(Change::Rewatch)
+        );
+        assert_eq!(
+            classify(Path::new("/work/acme-web/app/tmp"), config, &c, &scans()),
+            None
+        );
     }
 
     #[test]
@@ -427,5 +485,84 @@ mod tests {
                 event.display()
             );
         }
+    }
+
+    fn set_mtime(path: &Path, secs: u64) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    fn checkout_with_tmp() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let checkout = dir.path().join("app");
+        std::fs::create_dir_all(checkout.join("tmp")).unwrap();
+        let file = checkout.join("tmp/restart.txt");
+        (dir, checkout, file)
+    }
+
+    #[test]
+    fn creating_restart_txt_does_not_restart() {
+        let (_dir, checkout, file) = checkout_with_tmp();
+        let mut files = RestartFiles::default();
+        files.arm([checkout.clone()].iter());
+        std::fs::write(&file, "").unwrap();
+        assert!(!files.touched(&checkout));
+    }
+
+    #[test]
+    fn touching_an_existing_restart_txt_restarts() {
+        let (_dir, checkout, file) = checkout_with_tmp();
+        std::fs::write(&file, "").unwrap();
+        set_mtime(&file, 1_000);
+        let mut files = RestartFiles::default();
+        files.arm([checkout.clone()].iter());
+        set_mtime(&file, 2_000);
+        assert!(files.touched(&checkout));
+        assert!(!files.touched(&checkout), "same mtime");
+        set_mtime(&file, 1_500);
+        assert!(!files.touched(&checkout), "older mtime");
+    }
+
+    #[test]
+    fn creating_restart_txt_after_deleting_it_does_not_restart() {
+        let (_dir, checkout, file) = checkout_with_tmp();
+        std::fs::write(&file, "").unwrap();
+        set_mtime(&file, 1_000);
+        let mut files = RestartFiles::default();
+        files.arm([checkout.clone()].iter());
+        std::fs::remove_file(&file).unwrap();
+        assert!(!files.touched(&checkout));
+        std::fs::write(&file, "").unwrap();
+        set_mtime(&file, 2_000);
+        assert!(!files.touched(&checkout));
+    }
+
+    #[test]
+    fn touching_restart_txt_after_creating_it_restarts() {
+        let (_dir, checkout, file) = checkout_with_tmp();
+        let mut files = RestartFiles::default();
+        files.arm([checkout.clone()].iter());
+        std::fs::write(&file, "").unwrap();
+        set_mtime(&file, 1_000);
+        assert!(!files.touched(&checkout));
+        set_mtime(&file, 2_000);
+        assert!(files.touched(&checkout));
+    }
+
+    #[test]
+    fn arming_again_keeps_known_mtimes_and_picks_up_new_files() {
+        let (_dir, checkout, file) = checkout_with_tmp();
+        let mut files = RestartFiles::default();
+        files.arm([checkout.clone()].iter());
+        std::fs::write(&file, "").unwrap();
+        set_mtime(&file, 1_000);
+        files.arm([checkout.clone()].iter());
+        set_mtime(&file, 2_000);
+        files.arm([checkout.clone()].iter());
+        assert!(files.touched(&checkout));
     }
 }
