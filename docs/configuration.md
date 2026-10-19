@@ -748,7 +748,9 @@ Each process's environment is built in layers, later ones winning:
 1. **The provider.** The default is `mise` when mise is installed and
    the checkout has `mise.toml`, `.mise.toml` or `.tool-versions`;
    otherwise `shell`, the environment of a login shell in the checkout.
-   `direnv` uses `direnv export json`; `none` uses only the daemon's own
+   When that shell's `PATH` has mise's shims, carte adds `mise env` on
+   top, since a shim would otherwise apply mise's `[env]` over carte's
+   values inside every process. `direnv` uses `direnv export json`; `none` uses only the daemon's own
    environment.
 2. **Env files** from `env_files`.
 3. **Templates:** the project's `[env]`, then the app's, then the
