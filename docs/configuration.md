@@ -325,7 +325,7 @@ TZ = "Europe/Oslo"
 | `env` | none | Env templates for this app, over the project's |
 | `env_files` | none | Files of `KEY=VALUE` lines, relative to the checkout, read in order |
 | `depends_on` | none | Apps this app calls. See below |
-| `aliases` | none | Extra hostnames, without the TLD, routed to the app on main. `carte import puma-dev` sets the old puma-dev names |
+| `aliases` | none | Extra hostnames routed to the app on main. An alias is one label without the TLD: `shop` serves `shop.localhost`. `carte import puma-dev` sets the old puma-dev names. Rails apps: see `CARTE_TLD_LENGTH` under [Environment](#environment) |
 | `subdomains` | `false` | Pass extra labels on the left (`oslo.events.acme.localhost`) through to the app instead of returning 404 |
 | `policy` | `"auto"` | Default policy for the app's processes. See [Policies](#policies) |
 | `port` | none | Route to a fixed port instead of running processes, for an app you start yourself |
@@ -765,7 +765,7 @@ Each process's environment is built in layers, later ones winning:
 | `CARTE_RUN_DIR` | The instance's [run directory](#instance-directories) |
 | `CARTE_URL` | The app's URL in this stack |
 | `CARTE_PUBLIC_URL` | Its public URL, while shared |
-| `CARTE_TLD_LENGTH` | Labels after the app's own, for Rails' `tld_length` |
+| `CARTE_TLD_LENGTH` | Labels after the app's own, for Rails' `tld_length`. It counts from the app's own hostname, so it doesn't fit an alias with fewer labels. With `subdomains = true`, `oslo.frontend.nova.localhost` gives Rails' `request.subdomain` `oslo`, but the alias `oslo.nova-frontend.localhost` gives an empty one |
 | `PIDFILE` | A pidfile path for the instance, in carte's state directory |
 | `RAILS_DEVELOPMENT_HOSTS` | Every domain the instance answers under, for Rails' `config.hosts`: the project's, the stack's, the app's own with `subdomains = true`, its aliases on main, and the share domain |
 | `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` | The project's domain, aliases on main and the share domain, for Vite's `server.allowedHosts` |
