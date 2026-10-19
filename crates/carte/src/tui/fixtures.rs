@@ -79,6 +79,7 @@ pub fn process(name: &str, state: ProcessState) -> ProcessStatus {
         memory_bytes: 0,
         cpu_percent: 0.0,
         gave_up: false,
+        restart_in_secs: None,
     }
 }
 

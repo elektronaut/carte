@@ -32,8 +32,8 @@ address inside it when given one.
 
 | Command | |
 | --- | --- |
-| `carte ls [-a]` | Running instances, with URL and notes; `--all` includes stopped ones |
-| `carte status [address]` | URL, state, public URL, processes, holds, idle time and last error of an app |
+| `carte ls [-a]` | Running instances, with URL and notes, like processes that are down and when they restart; `--all` includes stopped ones |
+| `carte status [address]` | URL, state, public URL, processes, holds, idle time and last error of an app; a crashed process shows when it restarts |
 | `carte up [address] [--no-wait]` | Start, and wait until ready |
 | `carte restart [address] [--no-wait]` | Restart, and wait until ready |
 | `carte down [address]` | Stop |
@@ -172,7 +172,7 @@ An **Instance** is:
 | `checkout_path` | Where its code is |
 | `url`, `public_url` | `public_url` is null unless shared |
 | `state` | `stopped`, `starting`, `ready`, `stopping` or `crashed` |
-| `processes` | `[{ name, state, policy, temporary, pid, port, http, restarts, memory_bytes, cpu_percent, gave_up }]`; `state` is `stopped`, `starting`, `running`, `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, and `gave_up` is true once carte stopped restarting a process that kept crashing |
+| `processes` | `[{ name, state, policy, temporary, pid, port, http, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `state` is `stopped`, `starting`, `running`, `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
 | `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent", … }` |
 | `idle_in_secs` | Until idle shutdown, when counting down |
 | `last_error`, `last_event` | Null when there's none |

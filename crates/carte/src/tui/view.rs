@@ -306,7 +306,12 @@ fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
         State::Starting => Span::raw("starting").yellow(),
         State::Stopping => Span::raw("stopping").yellow(),
         State::Crashed if process && status.gave_up => Span::raw("gave up").red(),
-        State::Crashed if process => Span::raw("exited").red(),
+        State::Crashed if process => match status.restart_in_secs {
+            Some(secs) => {
+                Span::raw(format!("restarting in {}", duration(app.idle_in(secs)))).yellow()
+            }
+            None => Span::raw("exited").red(),
+        },
         State::Crashed => Span::raw("crashed").red(),
         State::Exited => Span::raw("exited").dark_gray(),
         State::Done => Span::raw("done").dark_gray(),
@@ -422,7 +427,7 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
             if let Some(instance) = app.instance(id)
                 && let Some(proc) = instance.processes.iter().find(|p| p.name == *process)
             {
-                lines.extend(process_details(instance, proc, state));
+                lines.extend(process_details(app, instance, proc, state));
             }
         }
     }
@@ -623,6 +628,7 @@ fn share_details(app: &App, project: &str, instance: &InstanceStatus) -> Vec<Lin
 }
 
 fn process_details(
+    app: &App,
     instance: &InstanceStatus,
     process: &ProcessStatus,
     state: Span<'static>,
@@ -657,6 +663,9 @@ fn process_details(
         } else {
             line.red()
         });
+    }
+    if let Some(secs) = process.restart_in_secs {
+        lines.push(Line::from(format!("restarting in {}", duration(app.idle_in(secs)))).yellow());
     }
     if process.gave_up {
         lines.push(
@@ -1515,6 +1524,34 @@ mod tests {
             screen.contains("it crashed too often, so carte stopped restarting it"),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn renders_the_wait_before_restarting_a_crashed_process() {
+        let mut snapshot = sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.processes[1].state = ProcessState::Exited {
+            code: Some(1),
+            signal: None,
+        };
+        billing.processes[1].restart_in_secs = Some(8);
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down, KeyCode::Right] {
+            press(&mut app, now, code);
+        }
+        for _ in 0..2 {
+            press(&mut app, now, KeyCode::Down);
+        }
+        let later = now + Duration::from_secs(3);
+        app.update(Event::Tick, later);
+        let screen = draw(&mut app, 120, 12);
+        assert!(
+            screen.contains("worker        restarting in 5s"),
+            "{screen}"
+        );
+        assert!(screen.contains("exited with code 1"), "{screen}");
     }
 
     #[test]

@@ -289,6 +289,9 @@ pub struct ProcessStatus {
     /// It crashed too often after the start, and carte stopped restarting it.
     #[serde(default)]
     pub gave_up: bool,
+    /// Seconds until carte restarts it after a crash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_in_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
