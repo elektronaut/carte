@@ -1978,6 +1978,81 @@ async fn a_clean_exit_or_restart_never_keeps_a_process_down_after_it_exits() {
 }
 
 #[tokio::test]
+async fn a_clean_exit_is_recorded_as_an_exit_not_a_crash() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\nonce: sleep 0.3; exit 0\n");
+    setup.project("");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    wait_for_events(&handle, "the exit", |lines| {
+        lines
+            .iter()
+            .any(|l| l == "acme-web/once exited: once exited with code 0")
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == carte_api::EventKind::Crashed),
+        "{:#?}",
+        event_lines(&events)
+    );
+    let snapshot = handle.snapshot();
+    let web = status(&snapshot, "acme-web", "main");
+    assert_eq!(web.state, InstanceState::Ready);
+    assert_eq!(web.last_error, None);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_start_deferred_until_processes_stop_keeps_its_reason() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.app(
+        "acme-api",
+        "web: FIXTURE_NAME=api exec {fixture}\nworker: trap 'sleep 0.5; exit 0' TERM; while :; do sleep 0.05; done\n",
+    );
+    setup.project("[apps.acme-web]\ndepends_on = [\"api\"]\n");
+    let handle = setup.start();
+    let api = key("acme-api", Stack::Main);
+
+    handle.ensure_ready(api.clone()).await.unwrap();
+    handle.control(control("api", Action::Down)).await.unwrap();
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    handle.ensure_ready(api.clone()).await.unwrap();
+
+    handle.control(control("api", Action::Down)).await.unwrap();
+    handle.control(control("api", Action::Up)).await.unwrap();
+    wait_for(&handle, "api to start again", |s| {
+        status(s, "acme-api", "main").state == InstanceState::Ready
+    })
+    .await;
+
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    let starts: Vec<String> = event_lines(&events)
+        .into_iter()
+        .filter(|l| l.starts_with("acme-api started: "))
+        .collect();
+    assert_eq!(
+        starts,
+        [
+            "acme-api started: on request",
+            "acme-api started: for acme-web",
+            "acme-api started: by hand",
+        ]
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn stopping_a_crashed_process_cancels_its_restart() {
     let setup = Setup::new();
     setup.app("acme-web", "web: exec {fixture}\nworker: exec {fixture}\n");

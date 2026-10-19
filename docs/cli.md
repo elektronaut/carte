@@ -187,14 +187,15 @@ An **Instance** is:
 **`carte events --json`** prints one line per event:
 `{ seq, at_ms, kind, message, subjects: [{ project, stack, app, process }], boot_ms, exit_code }`,
 where `kind` is one of `started`, `ready`, `stopped`, `crashed`,
-`restarted`, `config-reloaded`, `config-error`, `worktree-added`,
+`exited`, `restarted`, `config-reloaded`, `config-error`, `worktree-added`,
 `worktree-removed`, `shared`, `unshared`, `share-expired`,
 `tunnel-connected`, `tunnel-failed`, `policy-changed`,
 `teardown-scheduled`, `teardown-paused`, `teardown-cancelled`, `teardown-finished` and
 `teardown-failed`. A [teardown](configuration.md#teardown) has one
 `teardown-finished` or `teardown-failed` event per process, about
 `app@stack/process` and with its `exit_code`, and one about the stack
-when its folders are removed or kept.
+when its folders are removed or kept. A process that exits with code 0
+while its instance runs on has an `exited` event, not `crashed`.
 
 **`carte env --json`** prints `{ instance, vars: [{ key, value, masked, source, overrides }] }`;
 `value` is null when `masked` is true.

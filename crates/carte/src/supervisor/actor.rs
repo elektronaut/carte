@@ -80,8 +80,8 @@ pub(super) struct Instance {
     pub last_error: Option<String>,
     pub env_changed: bool,
     restart_pending: bool,
-    /// The pending restart has its `restarted` event.
-    restart_announced: bool,
+    /// Why the pending restart starts it, for its `started` event.
+    restart_why: Option<Why>,
     forced: BTreeSet<String>,
     /// Disabled processes the pending restart starts once.
     restart_forced: BTreeSet<String>,
@@ -94,6 +94,7 @@ pub(super) struct Instance {
 }
 
 /// Why an instance starts, for its `started` event.
+#[derive(Clone)]
 enum Why {
     Request,
     Manual,
@@ -182,7 +183,7 @@ impl Instance {
             last_error: None,
             env_changed: false,
             restart_pending: false,
-            restart_announced: false,
+            restart_why: None,
             forced: BTreeSet::new(),
             restart_forced: BTreeSet::new(),
             started_at: Instant::now(),
@@ -616,6 +617,7 @@ impl Actor {
                 }
                 InstanceState::Stopping => {
                     inst.restart_pending = true;
+                    inst.restart_why.get_or_insert(Why::Request);
                     inst.waiters.push(reply);
                     return;
                 }
@@ -654,6 +656,7 @@ impl Actor {
             && inst.any_running()
         {
             inst.restart_pending = true;
+            inst.restart_why.get_or_insert(why);
             if let Some(name) = force {
                 inst.restart_forced.insert(name.to_string());
             }
@@ -758,7 +761,7 @@ impl Actor {
         inst.last_activity = Instant::now();
         inst.started_at = Instant::now();
         inst.restart_pending = false;
-        inst.restart_announced = false;
+        inst.restart_why = None;
         if !matches!(why, Why::Restart) {
             inst.opened = false;
             inst.warmed_after = None;
@@ -1194,7 +1197,8 @@ impl Actor {
                 self.crash(key, None, Some(idx), message);
             }
             InstanceState::Starting | InstanceState::Ready => {
-                if !manual {
+                let crashed = !manual && code != Some(0);
+                if crashed {
                     inst.last_error = Some(message.clone());
                 }
                 let restart = inst
@@ -1203,8 +1207,13 @@ impl Actor {
                     .find(|p| p.spec.name == name)
                     .is_some_and(|p| std::mem::take(&mut p.restart));
                 if !manual {
+                    let kind = if crashed {
+                        EventKind::Crashed
+                    } else {
+                        EventKind::Exited
+                    };
                     self.events.push_event(
-                        EventKind::Crashed,
+                        kind,
                         message,
                         vec![events::process(key, name)],
                         |event| event.exit_code = code,
@@ -1382,7 +1391,7 @@ impl Actor {
         }
         if let Some(why) = why {
             let kind = if inst.restart_pending {
-                inst.restart_announced = true;
+                inst.restart_why = Some(Why::Restart);
                 EventKind::Restarted
             } else {
                 EventKind::Stopped
@@ -1469,11 +1478,7 @@ impl Actor {
         if inst.restart_pending {
             inst.restart_pending = false;
             inst.forced = restart_forced;
-            let why = if std::mem::take(&mut inst.restart_announced) {
-                Why::Restart
-            } else {
-                Why::Request
-            };
+            let why = inst.restart_why.take().unwrap_or(Why::Request);
             let waiters = std::mem::take(&mut inst.waiters);
             let result = self.start(key, None, why);
             let inst = self.instances.get_mut(key).expect("instance");
