@@ -458,6 +458,11 @@ impl Actor {
                     self.dirty = true;
                 }
             }
+            Msg::Event {
+                kind,
+                message,
+                subjects,
+            } => self.events.push(kind, message, subjects),
             Msg::Tunnel(status) => {
                 let before = self.tunnel.as_ref().map(|t| t.state);
                 if before != Some(status.state) {

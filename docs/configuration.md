@@ -945,3 +945,32 @@ Otherwise the error page lists the ports.
 
 The keys about apps on disk (`root`, `include`, `env`, `processes` and
 the like) don't apply to a kube project and are errors.
+
+### Forwarding
+
+carte looks up the Service when a request comes in, picks a ready pod
+behind it, and opens a loopback port for it. Every connection to that
+port gets its own port-forward stream, so a forward survives the laptop
+sleeping, a network change and an expired token: the next connection
+simply opens a new stream. When the pod goes away, carte picks another
+ready one. A forward nobody used for `idle_timeout` is closed and opens
+again on the next request.
+
+- **Login plugins**, like `aws eks get-token`, run with the env the
+  project's env provider gives in your home directory, so they find the
+  tools and profiles your shell has. When one fails, the error page shows its
+  output, with a hint for `aws`, `gcloud` and `kubelogin`.
+- **Ports that speak TLS** get a TLS connection without certificate
+  checks; anything else is plain HTTP. A port speaks TLS when its
+  `appProtocol` is `https`, else when it's named `https`, else when it's
+  443 and neither its `appProtocol` nor its name says HTTP.
+- **The `Host` header** is passed on as received. An app whose own URL
+  setting names its public domain may redirect there.
+- **Requests other sites make** are refused with a 403, so a web page
+  can't reach a cluster with your credentials: a request whose `Origin`
+  or `Referer` is a page outside carte's TLDs and loopback, whose
+  `Origin` is hidden (`null`), or that the browser marks cross-site.
+  Opening a page yourself always works, including by a link from
+  another site, as does an SSO login that comes back to the Service.
+
+Starts, pod changes, failures and idle stops show in `carte events`.

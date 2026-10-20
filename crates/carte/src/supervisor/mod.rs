@@ -15,8 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, Event, ExternalRequest, LogLine, LogsRequest,
-    ShareRequest, ShareResponse, Snapshot, StartFailure, TunnelStatus,
+    Action, Address, ControlRequest, ControlResponse, Event, EventKind, EventSubject,
+    ExternalRequest, LogLine, LogsRequest, ShareRequest, ShareResponse, Snapshot, StartFailure,
+    TunnelStatus,
 };
 use carte_core::model::{InstanceKey, World};
 use carte_core::prune::Orphan;
@@ -152,6 +153,12 @@ pub(crate) enum Msg {
     },
     ExternalRequest(InstanceKey, ExternalRequest),
     Tunnel(TunnelStatus),
+    /// An event from outside the supervisor, like a kube project's forward.
+    Event {
+        kind: EventKind,
+        message: String,
+        subjects: Vec<EventSubject>,
+    },
     Shutdown(oneshot::Sender<()>),
     Running(oneshot::Sender<BTreeSet<InstanceKey>>),
     Prune {
@@ -377,6 +384,15 @@ impl Handle {
 
     pub fn external_request(&self, key: InstanceKey, request: ExternalRequest) {
         self.send(Msg::ExternalRequest(key, request));
+    }
+
+    /// Adds an event to the log, for things outside the supervisor.
+    pub fn event(&self, kind: EventKind, message: impl Into<String>, subjects: Vec<EventSubject>) {
+        self.send(Msg::Event {
+            kind,
+            message: message.into(),
+            subjects,
+        });
     }
 
     pub fn tunnel_status(&self, status: TunnelStatus) {

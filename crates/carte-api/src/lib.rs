@@ -533,6 +533,8 @@ pub enum EventKind {
     TeardownCancelled,
     TeardownFinished,
     TeardownFailed,
+    /// A kube project's Service couldn't be reached.
+    Failed,
 }
 
 impl EventKind {
@@ -558,6 +560,7 @@ impl EventKind {
             EventKind::TeardownScheduled => "teardown scheduled",
             EventKind::TeardownPaused => "teardown paused",
             EventKind::TeardownCancelled => "teardown cancelled",
+            EventKind::Failed => "failed",
             EventKind::TeardownFinished => "teardown finished",
             EventKind::TeardownFailed => "teardown failed",
         }

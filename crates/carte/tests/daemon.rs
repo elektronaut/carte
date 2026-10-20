@@ -1462,3 +1462,46 @@ fn switching_or_detaching_inside_a_worktree_keeps_its_stack() {
         .unwrap();
     assert_eq!(web.state, carte_api::InstanceState::Ready, "still running");
 }
+
+#[test]
+fn kube_projects_answer_from_the_proxy() {
+    let daemon = Daemon::start_prepared("", |work| {
+        let root = work.parent().unwrap();
+        let kubeconfig = root.join("kubeconfig");
+        std::fs::write(
+            &kubeconfig,
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\n  cluster:\n    server: https://127.0.0.1:1\ncontexts:\n- name: prod\n  context:\n    cluster: prod\n    user: prod\nusers:\n- name: prod\n  user:\n    token: secret\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("config/projects")).unwrap();
+        std::fs::write(
+            root.join("config/projects/prod.toml"),
+            format!(
+                "kube = {{ context = \"prod\", kubeconfig = \"{}\" }}\nenv_provider = \"none\"\n",
+                kubeconfig.display()
+            ),
+        )
+        .unwrap();
+    });
+    let response = daemon.request("grafana.monitoring.prod.test", "/");
+    assert!(response.starts_with("HTTP/1.1 502"), "{response}");
+    assert!(
+        response.contains("Couldn't reach the cluster"),
+        "{response}"
+    );
+
+    let response = daemon.request("www.grafana.monitoring.prod.test", "/");
+    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+    assert!(response.contains("has no subdomains"), "{response}");
+
+    let mut stream = TcpStream::connect(("127.0.0.1", daemon.http_port)).unwrap();
+    write!(
+        stream,
+        "GET / HTTP/1.1\r\nHost: grafana.monitoring.prod.test\r\nReferer: https://evil.example/page\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(response.contains("evil.example"), "{response}");
+}

@@ -3,15 +3,121 @@
 use std::time::Duration;
 
 use carte_api::ExternalRequest;
+use carte_core::kube::{self, KubeTarget};
 use carte_core::model::{InstanceKey, World};
 use carte_core::naming;
 use carte_core::procfile::ProcessSource;
 use http::StatusCode;
 
+use crate::kube::Kube;
 use crate::proxy::{
-    ActivityGuard, BoxFuture, ErrorPage, ListenerKind, Route, RouteRequest, Router,
+    ActivityGuard, BoxFuture, ErrorPage, ListenerKind, Route, RouteRequest, Router, UpstreamError,
 };
 use crate::supervisor::{Activity, Handle, share};
+
+/// Sends kube projects' hosts to their forwards and everything else to the
+/// supervisor. Kube projects are only reachable from the loopback listeners.
+pub struct DaemonRouter {
+    pub supervisor: SupervisorRouter,
+    pub kube: Kube,
+}
+
+impl DaemonRouter {
+    fn kube_target(
+        &self,
+        request: &RouteRequest<'_>,
+    ) -> Option<Result<KubeTarget, carte_core::naming::NotFound>> {
+        if request.kind != ListenerKind::Local {
+            return None;
+        }
+        let world = self.supervisor.supervisor.world();
+        kube::resolve_host(&world, request.host)
+    }
+}
+
+impl Router for DaemonRouter {
+    fn route<'a>(&'a self, request: RouteRequest<'a>) -> BoxFuture<'a, Route> {
+        let Some(target) = self.kube_target(&request) else {
+            return self.supervisor.route(request);
+        };
+        Box::pin(async move {
+            let target = match target {
+                Ok(target) => target,
+                Err(not_found) => {
+                    return Route::Error(ErrorPage::new(
+                        StatusCode::NOT_FOUND,
+                        "No app here",
+                        not_found.to_string(),
+                    ));
+                }
+            };
+            let world = self.supervisor.supervisor.world();
+            if let Some(from) = foreign_origin(&world, &request) {
+                return Route::Error(ErrorPage::new(
+                    StatusCode::FORBIDDEN,
+                    "Refused",
+                    format!(
+                        "{from} asked for {}. carte only forwards requests to a cluster that you open yourself or that come from local pages, so other sites can't reach it with your credentials.",
+                        target.service
+                    ),
+                ));
+            }
+            self.kube.route(target).await
+        })
+    }
+
+    fn upstream_failed(
+        &self,
+        request: RouteRequest<'_>,
+        port: u16,
+        error: &UpstreamError,
+    ) -> ErrorPage {
+        match self.kube_target(&request) {
+            Some(_) => self.kube.upstream_failed(port, error),
+            None => self.supervisor.upstream_failed(request, port, error),
+        }
+    }
+}
+
+/// Who sent a request that another site made, as a phrase for the error page; `None`
+/// for opening a page yourself (typed, bookmarked, or a link you followed) and for
+/// requests from local pages.
+fn foreign_origin(world: &World, request: &RouteRequest<'_>) -> Option<String> {
+    let navigation = matches!(*request.method, http::Method::GET | http::Method::HEAD)
+        && request.fetch_mode == Some("navigate");
+    if navigation {
+        return None;
+    }
+    if request.opaque_origin {
+        return Some("A page that hides its origin".into());
+    }
+    match request.referrer {
+        Some(host) if is_local_host(world, host) => None,
+        Some(host) => Some(format!("A page on {host}")),
+        None if request.fetch_site == Some("cross-site") => Some("Another site".into()),
+        None => None,
+    }
+}
+
+/// A host under one of the served TLDs, or a loopback address.
+fn is_local_host(world: &World, host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(rest),
+        None => host.split(':').next().unwrap_or(host),
+    };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    if name
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+    {
+        return true;
+    }
+    world
+        .machine
+        .served_tlds()
+        .iter()
+        .any(|tld| name == *tld || name.ends_with(&format!(".{tld}")))
+}
 
 pub struct SupervisorRouter {
     pub supervisor: Handle,
@@ -206,5 +312,110 @@ impl Drop for Guard {
             Activity::RequestEnded
         };
         self.supervisor.activity(self.key.clone(), activity);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refuses_requests_other_sites_make() {
+        let mut world = World::default();
+        world.machine.tld = "test".into();
+        let get = http::Method::GET;
+        let post = http::Method::POST;
+        let request = |method: &'static http::Method,
+                       referrer: Option<&'static str>,
+                       opaque_origin: bool,
+                       fetch_site: Option<&'static str>,
+                       fetch_mode: Option<&'static str>| RouteRequest {
+            host: "grafana.monitoring.prod.test",
+            tls: true,
+            kind: ListenerKind::Local,
+            method,
+            path: "/",
+            authorization: None,
+            referrer,
+            opaque_origin,
+            fetch_site,
+            fetch_mode,
+        };
+        let get: &'static http::Method = Box::leak(Box::new(get));
+        let post: &'static http::Method = Box::leak(Box::new(post));
+        let allowed = [
+            request(get, None, false, None, None),
+            request(
+                get,
+                Some("app.slack.com"),
+                false,
+                Some("cross-site"),
+                Some("navigate"),
+            ),
+            request(
+                post,
+                Some("shop.test"),
+                false,
+                Some("cross-site"),
+                Some("cors"),
+            ),
+            request(get, Some("localhost"), false, None, None),
+            request(post, None, false, Some("same-origin"), Some("cors")),
+        ];
+        for r in allowed {
+            assert_eq!(
+                foreign_origin(&world, &r),
+                None,
+                "{:?} {:?}",
+                r.referrer,
+                r.fetch_site
+            );
+        }
+        let refused = [
+            request(
+                post,
+                Some("evil.example"),
+                false,
+                Some("cross-site"),
+                Some("navigate"),
+            ),
+            request(
+                get,
+                Some("evil.example"),
+                false,
+                Some("cross-site"),
+                Some("no-cors"),
+            ),
+            request(post, None, true, Some("cross-site"), Some("navigate")),
+            request(get, None, false, Some("cross-site"), Some("no-cors")),
+            request(get, Some("evil.example"), false, None, None),
+        ];
+        for r in refused {
+            assert!(
+                foreign_origin(&world, &r).is_some(),
+                "{:?} {:?}",
+                r.referrer,
+                r.fetch_site
+            );
+        }
+    }
+
+    #[test]
+    fn local_hosts_are_under_the_served_tlds_or_loopback() {
+        let mut world = World::default();
+        world.machine.tld = "test".into();
+        for host in [
+            "grafana.prod.test",
+            "shop.localhost:8443",
+            "localhost",
+            "127.0.0.1:3000",
+            "[::1]:3000",
+            "Shop.Test.",
+        ] {
+            assert!(is_local_host(&world, host), "{host}");
+        }
+        for host in ["evil.example", "test.example", "eviltest", "10.0.0.1"] {
+            assert!(!is_local_host(&world, host), "{host}");
+        }
     }
 }

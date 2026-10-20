@@ -39,6 +39,8 @@ httpdate = "1"
 http-body-util = "0.1"
 hyper = { version = "1.12", features = ["http1", "http2", "server", "client"] }
 hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+k8s-openapi = { version = "0.28", features = ["earliest"] }
+kube = { version = "4.2", default-features = false, features = ["client", "config", "rustls-tls", "ring", "ws"] }
 rcgen = { version = "0.14", features = ["x509-parser"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-stream = "0.1"

@@ -32,6 +32,11 @@ pub struct RouteRequest<'a> {
     pub authorization: Option<&'a str>,
     /// The host of the page the request came from, by its `Origin` or `Referer`.
     pub referrer: Option<&'a str>,
+    /// `Origin: null`: a page that hides where it is, like a sandboxed frame.
+    pub opaque_origin: bool,
+    /// `Sec-Fetch-Site` and `Sec-Fetch-Mode`, lowercased, from browsers that send them.
+    pub fetch_site: Option<&'a str>,
+    pub fetch_mode: Option<&'a str>,
 }
 
 pub enum Route {
