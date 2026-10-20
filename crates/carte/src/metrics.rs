@@ -120,17 +120,34 @@ mod tests {
     #[test]
     fn cpu_time_is_in_real_seconds() {
         use std::os::unix::process::CommandExt;
-        let mut child = std::process::Command::new("yes")
+        let id = std::process::Command::new("yes")
             .stdout(std::process::Stdio::null())
             .process_group(0)
             .spawn()
-            .unwrap();
-        std::thread::sleep(Duration::from_secs(1));
-        let usage = group_usage(child.id()).unwrap();
-        child.kill().unwrap();
-        child.wait().unwrap();
-        let secs = usage.cpu_time.as_secs_f64();
-        assert!((0.1..1.5).contains(&secs), "{secs}s of CPU in one second");
+            .unwrap()
+            .id();
+        let pid = id as libc::pid_t;
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while group_usage(id).unwrap().cpu_time < Duration::from_millis(200)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        unsafe { libc::kill(pid, libc::SIGSTOP) };
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
+        let measured = group_usage(id).unwrap().cpu_time.as_secs_f64();
+
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
+        let seconds = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
+        let actual = seconds(rusage.ru_utime) + seconds(rusage.ru_stime);
+        assert!(actual >= 0.1, "yes got only {actual}s of CPU");
+        assert!(
+            (measured - actual).abs() <= actual * 0.1 + 0.02,
+            "measured {measured}s of CPU, the kernel says {actual}s"
+        );
     }
 
     #[test]
