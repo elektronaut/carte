@@ -5,9 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use carte_api::{
-    Action, Address, ControlRequest, ControlResponse, Event, EventKind, EventSubject,
-    InstanceState, LogLine, LogsRequest, ProcessState, ShareRequest, ShareResponse, Snapshot,
-    TunnelState, TunnelStatus,
+    Action, Address, ControlRequest, ControlResponse, Event, EventKind, EventSubject, LogLine,
+    LogsRequest, ProcessState, ShareRequest, ShareResponse, Snapshot, TunnelState, TunnelStatus,
 };
 use carte_core::address::{self, Target};
 use carte_core::dirs::DirRoots;
@@ -66,9 +65,21 @@ pub(crate) enum Internal {
     },
 }
 
+/// Where an instance is in its lifecycle. The snapshot maps it to an
+/// [`InstanceState`](carte_api::InstanceState), adding the states it derives from
+/// the processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Lifecycle {
+    Stopped,
+    Starting,
+    Ready,
+    Stopping,
+    Crashed,
+}
+
 pub(super) struct Instance {
     pub key: InstanceKey,
-    pub state: InstanceState,
+    pub state: Lifecycle,
     boot: u64,
     pub checkout: Option<Checkout>,
     pub procs: Vec<Proc>,
@@ -180,7 +191,7 @@ impl Instance {
     fn new(key: InstanceKey) -> Self {
         Instance {
             key,
-            state: InstanceState::Stopped,
+            state: Lifecycle::Stopped,
             boot: 0,
             checkout: None,
             procs: Vec::new(),
@@ -204,13 +215,13 @@ impl Instance {
     }
 
     fn is_active(&self) -> bool {
-        matches!(self.state, InstanceState::Starting | InstanceState::Ready)
+        matches!(self.state, Lifecycle::Starting | Lifecycle::Ready)
     }
 
     /// Ready, with its HTTP process up: not waiting to restart or to pass its
     /// readiness check again after a crash.
     pub(super) fn serving(&self) -> bool {
-        self.state == InstanceState::Ready
+        self.state == Lifecycle::Ready
             && (self.route_port.is_some() || self.http().is_none_or(|p| p.is_running() && p.ready))
     }
 
@@ -632,31 +643,31 @@ impl Actor {
     ) {
         if let Some(inst) = self.instances.get_mut(&key) {
             match inst.state {
-                InstanceState::Ready if inst.serving() => {
+                Lifecycle::Ready if inst.serving() => {
                     let _ = reply.send(
                         inst.upstream()
                             .ok_or_else(|| BootFailure::no_web_process(&key.app)),
                     );
                     return;
                 }
-                InstanceState::Starting | InstanceState::Ready | InstanceState::Restarting => {
+                Lifecycle::Starting | Lifecycle::Ready => {
                     inst.last_activity = Instant::now();
                     inst.waiters.push(reply);
                     return;
                 }
-                InstanceState::Stopping => {
+                Lifecycle::Stopping => {
                     inst.restart_pending = true;
                     inst.restart_why.get_or_insert(Why::Request);
                     inst.waiters.push(reply);
                     return;
                 }
-                InstanceState::Stopped | InstanceState::Crashed => {}
+                Lifecycle::Stopped | Lifecycle::Crashed => {}
             }
         }
         match self.start(&key, None, Why::Request) {
             Ok(()) => {
                 let inst = self.instances.get_mut(&key).expect("started instance");
-                if inst.state == InstanceState::Ready {
+                if inst.state == Lifecycle::Ready {
                     let _ = reply.send(
                         inst.upstream()
                             .ok_or_else(|| BootFailure::no_web_process(&key.app)),
@@ -688,7 +699,7 @@ impl Actor {
             }
         }
         if let Some(inst) = self.instances.get_mut(key)
-            && matches!(inst.state, InstanceState::Crashed | InstanceState::Stopping)
+            && matches!(inst.state, Lifecycle::Crashed | Lifecycle::Stopping)
             && inst.any_running()
         {
             inst.restart_pending = true;
@@ -696,8 +707,8 @@ impl Actor {
             if let Some(name) = force {
                 inst.restart_forced.insert(name.to_string());
             }
-            if inst.state == InstanceState::Crashed {
-                inst.state = InstanceState::Stopping;
+            if inst.state == Lifecycle::Crashed {
+                inst.state = Lifecycle::Stopping;
                 inst.signal_stop(self.options.grace, true);
             }
             self.dirty = true;
@@ -733,7 +744,7 @@ impl Actor {
         let list = match list {
             Ok(list) => list,
             Err(failure) => {
-                inst.state = InstanceState::Crashed;
+                inst.state = Lifecycle::Crashed;
                 inst.last_error = Some(failure.detail.clone());
                 let message = failure.detail.clone();
                 self.event(EventKind::Crashed, message, vec![events::instance(key)]);
@@ -808,7 +819,7 @@ impl Actor {
 
         if let Some(port) = route_port {
             inst.route_port = Some(port);
-            inst.state = InstanceState::Ready;
+            inst.state = Lifecycle::Ready;
             self.started_event(key, &why);
             return Ok(());
         }
@@ -819,7 +830,7 @@ impl Actor {
             let (policy, _) = effective_policy(overrides, key, &proc.spec);
             if policy == Policy::Disabled && !inst.forced.contains(&proc.spec.name) {
                 if proc.spec.http {
-                    inst.state = InstanceState::Stopped;
+                    inst.state = Lifecycle::Stopped;
                     return Err(BootFailure::new(
                         format!("{} is disabled", inst.label()),
                         format!(
@@ -857,7 +868,7 @@ impl Actor {
         for &idx in &to_run {
             inst.procs[idx].queued = true;
         }
-        inst.state = InstanceState::Starting;
+        inst.state = Lifecycle::Starting;
         self.started_event(key, &why);
         self.build_env(key, boot, to_run);
 
@@ -1088,7 +1099,7 @@ impl Actor {
         let Some(inst) = self.instances.get(key) else {
             return;
         };
-        if inst.state != InstanceState::Starting {
+        if inst.state != Lifecycle::Starting {
             return;
         }
         let launch: Vec<usize> = inst
@@ -1115,7 +1126,7 @@ impl Actor {
         if inst.procs.iter().any(Proc::blocks) {
             return;
         }
-        inst.state = InstanceState::Ready;
+        inst.state = Lifecycle::Ready;
         inst.last_activity = Instant::now();
         let result = match inst.http() {
             Some(_) => Ok(inst.upstream().expect("http process")),
@@ -1185,7 +1196,7 @@ impl Actor {
                     self.groups.remove(pid);
                 }
                 proc.stop = None;
-                let manual = proc.manual_stop || inst.state == InstanceState::Stopping;
+                let manual = proc.manual_stop || inst.state == Lifecycle::Stopping;
                 proc.state = if manual {
                     ProcessState::Stopped
                 } else if proc.spec.is_task() && code == Some(0) {
@@ -1225,20 +1236,18 @@ impl Actor {
         let done = proc.state == ProcessState::Done;
         let restarting = proc.restart;
         match inst.state {
-            InstanceState::Starting | InstanceState::Ready | InstanceState::Restarting if done => {
-                self.advance(key)
-            }
-            InstanceState::Starting if http && !manual => {
+            Lifecycle::Starting | Lifecycle::Ready if done => self.advance(key),
+            Lifecycle::Starting if http && !manual => {
                 self.crash(key, code, Some(idx), message);
             }
-            InstanceState::Starting if boot_step && !manual => {
+            Lifecycle::Starting if boot_step && !manual => {
                 self.crash(key, code, Some(idx), message);
             }
-            InstanceState::Starting if boot_step && !restarting => {
+            Lifecycle::Starting if boot_step && !restarting => {
                 let message = format!("{name} was stopped while {} was starting", inst.label());
                 self.crash(key, None, Some(idx), message);
             }
-            InstanceState::Starting | InstanceState::Ready | InstanceState::Restarting => {
+            Lifecycle::Starting | Lifecycle::Ready => {
                 let crashed = !manual && code != Some(0);
                 if crashed {
                     inst.last_error = Some(message.clone());
@@ -1268,7 +1277,7 @@ impl Actor {
                     );
                     self.dirty = true;
                 }
-                let ready = inst.state == InstanceState::Ready;
+                let ready = inst.state == Lifecycle::Ready;
                 if restart {
                     let _ = self.start_process(key, name);
                 } else if restarts && ready && (!manual || stalled) {
@@ -1276,14 +1285,14 @@ impl Actor {
                 }
                 self.advance(key);
             }
-            InstanceState::Stopping => {
+            Lifecycle::Stopping => {
                 inst.signal_stop(grace, true);
                 if !inst.any_running() {
                     self.finish_stop(key);
                 }
             }
-            InstanceState::Crashed => inst.signal_stop(grace, false),
-            InstanceState::Stopped => {}
+            Lifecycle::Crashed => inst.signal_stop(grace, false),
+            Lifecycle::Stopped => {}
         }
     }
 
@@ -1349,7 +1358,7 @@ impl Actor {
         let Some(inst) = self.instances.get(key) else {
             return;
         };
-        if inst.state != InstanceState::Ready {
+        if inst.state != Lifecycle::Ready {
             return;
         }
         let Some(proc) = inst.procs.get(idx) else {
@@ -1391,8 +1400,8 @@ impl Actor {
         let Some(inst) = self.instances.get_mut(key) else {
             return;
         };
-        let starting = inst.state == InstanceState::Starting;
-        let is_ready = inst.state == InstanceState::Ready;
+        let starting = inst.state == Lifecycle::Starting;
+        let is_ready = inst.state == Lifecycle::Ready;
         let Some(proc) = inst.procs.get_mut(idx) else {
             return;
         };
@@ -1458,7 +1467,7 @@ impl Actor {
             .or(inst.procs.first())
             .map(|p| p.log.lock().unwrap().tail(40))
             .unwrap_or_default();
-        inst.state = InstanceState::Crashed;
+        inst.state = Lifecycle::Crashed;
         inst.last_error = Some(message.clone());
         let mut failure = BootFailure::new(format!("{} crashed", inst.label()), message.clone());
         failure.log = log;
@@ -1489,7 +1498,7 @@ impl Actor {
             format!("{message}. Run `carte restart {label}` to start it again."),
         );
         failure.log = inst.procs[idx].log.lock().unwrap().tail(40);
-        inst.state = InstanceState::Crashed;
+        inst.state = Lifecycle::Crashed;
         inst.last_error = Some(message);
         inst.fail_waiters(failure.clone());
         inst.gave_up = Some(failure);
@@ -1508,8 +1517,8 @@ impl Actor {
         for proc in &mut inst.procs {
             proc.gave_up = false;
         }
-        if inst.state == InstanceState::Crashed && !inst.any_running() {
-            inst.state = InstanceState::Stopped;
+        if inst.state == Lifecycle::Crashed && !inst.any_running() {
+            inst.state = Lifecycle::Stopped;
             self.event(EventKind::Stopped, "by hand", vec![events::instance(key)]);
         }
         self.dirty = true;
@@ -1536,8 +1545,8 @@ impl Actor {
         }
         let inst = self.instances.get_mut(key).expect("instance");
         let detail = match inst.state {
-            InstanceState::Starting => Some("It was stopped while starting."),
-            InstanceState::Ready if !inst.restart_pending => {
+            Lifecycle::Starting => Some("It was stopped while starting."),
+            Lifecycle::Ready if !inst.restart_pending => {
                 Some("It was stopped while its web process restarted.")
             }
             _ => None,
@@ -1547,7 +1556,7 @@ impl Actor {
             failure.transient = true;
             inst.fail_waiters(failure);
         }
-        inst.state = InstanceState::Stopping;
+        inst.state = Lifecycle::Stopping;
         inst.signal_stop(grace, true);
         if !inst.any_running() {
             self.finish_stop(key);
@@ -1578,7 +1587,7 @@ impl Actor {
         }
         proc.restart_at = None;
         let mut event = None;
-        if inst.state == InstanceState::Starting
+        if inst.state == Lifecycle::Starting
             && proc.spec.kind.is_some()
             && proc.restart
             && proc.is_running()
@@ -1609,7 +1618,7 @@ impl Actor {
         let Some(inst) = self.instances.get_mut(key) else {
             return;
         };
-        inst.state = InstanceState::Stopped;
+        inst.state = Lifecycle::Stopped;
         inst.in_flight = 0;
         inst.connections = 0;
         if !inst.restart_pending {
@@ -1736,7 +1745,7 @@ impl Actor {
                 .project
                 .idle_timeout
                 .unwrap_or(self.world.machine.idle_timeout);
-            if self.instances[&usage.key].state == InstanceState::Ready
+            if self.instances[&usage.key].state == Lifecycle::Ready
                 && lifecycle::idle_deadline(usage, timeout).is_some_and(|deadline| now >= deadline)
             {
                 let why = format!("idle for {}", carte_core::duration::format(timeout));
@@ -1773,11 +1782,7 @@ impl Actor {
         for (key, why) in to_stop {
             self.stop(&key, Some(&why));
         }
-        if self
-            .instances
-            .values()
-            .any(|i| i.state == InstanceState::Ready)
-        {
+        if self.instances.values().any(|i| i.state == Lifecycle::Ready) {
             self.dirty = true;
         }
         self.check_teardowns();
@@ -2073,7 +2078,7 @@ impl Actor {
     fn adopt_shared_processes(&mut self) {
         let mut adopt = Vec::new();
         for inst in self.instances.values() {
-            if inst.state != InstanceState::Ready {
+            if inst.state != Lifecycle::Ready {
                 continue;
             }
             let Some(checkout) = &inst.checkout else {

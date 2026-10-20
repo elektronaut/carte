@@ -119,9 +119,10 @@ the web process restarts after a crash, the app shows as `restarting`
 and requests wait for it.
 
 A worker or service that crashes after the start is restarted on its
-own after a short wait, which `carte status` shows as `restarting in 2s`;
-at the fifth crash within a minute carte gives up, and `carte status`
-shows it as `gave up restarting`. Fix the cause, then `carte up /worker`.
+own after a short wait, which `carte status` shows as `restarting in 2s`
+(the app stays `ready`); at the fifth crash within a minute carte gives
+up, and `carte status` shows it as `gave up restarting`. Fix the cause,
+then `carte up /worker`.
 
 The web process is restarted the same way, and a restart that never
 passes its readiness check counts as a crash too. carte gives up on it
