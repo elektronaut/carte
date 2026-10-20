@@ -54,15 +54,20 @@ impl Setup {
     }
 
     fn start_with_backoff(&self, restart_backoff: Duration) -> Handle {
+        self.start_with(|options| options.restart_backoff = restart_backoff)
+    }
+
+    fn start_with(&self, adjust: impl FnOnce(&mut Options)) -> Handle {
         let world = discovery::load_world(&self.paths.config_dir);
         assert!(world.problems.is_empty(), "{:?}", world.problems);
-        let options = Options {
+        let mut options = Options {
             grace: Duration::from_millis(500),
             boot_timeout: Duration::from_secs(10),
             tick: Duration::from_millis(100),
-            restart_backoff,
+            restart_backoff: Duration::from_millis(100),
             ..Options::new(&self.paths)
         };
+        adjust(&mut options);
         supervisor::start(
             world,
             self.paths.clone(),
@@ -2318,6 +2323,139 @@ async fn stopping_an_instance_carte_gave_up_on_lets_the_next_request_start_it() 
         .request(key("acme-web", Stack::Main), None)
         .await
         .unwrap();
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_web_process_that_never_becomes_ready_after_a_restart_counts_as_a_crash() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: if [ -e {marker} ]; then echo hanging; exec sleep 600; fi; touch {marker}; exec {{fixture}}\n",
+            marker = marker.display()
+        ),
+    );
+    setup.project("");
+    let handle = setup.start_with(|options| options.boot_timeout = Duration::from_secs(3));
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    let gave_up = "acme-web/web gave up: web crashed 5 times within a minute; it stays down";
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let (events, _) = handle.events(None, 100).await.unwrap();
+            if event_lines(&events).iter().any(|l| l == gave_up) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(result.is_ok(), "{:#?}", event_lines(&events));
+    let crashes: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == carte_api::EventKind::Crashed)
+        .collect();
+    assert_eq!(crashes.len(), 5, "{:#?}", event_lines(&events));
+    assert!(
+        crashes
+            .iter()
+            .all(|e| e.subjects[0].process.as_deref() == Some("web")),
+        "{:#?}",
+        event_lines(&events)
+    );
+    let stalled = event_lines(&events)
+        .into_iter()
+        .filter(|l| {
+            l.contains("web did not accept connections on port ") && l.ends_with(" within 3s")
+        })
+        .count();
+    assert_eq!(stalled, 4, "{:#?}", event_lines(&events));
+
+    wait_for(&handle, "the instance to stop", |s| {
+        let inst = status(s, "acme-web", "main");
+        inst.state == InstanceState::Crashed && inst.processes.iter().all(|p| p.pid.is_none())
+    })
+    .await;
+    let failure = handle
+        .request(key("acme-web", Stack::Main), None)
+        .await
+        .unwrap_err();
+    assert!(
+        failure.detail.contains("crashed 5 times within a minute"),
+        "{failure:?}"
+    );
+    assert!(
+        failure.log.iter().any(|l| l.contains("hanging")),
+        "{failure:?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_web_process_that_never_becomes_ready_five_times_in_a_row_stops_the_instance() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: if [ -e {marker} ]; then echo hanging; exec sleep 600; fi; touch {marker}; exec {{fixture}}\n",
+            marker = marker.display()
+        ),
+    );
+    setup.project("");
+    let handle = setup.start_with(|options| {
+        options.boot_timeout = Duration::from_secs(3);
+        options.crash_window = Duration::from_secs(1);
+    });
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    let gave_up = "acme-web/web gave up: web didn't become ready 5 times in a row; it stays down";
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let (events, _) = handle.events(None, 100).await.unwrap();
+            if event_lines(&events).iter().any(|l| l == gave_up) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(result.is_ok(), "{:#?}", event_lines(&events));
+    let crashes = events
+        .iter()
+        .filter(|e| e.kind == carte_api::EventKind::Crashed)
+        .count();
+    assert_eq!(crashes, 6, "{:#?}", event_lines(&events));
+
+    wait_for(&handle, "the instance to stop", |s| {
+        let inst = status(s, "acme-web", "main");
+        inst.state == InstanceState::Crashed && inst.processes.iter().all(|p| p.pid.is_none())
+    })
+    .await;
+    let failure = handle
+        .request(key("acme-web", Stack::Main), None)
+        .await
+        .unwrap_err();
+    assert!(
+        failure
+            .detail
+            .contains("didn't become ready 5 times in a row"),
+        "{failure:?}"
+    );
     handle.shutdown().await;
 }
 

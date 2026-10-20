@@ -141,6 +141,11 @@ pub(super) struct Proc {
     pub restart_at: Option<Instant>,
     /// It crashed too often and stays down until started again.
     pub gave_up: bool,
+    /// It didn't become ready after a restart and is being stopped; its exit counts
+    /// as a crash.
+    stalled: bool,
+    /// Readiness timeouts after a restart since it last passed its readiness check.
+    stalls: u32,
 }
 
 impl Proc {
@@ -779,6 +784,8 @@ impl Actor {
                 crashes: Vec::new(),
                 restart_at: None,
                 gave_up: false,
+                stalled: false,
+                stalls: 0,
                 memory_bytes: 0,
                 cpu_percent: 0.0,
                 cpu_sample: None,
@@ -900,6 +907,7 @@ impl Actor {
         proc.restart_at = None;
         if std::mem::take(&mut proc.gave_up) {
             proc.crashes.clear();
+            proc.stalls = 0;
         }
         if inst.procs[idx].is_running() {
             return Ok(());
@@ -1008,6 +1016,7 @@ impl Actor {
         proc.started_ms = Some(runner::now_ms());
         proc.manual_stop = false;
         proc.ready = false;
+        proc.stalled = false;
         let label = LogLabel {
             project: key.project.clone(),
             app: key.app.clone(),
@@ -1234,11 +1243,17 @@ impl Actor {
                 if crashed {
                     inst.last_error = Some(message.clone());
                 }
-                let restart = inst
+                let (restart, stalled) = inst
                     .procs
                     .iter_mut()
                     .find(|p| p.spec.name == name)
-                    .is_some_and(|p| std::mem::take(&mut p.restart));
+                    .map(|p| {
+                        (
+                            std::mem::take(&mut p.restart),
+                            std::mem::take(&mut p.stalled),
+                        )
+                    })
+                    .unwrap_or_default();
                 if !manual {
                     let kind = if crashed {
                         EventKind::Crashed
@@ -1256,7 +1271,7 @@ impl Actor {
                 let ready = inst.state == InstanceState::Ready;
                 if restart {
                     let _ = self.start_process(key, name);
-                } else if restarts && ready && !manual {
+                } else if restarts && ready && (!manual || stalled) {
                     self.schedule_restart(key, idx);
                 }
                 self.advance(key);
@@ -1273,10 +1288,11 @@ impl Actor {
     }
 
     /// Restarts a crashed process after a wait that doubles with each crash: 1, 2, 4
-    /// and 8 times the first; gives up at the fifth crash within a minute, and on the
-    /// HTTP process stops the instance.
+    /// and 8 times the first; gives up at the fifth crash within a minute or the fifth
+    /// readiness timeout in a row, and on the HTTP process stops the instance.
     fn schedule_restart(&mut self, key: &InstanceKey, idx: usize) {
         let backoff = self.options.restart_backoff;
+        let window = self.options.crash_window;
         let Some(proc) = self
             .instances
             .get_mut(key)
@@ -1285,15 +1301,25 @@ impl Actor {
             return;
         };
         let now = Instant::now();
-        proc.crashes
-            .retain(|at| now.duration_since(*at) < Duration::from_secs(60));
+        proc.crashes.retain(|at| now.duration_since(*at) < window);
         proc.crashes.push(now);
         let crashes = proc.crashes.len() as u32;
         let name = proc.spec.name.clone();
-        if crashes >= 5 {
+        let message = if proc.stalls >= 5 {
+            Some(format!(
+                "{name} didn't become ready {} times in a row; it stays down",
+                proc.stalls
+            ))
+        } else if crashes >= 5 {
+            Some(format!(
+                "{name} crashed {crashes} times within a minute; it stays down"
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = message {
             proc.gave_up = true;
             let http = proc.spec.http;
-            let message = format!("{name} crashed {crashes} times within a minute; it stays down");
             self.event(
                 EventKind::GaveUp,
                 message.clone(),
@@ -1366,6 +1392,7 @@ impl Actor {
             return;
         };
         let starting = inst.state == InstanceState::Starting;
+        let is_ready = inst.state == InstanceState::Ready;
         let Some(proc) = inst.procs.get_mut(idx) else {
             return;
         };
@@ -1376,6 +1403,7 @@ impl Actor {
             Ok(()) => {
                 proc.ready = true;
                 self.dirty = true;
+                proc.stalls = 0;
                 if !starting
                     && inst.serving()
                     && let Some(upstream) = inst.upstream()
@@ -1386,9 +1414,26 @@ impl Actor {
                 }
                 self.advance(key);
             }
-            Err(message) if starting || proc.spec.http => {
+            Err(message) if starting => {
                 let message = format!("{} {message}", proc.spec.name);
                 self.crash(key, None, Some(idx), message);
+            }
+            Err(message) if proc.spec.http && is_ready && !proc.manual_stop => {
+                let name = proc.spec.name.clone();
+                let message = format!("{name} {message}");
+                if let Some(stop) = proc.stop.take() {
+                    proc.state = ProcessState::Stopping;
+                    proc.manual_stop = true;
+                    proc.stalled = true;
+                    proc.stalls += 1;
+                    let _ = stop.send(self.options.grace);
+                }
+                inst.last_error = Some(message.clone());
+                self.event(
+                    EventKind::Crashed,
+                    message,
+                    vec![events::process(key, &name)],
+                );
             }
             Err(_) => {}
         }

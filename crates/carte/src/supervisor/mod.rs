@@ -84,6 +84,8 @@ pub struct Options {
     pub tick: Duration,
     /// The wait before restarting a crashed service; it doubles with each crash.
     pub restart_backoff: Duration,
+    /// Crashes within this long of each other count toward giving up on a process.
+    pub crash_window: Duration,
     /// The CA files injected as `SSL_CERT_FILE` and friends.
     pub ca_bundle: PathBuf,
     pub ca_cert: PathBuf,
@@ -96,6 +98,7 @@ impl Options {
             boot_timeout: Duration::from_secs(120),
             tick: Duration::from_secs(1),
             restart_backoff: Duration::from_secs(1),
+            crash_window: Duration::from_secs(60),
             ca_bundle: paths.ca_bundle(),
             ca_cert: paths.ca_cert(),
         }
