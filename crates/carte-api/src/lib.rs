@@ -364,6 +364,10 @@ pub enum Hold {
     Exec {
         count: u32,
     },
+    /// A process waiting at a debugger prompt.
+    Paused {
+        process: String,
+    },
     /// Sent by a newer daemon than this client knows.
     #[serde(other)]
     Unknown,

@@ -54,7 +54,7 @@ detach_key = "ctrl-q d"
 | `http_port` | `80` | Plain HTTP |
 | `https_port` | `443` | HTTPS |
 | `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` points to for a `tld` other than `localhost` |
-| `idle_timeout` | `"15m"` | How long an app runs without traffic before it's stopped; projects can override it |
+| `idle_timeout` | `"15m"` | How long an app runs without traffic before it's stopped; projects can override it. An app with a process at a [debugger prompt](cli.md#attach) doesn't stop |
 | `teardown_delay` | `"10m"` | How long a stack's worktrees must stay gone before its [teardown](#teardown) runs; projects can override it |
 | `notifications` | `true` | Desktop [notifications](#notifications) when a process crashes, carte gives up on it, or it stops at a debugger prompt |
 
@@ -76,7 +76,8 @@ never block a start.
 | `log_budget` | `"256MB"` | Log kept in total; stopped apps' logs go first |
 
 Apps that are pinned, handling requests, or kept running by an app that
-depends on them are never stopped to meet a target.
+depends on them, or waiting at a [debugger prompt](cli.md#attach), are
+never stopped to meet a target.
 
 ### `[share]`
 

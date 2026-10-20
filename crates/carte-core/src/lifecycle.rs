@@ -16,6 +16,8 @@ pub struct Usage {
     pub execs: u32,
     /// Running instances that depend on this one.
     pub held_by: Vec<InstanceKey>,
+    /// Processes waiting at a debugger prompt.
+    pub paused: u32,
     pub last_activity: Instant,
     pub memory_bytes: u64,
     pub ptys: u32,
@@ -28,6 +30,7 @@ impl Usage {
             || self.requests_in_flight > 0
             || self.connections > 0
             || self.execs > 0
+            || self.paused > 0
             || !self.held_by.is_empty()
     }
 }
@@ -211,6 +214,7 @@ mod tests {
             connections: 0,
             execs: 0,
             held_by: vec![],
+            paused: 0,
             last_activity: now - Duration::from_secs(age_secs),
             memory_bytes: memory_mb * 1024 * 1024,
             ptys: 3,

@@ -387,6 +387,7 @@ fn hold_word(hold: &Hold) -> String {
         Hold::Connections { count } => format!("{count} connections"),
         Hold::Dependent { app } => app.clone(),
         Hold::Exec { count } => execs(*count),
+        Hold::Paused { process } => format!("{process} at a breakpoint"),
         Hold::Unknown => "unknown".into(),
     }
 }
@@ -555,6 +556,7 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
             Hold::Connections { count } => format!("held by {count} connections"),
             Hold::Dependent { app } => format!("held by {app}"),
             Hold::Exec { count } => format!("held by {}", execs(*count)),
+            Hold::Paused { .. } => continue,
             Hold::Unknown => "held by unknown".into(),
         });
     }
@@ -1185,6 +1187,15 @@ nova-billing  ready
             "{ls}"
         );
         assert!(ls.contains("paused: web (carte attach)"), "{ls}");
+        let mut held = snapshot.projects[0].stacks[0].instances[0].clone();
+        held.holds = vec![Hold::Paused {
+            process: "worker".into(),
+        }];
+        let status = render_status(&snapshot, &[held]);
+        assert!(
+            status.contains("  held by    worker at a breakpoint\n"),
+            "{status}"
+        );
         assert!(!ls.contains("down:"), "{ls}");
     }
 

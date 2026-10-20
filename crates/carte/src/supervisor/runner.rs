@@ -11,7 +11,7 @@ use carte_api::attach::TermSize;
 use carte_core::model::Readiness;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::terminal::Terminal;
 use crate::logs::{LogBuffer, Stripper};
@@ -362,26 +362,62 @@ fn broadcast_lines(tx: &broadcast::Sender<LogLine>, label: &LogLabel, lines: Vec
     }
 }
 
-/// Waits until the process answers on its port, or `timeout` passes.
-pub async fn wait_ready(port: u16, readiness: &Readiness, timeout: Duration) -> Result<(), String> {
+/// Sleeps for `timeout`, not counting the time `paused` is true: a process at a
+/// debugger prompt doesn't run out of time.
+pub async fn held_sleep(timeout: Duration, mut paused: watch::Receiver<bool>) {
+    let mut left = timeout;
+    loop {
+        if *paused.borrow_and_update() {
+            if paused.changed().await.is_err() {
+                break;
+            }
+            continue;
+        }
+        let since = tokio::time::Instant::now();
+        tokio::select! {
+            () = tokio::time::sleep(left) => return,
+            changed = paused.changed() => {
+                left = left.saturating_sub(since.elapsed());
+                if changed.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    tokio::time::sleep(left).await;
+}
+
+/// Waits until the process answers on its port, or `timeout` passes. While `paused`
+/// is true it isn't asked, and the time doesn't count.
+pub async fn wait_ready(
+    port: u16,
+    readiness: &Readiness,
+    timeout: Duration,
+    paused: watch::Receiver<bool>,
+) -> Result<(), String> {
+    let mut running = paused.clone();
     let check = async {
         loop {
+            let _ = running.wait_for(|paused| !paused).await;
             if probe(port, readiness).await {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     };
-    tokio::time::timeout(timeout, check).await.map_err(|_| {
-        let what = match readiness {
-            Readiness::Port => format!("accept connections on port {port}"),
-            Readiness::Http(path) => format!("answer GET {path} on port {port}"),
-        };
-        format!(
-            "did not {what} within {}",
-            carte_core::duration::format(timeout)
-        )
-    })
+    tokio::select! {
+        () = check => Ok(()),
+        () = held_sleep(timeout, paused) => {
+            let what = match readiness {
+                Readiness::Port => format!("accept connections on port {port}"),
+                Readiness::Http(path) => format!("answer GET {path} on port {port}"),
+            };
+            Err(format!(
+                "did not {what} within {}",
+                carte_core::duration::format(timeout)
+            ))
+        }
+    }
 }
 
 async fn probe(port: u16, readiness: &Readiness) -> bool {
@@ -869,8 +905,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_held_sleep_stands_still_while_paused() {
+        let (paused, rx) = watch::channel(false);
+        let started = tokio::time::Instant::now();
+        let sleeping = tokio::spawn(held_sleep(Duration::from_millis(400), rx));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        paused.send_replace(true);
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert!(!sleeping.is_finished(), "time doesn't count while paused");
+        paused.send_replace(false);
+        sleeping.await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(1000));
+    }
+
+    #[tokio::test]
     async fn readiness_times_out_with_a_readable_message() {
-        let err = wait_ready(1, &Readiness::Port, Duration::from_millis(300))
+        let (_paused, rx) = watch::channel(false);
+        let err = wait_ready(1, &Readiness::Port, Duration::from_millis(300), rx)
             .await
             .unwrap_err();
         assert!(err.contains("accept connections on port 1"), "{err}");
@@ -882,7 +933,8 @@ mod tests {
             .await
             .unwrap();
         let port = listener.local_addr().unwrap().port();
-        wait_ready(port, &Readiness::Port, Duration::from_secs(2))
+        let (_paused, rx) = watch::channel(false);
+        wait_ready(port, &Readiness::Port, Duration::from_secs(2), rx)
             .await
             .unwrap();
     }

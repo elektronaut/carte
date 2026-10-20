@@ -3722,3 +3722,62 @@ async fn a_pause_while_someone_is_attached_adds_no_event() {
     );
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_paused_worker_keeps_the_app_from_idling_out() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nworker: printf '(byebug) '; while read line; do echo \"echo: $line\"; done\n",
+    );
+    setup.project("idle_timeout = \"1s\"\n");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the worker to pause", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Paused
+    })
+    .await;
+    let inst = |s: &carte_api::Snapshot| status(s, "acme-web", "main").clone();
+    assert_eq!(
+        inst(&handle.snapshot()).holds,
+        [carte_api::Hold::Paused {
+            process: "worker".into()
+        }]
+    );
+    assert_eq!(inst(&handle.snapshot()).idle_in_secs, None);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(inst(&handle.snapshot()).state, InstanceState::Ready);
+
+    let (_, terminal) = handle.attach(here("web"), None).await.unwrap();
+    terminal.join(None, false).write(b"next\n").await.unwrap();
+    wait_for(&handle, "the app to idle out once answered", |s| {
+        inst(s).state == InstanceState::Stopped
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_web_process_paused_while_booting_doesnt_run_out_of_time() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: FIXTURE_PARTIAL='(rdbg) ' FIXTURE_BOOT_DELAY_MS=5000 exec {fixture}\n",
+    );
+    setup.project("");
+    let handle = setup.start_with(|options| options.boot_timeout = Duration::from_secs(2));
+    let response = handle.control(waiting("web", Action::Up)).await.unwrap();
+    assert!(response.failures.is_empty(), "{response:?}");
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Ready
+    );
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == carte_api::EventKind::Crashed),
+        "{events:#?}"
+    );
+    handle.shutdown().await;
+}
