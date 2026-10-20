@@ -140,14 +140,17 @@ pub fn choose_port(
         .ok_or_else(|| LookupError::PortNotChosen(labels()))
 }
 
-/// Whether carte speaks TLS to the pod on this Service port.
 /// Whether carte speaks TLS to the pod on this Service port: its `appProtocol` says
 /// so, else its name, else port 443. A port named or marked as HTTP never is, like a
 /// load balancer's 443 that ends TLS before the pod.
 pub fn is_tls(port: &PortInfo) -> bool {
     let says = |value: Option<&str>| {
         let value = value?.to_ascii_lowercase();
-        if value == "https" || value.starts_with("https-") {
+        if value == "https"
+            || value.starts_with("https-")
+            || value == "wss"
+            || value.starts_with("wss-")
+        {
             Some(true)
         } else if value.starts_with("http") || value.contains("h2c") || value.starts_with("ws") {
             Some(false)
@@ -275,6 +278,11 @@ mod tests {
         assert!(!is_tls(&with(None, 443, Some("kubernetes.io/h2c"))));
         assert!(!is_tls(&with(Some("https"), 443, Some("http"))));
         assert!(!is_tls(&with(Some("web"), 80, None)));
+        assert!(is_tls(&with(Some("wss"), 8443, None)));
+        assert!(is_tls(&with(Some("wss-api"), 8443, None)));
+        assert!(is_tls(&with(None, 8443, Some("wss"))));
+        assert!(!is_tls(&with(Some("ws"), 443, None)));
+        assert!(!is_tls(&with(None, 443, Some("ws"))));
     }
 
     fn service(ports: Vec<PortInfo>) -> ServiceInfo {
