@@ -12,6 +12,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
 use super::app::{App, Connection};
+use super::browse::Browse;
 use super::input::{Confirm, Focus, HELP, Mode};
 use super::jump;
 use super::target;
@@ -207,11 +208,12 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
         Span::raw(" "),
     ];
     let label = Span::raw(node.label.clone());
-    spans.push(match node.ids[0] {
+    spans.push(match &node.ids[0] {
         NodeId::Folder { .. } => label.bold(),
         NodeId::Project { .. } => label.bold(),
         _ if status.state == State::Disabled => label.dark_gray(),
         NodeId::Stack { .. } => label.blue().bold(),
+        _ if status.kube && status.state == State::Stopped => label.dark_gray(),
         _ => label,
     });
     spans.extend(badges(status, aggregate));
@@ -219,10 +221,19 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     let detail = if let NodeId::Project { project } = node.id()
         && let Some(kube) = app.kube_project(project)
     {
-        match &kube.error {
-            Some(error) => Span::raw(format!("⎈ {error}")).red(),
-            None => Span::raw(format!("⎈ {}", kube.context)).dark_gray(),
+        match (app.browse.get(project), &kube.error) {
+            (Some(Browse::Loading(_)), _) => Span::raw("⎈ listing…").yellow(),
+            (Some(Browse::Failed(error)), _) | (_, Some(error)) => {
+                Span::raw(format!("⎈ {error}")).red()
+            }
+            _ => Span::raw(format!("⎈ {}", kube.context)).dark_gray(),
         }
+    } else if status.kube && matches!(node.id(), NodeId::Stack { .. }) && status.running == 0 {
+        Span::raw(match status.total {
+            1 => "1 service".to_string(),
+            n => format!("{n} services"),
+        })
+        .dark_gray()
     } else if aggregate {
         Span::raw(if status.running > 0 {
             format!("{}/{}", status.running, status.total)
@@ -428,6 +439,9 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
                 lines.push(Line::from(format!("kube context {}", kube.context)).dark_gray());
                 if let Some(error) = &kube.error {
                     lines.push(Line::from(error.clone()).red());
+                }
+                if let Some(Browse::Failed(error)) = app.browse.get(project) {
+                    lines.push(Line::from(format!("listing Services failed: {error}")).red());
                 }
             }
             let crashed: Vec<&str> = crashed_below(node);
@@ -1721,11 +1735,105 @@ mod tests {
         assert_eq!(spans[1].style, Style::new().yellow().bold());
     }
 
+    /// The kube sample with its project opened and an empty listing back.
+    fn kube_app(now: Instant) -> App {
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(kube_sample())), now);
+        let commands = press(&mut app, now, KeyCode::Right);
+        assert_eq!(commands, vec![Command::FetchServices("prod".into())]);
+        app.update(
+            Event::Services {
+                project: "prod".into(),
+                result: Ok(Vec::new()),
+            },
+            now,
+        );
+        app
+    }
+
     #[test]
-    fn renders_kube_projects() {
+    fn a_kube_project_starts_closed_and_lists_its_services_when_opened() {
         let now = Instant::now();
         let mut app = App::new(now);
         app.update(Event::Snapshot(Box::new(kube_sample())), now);
+        let screen = draw(&mut app, 110, 12);
+        assert!(screen.contains("▸ ✖ prod"), "{screen}");
+        assert!(!screen.contains("grafana"), "{screen}");
+
+        assert_eq!(
+            press(&mut app, now, KeyCode::Right),
+            vec![Command::FetchServices("prod".into())]
+        );
+        let screen = draw(&mut app, 110, 12);
+        assert!(screen.contains("⎈ listing…"), "{screen}");
+
+        let entry = |namespace: &str, name: &str| carte_api::KubeServiceEntry {
+            namespace: namespace.into(),
+            name: name.into(),
+            url: format!("https://{name}.{namespace}.prod.test"),
+        };
+        app.update(
+            Event::Services {
+                project: "prod".into(),
+                result: Ok(vec![
+                    entry("billing", "api"),
+                    entry("billing", "worker"),
+                    entry("kube-system", "kube-dns"),
+                    entry("monitoring", "alertmanager"),
+                ]),
+            },
+            now,
+        );
+        let screen = draw(&mut app, 110, 14);
+        assert!(screen.contains("▸ ○ billing       2 services"), "{screen}");
+        assert!(
+            screen.contains("alertmanage"),
+            "namespaces in use are open: {screen}"
+        );
+        let rows: Vec<&str> = screen.lines().collect();
+        let system = rows.iter().position(|l| l.contains("kube-system")).unwrap();
+        let monitoring = rows.iter().position(|l| l.contains("monitoring")).unwrap();
+        assert!(system < monitoring, "namespaces by name: {screen}");
+
+        press(&mut app, now, KeyCode::Char('/'));
+        for c in "work".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        let screen = draw(&mut app, 110, 14);
+        assert!(
+            screen.contains("worker"),
+            "the filter finds closed namespaces: {screen}"
+        );
+        assert!(!screen.contains("alertmanage"), "{screen}");
+
+        press(&mut app, now, KeyCode::Esc);
+        press(&mut app, now, KeyCode::Left);
+        press(&mut app, now, KeyCode::Home);
+        assert_eq!(press(&mut app, now, KeyCode::Left), Vec::<Command>::new());
+        assert_eq!(
+            press(&mut app, now, KeyCode::Right),
+            vec![Command::FetchServices("prod".into())],
+            "opening it again lists them again"
+        );
+        app.update(
+            Event::Services {
+                project: "prod".into(),
+                result: Err("The cluster refused".into()),
+            },
+            now,
+        );
+        let screen = draw(&mut app, 110, 14);
+        assert!(screen.contains("⎈ The cluster re"), "{screen}");
+        assert!(
+            screen.contains("listing Services failed: The cluster refused"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn renders_kube_projects() {
+        let now = Instant::now();
+        let mut app = kube_app(now);
         let screen = draw(&mut app, 110, 24);
         assert!(screen.contains("prod"), "{screen}");
         assert!(screen.contains("⎈ prod-context"), "{screen}");
@@ -1760,8 +1868,7 @@ mod tests {
     #[test]
     fn renders_a_service_s_pod() {
         let now = Instant::now();
-        let mut app = App::new(now);
-        app.update(Event::Snapshot(Box::new(kube_sample())), now);
+        let mut app = kube_app(now);
         let grafana = (0..10)
             .find(|_| {
                 press(&mut app, now, KeyCode::Down);

@@ -164,12 +164,19 @@ impl Node {
         self.ids.last().expect("a node has at least one id")
     }
 
-    /// A stack folded into its project opens like the project, and so does a kube
-    /// project's namespace.
+    /// A stack folded into its project opens like the project. A kube project starts
+    /// closed, since opening it asks the cluster for its Services, and its namespaces
+    /// start open while something in them runs or failed.
     fn expanded_by_default(&self) -> bool {
+        if self.status.kube {
+            return match self.ids.as_slice() {
+                [NodeId::Project { .. }, ..] => false,
+                [.., NodeId::Stack { .. }] => self.status.state != State::Stopped,
+                _ => false,
+            };
+        }
         match self.ids.as_slice() {
             [.., NodeId::Project { .. }, NodeId::Stack { .. }] => true,
-            [.., NodeId::Stack { .. }] if self.status.kube => true,
             _ => self.id().expanded_by_default(),
         }
     }

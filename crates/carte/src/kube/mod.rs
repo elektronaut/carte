@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use carte_api::{
     Action, ControlResponse, EventKind, EventSubject, Hold, InstanceState, InstanceStatus,
-    KubeInstanceInfo, KubeProjectInfo, ProjectStatus, StackStatus, StartFailure,
+    KubeInstanceInfo, KubeProjectInfo, KubeServiceEntry, ProjectStatus, StackStatus, StartFailure,
 };
 use carte_core::kube::{KubeAddress, KubeProject, KubeTarget};
 use carte_core::model::{Policy, World};
@@ -377,6 +377,61 @@ impl Kube {
             }
         }
         Ok(response)
+    }
+
+    /// Every Service of the project, from the cluster. When the cluster doesn't let
+    /// you list Services across namespaces, lists them per namespace, and when it
+    /// doesn't let you list namespaces either, in the project's `namespaces`.
+    pub async fn services(&self, project: &str) -> Result<Vec<KubeServiceEntry>, String> {
+        let world = self.inner.supervisor.world();
+        let project = world
+            .kube_project(project)
+            .cloned()
+            .ok_or_else(|| format!("no kube project {project}"))?;
+        let cluster = self
+            .inner
+            .cluster(&project)
+            .await
+            .map_err(|page| page.detail)?;
+        let failed = |err: ApiError| {
+            self.inner.project_failed(&project.name, &err);
+            err.summary()
+        };
+        let mut services = if project.namespaces.is_empty() {
+            match cluster.services(None).await {
+                Ok(services) => services,
+                Err(ApiError::Forbidden(_)) => {
+                    let namespaces = match cluster.namespaces().await {
+                        Ok(namespaces) => namespaces,
+                        Err(ApiError::Forbidden(_)) => {
+                            return Err(format!(
+                                "The cluster doesn't let you list namespaces, or Services across them. List the namespaces you use in `namespaces` in the {} project file.",
+                                project.name
+                            ));
+                        }
+                        Err(err) => return Err(failed(err)),
+                    };
+                    each_namespace(&*cluster, &namespaces)
+                        .await
+                        .map_err(failed)?
+                }
+                Err(err) => return Err(failed(err)),
+            }
+        } else {
+            each_namespace(&*cluster, &project.namespaces)
+                .await
+                .map_err(failed)?
+        };
+        self.inner.project_reached(&project.name);
+        services.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+        Ok(services
+            .into_iter()
+            .map(|s| KubeServiceEntry {
+                url: carte_core::kube::url(&world.machine, &project.name, &s.namespace, &s.name),
+                namespace: s.namespace,
+                name: s.name,
+            })
+            .collect())
     }
 
     /// Stops every forward, or only those without requests or connections; answers
@@ -1000,6 +1055,31 @@ fn instance_status(
             pod: target.as_ref().map(|t| t.pod.clone()),
             port: target.map(|t| t.port),
         }),
+    }
+}
+
+/// The Services of each namespace, skipping namespaces the cluster won't list, unless
+/// it lists none of them.
+async fn each_namespace(
+    cluster: &dyn Cluster,
+    namespaces: &[String],
+) -> Result<Vec<ServiceInfo>, ApiError> {
+    let mut services = Vec::new();
+    let mut forbidden = None;
+    let mut listed = false;
+    for namespace in namespaces {
+        match cluster.services(Some(namespace)).await {
+            Ok(found) => {
+                listed = true;
+                services.extend(found);
+            }
+            Err(ApiError::Forbidden(message)) => forbidden = Some(message),
+            Err(err) => return Err(err),
+        }
+    }
+    match forbidden {
+        Some(message) if !listed => Err(ApiError::Forbidden(message)),
+        _ => Ok(services),
     }
 }
 

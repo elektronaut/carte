@@ -30,6 +30,27 @@ pub mod paths {
     /// POST an `Address`: keeps that running instance from idling out until the client
     /// closes the connection. The response never ends.
     pub const HOLD: &str = "/v1/hold";
+    /// POST a `KubeServicesRequest`: every Service of a kube project, as a
+    /// `KubeServicesResponse`. Asks the cluster each time.
+    pub const KUBE_SERVICES: &str = "/v1/kube/services";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubeServicesRequest {
+    pub project: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubeServicesResponse {
+    /// By namespace, then name.
+    pub services: Vec<KubeServiceEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubeServiceEntry {
+    pub namespace: String,
+    pub name: String,
+    pub url: String,
 }
 
 /// A CLI address (`app@stack/process`, any part optional) and the directory it was

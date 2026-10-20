@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Credentials, EnvResponse, EventsRequest,
-    InstanceStatus, KubeProjectInfo, LogLine, LogsRequest, ShareRequest, ShareResponse, Snapshot,
-    UnshareRequest,
+    InstanceStatus, KubeProjectInfo, KubeServiceEntry, LogLine, LogsRequest, ShareRequest,
+    ShareResponse, Snapshot, UnshareRequest,
 };
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
+use super::browse::{self, Browse};
 use super::input::{self, Confirm, Control, Focus, Intent, Mode};
 use super::jump::{self, Jump};
 use super::logs::{Logs, Prefix};
@@ -41,6 +42,11 @@ pub enum Event {
     Shared(Result<ShareResponse, String>),
     Unshared(Result<Vec<String>, String>),
     Env(Result<EnvResponse, String>),
+    /// A kube project's Services, as the cluster lists them.
+    Services {
+        project: String,
+        result: Result<Vec<KubeServiceEntry>, String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +75,8 @@ pub enum Command {
     MouseCapture(bool),
     Copy(String),
     FetchEnv(Address),
+    /// Lists a kube project's Services.
+    FetchServices(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +122,12 @@ pub struct Notice {
 
 pub struct App {
     pub connection: Connection,
+    /// The daemon's snapshot with the kube projects' listed Services merged in.
     pub snapshot: Option<Snapshot>,
+    /// The daemon's snapshot as it came.
+    daemon_snapshot: Option<Snapshot>,
+    /// Each kube project's listing, once it was expanded.
+    pub browse: BTreeMap<String, Browse>,
     pub snapshot_at: Instant,
     pub now: Instant,
     pub roots: Vec<Node>,
@@ -152,6 +165,8 @@ impl App {
         App {
             connection: Connection::Connecting,
             snapshot: None,
+            daemon_snapshot: None,
+            browse: BTreeMap::new(),
             snapshot_at: now,
             now,
             roots: Vec::new(),
@@ -197,13 +212,36 @@ impl App {
                         .iter()
                         .any(|s| s.project == *project && s.stack == *stack)
                 });
-                self.snapshot = Some(*snapshot);
+                let contexts: BTreeMap<&str, &str> = snapshot
+                    .projects
+                    .iter()
+                    .filter_map(|p| Some((p.name.as_str(), p.kube.as_ref()?.context.as_str())))
+                    .collect();
+                let before = self.daemon_snapshot.as_ref();
+                self.browse.retain(|project, _| {
+                    let context = contexts.get(project.as_str());
+                    let previous = before
+                        .and_then(|s| s.projects.iter().find(|p| p.name == *project))
+                        .and_then(|p| p.kube.as_ref())
+                        .map(|k| k.context.as_str());
+                    context.is_some() && (previous.is_none() || previous == context.copied())
+                });
+                self.daemon_snapshot = Some(*snapshot);
                 self.snapshot_at = now;
                 self.rebuild();
             }
             Event::Disconnected(message) => {
                 self.connection = Connection::Lost(message);
-                self.snapshot = None;
+                self.daemon_snapshot = None;
+                self.browse.clear();
+                self.rebuild();
+            }
+            Event::Services { project, result } => {
+                let browse = match result {
+                    Ok(services) => Browse::Loaded(services),
+                    Err(message) => Browse::Failed(message),
+                };
+                self.browse.insert(project, browse);
                 self.rebuild();
             }
             Event::Log { generation, line } => self.logs.push(generation, line),
@@ -235,7 +273,6 @@ impl App {
         Some(tree::node(&self.roots, &row.path))
     }
 
-    /// The instance a node belongs to, for nodes at instance level or below.
     /// The kube project named `project`, when it is one.
     pub fn kube_project(&self, project: &str) -> Option<&KubeProjectInfo> {
         self.snapshot
@@ -258,6 +295,7 @@ impl App {
         kube
     }
 
+    /// The instance a node belongs to, for nodes at instance level or below.
     pub fn instance(&self, id: &NodeId) -> Option<&InstanceStatus> {
         let (NodeId::Instance {
             project,
@@ -292,6 +330,10 @@ impl App {
     }
 
     fn rebuild(&mut self) {
+        self.snapshot = self.daemon_snapshot.clone().map(|mut snapshot| {
+            browse::merge(&mut snapshot, &self.browse);
+            snapshot
+        });
         self.roots = self.snapshot.as_ref().map(tree::build).unwrap_or_default();
         match self.start_at.take() {
             Some(id) if self.snapshot.is_some() => self.reveal(id),
@@ -428,7 +470,7 @@ impl App {
                     }
                     let index = self.tree_offset + usize::from(at.y - first);
                     if index == self.cursor {
-                        self.apply(Intent::Toggle, &mut Vec::new());
+                        self.apply(Intent::Toggle, commands);
                     } else if index < self.rows.len() {
                         self.select(index);
                     }
@@ -486,11 +528,16 @@ impl App {
             (Intent::Top, Focus::Logs) => self.logs.scroll_to_top(),
             (Intent::Bottom, Focus::Logs) => self.logs.follow(),
             (Intent::Collapse, _) => self.collapse(),
-            (Intent::Expand, _) => self.expand(),
+            (Intent::Expand, _) => commands.extend(self.expand()),
             (Intent::Toggle, _) => {
-                if let Some(row) = self.rows.get(self.cursor).filter(|r| r.expandable) {
-                    let expanded = !row.expanded;
-                    self.set_expanded(expanded);
+                let kube = self.selected_kube_project();
+                if let Some(row) = self.rows.get(self.cursor) {
+                    if kube.is_some() && !row.expanded {
+                        commands.extend(self.expand());
+                    } else if row.expandable {
+                        let expanded = !row.expanded;
+                        self.set_expanded(expanded);
+                    }
                 }
             }
             (Intent::StartFilter, _) => self.mode = Mode::Filter,
@@ -680,15 +727,36 @@ impl App {
         }
     }
 
-    fn expand(&mut self) {
-        let Some(row) = self.rows.get(self.cursor) else {
-            return;
-        };
+    /// Opens the selected row, or moves into it when it's open. Opening a kube
+    /// project lists its Services.
+    fn expand(&mut self) -> Option<Command> {
+        let row = self.rows.get(self.cursor)?;
         if row.expanded {
             self.move_by(1);
-        } else if row.expandable {
+            return None;
+        }
+        if let Some(project) = self.selected_kube_project() {
+            let shown = match self.browse.remove(&project) {
+                Some(Browse::Loaded(services) | Browse::Loading(Some(services))) => Some(services),
+                _ => None,
+            };
+            self.browse.insert(project.clone(), Browse::Loading(shown));
+            self.set_expanded(true);
+            return Some(Command::FetchServices(project));
+        }
+        if row.expandable {
             self.set_expanded(true);
         }
+        None
+    }
+
+    /// The kube project whose row is selected.
+    fn selected_kube_project(&self) -> Option<String> {
+        let node = self.selected_node()?;
+        let NodeId::Project { project } = &node.ids[0] else {
+            return None;
+        };
+        self.kube_project(project).map(|_| project.clone())
     }
 
     fn control(&mut self, control: Control) -> Option<Command> {
@@ -1115,7 +1183,7 @@ mod tests {
             Event::Snapshot(Box::new(crate::tui::fixtures::kube_sample())),
             now,
         );
-        let mut followed = Vec::new();
+        let mut followed = press(&mut app, now, KeyCode::Right);
         for _ in 0..4 {
             followed.extend(press(&mut app, now, KeyCode::Down));
         }
@@ -1210,6 +1278,62 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    #[test]
+    fn clicking_a_kube_project_lists_its_services() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(
+            Event::Snapshot(Box::new(crate::tui::fixtures::kube_sample())),
+            now,
+        );
+        app.tree_area = Rect::new(0, 0, 40, 20);
+        let commands = app.update(mouse(MouseEventKind::Down(MouseButton::Left), 5, 2), now);
+        assert!(
+            commands.contains(&Command::FetchServices("prod".into())),
+            "{commands:?}"
+        );
+    }
+
+    #[test]
+    fn listings_go_when_the_daemon_or_the_cluster_changes() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        let snapshot = crate::tui::fixtures::kube_sample();
+        app.update(Event::Snapshot(Box::new(snapshot.clone())), now);
+        let listed = |app: &mut App| {
+            app.update(
+                Event::Services {
+                    project: "prod".into(),
+                    result: Ok(vec![KubeServiceEntry {
+                        namespace: "billing".into(),
+                        name: "api".into(),
+                        url: "https://api.billing.prod.test".into(),
+                    }]),
+                },
+                now,
+            );
+        };
+        listed(&mut app);
+        app.update(Event::Snapshot(Box::new(snapshot.clone())), now);
+        assert!(app.browse.contains_key("prod"), "kept across snapshots");
+
+        let mut moved = snapshot.clone();
+        moved.projects[0].kube.as_mut().unwrap().context = "other".into();
+        app.update(Event::Snapshot(Box::new(moved)), now);
+        assert!(app.browse.is_empty(), "another cluster");
+
+        listed(&mut app);
+        app.update(Event::Disconnected("gone".into()), now);
+        assert!(app.browse.is_empty());
+
+        app.update(Event::Snapshot(Box::new(snapshot.clone())), now);
+        listed(&mut app);
+        let mut removed = snapshot;
+        removed.projects.clear();
+        app.update(Event::Snapshot(Box::new(removed)), now);
+        assert!(app.browse.is_empty(), "the project is gone");
     }
 
     #[test]
