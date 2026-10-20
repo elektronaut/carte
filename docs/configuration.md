@@ -974,3 +974,9 @@ again on the next request.
   another site, as does an SSO login that comes back to the Service.
 
 Starts, pod changes, failures and idle stops show in `carte events`.
+
+In the terminal UI, a kube project lists its namespaces with the
+Services carte knows of: configured ones with a `namespace`, and those
+requested since the daemon started. The project's row shows its context,
+or why the cluster can't be reached, like a failed login; a Service's
+details show the pod it forwards to, and its log pane shows its events.

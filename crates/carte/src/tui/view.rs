@@ -216,7 +216,14 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     });
     spans.extend(badges(status, aggregate));
 
-    let detail = if aggregate {
+    let detail = if let NodeId::Project { project } = node.id()
+        && let Some(kube) = app.kube_project(project)
+    {
+        match &kube.error {
+            Some(error) => Span::raw(format!("⎈ {error}")).red(),
+            None => Span::raw(format!("⎈ {}", kube.context)).dark_gray(),
+        }
+    } else if aggregate {
         Span::raw(if status.running > 0 {
             format!("{}/{}", status.running, status.total)
         } else {
@@ -226,7 +233,7 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     } else {
         detail(app, node.id(), status)
     };
-    let (cpu, memory) = if status.running > 0 {
+    let (cpu, memory) = if status.running > 0 && !status.kube {
         (
             format!("{:.0}%", status.cpu_percent),
             format_bytes(status.memory_bytes),
@@ -312,6 +319,7 @@ fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
             }
             None => Span::raw("exited").red(),
         },
+        State::Crashed if status.kube => Span::raw("failed").red(),
         State::Crashed => Span::raw("crashed").red(),
         State::Exited => Span::raw("exited").dark_gray(),
         State::Done => Span::raw("done").dark_gray(),
@@ -385,6 +393,7 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
         State::Stopped => "stopped",
         State::Exited => "exited",
         State::Done => "done",
+        State::Crashed if status.kube => "failed",
         State::Crashed => "crashed",
         State::Disabled => "disabled",
     };
@@ -413,9 +422,18 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
                 first.push(Span::raw(format!(" · branch {branch}")).dark_gray());
             }
             lines.push(Line::from(first));
+            if let NodeId::Project { project } = id
+                && let Some(kube) = app.kube_project(project)
+            {
+                lines.push(Line::from(format!("kube context {}", kube.context)).dark_gray());
+                if let Some(error) = &kube.error {
+                    lines.push(Line::from(error.clone()).red());
+                }
+            }
             let crashed: Vec<&str> = crashed_below(node);
             if !crashed.is_empty() {
-                lines.push(Line::from(format!("crashed: {}", crashed.join(", ")).red()));
+                let word = if status.kube { "failed" } else { "crashed" };
+                lines.push(Line::from(format!("{word}: {}", crashed.join(", ")).red()));
             }
         }
         NodeId::Instance { .. } => {
@@ -518,16 +536,24 @@ fn instance_details(
         lines.push(Line::from(boot_progress(app, instance, boot)).yellow());
     }
     lines.extend(share_details(app, project, instance));
-    let checkout = if status.fallback {
-        "main (no worktree for this stack)".to_string()
+    if let Some(kube) = &instance.kube {
+        let place = match (&kube.pod, kube.port) {
+            (Some(pod), Some(port)) => format!("pod {pod} :{port} · namespace {}", instance.stack),
+            _ => format!("namespace {}", instance.stack),
+        };
+        lines.push(Line::from(place.dark_gray()));
     } else {
-        instance.checkout.clone()
-    };
-    let mut checkout = format!("checkout {checkout}");
-    if !instance.checkout_path.as_os_str().is_empty() {
-        checkout.push_str(&format!(" · {}", instance.checkout_path.display()));
+        let checkout = if status.fallback {
+            "main (no worktree for this stack)".to_string()
+        } else {
+            instance.checkout.clone()
+        };
+        let mut checkout = format!("checkout {checkout}");
+        if !instance.checkout_path.as_os_str().is_empty() {
+            checkout.push_str(&format!(" · {}", instance.checkout_path.display()));
+        }
+        lines.push(Line::from(checkout.dark_gray()));
     }
-    lines.push(Line::from(checkout.dark_gray()));
     let mut notes = Vec::new();
     for (word, policy) in [("pinned", Policy::Pinned), ("disabled", Policy::Disabled)] {
         let procs: Vec<&ProcessStatus> = instance
@@ -1152,7 +1178,7 @@ mod tests {
 
     use super::*;
     use crate::tui::app::{Command, Event};
-    use crate::tui::fixtures::{process, sample, shared_sample};
+    use crate::tui::fixtures::{kube_sample, process, sample, shared_sample};
 
     fn draw(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1693,6 +1719,63 @@ mod tests {
         assert_eq!(spans[1].style, Style::new().black().on_yellow());
         let spans = highlight("GET /up", "get", false);
         assert_eq!(spans[1].style, Style::new().yellow().bold());
+    }
+
+    #[test]
+    fn renders_kube_projects() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(kube_sample())), now);
+        let screen = draw(&mut app, 110, 24);
+        assert!(screen.contains("prod"), "{screen}");
+        assert!(screen.contains("⎈ prod-context"), "{screen}");
+        assert!(screen.contains("failed"), "{screen}");
+        assert!(screen.contains("held by 2"), "{screen}");
+        assert!(screen.contains("failed: vlogs"), "{screen}");
+        assert!(!screen.contains("0 B"), "no memory for Services: {screen}");
+
+        let mut snapshot = kube_sample();
+        snapshot.projects[0].kube.as_mut().unwrap().error =
+            Some("login failed: Run `aws sso login`, then reload.".into());
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let screen = draw(&mut app, 110, 24);
+        assert!(screen.contains("⎈ login failed"), "{screen}");
+        assert!(
+            screen.contains("login failed: Run `aws sso login`, then reload."),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn a_kube_project_with_one_namespace_keeps_its_own_row() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        let mut snapshot = kube_sample();
+        snapshot.projects[0].stacks.remove(0);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let screen = draw(&mut app, 110, 12);
+        assert!(screen.contains("⎈ prod-context"), "{screen}");
+    }
+
+    #[test]
+    fn renders_a_service_s_pod() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(kube_sample())), now);
+        let grafana = (0..10)
+            .find(|_| {
+                press(&mut app, now, KeyCode::Down);
+                app.selected_node()
+                    .is_some_and(|n| n.label == "grafana" || n.search.contains("grafana"))
+            })
+            .is_some();
+        assert!(grafana);
+        let screen = draw(&mut app, 110, 30);
+        assert!(
+            screen.contains("pod grafana-7d9f-x2k :3000 · namespace monitoring"),
+            "{screen}"
+        );
+        assert!(!screen.contains("checkout"), "{screen}");
     }
 
     #[test]

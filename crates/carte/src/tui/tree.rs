@@ -113,6 +113,8 @@ pub struct Status {
     pub gave_up: bool,
     /// Seconds until carte restarts a crashed process.
     pub restart_in_secs: Option<u64>,
+    /// Part of a kube project, whose instances are a cluster's Services.
+    pub kube: bool,
 }
 
 impl Status {
@@ -132,6 +134,7 @@ impl Status {
             problems: 0,
             gave_up: false,
             restart_in_secs: None,
+            kube: false,
         }
     }
 
@@ -161,10 +164,12 @@ impl Node {
         self.ids.last().expect("a node has at least one id")
     }
 
-    /// A stack folded into its project opens like the project.
+    /// A stack folded into its project opens like the project, and so does a kube
+    /// project's namespace.
     fn expanded_by_default(&self) -> bool {
         match self.ids.as_slice() {
             [.., NodeId::Project { .. }, NodeId::Stack { .. }] => true,
+            [.., NodeId::Stack { .. }] if self.status.kube => true,
             _ => self.id().expanded_by_default(),
         }
     }
@@ -181,10 +186,15 @@ impl Node {
 
     /// Folds single children into their parent: a project with only the main stack
     /// shows its apps directly, and a single-app project shows the app's state on the
-    /// project's row. Processes never fold, so an instance stays addressable as a whole.
+    /// project's row. Processes never fold, so an instance stays addressable as a whole,
+    /// and nothing folds in a kube project: a namespace's name alone wouldn't say which
+    /// Service its row is, and the project's row stays the project's.
     fn collapse(mut self) -> Self {
         self.children = self.children.into_iter().map(Node::collapse).collect();
-        while self.children.len() == 1 && !matches!(self.children[0].id(), NodeId::Process { .. }) {
+        while self.children.len() == 1
+            && !matches!(self.children[0].id(), NodeId::Process { .. })
+            && !self.status.kube
+        {
             let child = self.children.pop().expect("one child");
             self.ids.extend(child.ids);
             self.search = format!("{} {}", self.search, child.search);
@@ -260,6 +270,7 @@ fn project_node(snapshot: &Snapshot, project: &ProjectStatus) -> Node {
         .map(|stack| stack_node(snapshot, project, stack))
         .collect();
     let mut status = aggregate(&children);
+    status.kube = project.kube.is_some();
     status.problems = snapshot
         .problems
         .iter()
@@ -287,7 +298,10 @@ fn stack_node(snapshot: &Snapshot, project: &ProjectStatus, stack: &StackStatus)
         .collect();
     let search = format!("{} {}", stack.name, stack.branch.as_deref().unwrap_or(""));
     Node {
-        status: aggregate(&children),
+        status: Status {
+            kube: project.kube.is_some(),
+            ..aggregate(&children)
+        },
         children,
         ..Node::leaf(
             NodeId::Stack {
@@ -365,6 +379,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
         cpu_percent: inst.cpu_percent,
         memory_bytes: inst.memory_bytes,
         gave_up: inst.processes.iter().any(|p| p.gave_up),
+        kube: inst.kube.is_some(),
         ..Status::new(state)
     };
     status.problems = snapshot
