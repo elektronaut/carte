@@ -1007,6 +1007,15 @@ impl App {
         });
     }
 
+    /// A kube project or namespace is selected, whose log pane shows its events since
+    /// its Services' logs come from separate pods.
+    fn follows_kube_events(&self) -> bool {
+        self.selected_node().is_some_and(|n| {
+            self.kube_project(n.id().project()).is_some()
+                && !matches!(n.id(), NodeId::Instance { .. })
+        })
+    }
+
     /// Starts a new log stream when the selection changed.
     fn sync_logs(&mut self) -> Option<Command> {
         let wanted = self.log_key();
@@ -1020,8 +1029,7 @@ impl App {
             return Some(Command::StopLogs);
         }
         let node = self.selected_node();
-        let kube = node.is_some_and(|n| self.kube_project(n.id().project()).is_some());
-        if self.events || kube {
+        if self.events || self.follows_kube_events() {
             return Some(Command::FollowEvents {
                 generation,
                 request: EventsRequest {
@@ -1070,7 +1078,7 @@ impl App {
     }
 
     fn log_prefix(&self) -> Prefix {
-        if self.events {
+        if self.events || self.follows_kube_events() {
             return Prefix::None;
         }
         match self.selected_node().map(Node::id) {
@@ -1176,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn kube_services_refuse_what_doesnt_apply_and_follow_events() {
+    fn kube_services_refuse_what_doesnt_apply_and_follow_their_logs() {
         let now = Instant::now();
         let mut app = App::new(now);
         app.update(
@@ -1184,21 +1192,17 @@ mod tests {
             now,
         );
         let mut followed = press(&mut app, now, KeyCode::Right);
-        for _ in 0..4 {
-            followed.extend(press(&mut app, now, KeyCode::Down));
-        }
+        followed.extend(press(&mut app, now, KeyCode::Down));
         assert!(
-            followed
-                .iter()
-                .all(|c| !matches!(c, Command::FollowLogs { .. })),
-            "{followed:?}"
+            matches!(followed.last(), Some(Command::FollowEvents { .. })),
+            "a namespace follows its events: {followed:?}"
         );
-        assert!(
-            followed
-                .iter()
-                .any(|c| matches!(c, Command::FollowEvents { .. })),
-            "{followed:?}"
-        );
+        let followed = press(&mut app, now, KeyCode::Down);
+        let [Command::FollowLogs { request, .. }] = followed.as_slice() else {
+            panic!("a Service follows its pod's logs: {followed:?}");
+        };
+        assert_eq!(request.target.address, "vlogs@logging");
+        assert_eq!(request.target.project.as_deref(), Some("prod"));
         for (key, what) in [
             ('w', "sharing"),
             ('v', "env"),

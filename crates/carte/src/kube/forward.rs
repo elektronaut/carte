@@ -88,20 +88,27 @@ impl Forward {
         if matches!(first, ApiError::Auth { .. } | ApiError::Forbidden(_)) {
             return Err(first);
         }
+        let next = self.refresh().await?;
+        self.connect(&next).await
+    }
+
+    /// The pod to use now: the current one while it's ready, else another ready one.
+    pub async fn refresh(&self) -> Result<PodTarget, ApiError> {
+        let current = self.target();
         let slices = self
             .cluster
             .endpoint_slices(&self.namespace, &self.service)
             .await?;
-        let next = lookup::choose_pod(&self.port, &slices, None)
+        let next = lookup::choose_pod(&self.port, &slices, Some(&current.pod))
             .map_err(|err| ApiError::Other(err.title().to_string()))?;
-        if next.pod != target.pod {
+        if next.pod != current.pod {
             self.reporter.event(
                 EventKind::Restarted,
-                format!("pod {} is gone; now pod {}", target.pod, next.pod),
+                format!("pod {} is gone; now pod {}", current.pod, next.pod),
             );
             *self.target.lock().expect("target lock") = next.clone();
         }
-        self.connect(&next).await
+        Ok(next)
     }
 
     async fn connect(&self, target: &PodTarget) -> Result<PodStream, ApiError> {

@@ -4,14 +4,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use carte_core::kube::KubeProject;
+use futures_util::AsyncBufReadExt;
+use futures_util::stream::{BoxStream, StreamExt};
 use k8s_openapi::api::core::v1::{Namespace, Pod, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use kube::api::ListParams;
+use kube::api::{ListParams, LogParams};
 use kube::config::{ExecInteractiveMode, KubeConfigOptions, Kubeconfig};
 use kube::{Api, Client, Config};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::lookup::{EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
+use super::lookup::{ContainerInfo, EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
 use crate::proxy::BoxFuture;
 
 pub trait PodIo: AsyncRead + AsyncWrite + Send + Unpin {}
@@ -50,6 +52,20 @@ pub trait Cluster: Send + Sync + 'static {
 
     fn namespaces(&self) -> BoxFuture<'_, Result<Vec<String>, ApiError>>;
 
+    fn containers<'a>(
+        &'a self,
+        namespace: &'a str,
+        pod: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ContainerInfo>, ApiError>>;
+
+    /// A pod's log lines, each starting with its RFC 3339 timestamp.
+    fn logs<'a>(
+        &'a self,
+        namespace: &'a str,
+        pod: &'a str,
+        options: LogOptions,
+    ) -> BoxFuture<'a, Result<LogLines, ApiError>>;
+
     /// Opens a port-forward stream to `port` of the pod.
     fn connect<'a>(
         &'a self,
@@ -58,6 +74,18 @@ pub trait Cluster: Send + Sync + 'static {
         port: u16,
     ) -> BoxFuture<'a, Result<PodStream, ApiError>>;
 }
+
+/// Which of a container's log lines to read.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LogOptions {
+    pub container: Option<String>,
+    pub follow: bool,
+    pub tail: Option<i64>,
+    pub since_secs: Option<i64>,
+}
+
+/// Log lines, invalid UTF-8 replaced; the stream ends with the log or an error.
+pub type LogLines = BoxStream<'static, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
@@ -431,6 +459,71 @@ impl Cluster for KubeCluster {
                 .into_iter()
                 .filter_map(|n| n.metadata.name)
                 .collect())
+        })
+    }
+
+    fn containers<'a>(
+        &'a self,
+        namespace: &'a str,
+        pod: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ContainerInfo>, ApiError>> {
+        Box::pin(async move {
+            let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+            let pod = api.get(pod).await.map_err(|err| self.error(err))?;
+            Ok(pod
+                .spec
+                .map(|s| s.containers)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| ContainerInfo {
+                    ports: c
+                        .ports
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|p| u16::try_from(p.container_port).ok())
+                        .collect(),
+                    name: c.name,
+                })
+                .collect())
+        })
+    }
+
+    fn logs<'a>(
+        &'a self,
+        namespace: &'a str,
+        pod: &'a str,
+        options: LogOptions,
+    ) -> BoxFuture<'a, Result<LogLines, ApiError>> {
+        Box::pin(async move {
+            let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
+            let params = LogParams {
+                container: options.container,
+                follow: options.follow,
+                tail_lines: options.tail,
+                since_seconds: options.since_secs,
+                timestamps: true,
+                ..LogParams::default()
+            };
+            let reader =
+                api.log_stream(pod, &params)
+                    .await
+                    .map_err(|err| match self.error(err) {
+                        ApiError::Forbidden(_) => {
+                            ApiError::Forbidden("reading logs needs the pods/log permission".into())
+                        }
+                        other => other,
+                    })?;
+            let lines = futures_util::stream::unfold(Box::pin(reader), |mut reader| async move {
+                let mut line = Vec::new();
+                match reader.read_until(b'\n', &mut line).await {
+                    Ok(0) | Err(_) => None,
+                    Ok(_) => {
+                        let text = String::from_utf8_lossy(&line);
+                        Some((text.trim_end_matches(['\n', '\r']).to_string(), reader))
+                    }
+                }
+            });
+            Ok(lines.boxed())
         })
     }
 

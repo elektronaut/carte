@@ -35,9 +35,9 @@ and the stack a namespace:
 | `prod@monitoring` | Every Service carte knows of in the namespace |
 | `prod` | The whole kube project, unless an app has that name |
 
-`up`, `down`, `restart`, `status`, `open` and `events` work on them; `up`
-needs a Service. `pin`, `disable`, `env`, `exec`, `logs` and `share`
-don't apply to Services.
+`up`, `down`, `restart`, `status`, `open`, `logs` and `events` work on
+them; `up` and `logs` need a Service. `pin`, `disable`, `env`, `exec`
+and `share` don't apply to Services.
 
 Apps can be named by their full or short name, or any unambiguous part
 of one. When an app has the same name as its project, the name means the

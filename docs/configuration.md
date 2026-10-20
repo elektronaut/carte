@@ -975,6 +975,15 @@ again on the next request.
 
 Starts, pod changes, failures and idle stops show in `carte events`.
 
+`carte logs grafana.prod` shows the logs of the pod the forward uses,
+which is the pod every one of your requests reaches, or of a ready pod
+when no forward runs; reading logs doesn't open one. Of a pod's
+containers it picks the one serving the Service's port, rather than a
+sidecar. `--search` and `--since` look through up to 10,000 lines.
+Following (`-f`) continues on the next pod when this one goes away. Logs
+stream only while a client reads them, and reading them needs the
+`pods/log` permission, which is separate from port-forwarding.
+
 In the terminal UI, a kube project starts closed. Opening it asks the
 cluster for all its Services, once per opening, and lists them by
 namespace beside the ones carte already knows of: namespaces where
@@ -987,4 +996,4 @@ use in `namespaces`.
 
 The project's row shows its context, or why the cluster can't be
 reached, like a failed login; a Service's details show the pod it
-forwards to, and its log pane shows its events.
+forwards to, and its log pane shows its pod's logs.

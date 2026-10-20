@@ -193,6 +193,60 @@ pub fn choose_pod(
     })
 }
 
+/// A container of a pod, for picking whose logs to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerInfo {
+    pub name: String,
+    pub ports: Vec<u16>,
+}
+
+/// The container serving `port`, rather than a sidecar; else the first one.
+pub fn choose_container(containers: &[ContainerInfo], port: u16) -> Option<&ContainerInfo> {
+    containers
+        .iter()
+        .find(|c| c.ports.contains(&port))
+        .or_else(|| containers.first())
+}
+
+/// Splits the RFC 3339 timestamp the API server puts in front of each log line with
+/// `timestamps=true`: milliseconds since the Unix epoch, and the rest of the line.
+pub fn split_timestamp(line: &str) -> (Option<u64>, &str) {
+    let Some((stamp, text)) = line.split_once(' ') else {
+        return (None, line);
+    };
+    match parse_rfc3339_ms(stamp) {
+        Some(at_ms) => (Some(at_ms), text),
+        None => (None, line),
+    }
+}
+
+/// `2026-10-20T08:15:30.123456789Z` in milliseconds; only UTC, as the API server
+/// writes it.
+fn parse_rfc3339_ms(stamp: &str) -> Option<u64> {
+    let stamp = stamp.strip_suffix('Z')?;
+    let (date, time) = stamp.split_once('T')?;
+    let mut date = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
+    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
+    let (clock, fraction) = time.split_once('.').unwrap_or((time, "0"));
+    if !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mut clock = clock.splitn(3, ':').map(|p| p.parse::<i64>().ok());
+    let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
+    let millis: i64 = format!("{fraction:0<3}").get(..3)?.parse().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || !(0..10_000).contains(&year) {
+        return None;
+    }
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    let secs = days * 86_400 + hour * 3600 + minute * 60 + second;
+    u64::try_from(secs * 1000 + millis).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +405,52 @@ mod tests {
         assert_eq!(
             choose_pod(&port(None, 80), &slices, None),
             Err(LookupError::NoReadyPod)
+        );
+    }
+
+    #[test]
+    fn picks_the_container_serving_the_port() {
+        let container = |name: &str, ports: &[u16]| ContainerInfo {
+            name: name.into(),
+            ports: ports.to_vec(),
+        };
+        let containers = vec![
+            container("istio-proxy", &[15090]),
+            container("grafana", &[3000]),
+        ];
+        assert_eq!(
+            choose_container(&containers, 3000).map(|c| c.name.as_str()),
+            Some("grafana")
+        );
+        assert_eq!(
+            choose_container(&containers, 8080).map(|c| c.name.as_str()),
+            Some("istio-proxy")
+        );
+        assert_eq!(choose_container(&[], 80), None);
+    }
+
+    #[test]
+    fn splits_timestamps_off_log_lines() {
+        assert_eq!(
+            split_timestamp("2026-10-20T08:15:30.123456789Z GET /api/health 200"),
+            (Some(1_792_484_130_123), "GET /api/health 200")
+        );
+        assert_eq!(
+            split_timestamp("1970-01-01T00:00:01Z started"),
+            (Some(1000), "started")
+        );
+        assert_eq!(
+            split_timestamp("no timestamp here"),
+            (None, "no timestamp here")
+        );
+        assert_eq!(split_timestamp("plain"), (None, "plain"));
+        assert_eq!(
+            split_timestamp("2026-10-20T08:15:30.aaé started"),
+            (None, "2026-10-20T08:15:30.aaé started")
+        );
+        assert_eq!(
+            split_timestamp("99999999999-01-01T00:00:00Z x"),
+            (None, "99999999999-01-01T00:00:00Z x")
         );
     }
 }

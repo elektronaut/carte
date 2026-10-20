@@ -16,6 +16,7 @@ bytes.workspace = true
 carte-api.workspace = true
 carte-core.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 gethostname.workspace = true
 hickory-proto.workspace = true
 http.workspace = true

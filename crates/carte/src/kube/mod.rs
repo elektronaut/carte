@@ -12,25 +12,31 @@ use std::time::{Duration, Instant, SystemTime};
 
 use carte_api::{
     Action, ControlResponse, EventKind, EventSubject, Hold, InstanceState, InstanceStatus,
-    KubeInstanceInfo, KubeProjectInfo, KubeServiceEntry, ProjectStatus, StackStatus, StartFailure,
+    KubeInstanceInfo, KubeProjectInfo, KubeServiceEntry, LogLine, LogsRequest, ProjectStatus,
+    StackStatus, StartFailure,
 };
 use carte_core::kube::{KubeAddress, KubeProject, KubeTarget};
 use carte_core::model::{Policy, World};
 use carte_core::{duration, env};
+use futures_util::StreamExt;
 use http::StatusCode;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-pub use cluster::{ApiError, Cluster, KubeCluster, PodStream};
+pub use cluster::{ApiError, Cluster, KubeCluster, LogLines, LogOptions, PodStream};
 use forward::{Forward, Reporter};
-pub use lookup::{EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
+use lookup::PodTarget;
+pub use lookup::{ContainerInfo, EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
 
 use crate::proxy::{ActivityGuard, BoxFuture, ErrorPage, Route, UpstreamError};
 use crate::supervisor::Handle;
 
 /// How long a short hostname's namespace is remembered.
 const NAMESPACE_TTL: Duration = Duration::from_secs(60);
+
+/// The most lines read back to search through or to show since a time.
+const MAX_LOG_LINES: i64 = 10_000;
 
 /// How long a request may wait for the cluster before it gets an error page.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -434,6 +440,85 @@ impl Kube {
             .collect())
     }
 
+    /// The logs of the pod the Service's forward uses, opening the forward when
+    /// needed. Following, they continue on the next pod when that one goes away.
+    pub async fn logs(
+        &self,
+        address: KubeAddress,
+        request: &LogsRequest,
+    ) -> Result<mpsc::Receiver<LogLine>, String> {
+        if request.rank.is_some() {
+            return Err("kube projects' Services can't be ranked".into());
+        }
+        let service = address.service.clone().ok_or_else(|| {
+            format!(
+                "name a Service to see its logs, like `carte logs grafana.{}`",
+                address.project
+            )
+        })?;
+        let target = KubeTarget {
+            project: address.project.clone(),
+            service,
+            namespace: address.namespace.clone(),
+            via_alias: false,
+        };
+        let page = |page: ErrorPage| format!("{}: {}", page.title, page.detail);
+        let found = tokio::time::timeout(LOOKUP_TIMEOUT, async {
+            let (project, cluster, key) = self.inner.resolve(&target).await?;
+            let running = self
+                .inner
+                .state
+                .lock()
+                .expect("kube state")
+                .instances
+                .get(&key)
+                .and_then(|i| i.forward.as_ref())
+                .filter(|r| Arc::ptr_eq(&r.forward.cluster, &cluster))
+                .map(|r| (r.forward.port.clone(), r.forward.target()));
+            let (port, pod) = match running {
+                Some(found) => found,
+                None => self.inner.lookup_pod(&project, &*cluster, &key).await?,
+            };
+            Ok::<_, ErrorPage>((cluster, key, port, pod))
+        })
+        .await
+        .map_err(|_| "the cluster didn't answer".to_string())?;
+        let (cluster, key, port, pod) = found.map_err(page)?;
+        let containers = cluster
+            .containers(&key.namespace, &pod.pod)
+            .await
+            .map_err(|err| err.detail())?;
+        let container = lookup::choose_container(&containers, pod.port).map(|c| c.name.clone());
+        let since_secs = request
+            .since_ms
+            .map(|ms| (crate::clock::now_ms().saturating_sub(ms) / 1000 + 1) as i64);
+        let filtered = request.search.is_some() || since_secs.is_some();
+        let tail = request.tail.unwrap_or(100);
+        let initial = LogOptions {
+            container: container.clone(),
+            tail: Some(if filtered { MAX_LOG_LINES } else { tail as i64 }),
+            since_secs,
+            ..LogOptions::default()
+        };
+        let initial = cluster
+            .logs(&key.namespace, &pod.pod, initial)
+            .await
+            .map_err(|err| err.detail())?;
+        let (tx, rx) = mpsc::channel(256);
+        let lines = PodLines {
+            cluster,
+            key,
+            port,
+            pod: pod.pod,
+            container,
+            search: request.search.clone(),
+            tail: (since_secs.is_none()).then_some(tail),
+            tx,
+        };
+        tokio::spawn(lines.run(initial, request.follow));
+        Ok(rx)
+    }
+
     /// Stops every forward, or only those without requests or connections; answers
     /// with `service.project@namespace` for each.
     pub fn stop_all(&self, idle_only: bool) -> Vec<String> {
@@ -504,6 +589,19 @@ impl Inner {
 
     /// Resolves the target and makes sure its forward runs.
     async fn start_target(self: Arc<Self>, target: KubeTarget) -> Result<Key, ErrorPage> {
+        let (project, cluster, key) = self.resolve(&target).await?;
+        self.stop_if_stale(&key, &cluster);
+        if self.running_port(&key).is_none() {
+            self.start(&project, cluster, &key).await?;
+        }
+        Ok(key)
+    }
+
+    /// The target's project, client and namespace, without opening anything.
+    async fn resolve(
+        &self,
+        target: &KubeTarget,
+    ) -> Result<(KubeProject, Arc<dyn Cluster>, Key), ErrorPage> {
         let world = self.supervisor.world();
         let project = world
             .kube_project(&target.project)
@@ -526,7 +624,7 @@ impl Inner {
             ));
         }
         let cluster = self.cluster(&project).await?;
-        let namespace = self.namespace(&world, &project, &*cluster, &target).await?;
+        let namespace = self.namespace(&world, &project, &*cluster, target).await?;
         let key = Key {
             project: project.name.clone(),
             namespace,
@@ -542,11 +640,7 @@ impl Inner {
                 ),
             ));
         }
-        self.stop_if_stale(&key, &cluster);
-        if self.running_port(&key).is_none() {
-            self.start(&project, cluster, &key).await?;
-        }
-        Ok(key)
+        Ok((project, cluster, key))
     }
 
     /// Stops the running forwards the address names.
@@ -836,6 +930,28 @@ impl Inner {
         cluster: Arc<dyn Cluster>,
         key: &Key,
     ) -> Result<Arc<Forward>, ErrorPage> {
+        let (port, target) = self.lookup_pod(project, &*cluster, key).await?;
+        Ok(Arc::new(Forward {
+            cluster,
+            namespace: key.namespace.clone(),
+            service: key.service.clone(),
+            port,
+            target: Mutex::new(target),
+            cancel: CancellationToken::new(),
+            reporter: Box::new(InstanceReporter {
+                inner: Arc::downgrade(self),
+                key: key.clone(),
+            }),
+        }))
+    }
+
+    /// The Service's port and a ready pod behind it.
+    async fn lookup_pod(
+        &self,
+        project: &KubeProject,
+        cluster: &dyn Cluster,
+        key: &Key,
+    ) -> Result<(PortInfo, PodTarget), ErrorPage> {
         let api = |err: ApiError| {
             self.project_failed(&project.name, &err);
             api_page(&err)
@@ -871,18 +987,7 @@ impl Inner {
             .await
             .map_err(api)?;
         let target = lookup::choose_pod(&port, &slices, None).map_err(lookup)?;
-        Ok(Arc::new(Forward {
-            cluster,
-            namespace: key.namespace.clone(),
-            service: key.service.clone(),
-            port,
-            target: Mutex::new(target),
-            cancel: CancellationToken::new(),
-            reporter: Box::new(InstanceReporter {
-                inner: Arc::downgrade(self),
-                key: key.clone(),
-            }),
-        }))
+        Ok((port, target))
     }
 
     /// Records why the instance couldn't start; a new reason is also an event.
@@ -985,13 +1090,13 @@ impl Inner {
                 .retain(|name, _| world.kube_project(name).is_some());
             state.instances.values().any(|i| i.forward.is_some())
         };
-        if running || !stopped.is_empty() {
-            self.changed();
-        }
         self.clusters
             .lock()
             .expect("kube clusters")
             .retain(|name, _| world.kube_project(name).is_some());
+        if running || !stopped.is_empty() {
+            self.changed();
+        }
         for (key, timeout) in stopped {
             self.supervisor.event(
                 EventKind::Stopped,
@@ -1055,6 +1160,126 @@ fn instance_status(
             pod: target.as_ref().map(|t| t.pod.clone()),
             port: target.map(|t| t.port),
         }),
+    }
+}
+
+/// Sends a Service's log lines on: the ones it has, then, following, new ones from
+/// its pod and then the next.
+struct PodLines {
+    cluster: Arc<dyn Cluster>,
+    key: Key,
+    port: PortInfo,
+    pod: String,
+    container: Option<String>,
+    search: Option<String>,
+    /// How many of the lines it has to send; all with `since`.
+    tail: Option<usize>,
+    tx: mpsc::Sender<LogLine>,
+}
+
+impl PodLines {
+    async fn run(mut self, initial: LogLines, follow: bool) {
+        let mut lines = Vec::new();
+        let mut initial = initial;
+        loop {
+            let next = tokio::select! {
+                _ = self.tx.closed() => return,
+                next = initial.next() => next,
+            };
+            let Some(line) = next else {
+                break;
+            };
+            lines.extend(self.line(&line));
+        }
+        let skip = self.tail.map_or(0, |tail| lines.len().saturating_sub(tail));
+        for line in lines.into_iter().skip(skip) {
+            if self.tx.send(line).await.is_err() {
+                return;
+            }
+        }
+        if !follow {
+            return;
+        }
+        let mut stream = self.open(Some(0), None).await;
+        loop {
+            if let Some(stream) = stream.take()
+                && !self.send_all(stream).await
+            {
+                return;
+            }
+            let ended = Instant::now();
+            while stream.is_none() {
+                tokio::select! {
+                    _ = self.tx.closed() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                }
+                let Ok(slices) = self
+                    .cluster
+                    .endpoint_slices(&self.key.namespace, &self.key.service)
+                    .await
+                else {
+                    continue;
+                };
+                let Ok(next) = lookup::choose_pod(&self.port, &slices, Some(&self.pod)) else {
+                    continue;
+                };
+                self.pod = next.pod;
+                let since = ended.elapsed().as_secs() as i64 + 1;
+                stream = self.open(None, Some(since)).await;
+            }
+        }
+    }
+
+    async fn open(&self, tail: Option<i64>, since_secs: Option<i64>) -> Option<LogLines> {
+        let options = LogOptions {
+            container: self.container.clone(),
+            follow: true,
+            tail,
+            since_secs,
+        };
+        self.cluster
+            .logs(&self.key.namespace, &self.pod, options)
+            .await
+            .ok()
+    }
+
+    /// Sends every line of the stream; `false` once the receiver is gone.
+    async fn send_all(&self, mut stream: LogLines) -> bool {
+        loop {
+            let next = tokio::select! {
+                _ = self.tx.closed() => return false,
+                next = stream.next() => next,
+            };
+            let Some(line) = next else {
+                return true;
+            };
+            if let Some(line) = self.line(&line)
+                && self.tx.send(line).await.is_err()
+            {
+                return false;
+            }
+        }
+    }
+
+    /// The log line for a line of output, unless the search leaves it out.
+    fn line(&self, line: &str) -> Option<LogLine> {
+        let (at_ms, text) = lookup::split_timestamp(line);
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| !text.contains(s.as_str()))
+        {
+            return None;
+        }
+        Some(LogLine {
+            project: self.key.project.clone(),
+            app: self.key.service.clone(),
+            stack: self.key.namespace.clone(),
+            process: self.container.clone().unwrap_or_default(),
+            at_ms: at_ms.unwrap_or_else(crate::clock::now_ms),
+            text: text.to_string(),
+            marker: false,
+        })
     }
 }
 

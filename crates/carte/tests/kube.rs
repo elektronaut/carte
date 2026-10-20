@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use carte::kube::{
-    ApiError, Cluster, Connector, EndpointInfo, Kube, PodStream, PortInfo, ServiceInfo, SliceInfo,
+    ApiError, Cluster, Connector, ContainerInfo, EndpointInfo, Kube, LogLines, LogOptions,
+    PodStream, PortInfo, ServiceInfo, SliceInfo,
 };
 use carte::paths::Paths;
 use carte::process::Spawner;
@@ -14,6 +15,7 @@ use carte::supervisor::{self, Handle, Options};
 use carte_api::{Event, EventKind};
 use carte_core::discovery;
 use carte_core::kube::{KubeProject, KubeTarget};
+use futures_util::StreamExt;
 use http::StatusCode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -33,6 +35,10 @@ struct FakeState {
     forbid_namespaces: bool,
     /// Namespaces whose Services can't be listed.
     forbidden: HashSet<String>,
+    containers: HashMap<String, Vec<ContainerInfo>>,
+    /// Each pod's log lines.
+    logs: HashMap<String, Vec<String>>,
+    log_requests: Vec<LogOptions>,
 }
 
 #[derive(Clone, Default)]
@@ -192,6 +198,57 @@ impl Cluster for FakeCluster {
                 state.services.iter().map(|s| s.namespace.clone()).collect();
             namespaces.dedup();
             Ok(namespaces)
+        })
+    }
+
+    fn containers<'a>(
+        &'a self,
+        _namespace: &'a str,
+        pod: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ContainerInfo>, ApiError>> {
+        Box::pin(async move {
+            Ok(self
+                .state()
+                .containers
+                .get(pod)
+                .cloned()
+                .unwrap_or_default())
+        })
+    }
+
+    fn logs<'a>(
+        &'a self,
+        _namespace: &'a str,
+        pod: &'a str,
+        options: LogOptions,
+    ) -> BoxFuture<'a, Result<LogLines, ApiError>> {
+        Box::pin(async move {
+            let lines = {
+                let mut state = self.state();
+                state.log_requests.push(options.clone());
+                let lines = state.logs.get(pod).cloned().unwrap_or_default();
+                let skip = options
+                    .tail
+                    .map_or(0, |tail| lines.len().saturating_sub(tail as usize));
+                lines.into_iter().skip(skip).collect::<Vec<_>>()
+            };
+            let lines = futures_util::stream::iter(lines);
+            if !options.follow {
+                return Ok(lines.boxed());
+            }
+            let fake = self.clone();
+            let pod = pod.to_string();
+            let until_gone = futures_util::stream::unfold((), move |_| {
+                let fake = fake.clone();
+                let pod = pod.clone();
+                async move {
+                    while !fake.state().gone.contains(&pod) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    None::<(String, ())>
+                }
+            });
+            Ok(lines.chain(until_gone).boxed())
         })
     }
 
@@ -459,81 +516,6 @@ async fn idle_forwards_stop() {
         "the next request opens it again"
     );
 }
-#[tokio::test]
-async fn a_connection_left_open_between_requests_doesnt_keep_a_forward() {
-    let setup = Setup::new(PROJECT);
-    setup
-        .cluster
-        .add_service("monitoring", "grafana", &["grafana-a"])
-        .await;
-    let port = upstream(
-        setup
-            .kube
-            .route(target("grafana", Some("monitoring")))
-            .await,
-    )
-    .unwrap();
-    let pooled = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    let mut stopped = false;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if setup
-            .events()
-            .await
-            .iter()
-            .any(|e| e.kind == EventKind::Stopped)
-        {
-            stopped = true;
-            break;
-        }
-    }
-    assert!(stopped, "{:?}", setup.events().await);
-    drop(pooled);
-}
-
-#[tokio::test]
-async fn a_changed_project_restarts_its_forwards() {
-    let setup = Setup::new(PROJECT);
-    setup
-        .cluster
-        .add_service("monitoring", "grafana", &["grafana-a"])
-        .await;
-    let first = setup
-        .kube
-        .route(target("grafana", Some("monitoring")))
-        .await;
-    let first = upstream(first).unwrap();
-    std::fs::write(
-        setup.paths.project_file("prod"),
-        "kube = { context = \"other\" }\nidle_timeout = \"1s\"\n",
-    )
-    .unwrap();
-    setup
-        .handle
-        .reload(discovery::load_world(&setup.paths.config_dir));
-    let mut second = first;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        second = upstream(
-            setup
-                .kube
-                .route(target("grafana", Some("monitoring")))
-                .await,
-        )
-        .unwrap();
-        if second != first {
-            break;
-        }
-    }
-    assert_ne!(second, first, "a new forward for the new context");
-    assert!(
-        setup
-            .events()
-            .await
-            .iter()
-            .any(|e| e.kind == EventKind::Stopped && e.message == "the project changed")
-    );
-}
 
 fn address(service: Option<&str>, namespace: Option<&str>) -> carte_core::kube::KubeAddress {
     carte_core::kube::KubeAddress {
@@ -650,51 +632,6 @@ async fn stop_all_includes_forwards() {
     drop(route);
     assert_eq!(setup.kube.stop_all(true), vec!["grafana.prod@monitoring"]);
 }
-#[tokio::test]
-async fn failed_lookups_are_forgotten_after_the_idle_timeout() {
-    let setup = Setup::new(PROJECT);
-    let (status, _) =
-        upstream(setup.kube.route(target("nope", Some("monitoring"))).await).unwrap_err();
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    let listed = |setup: &Setup| {
-        setup.kube.status(&setup.handle.world())[0]
-            .stacks
-            .iter()
-            .flat_map(|s| &s.instances)
-            .any(|i| i.app == "nope")
-    };
-    assert!(listed(&setup));
-    let mut gone = false;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if !listed(&setup) {
-            gone = true;
-            break;
-        }
-    }
-    assert!(gone);
-}
-
-#[tokio::test]
-async fn namespaces_outside_the_project_are_refused() {
-    let setup = Setup::new(&format!("{PROJECT}namespaces = [\"logging\"]\n"));
-    setup
-        .cluster
-        .add_service("monitoring", "grafana", &["grafana-a"])
-        .await;
-    let response = setup
-        .kube
-        .control(
-            address(Some("grafana"), Some("monitoring")),
-            carte_api::Action::Up,
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        response.failures[0].title,
-        "Not one of the project's namespaces"
-    );
-}
 
 #[tokio::test]
 async fn lists_services_across_namespaces_as_far_as_allowed() {
@@ -759,4 +696,291 @@ async fn lists_only_the_configured_namespaces() {
     let services = setup.kube.services("prod").await.unwrap();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, "vlogs");
+}
+
+fn logs_request(follow: bool) -> carte_api::LogsRequest {
+    carte_api::LogsRequest {
+        target: carte_api::Address::default(),
+        follow,
+        tail: Some(50),
+        ..Default::default()
+    }
+}
+
+fn container(name: &str, ports: &[u16]) -> ContainerInfo {
+    ContainerInfo {
+        name: name.into(),
+        ports: ports.to_vec(),
+    }
+}
+
+#[tokio::test]
+async fn shows_the_logs_of_the_container_serving_the_port() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    {
+        let mut state = setup.cluster.state();
+        state.containers.insert(
+            "grafana-a".into(),
+            vec![
+                container("istio-proxy", &[15090]),
+                container("grafana", &[3000]),
+            ],
+        );
+        state.logs.insert(
+            "grafana-a".into(),
+            vec![
+                "2026-10-20T08:15:29Z GET /api/health 200".into(),
+                "2026-10-20T08:15:30.5Z GET /api/search 200".into(),
+                "2026-10-20T08:15:30.7Z panic: no database".into(),
+                "2026-10-20T08:15:31Z GET /api/search 500".into(),
+            ],
+        );
+    }
+    let mut request = logs_request(false);
+    request.search = Some("GET".into());
+    request.tail = Some(2);
+    let mut lines = setup
+        .kube
+        .logs(address(Some("grafana"), None), &request)
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    while let Some(line) = lines.recv().await {
+        got.push(line);
+    }
+    let texts: Vec<&str> = got.iter().map(|l| l.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["GET /api/search 200", "GET /api/search 500"],
+        "the last 2 matches, not the matches in the last 2 lines"
+    );
+    assert_eq!(got[0].process, "grafana");
+    assert_eq!(got[0].stack, "monitoring");
+    assert_eq!(got[0].at_ms, 1_792_484_130_500);
+    let requests = setup.cluster.state().log_requests.clone();
+    assert_eq!(requests[0].container.as_deref(), Some("grafana"));
+    assert_eq!(
+        requests[0].tail,
+        Some(10_000),
+        "searching reads further back"
+    );
+
+    assert!(
+        setup
+            .events()
+            .await
+            .iter()
+            .all(|e| e.kind != EventKind::Ready),
+        "reading logs opens no forward"
+    );
+}
+
+#[tokio::test]
+async fn following_logs_continue_on_the_next_pod() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a", "grafana-b"])
+        .await;
+    {
+        let mut state = setup.cluster.state();
+        state.logs.insert("grafana-a".into(), vec!["from a".into()]);
+        state.logs.insert("grafana-b".into(), vec!["from b".into()]);
+    }
+    let mut lines = setup
+        .kube
+        .logs(
+            address(Some("grafana"), Some("monitoring")),
+            &logs_request(true),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lines.recv().await.unwrap().text, "from a");
+    {
+        let mut state = setup.cluster.state();
+        state.gone.insert("grafana-a".into());
+        let slices = state
+            .slices
+            .get_mut(&("monitoring".into(), "grafana".into()))
+            .unwrap();
+        slices[0].endpoints.remove(0);
+    }
+    let next = tokio::time::timeout(Duration::from_secs(5), lines.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.text, "from b", "and not from a again");
+    let follows: Vec<_> = setup
+        .cluster
+        .state()
+        .log_requests
+        .iter()
+        .filter(|o| o.follow)
+        .cloned()
+        .collect();
+    assert_eq!(follows[0].tail, Some(0), "following adds only new lines");
+    assert!(follows[1].since_secs.is_some());
+}
+
+#[tokio::test]
+async fn following_stops_when_the_reader_goes() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let lines = setup
+        .kube
+        .logs(
+            address(Some("grafana"), Some("monitoring")),
+            &logs_request(true),
+        )
+        .await
+        .unwrap();
+    drop(lines);
+    setup.cluster.state().gone.insert("grafana-a".into());
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let requests = setup.cluster.state().log_requests.len();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        setup.cluster.state().log_requests.len(),
+        requests,
+        "no more requests once nobody reads"
+    );
+}
+
+#[tokio::test]
+async fn logs_need_a_service() {
+    let setup = Setup::new(PROJECT);
+    let err = setup
+        .kube
+        .logs(address(None, None), &logs_request(false))
+        .await
+        .unwrap_err();
+    assert!(err.contains("name a Service"), "{err}");
+}
+
+#[tokio::test]
+async fn a_connection_left_open_between_requests_doesnt_keep_a_forward() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let port = upstream(
+        setup
+            .kube
+            .route(target("grafana", Some("monitoring")))
+            .await,
+    )
+    .unwrap();
+    let pooled = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut stopped = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if setup
+            .events()
+            .await
+            .iter()
+            .any(|e| e.kind == EventKind::Stopped)
+        {
+            stopped = true;
+            break;
+        }
+    }
+    assert!(stopped, "{:?}", setup.events().await);
+    drop(pooled);
+}
+
+#[tokio::test]
+async fn a_changed_project_restarts_its_forwards() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let first = setup
+        .kube
+        .route(target("grafana", Some("monitoring")))
+        .await;
+    let first = upstream(first).unwrap();
+    std::fs::write(
+        setup.paths.project_file("prod"),
+        "kube = { context = \"other\" }\nidle_timeout = \"1s\"\n",
+    )
+    .unwrap();
+    setup
+        .handle
+        .reload(discovery::load_world(&setup.paths.config_dir));
+    let mut second = first;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        second = upstream(
+            setup
+                .kube
+                .route(target("grafana", Some("monitoring")))
+                .await,
+        )
+        .unwrap();
+        if second != first {
+            break;
+        }
+    }
+    assert_ne!(second, first, "a new forward for the new context");
+    assert!(
+        setup
+            .events()
+            .await
+            .iter()
+            .any(|e| e.kind == EventKind::Stopped && e.message == "the project changed")
+    );
+}
+#[tokio::test]
+async fn failed_lookups_are_forgotten_after_the_idle_timeout() {
+    let setup = Setup::new(PROJECT);
+    let (status, _) =
+        upstream(setup.kube.route(target("nope", Some("monitoring"))).await).unwrap_err();
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let listed = |setup: &Setup| {
+        setup.kube.status(&setup.handle.world())[0]
+            .stacks
+            .iter()
+            .flat_map(|s| &s.instances)
+            .any(|i| i.app == "nope")
+    };
+    assert!(listed(&setup));
+    let mut gone = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !listed(&setup) {
+            gone = true;
+            break;
+        }
+    }
+    assert!(gone);
+}
+
+#[tokio::test]
+async fn namespaces_outside_the_project_are_refused() {
+    let setup = Setup::new(&format!("{PROJECT}namespaces = [\"logging\"]\n"));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let response = setup
+        .kube
+        .control(
+            address(Some("grafana"), Some("monitoring")),
+            carte_api::Action::Up,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.failures[0].title,
+        "Not one of the project's namespaces"
+    );
 }
