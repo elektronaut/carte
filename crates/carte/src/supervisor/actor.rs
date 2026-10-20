@@ -1449,6 +1449,24 @@ impl Actor {
         self.dirty = true;
     }
 
+    /// Forgets that carte gave up on an instance, so the next request starts it.
+    fn forget_give_up(&mut self, key: &InstanceKey) {
+        let Some(inst) = self.instances.get_mut(key) else {
+            return;
+        };
+        if inst.gave_up.take().is_none() {
+            return;
+        }
+        for proc in &mut inst.procs {
+            proc.gave_up = false;
+        }
+        if inst.state == InstanceState::Crashed && !inst.any_running() {
+            inst.state = InstanceState::Stopped;
+            self.event(EventKind::Stopped, "by hand", vec![events::instance(key)]);
+        }
+        self.dirty = true;
+    }
+
     /// Stops an instance. `why` names the reason for its `stopped` or, with a restart
     /// pending, `restarted` event; `None` records nothing.
     fn stop(&mut self, key: &InstanceKey, why: Option<&str>) {
@@ -2180,13 +2198,25 @@ impl Actor {
                     .map(|_| None)
                     .map_err(|f| f.detail),
             },
-            Action::Down => match process {
-                Some(name) => self.stop_process(key, name, by_hand).map(|_| None),
-                None => {
-                    self.stop(key, by_hand);
-                    Ok(None)
+            Action::Down => {
+                let http = process.is_none_or(|name| {
+                    self.instances.get(key).is_some_and(|inst| {
+                        inst.procs
+                            .iter()
+                            .any(|p| p.spec.http && p.spec.name == name)
+                    })
+                });
+                if http {
+                    self.forget_give_up(key);
                 }
-            },
+                match process {
+                    Some(name) => self.stop_process(key, name, by_hand).map(|_| None),
+                    None => {
+                        self.stop(key, by_hand);
+                        Ok(None)
+                    }
+                }
+            }
             Action::Restart => match process {
                 Some(name) if active => {
                     let inst = self.instances.get_mut(key).expect("active instance");
@@ -2617,7 +2647,9 @@ impl Actor {
                 .values()
                 .filter(|i| {
                     i.key.project == *project
-                        && (i.is_active() || i.any_running())
+                        && (i.is_active()
+                            || i.any_running()
+                            || (action == Action::Down && i.gave_up.is_some()))
                         && stack.as_ref().is_none_or(|s| *s == i.key.stack)
                 })
                 .map(|i| i.key.clone())

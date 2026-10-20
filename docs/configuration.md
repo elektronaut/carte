@@ -561,7 +561,8 @@ it has `restart = "never"`:
   Requests that arrive meanwhile wait until it's ready again. When
   carte gives up on it, the instance stops, and requests get the error
   page with its log instead of starting it, until you start it by hand
-  (`carte up` or `carte restart`).
+  (`carte up` or `carte restart`). Stopping it with `carte down` clears
+  that too, so the next request starts it as usual.
 - A process with `scope = "checkout"` is restarted by the instance
   running it. Once it has exited, while it waits to restart or stays
   down, the other instances sharing the checkout don't start their own
