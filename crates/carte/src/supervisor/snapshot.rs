@@ -14,7 +14,7 @@ use carte_core::model::{
 use carte_core::naming;
 use carte_core::warming::Warming;
 
-use super::actor::{Instance, Overrides, Proc, effective_policy};
+use super::actor::{Instance, Lifecycle, Overrides, Proc, effective_policy};
 use super::share::{self, Shares};
 
 pub(super) struct Input<'a> {
@@ -40,7 +40,7 @@ pub(super) fn build(input: &Input) -> Snapshot {
     } = *input;
     let active: Vec<InstanceKey> = instances
         .values()
-        .filter(|i| matches!(i.state, InstanceState::Starting | InstanceState::Ready))
+        .filter(|i| matches!(i.state, Lifecycle::Starting | Lifecycle::Ready))
         .map(|i| i.key.clone())
         .collect();
     let running = active.len() as u32;
@@ -213,14 +213,13 @@ fn stack_status(
                 holds.push(Hold::Dependent { app });
             }
             let timeout = project.idle_timeout.unwrap_or(world.machine.idle_timeout);
-            let idle_in_secs =
-                (inst.state == InstanceState::Ready && holds.is_empty()).then(|| {
-                    (inst.last_activity + timeout)
-                        .saturating_duration_since(now)
-                        .as_secs()
-                });
+            let idle_in_secs = (inst.state == Lifecycle::Ready && holds.is_empty()).then(|| {
+                (inst.last_activity + timeout)
+                    .saturating_duration_since(now)
+                    .as_secs()
+            });
             let checkout = inst.checkout.clone().unwrap_or(checkout);
-            let processes = if inst.state == InstanceState::Stopped && !inst.any_running() {
+            let processes = if inst.state == Lifecycle::Stopped && !inst.any_running() {
                 stopped_processes(input, state, app, &stack, &key, &inst.procs)
             } else {
                 inst.procs
@@ -239,7 +238,7 @@ fn stack_status(
                             gave_up: p.gave_up,
                             restart_in_secs: p
                                 .restart_at
-                                .filter(|_| inst.state == InstanceState::Ready)
+                                .filter(|_| inst.state == Lifecycle::Ready)
                                 .map(|at| {
                                     at.saturating_duration_since(now).as_secs_f64().ceil() as u64
                                 }),
@@ -256,11 +255,7 @@ fn stack_status(
                 checkout_path: checkout.path().clone(),
                 url,
                 public_url,
-                state: if inst.state == InstanceState::Ready && !inst.serving() {
-                    InstanceState::Restarting
-                } else {
-                    inst.state
-                },
+                state: instance_state(inst),
                 processes,
                 holds,
                 idle_in_secs,
@@ -269,7 +264,7 @@ fn stack_status(
                 last_error: inst.last_error.clone(),
                 env_changed: inst.env_changed,
                 last_event: latest.get(&key).cloned(),
-                boot: (inst.state == InstanceState::Starting).then(|| BootProgress {
+                boot: (inst.state == Lifecycle::Starting).then(|| BootProgress {
                     elapsed_ms: now.saturating_duration_since(inst.started_at).as_millis() as u64,
                     waiting_for: waiting_for(&inst.procs),
                 }),
@@ -361,5 +356,17 @@ fn api_policy(policy: Policy) -> ApiPolicy {
         Policy::Pinned => ApiPolicy::Pinned,
         Policy::Auto => ApiPolicy::Auto,
         Policy::Disabled => ApiPolicy::Disabled,
+    }
+}
+
+/// A ready instance whose HTTP process isn't serving shows as restarting.
+fn instance_state(inst: &Instance) -> InstanceState {
+    match inst.state {
+        Lifecycle::Stopped => InstanceState::Stopped,
+        Lifecycle::Starting => InstanceState::Starting,
+        Lifecycle::Ready if !inst.serving() => InstanceState::Restarting,
+        Lifecycle::Ready => InstanceState::Ready,
+        Lifecycle::Stopping => InstanceState::Stopping,
+        Lifecycle::Crashed => InstanceState::Crashed,
     }
 }
