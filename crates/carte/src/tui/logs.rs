@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 
 use carte_api::LogLine;
+use unicode_width::UnicodeWidthStr;
 
 /// What a line is prefixed with, which depends on how wide the merged view is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,16 @@ impl Prefix {
     }
 }
 
+/// The lines a pane of some height shows.
+#[derive(Debug)]
+pub struct Window<'a> {
+    pub lines: Vec<(u64, &'a LogLine)>,
+    /// Rows of the oldest line that don't fit above the pane.
+    pub skip: usize,
+    /// Columns before each line's text, which its wrapped rows start at too.
+    pub indent: usize,
+}
+
 #[derive(Debug)]
 pub struct Logs {
     pub generation: u64,
@@ -49,6 +60,9 @@ pub struct Logs {
     pub ended: Option<String>,
     /// Rows the pane showed last time it was drawn.
     pub height: usize,
+    /// Columns the pane showed last time it was drawn, which long lines wrap at; 0
+    /// before the first draw.
+    pub width: usize,
     /// Keep the view still while lines arrive, even when following.
     pub hold: bool,
 }
@@ -69,6 +83,7 @@ impl Default for Logs {
             scroll: 0,
             ended: None,
             height: 0,
+            width: 0,
             hold: false,
         }
     }
@@ -172,18 +187,51 @@ impl Logs {
         true
     }
 
-    /// The lines that fit in `height` rows at the current scroll position, with their
-    /// sequence numbers.
-    pub fn window_numbered(&self, height: usize) -> Vec<(u64, &LogLine)> {
+    /// The lines that fill `height` rows at the current scroll position, long lines
+    /// wrapped at the pane's width, ending with the newest one shown.
+    pub fn window_rows(&self, height: usize) -> Window<'_> {
         let visible = self.numbered();
         let scroll = self.scroll.min(visible.len().saturating_sub(height));
         let end = visible.len() - scroll;
-        visible[end.saturating_sub(height)..end].to_vec()
+        let candidates = &visible[end.saturating_sub(height)..end];
+        let indent = self.indent(candidates);
+        let mut rows = 0;
+        let mut start = end;
+        while start > end.saturating_sub(height) && rows < height {
+            start -= 1;
+            rows += self.rows(visible[start].1, indent);
+        }
+        Window {
+            lines: visible[start..end].to_vec(),
+            skip: rows.saturating_sub(height),
+            indent,
+        }
+    }
+
+    /// The columns before a line's text: its prefix label, padded to the widest in
+    /// the window, and a space.
+    fn indent(&self, lines: &[(u64, &LogLine)]) -> usize {
+        lines
+            .iter()
+            .filter_map(|(_, line)| self.prefix.label(line))
+            .map(|label| label.width() + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// How many rows a line takes in the pane, wrapped after `indent` columns.
+    pub fn rows(&self, line: &LogLine, indent: usize) -> usize {
+        if line.marker || self.width == 0 {
+            return 1;
+        }
+        let room = self.width.saturating_sub(indent).max(1);
+        line.text.width().div_ceil(room).max(1)
     }
 
     #[cfg(test)]
     pub fn window(&self, height: usize) -> Vec<&LogLine> {
-        self.window_numbered(height)
+        self.window_rows(height)
+            .lines
             .into_iter()
             .map(|(_, line)| line)
             .collect()
@@ -192,8 +240,16 @@ impl Logs {
     /// The sequence number of the line on a row of the pane, or of the last line when
     /// the row is below it.
     pub fn seq_at(&self, row: usize) -> Option<u64> {
-        let window = self.window_numbered(self.height);
-        window.get(row).or(window.last()).map(|(seq, _)| *seq)
+        let window = self.window_rows(self.height);
+        let mut row = row + window.skip;
+        for (seq, line) in &window.lines {
+            let rows = self.rows(line, window.indent);
+            if row < rows {
+                return Some(*seq);
+            }
+            row -= rows;
+        }
+        window.lines.last().map(|(seq, _)| *seq)
     }
 
     /// The visible lines between two sequence numbers, inclusive, as plain text with
@@ -258,6 +314,44 @@ mod tests {
 
     fn texts(lines: Vec<&LogLine>) -> Vec<&str> {
         lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    #[test]
+    fn long_lines_wrap_and_fill_the_window_from_the_bottom() {
+        let mut logs = Logs::default();
+        let generation = logs.restart(None, Prefix::Process);
+        logs.width = 14;
+        for text in ["one", "a line of twenty-one!", "two", "three"] {
+            logs.push(generation, line(text));
+        }
+        // "web " takes 4 columns, leaving 10 per row: the long line takes 3 rows.
+        let window = logs.window_rows(5);
+        assert_eq!(window.indent, 4);
+        assert_eq!(
+            texts(window.lines.iter().map(|(_, l)| *l).collect()),
+            ["a line of twenty-one!", "two", "three"]
+        );
+        assert_eq!(window.skip, 0);
+        let window = logs.window_rows(4);
+        assert_eq!(
+            window.skip, 1,
+            "the long line's first row is above the pane"
+        );
+        assert_eq!(logs.rows(&line("a line of twenty-one!"), 4), 3);
+        assert_eq!(logs.rows(&line(""), 4), 1);
+
+        logs.height = 4;
+        let seq = |text: &str| {
+            logs.numbered()
+                .into_iter()
+                .find(|(_, l)| l.text == text)
+                .map(|(seq, _)| seq)
+        };
+        assert_eq!(logs.seq_at(0), seq("a line of twenty-one!"));
+        assert_eq!(logs.seq_at(1), seq("a line of twenty-one!"));
+        assert_eq!(logs.seq_at(2), seq("two"));
+        assert_eq!(logs.seq_at(3), seq("three"));
+        assert_eq!(logs.seq_at(9), seq("three"));
     }
 
     #[test]

@@ -52,6 +52,7 @@ tower-service = "0.3"
 lru = "0.18"
 percent-encoding = "2.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+unicode-width = "0.2"
 x509-parser = "0.18"
 
 [workspace.lints.rust]
