@@ -983,7 +983,9 @@ again on the next request.
   or `Referer` is a page outside carte's TLDs and loopback, whose
   `Origin` is hidden (`null`), or that the browser marks cross-site.
   Opening a page yourself always works, including by a link from
-  another site, as does an SSO login that comes back to the Service.
+  another site, but another site can't show a Service in a frame. An
+  SSO login that returns to the Service by POST (SAML, or OIDC with
+  `response_mode=form_post`) is refused, since it's a cross-site POST.
 
 Starts, pod changes, failures and idle stops show in `carte events`.
 

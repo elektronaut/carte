@@ -90,6 +90,7 @@ pub(crate) async fn handle(
     };
     let fetch_site = header("sec-fetch-site");
     let fetch_mode = header("sec-fetch-mode");
+    let fetch_dest = header("sec-fetch-dest");
     let route_request = RouteRequest {
         host: &host,
         tls: inbound.tls,
@@ -101,6 +102,7 @@ pub(crate) async fn handle(
         opaque_origin: header("origin").as_deref() == Some("null"),
         fetch_site: fetch_site.as_deref(),
         fetch_mode: fetch_mode.as_deref(),
+        fetch_dest: fetch_dest.as_deref(),
     };
     let route = shared.router.route(route_request).await;
     Ok(match route {

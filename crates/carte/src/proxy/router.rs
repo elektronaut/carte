@@ -34,9 +34,11 @@ pub struct RouteRequest<'a> {
     pub referrer: Option<&'a str>,
     /// `Origin: null`: a page that hides where it is, like a sandboxed frame.
     pub opaque_origin: bool,
-    /// `Sec-Fetch-Site` and `Sec-Fetch-Mode`, lowercased, from browsers that send them.
+    /// `Sec-Fetch-Site`, `Sec-Fetch-Mode` and `Sec-Fetch-Dest`, lowercased, from
+    /// browsers that send them.
     pub fetch_site: Option<&'a str>,
     pub fetch_mode: Option<&'a str>,
+    pub fetch_dest: Option<&'a str>,
 }
 
 pub enum Route {
