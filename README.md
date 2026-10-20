@@ -18,7 +18,7 @@ carte starts the app, then stops it once you're done with it.
 - **Sharing** apps on the public internet through Cloudflare Tunnel or
   ngrok.
 - **Kubernetes Services** at hostnames like
-  `https://grafana.monitoring.prod.localhost`, port-forwarded on demand.
+  `https://grafana.monitoring.prod.localhost`, forwarded when you visit.
 
 carte runs on macOS and Linux. `carte setup` is macOS-only for now, so on
 Linux you run `carte daemon` as a service and trust its certificate
@@ -190,18 +190,21 @@ Sharing is always explicit, and only shared apps are reachable. See
 
 ## Kubernetes
 
-A project file with a `kube` table makes a cluster's Services reachable,
-port-forwarded when a request comes in, with nothing to start by hand:
+carte can also reach the Services of a Kubernetes cluster, the way
+`kubectl port-forward` does, but with nothing to run first. Give each
+cluster a project file that names its kubeconfig context:
 
 ```toml
 # ~/.config/carte/projects/prod.toml
 kube = { context = "prod" }
 ```
 
-`https://grafana.monitoring.prod.localhost` then reaches the Service
-`grafana` in namespace `monitoring`, and `https://grafana.prod.localhost`
-works while only one namespace has a `grafana`. `carte import kube`
-writes these files for the contexts you pick. See
+The Service `grafana` in the `monitoring` namespace is then at
+`https://grafana.monitoring.prod.localhost`. You can leave out the
+namespace, as in `https://grafana.prod.localhost`, as long as only one
+namespace has a Service of that name.
+
+`carte import kube` writes a project file for each context you pick. See
 [Kube projects](docs/configuration.md#kube-projects).
 
 ## Configuration
