@@ -48,7 +48,7 @@ With `--control`:
 | `start` | Starts an app, stack or process and waits until it's ready, as `carte up` |
 | `restart` | Restarts and waits, as `carte restart` |
 | `stop` | Stops, as `carte down` |
-| `type` | Types `text` into a process's terminal, then enter unless `enter` is false, and returns what it printed once its output has been quiet for `quiet_ms` (500), or after `wait` (`"5s"`) at the latest, keeping the last 64 KB. For answering a debugger prompt, as `carte attach` does. `process` picks the process; it defaults to the HTTP one. The quiet time starts at the echo of what was typed, so raise `quiet_ms` for commands that take a while to answer |
+| `type` | Types `text` into a process's terminal, then enter unless `enter` is false, and returns what it printed once its output has been quiet for `quiet` (`"500ms"`), or after `wait` (`"5s"`) at the latest, keeping the last 64 KB. For answering a debugger prompt, as `carte attach` does. `process` picks the process; it defaults to the HTTP one. The quiet time starts at the echo of what was typed, so raise `quiet` for commands that take a while to answer |
 
 A start or restart that fails returns an error with the last log lines.
 

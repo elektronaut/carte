@@ -99,8 +99,20 @@ impl FrameReader {
         self.buf.extend_from_slice(data);
     }
 
-    /// The next whole frame, if one has arrived.
+    /// The next whole frame, if one has arrived. Frames with a tag this version
+    /// doesn't know are skipped.
     pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
+        loop {
+            match self.frame()? {
+                Some(Some(frame)) => return Ok(Some(frame)),
+                Some(None) => {}
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// The next whole frame, `Some(None)` for one with an unknown tag.
+    fn frame(&mut self) -> Result<Option<Option<Frame>>, FrameError> {
         let Some(header) = self.buf.get(..5) else {
             return Ok(None);
         };
@@ -125,9 +137,9 @@ impl FrameReader {
             }),
             3 => return Err(FrameError(format!("a resize of {len} bytes"))),
             4 => Frame::Ended(String::from_utf8_lossy(&payload).into_owned()),
-            _ => return Err(FrameError(format!("unknown tag {tag}"))),
+            _ => return Ok(Some(None)),
         };
-        Ok(Some(frame))
+        Ok(Some(Some(frame)))
     }
 }
 
@@ -166,10 +178,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_and_oversized_frames() {
+    fn skips_unknown_frames_and_rejects_oversized_ones() {
         let mut reader = FrameReader::default();
-        reader.feed(&[9, 0, 0, 0, 0]);
-        assert!(reader.next_frame().is_err());
+        reader.feed(&[9, 0, 0, 0, 2, 1, 2]);
+        reader.feed(&Frame::Input(b"x".to_vec()).encode());
+        assert_eq!(
+            reader.next_frame().unwrap(),
+            Some(Frame::Input(b"x".to_vec())),
+            "a newer frame is skipped"
+        );
         let mut reader = FrameReader::default();
         reader.feed(&[1, 0xff, 0, 0, 0]);
         assert!(reader.next_frame().is_err());

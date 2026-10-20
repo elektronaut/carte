@@ -3,33 +3,35 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
-#[error("invalid duration {0:?}: use a number with s, m, h or d, like \"15m\"")]
+#[error("invalid duration {0:?}: use a number with ms, s, m, h or d, like \"15m\"")]
 pub struct DurationError(pub String);
 
-/// Parses durations like `"30s"`, `"15m"`, `"2h"`, `"1d"` or `"1h30m"`.
+/// Parses durations like `"500ms"`, `"30s"`, `"15m"`, `"2h"`, `"1d"` or `"1h30m"`.
 pub fn parse(input: &str) -> Result<Duration, DurationError> {
     let err = || DurationError(input.to_string());
-    let mut total = 0u64;
+    let mut millis = 0u64;
     let mut digits = String::new();
-    for c in input.trim().chars() {
+    let mut chars = input.trim().chars().peekable();
+    while let Some(c) = chars.next() {
         if c.is_ascii_digit() {
             digits.push(c);
             continue;
         }
         let n: u64 = digits.parse().map_err(|_| err())?;
         digits.clear();
-        total += n * match c {
-            's' => 1,
-            'm' => 60,
-            'h' => 3600,
-            'd' => 86400,
+        millis += n * match c {
+            'm' if chars.next_if_eq(&'s').is_some() => 1,
+            's' => 1000,
+            'm' => 60_000,
+            'h' => 3_600_000,
+            'd' => 86_400_000,
             _ => return Err(err()),
         };
     }
-    if !digits.is_empty() || total == 0 && input.trim().is_empty() {
+    if !digits.is_empty() || millis == 0 && input.trim().is_empty() {
         return Err(err());
     }
-    Ok(Duration::from_secs(total))
+    Ok(Duration::from_millis(millis))
 }
 
 /// Formats a duration the way `parse` reads it, using the largest units.
@@ -58,6 +60,8 @@ mod tests {
         assert_eq!(parse("15m"), Ok(Duration::from_secs(900)));
         assert_eq!(parse("2h"), Ok(Duration::from_secs(7200)));
         assert_eq!(parse("1h30m"), Ok(Duration::from_secs(5400)));
+        assert_eq!(parse("500ms"), Ok(Duration::from_millis(500)));
+        assert_eq!(parse("1m30s250ms"), Ok(Duration::from_millis(90_250)));
     }
 
     #[test]

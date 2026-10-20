@@ -136,7 +136,7 @@ pub fn run(paths: &Paths, args: AttachArgs) -> anyhow::Result<ExitCode> {
         }
         let raw = tty.then(RawMode::enable).transpose()?;
         let timing = Timing {
-            quiet: Duration::from_millis(args.quiet),
+            quiet: args.quiet,
             wait: args.wait,
         };
         let end = session(&mut connection, &keys, tty, timing, &mut signals).await;
