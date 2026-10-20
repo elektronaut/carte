@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use carte_core::kube::KubeProject;
 use futures_util::AsyncBufReadExt;
@@ -12,7 +14,7 @@ use kube::api::{ListParams, LogParams};
 use kube::config::{ExecInteractiveMode, KubeConfigOptions, Kubeconfig};
 use kube::{Api, Client, Config};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::lookup::{ContainerInfo, EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
 use crate::proxy::BoxFuture;
@@ -23,6 +25,27 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin> PodIo for T {}
 
 /// A byte stream to a pod's port.
 pub type PodStream = Box<dyn PodIo>;
+
+/// What the pod side of a port-forward reported, like nothing listening on the port.
+/// Reads and writes of a [`PodStream`] fail with it inside an [`std::io::Error`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodError(pub String);
+
+impl std::fmt::Display for PodError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PodError {}
+
+impl PodError {
+    /// The pod side's message, when that's what the error is.
+    pub fn of(err: &std::io::Error) -> Option<&str> {
+        let pod = err.get_ref()?.downcast_ref::<PodError>()?;
+        Some(&pod.0)
+    }
+}
 
 /// What carte asks of a cluster; tests substitute a fake.
 pub trait Cluster: Send + Sync + 'static {
@@ -68,7 +91,8 @@ pub trait Cluster: Send + Sync + 'static {
         options: LogOptions,
     ) -> BoxFuture<'a, Result<LogLines, ApiError>>;
 
-    /// Opens a port-forward stream to `port` of the pod.
+    /// Opens a port-forward stream to `port` of the pod. When the pod side fails, the
+    /// stream fails with a [`PodError`].
     fn connect<'a>(
         &'a self,
         namespace: &'a str,
@@ -623,21 +647,81 @@ impl Cluster for KubeCluster {
             let stream = forwarder
                 .take_stream(port)
                 .ok_or_else(|| ApiError::Other("the port-forward has no stream".into()))?;
-            if let Some(error) = forwarder.take_error(port) {
-                let pod = pod.to_string();
-                tokio::spawn(async move {
-                    if let Some(message) = error.await {
-                        tracing::debug!(pod, "port-forward error: {message}");
-                    }
-                });
-            }
+            let error = forwarder
+                .take_error(port)
+                .map(|error| Box::pin(error) as BoxFuture<'static, Option<String>>);
             tokio::spawn(async move {
                 if let Err(err) = forwarder.join().await {
                     tracing::debug!("port-forward ended: {err}");
                 }
             });
-            Ok(Box::new(stream) as PodStream)
+            Ok(Box::new(ForwardStream {
+                stream,
+                error,
+                failed: None,
+            }) as PodStream)
         })
+    }
+}
+
+/// A port-forward stream that fails with the message of its error channel once it
+/// has no more data to read.
+struct ForwardStream<S> {
+    stream: S,
+    error: Option<BoxFuture<'static, Option<String>>>,
+    failed: Option<String>,
+}
+
+impl<S> ForwardStream<S> {
+    /// The pod side's error, once it reported one.
+    fn failed(&mut self, cx: &mut Context<'_>) -> Option<std::io::Error> {
+        if let Some(error) = self.error.as_mut()
+            && let Poll::Ready(message) = error.as_mut().poll(cx)
+        {
+            self.error = None;
+            self.failed = message;
+        }
+        let message = self.failed.clone()?;
+        Some(std::io::Error::other(PodError(message)))
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for ForwardStream<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let filled = buf.filled().len();
+        match Pin::new(&mut self.stream).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) if buf.filled().len() > filled => Poll::Ready(Ok(())),
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            read => match self.failed(cx) {
+                Some(err) => Poll::Ready(Err(err)),
+                None => read,
+            },
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ForwardStream<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        if let Some(err) = self.failed(cx) {
+            return Poll::Ready(Err(err));
+        }
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 
@@ -705,6 +789,92 @@ users:
             "the kubeconfig's own env comes last and wins"
         );
         assert!(vars.iter().any(|(k, _)| k == "PATH"));
+    }
+
+    #[tokio::test]
+    async fn forward_streams_fail_with_the_error_channels_message() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (stream, mut pod) = tokio::io::duplex(64);
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let mut forward = ForwardStream {
+            stream,
+            error: Some(Box::pin(async move { rx.await.ok() })),
+            failed: None,
+        };
+        pod.write_all(b"hi").await.unwrap();
+        let mut buf = [0u8; 2];
+        forward.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hi");
+        tx.send("connection refused".into()).unwrap();
+        drop(pod);
+        let err = forward.read(&mut buf).await.unwrap_err();
+        assert_eq!(PodError::of(&err), Some("connection refused"));
+
+        let (stream, pod) = tokio::io::duplex(64);
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let mut forward = ForwardStream {
+            stream,
+            error: Some(Box::pin(async move { rx.await.ok() })),
+            failed: None,
+        };
+        drop((pod, tx));
+        assert_eq!(
+            forward.read(&mut buf).await.unwrap(),
+            0,
+            "no error, just the end"
+        );
+    }
+
+    #[tokio::test]
+    async fn forward_streams_deliver_data_before_the_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (stream, mut pod) = tokio::io::duplex(64);
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let mut forward = ForwardStream {
+            stream,
+            error: Some(Box::pin(async move { rx.await.ok() })),
+            failed: None,
+        };
+        pod.write_all(b"tail").await.unwrap();
+        tx.send("connection reset".into()).unwrap();
+        let mut buf = [0u8; 4];
+        forward.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"tail", "the unread tail comes first");
+        let err = forward.read(&mut buf).await.unwrap_err();
+        assert_eq!(
+            PodError::of(&err),
+            Some("connection reset"),
+            "without a close"
+        );
+        drop(pod);
+    }
+
+    #[tokio::test]
+    async fn a_waiting_read_wakes_up_for_the_error() {
+        use tokio::io::AsyncReadExt;
+
+        let (stream, pod) = tokio::io::duplex(64);
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let mut forward = ForwardStream {
+            stream,
+            error: Some(Box::pin(async move { rx.await.ok() })),
+            failed: None,
+        };
+        let read = tokio::spawn(async move {
+            let mut buf = [0u8; 4];
+            forward.read(&mut buf).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        tx.send("connection refused".into()).unwrap();
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), read)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(PodError::of(&err), Some("connection refused"));
+        drop(pod);
     }
 
     #[test]

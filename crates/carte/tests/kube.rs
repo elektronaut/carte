@@ -2,23 +2,26 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use carte::kube::{
     ApiError, Cluster, Connector, ContainerInfo, EndpointInfo, Kube, Kubeconfig, LogLines,
-    LogOptions, PodStream, PortInfo, Readable, ServiceInfo, SliceInfo, read_each_namespace,
+    LogOptions, PodError, PodStream, PortInfo, Readable, ServiceInfo, SliceInfo,
+    read_each_namespace,
 };
 use carte::paths::Paths;
 use carte::process::Spawner;
-use carte::proxy::{BoxFuture, Dialer, Route};
+use carte::proxy::{BoxFuture, Dialer, Route, UpstreamError};
 use carte::supervisor::{self, Handle, Options};
 use carte_api::{Event, EventKind};
 use carte_core::discovery;
 use carte_core::kube::{KubeProject, KubeTarget};
 use futures_util::StreamExt;
 use http::StatusCode;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 
 #[derive(Default)]
@@ -51,6 +54,45 @@ struct FakeState {
     clients: usize,
     /// Which client opened each port-forward stream.
     connected_by: Vec<usize>,
+    /// What the pod side of every port-forward stream reports.
+    pod_error: Option<String>,
+}
+
+/// A port-forward stream whose pod side failed.
+struct FailedStream(String);
+
+impl FailedStream {
+    fn error(&self) -> std::io::Error {
+        std::io::Error::other(PodError(self.0.clone()))
+    }
+}
+
+impl AsyncRead for FailedStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Err(self.error()))
+    }
+}
+
+impl AsyncWrite for FailedStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Ready(Err(self.error()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -330,6 +372,9 @@ impl Cluster for FakeCluster {
                 if state.gone.contains(pod) {
                     return Err(ApiError::NotFound(format!("pods \"{pod}\" not found")));
                 }
+                if let Some(message) = &state.pod_error {
+                    return Ok(Box::new(FailedStream(message.clone())) as PodStream);
+                }
                 state.pods[pod]
             };
             let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
@@ -575,6 +620,95 @@ async fn errors_become_pages_and_events() {
             && e.message == "login failed: Run `aws sso login`, then reload."),
         "{events:?}"
     );
+}
+
+#[tokio::test]
+async fn the_pods_port_forward_error_is_reported() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let message = "error forwarding port 3000 to pod grafana-a, uid : failed to connect to localhost:3000: connection refused";
+    let failures = |setup: &Setup| {
+        let setup = setup.handle.clone();
+        async move {
+            setup
+                .events(None, 100)
+                .await
+                .unwrap()
+                .0
+                .iter()
+                .filter(|e| e.kind == EventKind::Failed && e.message == message)
+                .count()
+        }
+    };
+    let last_error = |setup: &Setup| {
+        let status = setup.kube.status(&setup.handle.world());
+        status[0].stacks[0].instances[0].last_error.clone()
+    };
+    setup.cluster.state().pod_error = Some(message.into());
+    let dialer = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
+    assert_eq!(fails(&dialer).await, "", "the request fails");
+    assert_eq!(last_error(&setup).as_deref(), Some(message));
+    assert_eq!(failures(&setup).await, 1);
+    let page = dialer.failed(&UpstreamError::Request(
+        "connection closed before message completed".into(),
+    ));
+    assert_eq!(page.title, "grafana didn't answer");
+    assert_eq!(page.detail, message);
+
+    setup.cluster.state().pod_error = None;
+    let mut open = dialer.dial().await.unwrap();
+    let mut idle = dialer.dial().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        last_error(&setup).as_deref(),
+        Some(message),
+        "a connection the pod sent nothing on yet doesn't clear it"
+    );
+    idle.shutdown().await.unwrap();
+    drop(idle);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        last_error(&setup).as_deref(),
+        Some(message),
+        "nor does one that ends without an answer"
+    );
+    assert_eq!(echo(&mut open, "ping").await, "ping");
+    assert_eq!(
+        last_error(&setup),
+        None,
+        "the pod's first bytes clear it, with the connection still open"
+    );
+
+    setup.cluster.state().pod_error = Some(message.into());
+    assert_eq!(fails(&dialer).await, "");
+    assert_eq!(failures(&setup).await, 2);
+    setup.cluster.state().pod_error = None;
+    let quiet = dialer.dial().await.unwrap();
+    drop(quiet);
+    setup.cluster.state().pod_error = Some(message.into());
+    assert_eq!(fails(&dialer).await, "");
+    assert_eq!(
+        failures(&setup).await,
+        2,
+        "a connection without an answer between failures adds no event"
+    );
+    assert_eq!(
+        echo(&mut open, "pong").await,
+        "pong",
+        "the open one goes on"
+    );
+}
+
+/// Sends a request on a new connection and reads what comes back until it ends.
+async fn fails(dialer: &Dialer) -> String {
+    let mut stream = dialer.dial().await.unwrap();
+    stream.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+    let mut response = Vec::new();
+    let _ = stream.read_to_end(&mut response).await;
+    String::from_utf8_lossy(&response).into_owned()
 }
 
 #[tokio::test]

@@ -1015,6 +1015,9 @@ opens again on the next request.
   `response_mode=form_post`) is refused, since it's a cross-site POST.
 
 Starts, pod changes, failures and idle stops show in `carte events`.
+When the pod side of a forward fails, as when nothing listens on the
+port, the error page, `carte status`, `carte ls`, the terminal UI and
+`carte events` show what the cluster said, until the pod answers again.
 
 `carte logs grafana.prod` shows the logs of the pod the forward uses,
 which is the pod every one of your requests reaches, or of a ready pod

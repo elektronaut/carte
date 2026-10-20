@@ -25,7 +25,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 pub use cluster::{
-    ApiError, Cluster, KubeCluster, LogLines, LogOptions, PodStream, Readable, read_each_namespace,
+    ApiError, Cluster, KubeCluster, LogLines, LogOptions, PodError, PodStream, Readable,
+    read_each_namespace,
 };
 use forward::{Forward, Reporter};
 pub use kube::config::Kubeconfig;
@@ -961,7 +962,7 @@ impl Inner {
             port,
             target: Mutex::new(target),
             cancel: CancellationToken::new(),
-            reporter: Box::new(InstanceReporter {
+            reporter: Arc::new(InstanceReporter {
                 inner: Arc::downgrade(self),
                 key: key.clone(),
             }),
