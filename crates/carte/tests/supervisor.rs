@@ -2124,6 +2124,10 @@ async fn requests_wait_while_the_web_process_restarts() {
         process(s, "acme-web", "web").restart_in_secs.is_some()
     })
     .await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Restarting
+    );
     let mut request = {
         let handle = handle.clone();
         tokio::spawn(async move { handle.request(key("acme-web", Stack::Main), None).await })
@@ -2135,6 +2139,10 @@ async fn requests_wait_while_the_web_process_restarts() {
         "the request didn't wait"
     );
     assert_eq!(request.await.unwrap().unwrap(), upstream);
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Ready
+    );
     assert!(http_get(upstream.port, "/").contains("fixture"));
     handle.shutdown().await;
 }

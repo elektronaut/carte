@@ -313,8 +313,21 @@ pub enum InstanceState {
     Stopped,
     Starting,
     Ready,
+    /// Running, but its HTTP process is waiting to restart after a crash or to pass
+    /// its readiness check again; requests wait for it.
+    Restarting,
     Stopping,
     Crashed,
+}
+
+impl InstanceState {
+    /// Started and not stopping: ready, or on its way there.
+    pub fn is_running(self) -> bool {
+        matches!(
+            self,
+            InstanceState::Starting | InstanceState::Ready | InstanceState::Restarting
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

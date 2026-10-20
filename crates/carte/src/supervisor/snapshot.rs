@@ -256,7 +256,11 @@ fn stack_status(
                 checkout_path: checkout.path().clone(),
                 url,
                 public_url,
-                state: inst.state,
+                state: if inst.state == InstanceState::Ready && !inst.serving() {
+                    InstanceState::Restarting
+                } else {
+                    inst.state
+                },
                 processes,
                 holds,
                 idle_in_secs,
