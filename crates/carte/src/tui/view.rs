@@ -605,7 +605,7 @@ fn instance_details(
         lines.push(Line::from(notes.join(" · ")).dark_gray());
     }
     if let Some(error) = &instance.last_error
-        && status.state == State::Crashed
+        && (status.state == State::Crashed || status.kube)
     {
         lines.push(Line::from(error.clone()).red());
     }
@@ -1978,6 +1978,16 @@ mod tests {
             "{screen}"
         );
         assert!(!screen.contains("checkout"), "{screen}");
+
+        let mut snapshot = kube_sample();
+        snapshot.projects[0].stacks[1].instances[0].last_error =
+            Some("error forwarding port 3000: connection refused".into());
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let screen = draw(&mut app, 110, 30);
+        assert!(
+            screen.contains("error forwarding port 3000: connection refused"),
+            "a ready Service shows its last error: {screen}"
+        );
     }
 
     #[test]

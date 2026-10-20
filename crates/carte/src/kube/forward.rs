@@ -2,16 +2,18 @@
 //! port-forward stream to the pod, so nothing long-lived breaks when the laptop sleeps
 //! or a pod is replaced.
 
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
 use carte_api::EventKind;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
-use tokio::io::DuplexStream;
+use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 use tokio_util::sync::CancellationToken;
 
-use super::cluster::{ApiError, Cluster, PodStream};
+use super::cluster::{ApiError, Cluster, PodError, PodStream};
 use super::lookup::{self, PodTarget, PortInfo};
 
 /// Reports what a forward does, to the event log and the instance's status.
@@ -30,7 +32,7 @@ pub struct Forward {
     pub port: PortInfo,
     pub target: Mutex<PodTarget>,
     pub cancel: CancellationToken,
-    pub reporter: Box<dyn Reporter>,
+    pub reporter: Arc<dyn Reporter>,
 }
 
 impl Forward {
@@ -58,7 +60,7 @@ impl Forward {
             }
             opened = self.open() => opened,
         };
-        let mut pod = match opened {
+        let pod = match opened {
             Ok(pod) => pod,
             Err(err) => {
                 let summary = err.summary();
@@ -66,13 +68,21 @@ impl Forward {
                 return Err(std::io::Error::other(summary));
             }
         };
-        self.reporter.error(None);
         let (local, mut remote) = tokio::io::duplex(64 * 1024);
         let cancel = self.cancel.clone();
+        let reporter = self.reporter.clone();
         tokio::spawn(async move {
+            let mut pod = FirstBytes {
+                stream: pod,
+                reporter: Some(reporter.clone()),
+            };
             tokio::select! {
                 _ = cancel.cancelled() => {}
-                _ = tokio::io::copy_bidirectional(&mut remote, &mut pod) => {}
+                copied = tokio::io::copy_bidirectional(&mut remote, &mut pod) => {
+                    if let Some(message) = copied.as_ref().err().and_then(PodError::of) {
+                        reporter.error(Some(message.to_string()));
+                    }
+                }
             }
         });
         Ok(local)
@@ -124,8 +134,52 @@ impl Forward {
         let tls = tls_connector()
             .connect(name, stream)
             .await
-            .map_err(|err| ApiError::Other(format!("TLS to pod {}: {err}", target.pod)))?;
+            .map_err(|err| match PodError::of(&err) {
+                Some(message) => ApiError::Other(message.to_string()),
+                None => ApiError::Other(format!("TLS to pod {}: {err}", target.pod)),
+            })?;
         Ok(Box::new(tls))
+    }
+}
+
+/// A pod stream that clears the forward's error once the pod sends something.
+struct FirstBytes {
+    stream: PodStream,
+    reporter: Option<Arc<dyn Reporter>>,
+}
+
+impl AsyncRead for FirstBytes {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let filled = buf.filled().len();
+        let read = Pin::new(&mut self.stream).poll_read(cx, buf);
+        if buf.filled().len() > filled
+            && let Some(reporter) = self.reporter.take()
+        {
+            reporter.error(None);
+        }
+        read
+    }
+}
+
+impl AsyncWrite for FirstBytes {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
     }
 }
 

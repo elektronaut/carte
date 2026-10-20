@@ -533,7 +533,7 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
         ));
     }
     if let Some(error) = &inst.last_error
-        && inst.state == InstanceState::Crashed
+        && (inst.state == InstanceState::Crashed || inst.kube.is_some())
     {
         parts.push(error.clone());
     }
@@ -966,6 +966,20 @@ mod tests {
             "nova-frontend@main didn't get ready: nova-frontend@main crashed: web exited with code 1\n  | line 6\n"
         ), "{failures}");
         assert!(failures.ends_with("  | line 25\n"), "{failures}");
+    }
+
+    #[test]
+    fn a_ready_kube_instance_notes_its_last_error() {
+        let mut snapshot = shared_sample();
+        let inst = &mut snapshot.projects[0].stacks[0].instances[0];
+        inst.public_url = None;
+        inst.last_error = Some("connection refused".into());
+        assert!(!notes(inst, None).contains("connection refused"));
+        inst.kube = Some(carte_api::KubeInstanceInfo {
+            pod: Some("grafana-a".into()),
+            port: Some(3000),
+        });
+        assert!(notes(inst, None).contains("connection refused"));
     }
 
     #[test]
