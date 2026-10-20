@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::dns::{DnsServer, Responder};
+use crate::kube::{Kube, KubeConnector};
 use crate::paths::Paths;
 use crate::process::Spawner;
 use crate::proxy::{ListenerOptions, Proxy};
@@ -88,9 +89,16 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         .with_context(|| format!("binding DNS on {}", loopback(machine.dns_port)))?;
     tokio::spawn(dns.run());
 
-    let proxy = Proxy::new(Arc::new(router::SupervisorRouter {
-        supervisor: supervisor.clone(),
-        hold,
+    let proxy = Proxy::new(Arc::new(router::DaemonRouter {
+        supervisor: router::SupervisorRouter {
+            supervisor: supervisor.clone(),
+            hold,
+        },
+        kube: Kube::new(
+            supervisor.clone(),
+            Arc::new(KubeConnector),
+            Duration::from_secs(15),
+        ),
     }));
     let bind_hint = |port| {
         format!(

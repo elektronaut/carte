@@ -14,6 +14,11 @@ from the worktree's folder, not its branch; a folder named like the repo
 takes the name of the folder above. Worktrees of different repos with the
 same name form one stack.
 
+A project file with a `kube` table is a kube project: its apps are a
+Kubernetes cluster's Services and its stacks are namespaces, so
+`https://grafana.monitoring.prod.localhost` port-forwards to the Service
+`grafana` in `monitoring`. Use those URLs instead of `kubectl port-forward`.
+
 ## Don't start servers yourself
 
 Never run `bin/dev`, `rails s`, `npm run dev`, `pnpm dev`, `foreman` or `overmind` for an

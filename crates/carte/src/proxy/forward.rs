@@ -81,6 +81,15 @@ pub(crate) async fn handle(
         .map(str::to_string);
     let method = request.method().clone();
     let referrer = referrer_host(request.headers());
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_ascii_lowercase)
+    };
+    let fetch_site = header("sec-fetch-site");
+    let fetch_mode = header("sec-fetch-mode");
     let route_request = RouteRequest {
         host: &host,
         tls: inbound.tls,
@@ -89,6 +98,9 @@ pub(crate) async fn handle(
         path: &path,
         authorization: authorization.as_deref(),
         referrer: referrer.as_deref(),
+        opaque_origin: header("origin").as_deref() == Some("null"),
+        fetch_site: fetch_site.as_deref(),
+        fetch_mode: fetch_mode.as_deref(),
     };
     let route = shared.router.route(route_request).await;
     Ok(match route {
