@@ -1636,7 +1636,7 @@ impl Actor {
         let detail = match inst.state {
             Lifecycle::Starting => Some("It was stopped while starting."),
             Lifecycle::Ready if !inst.restart_pending => {
-                Some("It was stopped while its web process restarted.")
+                Some("It was stopped while one of its processes restarted.")
             }
             _ => None,
         };
@@ -3305,7 +3305,6 @@ fn current_branch(path: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Checks a project's `requires`: `tcp://host:port` or `unix:///path`.
 /// Removes vite_ruby's record of a dev server on `port` from `dir/tmp`. Rails
 /// trusts the record while its port matches, and the dev server only removes it
 /// when it exits by itself, not when it's killed.
@@ -3329,6 +3328,7 @@ fn forget_vite_dev_server(dir: &Path, port: u16) {
     }
 }
 
+/// Checks a project's `requires`: `tcp://host:port` or `unix:///path`.
 fn check_requires(requires: &[String]) -> Result<(), String> {
     use std::net::ToSocketAddrs;
     let timeout = Duration::from_millis(500);
