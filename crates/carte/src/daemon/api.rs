@@ -12,7 +12,7 @@ use carte_api::{
     Address, ControlRequest, ErrorBody, EventsRequest, LogsRequest, MarkRequest, Problem,
     PruneRequest, ShareRequest, StopAllRequest, UnshareRequest, paths,
 };
-use carte_api::{Event, Snapshot};
+use carte_api::{Event, KubeServicesRequest, KubeServicesResponse, Snapshot};
 use carte_core::address;
 use carte_core::kube::{self, KubeAddress};
 use serde::Serialize;
@@ -48,6 +48,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::UNSHARE, post(unshare))
         .route(paths::PRUNE, get(prune_list).post(prune))
         .route(paths::HOLD, post(hold))
+        .route(paths::KUBE_SERVICES, post(kube_services))
         .with_state(api)
 }
 
@@ -370,6 +371,27 @@ async fn hold(State(api): State<Api>, Json(target): Json<Address>) -> Response {
         api.supervisor.release(key, id);
     });
     stream(rx)
+}
+
+async fn kube_services(
+    State(api): State<Api>,
+    Json(request): Json<KubeServicesRequest>,
+) -> Response {
+    if api
+        .supervisor
+        .world()
+        .kube_project(&request.project)
+        .is_none()
+    {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("no kube project {}", request.project),
+        );
+    }
+    match api.kube.services(&request.project).await {
+        Ok(services) => Json(KubeServicesResponse { services }).into_response(),
+        Err(message) => error(StatusCode::BAD_GATEWAY, message),
+    }
 }
 
 async fn prune_list(State(api): State<Api>) -> Response {

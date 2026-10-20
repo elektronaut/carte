@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use crate::paths::Paths;
 
 mod app;
+mod browse;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod input;

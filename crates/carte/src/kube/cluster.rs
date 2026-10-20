@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use carte_core::kube::KubeProject;
-use k8s_openapi::api::core::v1::{Pod, Service};
+use k8s_openapi::api::core::v1::{Namespace, Pod, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::api::ListParams;
 use kube::config::{ExecInteractiveMode, KubeConfigOptions, Kubeconfig};
@@ -41,6 +41,14 @@ pub trait Cluster: Send + Sync + 'static {
         namespace: &'a str,
         service: &'a str,
     ) -> BoxFuture<'a, Result<Vec<SliceInfo>, ApiError>>;
+
+    /// The Services of one namespace, or of every namespace when `None`.
+    fn services<'a>(
+        &'a self,
+        namespace: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>>;
+
+    fn namespaces(&self) -> BoxFuture<'_, Result<Vec<String>, ApiError>>;
 
     /// Opens a port-forward stream to `port` of the pod.
     fn connect<'a>(
@@ -391,6 +399,38 @@ impl Cluster for KubeCluster {
                 ListParams::default().labels(&format!("kubernetes.io/service-name={service}"));
             let list = api.list(&params).await.map_err(|err| self.error(err))?;
             Ok(list.items.into_iter().map(slice_info).collect())
+        })
+    }
+
+    fn services<'a>(
+        &'a self,
+        namespace: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>> {
+        Box::pin(async move {
+            let api: Api<Service> = match namespace {
+                Some(namespace) => Api::namespaced(self.client.clone(), namespace),
+                None => Api::all(self.client.clone()),
+            };
+            let list = api
+                .list(&ListParams::default())
+                .await
+                .map_err(|err| self.error(err))?;
+            Ok(list.items.into_iter().map(service_info).collect())
+        })
+    }
+
+    fn namespaces(&self) -> BoxFuture<'_, Result<Vec<String>, ApiError>> {
+        Box::pin(async move {
+            let api: Api<Namespace> = Api::all(self.client.clone());
+            let list = api
+                .list(&ListParams::default())
+                .await
+                .map_err(|err| self.error(err))?;
+            Ok(list
+                .items
+                .into_iter()
+                .filter_map(|n| n.metadata.name)
+                .collect())
         })
     }
 

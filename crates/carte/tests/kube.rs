@@ -27,6 +27,12 @@ struct FakeState {
     gone: HashSet<String>,
     auth_fails: bool,
     connects: usize,
+    /// Listing Services across namespaces is forbidden.
+    forbid_all: bool,
+    /// Listing namespaces is forbidden.
+    forbid_namespaces: bool,
+    /// Namespaces whose Services can't be listed.
+    forbidden: HashSet<String>,
 }
 
 #[derive(Clone, Default)]
@@ -151,6 +157,41 @@ impl Cluster for FakeCluster {
                 .get(&(namespace.to_string(), service.to_string()))
                 .cloned()
                 .unwrap_or_default())
+        })
+    }
+
+    fn services<'a>(
+        &'a self,
+        namespace: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>> {
+        Box::pin(async move {
+            self.check_auth()?;
+            let state = self.state();
+            if namespace.is_none() && state.forbid_all
+                || namespace.is_some_and(|n| state.forbidden.contains(n))
+            {
+                return Err(ApiError::Forbidden("services is forbidden".into()));
+            }
+            Ok(state
+                .services
+                .iter()
+                .filter(|s| namespace.is_none_or(|n| s.namespace == n))
+                .cloned()
+                .collect())
+        })
+    }
+
+    fn namespaces(&self) -> BoxFuture<'_, Result<Vec<String>, ApiError>> {
+        Box::pin(async move {
+            self.check_auth()?;
+            let state = self.state();
+            if state.forbid_namespaces {
+                return Err(ApiError::Forbidden("namespaces is forbidden".into()));
+            }
+            let mut namespaces: Vec<String> =
+                state.services.iter().map(|s| s.namespace.clone()).collect();
+            namespaces.dedup();
+            Ok(namespaces)
         })
     }
 
@@ -653,4 +694,69 @@ async fn namespaces_outside_the_project_are_refused() {
         response.failures[0].title,
         "Not one of the project's namespaces"
     );
+}
+
+#[tokio::test]
+async fn lists_services_across_namespaces_as_far_as_allowed() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    setup
+        .cluster
+        .add_service("logging", "vlogs", &["vlogs-a"])
+        .await;
+    let names = |services: Vec<carte_api::KubeServiceEntry>| -> Vec<String> {
+        services
+            .into_iter()
+            .map(|s| format!("{}/{}", s.namespace, s.name))
+            .collect()
+    };
+    let services = setup.kube.services("prod").await.unwrap();
+    assert_eq!(
+        services[0].url, "https://vlogs.logging.prod.localhost",
+        "by namespace, then name"
+    );
+    assert_eq!(names(services), vec!["logging/vlogs", "monitoring/grafana"]);
+
+    setup.cluster.state().forbid_all = true;
+    let services = setup.kube.services("prod").await.unwrap();
+    assert_eq!(names(services), vec!["logging/vlogs", "monitoring/grafana"]);
+
+    setup.cluster.state().forbid_namespaces = true;
+    let err = setup.kube.services("prod").await.unwrap_err();
+    assert!(err.contains("`namespaces`"), "{err}");
+}
+
+#[tokio::test]
+async fn a_listing_where_every_namespace_is_forbidden_fails() {
+    let setup = Setup::new(&format!(
+        "{PROJECT}namespaces = [\"logging\", \"monitoring\"]\n"
+    ));
+    setup
+        .cluster
+        .add_service("logging", "vlogs", &["vlogs-a"])
+        .await;
+    setup.cluster.state().forbidden.insert("monitoring".into());
+    assert_eq!(setup.kube.services("prod").await.unwrap().len(), 1);
+    setup.cluster.state().forbidden.insert("logging".into());
+    let err = setup.kube.services("prod").await.unwrap_err();
+    assert!(err.contains("forbidden"), "{err}");
+}
+
+#[tokio::test]
+async fn lists_only_the_configured_namespaces() {
+    let setup = Setup::new(&format!("{PROJECT}namespaces = [\"logging\"]\n"));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    setup
+        .cluster
+        .add_service("logging", "vlogs", &["vlogs-a"])
+        .await;
+    let services = setup.kube.services("prod").await.unwrap();
+    assert_eq!(services.len(), 1);
+    assert_eq!(services[0].name, "vlogs");
 }

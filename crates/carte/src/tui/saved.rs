@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::tree::{Fold, Node, NodeId, Show, path_to};
+use super::tree::{Fold, Node, NodeId, Show, node, path_to};
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Saved {
@@ -22,6 +22,11 @@ impl Saved {
             .expanded
             .iter()
             .filter(|(id, _)| roots.is_empty() || path_to(roots, id).is_some())
+            .filter(|(id, _)| {
+                let kube_project = matches!(id, NodeId::Project { .. })
+                    && path_to(roots, id).is_some_and(|path| node(roots, &path).status.kube);
+                !kube_project
+            })
             .map(|(id, expanded)| (id.clone(), *expanded))
             .collect();
         expanded.sort();
@@ -64,6 +69,23 @@ mod tests {
     use super::*;
     use crate::tui::fixtures::sample;
     use crate::tui::tree;
+
+    #[test]
+    fn kube_projects_open_afresh_each_session() {
+        let roots = tree::build(&crate::tui::fixtures::kube_sample());
+        let mut fold = Fold::default();
+        let project = NodeId::Project {
+            project: "prod".into(),
+        };
+        let namespace = NodeId::Stack {
+            project: "prod".into(),
+            stack: "logging".into(),
+        };
+        fold.expanded.insert(project, true);
+        fold.expanded.insert(namespace.clone(), false);
+        let saved = Saved::from_fold(&fold, &roots);
+        assert_eq!(saved.expanded, vec![(namespace, false)]);
+    }
 
     #[test]
     fn round_trips_and_forgets_nodes_that_are_gone() {

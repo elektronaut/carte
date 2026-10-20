@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carte_api::{
-    ControlResponse, EnvResponse, Event as DaemonEvent, LogLine, MarkRequest, ShareResponse,
-    Snapshot, StopAllRequest, paths,
+    ControlResponse, EnvResponse, Event as DaemonEvent, KubeServicesRequest, KubeServicesResponse,
+    LogLine, MarkRequest, ShareResponse, Snapshot, StopAllRequest, paths,
 };
 use http::Method;
 use ratatui::crossterm::event::{
@@ -159,6 +159,21 @@ impl Tasks {
                         .await
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Event::Env(result));
+                });
+            }
+            Command::FetchServices(project) => {
+                tokio::spawn(async move {
+                    let result = client
+                        .post::<_, KubeServicesResponse>(
+                            paths::KUBE_SERVICES,
+                            &KubeServicesRequest {
+                                project: project.clone(),
+                            },
+                        )
+                        .await
+                        .map(|response| response.services)
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Event::Services { project, result });
                 });
             }
             Command::MouseCapture(on) => set_mouse_capture(on),
