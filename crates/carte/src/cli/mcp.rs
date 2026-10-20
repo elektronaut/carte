@@ -145,7 +145,7 @@ impl Server {
                     json!({
                         "text": { "type": "string", "description": "What to type, like `continue` or `\\u0003` for ctrl-c." },
                         "enter": { "type": "boolean", "description": "Press enter after the text (default true)." },
-                        "process": { "type": "string", "description": "The process; defaults to the one serving HTTP." },
+                        "process": { "type": "string", "description": "The process; defaults to the one paused at a debugger prompt, else the one serving HTTP." },
                         "quiet": { "type": "string", "description": "Return once the output has been quiet this long, like `3s` (default `1s`); raise it for commands that take a while before they print." },
                         "wait": { "type": "string", "description": "Return after this long at the latest, like `30s` (default `5s`)." },
                     }),

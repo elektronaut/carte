@@ -228,7 +228,10 @@ fn stack_status(
                         let (policy, temporary) = effective_policy(overrides, &key, &p.spec);
                         ProcessStatus {
                             name: p.spec.name.clone(),
-                            state: p.state,
+                            state: match p.state {
+                                ProcessState::Running if p.paused.is_some() => ProcessState::Paused,
+                                state => state,
+                            },
                             policy: api_policy(policy),
                             temporary,
                             pid: p.pid,
@@ -365,6 +368,11 @@ fn api_policy(policy: Policy) -> ApiPolicy {
 fn instance_state(inst: &Instance) -> InstanceState {
     match inst.state {
         Lifecycle::Stopped => InstanceState::Stopped,
+        Lifecycle::Starting | Lifecycle::Ready
+            if inst.procs.iter().any(|p| p.spec.http && p.paused.is_some()) =>
+        {
+            InstanceState::Paused
+        }
         Lifecycle::Starting => InstanceState::Starting,
         Lifecycle::Ready if inst.restarting() => InstanceState::Restarting,
         Lifecycle::Ready => InstanceState::Ready,

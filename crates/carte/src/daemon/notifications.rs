@@ -1,4 +1,5 @@
-//! Desktop notifications when a process crashes or carte gives up on it.
+//! Desktop notifications when a process crashes, carte gives up on it, or it stops
+//! at a debugger prompt.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -85,6 +86,11 @@ impl Throttle {
                     });
                 }
             }
+            EventKind::Paused => notices.push(Notice {
+                subtitle: format!("{label} paused in {process}"),
+                message: format!("carte attach {label}"),
+                key,
+            }),
             EventKind::GaveUp => {
                 self.quiet.remove(&key);
                 notices.push(Notice {
@@ -457,6 +463,20 @@ mod tests {
         assert_eq!(notices[0].message, message);
         assert_eq!(throttle.next_due(), None);
         assert!(throttle.due(QUIET_MS * 2).is_empty());
+    }
+
+    #[test]
+    fn tells_about_every_pause_with_the_command_that_answers_it() {
+        let mut throttle = Throttle::default();
+        for _ in 0..2 {
+            let notices = throttle.event(
+                &event(EventKind::Paused, "feature-x", Some("web"), "at (rdbg)"),
+                0,
+            );
+            assert_eq!(subtitles(&notices), ["acme-web@feature-x paused in web"]);
+            assert_eq!(notices[0].message, "carte attach acme-web@feature-x");
+        }
+        assert_eq!(throttle.next_due(), None);
     }
 
     #[test]

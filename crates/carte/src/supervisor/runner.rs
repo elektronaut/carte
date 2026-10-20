@@ -82,6 +82,11 @@ impl ProcLog {
         self.lines.iter()
     }
 
+    /// The unfinished last line, without escape codes.
+    pub fn pending(&self) -> String {
+        self.stripper.pending()
+    }
+
     pub fn tail(&self, n: usize) -> Vec<String> {
         let skip = self.lines.len().saturating_sub(n);
         self.lines
@@ -119,6 +124,9 @@ pub enum Event {
         terminal: Option<Arc<Terminal>>,
     },
     SpawnFailed(String),
+    /// Its last line became a debugger prompt waiting for input (`Some`, the prompt),
+    /// or stopped being one.
+    Paused(Option<String>),
     /// `code` is `None` when a signal ended the process.
     Exited {
         code: Option<i32>,
@@ -159,21 +167,28 @@ pub async fn run(
         let label = label.clone();
         let log_tx = log_tx.clone();
         let terminal = terminal.clone();
+        let events = events.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 16 * 1024];
+            let mut paused = None;
             loop {
                 match output.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let lines = {
+                        let (lines, prompt) = {
                             let mut log = log.lock().unwrap();
                             let lines = log.push(&buf[..n]);
-                            if let Some(terminal) = &terminal {
+                            let prompt = terminal.as_ref().and_then(|terminal| {
                                 terminal.output(&buf[..n]);
-                            }
-                            lines
+                                carte_core::debugger::prompt(&log.pending()).map(str::to_string)
+                            });
+                            (lines, prompt)
                         };
                         broadcast_lines(&log_tx, &label, lines);
+                        if prompt.is_some() != paused.is_some() {
+                            paused = prompt.clone();
+                            let _ = events.send(Event::Paused(prompt));
+                        }
                     }
                 }
             }

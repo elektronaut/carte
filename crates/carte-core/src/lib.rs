@@ -5,6 +5,7 @@
 pub mod address;
 pub mod config;
 pub mod config_edit;
+pub mod debugger;
 pub mod detach;
 pub mod dirs;
 pub mod discovery;

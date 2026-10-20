@@ -77,6 +77,8 @@ pub enum State {
     Starting,
     /// An instance whose HTTP process is restarting.
     Restarting,
+    /// Waiting at a debugger prompt: a process, or an instance whose HTTP process is.
+    Paused,
     Stopping,
     Stopped,
     /// A process that exited cleanly on its own.
@@ -149,6 +151,7 @@ impl Status {
             State::Ready
                 | State::Starting
                 | State::Restarting
+                | State::Paused
                 | State::Stopping
                 | State::Crashed
                 | State::Unknown
@@ -368,6 +371,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
         InstanceState::Ready => State::Ready,
         InstanceState::Starting => State::Starting,
         InstanceState::Restarting => State::Restarting,
+        InstanceState::Paused => State::Paused,
         InstanceState::Stopping => State::Stopping,
         InstanceState::Crashed => State::Crashed,
         InstanceState::Stopped if disabled.is_some() => State::Disabled,
@@ -440,6 +444,7 @@ fn process_node(instance: &NodeId, process: &ProcessStatus) -> Node {
     let disabled = policy_source(process, Policy::Disabled);
     let state = match process.state {
         ProcessState::Running => State::Ready,
+        ProcessState::Paused => State::Paused,
         ProcessState::Starting => State::Starting,
         ProcessState::Stopping => State::Stopping,
         ProcessState::Exited { code: Some(0), .. } => State::Exited,
@@ -451,7 +456,10 @@ fn process_node(instance: &NodeId, process: &ProcessStatus) -> Node {
         ProcessState::Unknown => State::Unknown,
     };
     let status = Status {
-        running: usize::from(matches!(state, State::Ready | State::Starting)),
+        running: usize::from(matches!(
+            state,
+            State::Ready | State::Starting | State::Paused
+        )),
         total: 1,
         pinned: policy_source(process, Policy::Pinned),
         disabled,
@@ -495,6 +503,7 @@ fn aggregate(children: &[Node]) -> Status {
     let any = |state| children.iter().any(|c| c.status.state == state);
     let state = [
         State::Crashed,
+        State::Paused,
         State::Starting,
         State::Restarting,
         State::Ready,

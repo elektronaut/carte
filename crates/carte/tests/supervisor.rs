@@ -3623,3 +3623,75 @@ async fn input_a_process_doesnt_read_is_dropped_with_a_note() {
         .await
         .expect("the test finishes, with its processes stopped");
 }
+
+#[tokio::test]
+async fn a_worker_at_a_debugger_prompt_shows_as_paused_until_answered() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nworker: printf '(rdbg) '; while read line; do echo \"echo: $line\"; done\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the worker to pause", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Paused
+    })
+    .await;
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Ready,
+        "a paused worker doesn't hold requests"
+    );
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    let paused = events
+        .iter()
+        .find(|e| e.kind == carte_api::EventKind::Paused)
+        .expect("a paused event");
+    assert_eq!(paused.message, "at (rdbg)");
+    assert_eq!(paused.subject_label(), "acme-web/worker");
+
+    let (attached, terminal) = handle.attach(here("web"), None).await.unwrap();
+    assert_eq!(
+        attached.process, "worker",
+        "attach picks the paused process"
+    );
+    let mut client = terminal.join(None, false);
+    client.write(b"continue\n").await.unwrap();
+    read_until(&mut client, "echo: continue").await;
+    wait_for(&handle, "the worker to run on", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_web_process_at_a_debugger_prompt_pauses_the_instance() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: FIXTURE_PARTIAL='[1] pry(main)> ' FIXTURE_BOOT_DELAY_MS=2000 exec {fixture}\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(control("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the instance to pause", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Paused
+    })
+    .await;
+    assert_eq!(
+        process(&handle.snapshot(), "acme-web", "web").state,
+        ProcessState::Paused
+    );
+    wait_for(&handle, "ready once the prompt is gone", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Ready
+    })
+    .await;
+    assert_eq!(
+        process(&handle.snapshot(), "acme-web", "web").state,
+        ProcessState::Running
+    );
+    handle.shutdown().await;
+}
