@@ -68,6 +68,7 @@ pub(super) fn build(input: &Input) -> Snapshot {
                     })
                     .collect(),
                 stacks,
+                kube: None,
             }
         })
         .collect();
@@ -177,6 +178,7 @@ fn stack_status(
                     last_event: latest.get(&key).cloned(),
                     boot: None,
                     warms,
+                    kube: None,
                 });
             };
             let mut holds = Vec::new();
@@ -268,6 +270,7 @@ fn stack_status(
                     waiting_for: waiting_for(&inst.procs),
                 }),
                 warms,
+                kube: None,
             })
         })
         .collect();

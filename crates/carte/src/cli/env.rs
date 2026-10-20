@@ -131,6 +131,13 @@ pub(crate) fn render_for(
     if process.is_some() {
         address.process = process;
     }
+    if carte_core::kube::resolve_address(&world, target.project.as_deref(), &address).is_some() {
+        return Err(Failure::new(
+            crate::exit::Exit::NotFound,
+            "kube projects' Services have no env to run commands with",
+        )
+        .into());
+    }
     let cwd = std::env::current_dir()?.canonicalize()?;
     let resolved = match &target.project {
         Some(project) => address::resolve_in_project(&world, project, &address, Some(&cwd)),

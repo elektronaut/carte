@@ -33,6 +33,7 @@ pub fn project(name: &str, apps: &[&str], stacks: Vec<StackStatus>) -> ProjectSt
             })
             .collect(),
         stacks,
+        kube: None,
     }
 }
 
@@ -63,6 +64,7 @@ pub fn instance(app: &str, stack: &str, checkout: &str, state: InstanceState) ->
         last_event: None,
         boot: None,
         warms: Vec::new(),
+        kube: None,
     }
 }
 

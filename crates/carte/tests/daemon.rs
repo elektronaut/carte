@@ -1504,4 +1504,24 @@ fn kube_projects_answer_from_the_proxy() {
     stream.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 403"), "{response}");
     assert!(response.contains("evil.example"), "{response}");
+
+    let status = stdout(&daemon.run(&["status", "grafana.prod@monitoring"]));
+    assert!(status.starts_with("grafana@monitoring  failed"), "{status}");
+    assert!(status.contains("last error"), "{status}");
+    let ls = stdout(&daemon.run(&["ls"]));
+    assert!(ls.contains("grafana.prod@monitoring"), "{ls}");
+    assert!(ls.contains("cluster: prod:"), "{ls}");
+    let down = stdout(&daemon.run(&["down", "--project", "prod"]));
+    assert!(!down.contains("error"), "{down}");
+
+    for args in [
+        &["env", "--project", "prod", "grafana"][..],
+        &["share", "grafana.prod@monitoring"][..],
+        &["pin", "grafana.prod"][..],
+    ] {
+        let output = daemon.command(args).output().unwrap();
+        assert!(!output.status.success(), "carte {args:?} should fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("kube"), "carte {args:?}: {stderr}");
+    }
 }

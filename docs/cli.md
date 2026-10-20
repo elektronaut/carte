@@ -23,6 +23,22 @@ where every part is optional and inferred from the current directory:
 worktree in it and what they depend on. `up` refuses a whole project; name an app
 or a stack.
 
+In a [kube project](configuration.md#kube-projects), the app is a Service
+and the stack a namespace:
+
+| Address | Means |
+| --- | --- |
+| `grafana.prod` | Service `grafana` of kube project `prod`, in whichever namespace has it |
+| `grafana.prod@monitoring` | The Service in namespace `monitoring` |
+| `grafana.monitoring.prod` | The same, in hostname order |
+| `--project prod grafana@monitoring` | The same |
+| `prod@monitoring` | Every Service carte knows of in the namespace |
+| `prod` | The whole kube project, unless an app has that name |
+
+`up`, `down`, `restart`, `status`, `open` and `events` work on them; `up`
+needs a Service. `pin`, `disable`, `env`, `exec`, `logs` and `share`
+don't apply to Services.
+
 Apps can be named by their full or short name, or any unambiguous part
 of one. When an app has the same name as its project, the name means the
 app; `--project acme` addresses the project itself, and resolves an
@@ -46,7 +62,7 @@ address inside it when given one.
 | `carte open [address]` | Open in the browser |
 | `carte share [address] [--apps a,b] [--ttl 2h] [--auth] [--pin] [--replace]` | Put apps on the public internet |
 | `carte unshare [address]` | End a share |
-| `carte stop-all [--idle]` | Stop every instance, or the idle ones |
+| `carte stop-all [--idle]` | Stop every instance and kube forward, or the idle ones |
 | `carte prune [--dry-run] [-y]` | Remove leftover state folders, run directories and pidfiles; see below |
 | `carte project add\|ls\|edit\|rm` | Manage project files |
 | `carte setup [--dry-run\|--check\|--uninstall] [--tld tld] [--share domain]` | Set up the machine |
