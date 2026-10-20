@@ -140,6 +140,13 @@ row. Then it stops the app, and requests get the error page with its
 log instead of starting it. Fix the cause, then run `carte up` or
 `carte restart`; `carte down` also clears it.
 
+When the logs end in a debugger prompt (`(rdbg)`, `pry(…)>`, `irb(…)>`,
+`(byebug)`), the app stopped at a breakpoint and waits for input, and
+its requests hang until someone answers. `carte attach` connects the
+user's terminal to it. Typing into it runs code in the app, so only do
+it when the user asks: `printf 'continue\n' | carte attach` types a
+line and prints what the process answers.
+
 `carte env` hides values that come from the environment and env files,
 since they may be secrets. Don't reveal them without asking (see below).
 

@@ -1655,3 +1655,117 @@ fn kube_projects_answer_from_the_proxy() {
         assert!(stderr.contains("kube"), "carte {args:?}: {stderr}");
     }
 }
+
+#[test]
+fn attach_types_into_a_process_and_shows_its_output() {
+    let daemon = Daemon::start_with_project(&format!(
+        "[apps.acme-web.processes.echo]\ncommand = \"FIXTURE_ECHO_STDIN=1 exec {}\"\n",
+        fixture().display()
+    ));
+    let output = daemon.command(&["attach", "web", "echo"]).output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("acme-web@main isn't running"), "{stderr}");
+
+    daemon.run(&["up", "web"]);
+    eventually("echo to start", || {
+        snapshot(&daemon).projects[0].stacks[0].instances[0]
+            .processes
+            .iter()
+            .any(|p| p.name == "echo" && p.state == carte_api::ProcessState::Running)
+    });
+    let mut attach = daemon
+        .command(&["attach", "web/echo"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    attach.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+    let output = attach.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = stdout(&output);
+    assert!(text.contains("tty: true"), "the last screen first: {text}");
+    assert!(text.contains("echo: hello"), "{text}");
+
+    let replies = mcp_session(
+        &daemon,
+        &["--control"],
+        &[
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": "type",
+                          "arguments": {"process": "echo", "text": "from an agent"}}}),
+        ],
+    );
+    assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
+    let typed = replies[0]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(typed.starts_with("acme-web@main/echo:\n"), "{typed}");
+    assert!(typed.contains("echo: from an agent"), "{typed}");
+
+    let output = daemon
+        .command(&["attach", "web", "--detach-keys", "ctrl-"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn attach_on_a_terminal_detaches_with_the_keys() {
+    use std::sync::{Arc, Mutex};
+
+    let daemon = Daemon::start_with_project(&format!(
+        "[apps.acme-web.processes.echo]\ncommand = \"FIXTURE_ECHO_STDIN=1 exec {}\"\n",
+        fixture().display()
+    ));
+    daemon.run(&["up", "web"]);
+    eventually("echo to start", || {
+        snapshot(&daemon).projects[0].stacks[0].instances[0]
+            .processes
+            .iter()
+            .any(|p| p.name == "echo" && p.state == carte_api::ProcessState::Running)
+    });
+    let size = nix::pty::Winsize {
+        ws_row: 30,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pty = nix::pty::openpty(Some(&size), None).unwrap();
+    let mut attach = daemon
+        .command(&["attach", "web", "echo"])
+        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
+        .stderr(Stdio::from(pty.slave))
+        .spawn()
+        .unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut master = std::fs::File::from(pty.master);
+    let mut reader = master.try_clone().unwrap();
+    let reading = seen.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            reading.lock().unwrap().extend_from_slice(&buf[..n]);
+        }
+    });
+    let wait_for = |needle: &str| {
+        eventually(needle, || {
+            String::from_utf8_lossy(&seen.lock().unwrap()).contains(needle)
+        })
+    };
+    wait_for("Attached to acme-web@main/echo. ctrl-q d detaches.");
+    master.write_all(b"hi\r").unwrap();
+    wait_for("echo: hi");
+    master.write_all(b"\x11\x11\r").unwrap();
+    wait_for("echo: \u{11}");
+    master.write_all(b"\x11d").unwrap();
+    wait_for("Detached from acme-web@main/echo.");
+    assert!(attach.wait().unwrap().success());
+}

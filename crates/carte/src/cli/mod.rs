@@ -9,6 +9,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::exit::{self, Exit};
 use crate::paths::Paths;
 
+pub(crate) mod attach;
 mod control;
 mod env;
 mod exec;
@@ -71,6 +72,8 @@ pub enum Command {
     Env(EnvArgs),
     /// Run a command in the foreground with an app's env, like `bin/rails console`.
     Exec(ExecArgs),
+    /// Connect your terminal to a running process, to answer a debugger prompt.
+    Attach(AttachArgs),
     /// Manage projects.
     #[command(subcommand)]
     Project(ProjectCommand),
@@ -170,6 +173,17 @@ pub struct ExecArgs {
     /// The command and its arguments, after `--`.
     #[arg(last = true, required = true, value_name = "COMMAND")]
     pub command: Vec<String>,
+}
+
+#[derive(Args, Clone)]
+pub struct AttachArgs {
+    #[command(flatten)]
+    pub target: Target,
+    /// The process; defaults to the one serving HTTP.
+    pub process: Option<String>,
+    /// The keys that detach, like `ctrl-q d`; overrides `attach.detach_key`.
+    #[arg(long, value_name = "KEYS")]
+    pub detach_keys: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -432,6 +446,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Unshare(t) => control::unshare(&paths, t, cli.json),
         Command::Env(args) => env::run(&paths, args, cli.json),
         Command::Exec(args) => exec::run(&paths, args),
+        Command::Attach(args) => attach::run(&paths, args),
         Command::Project(cmd) => project::run(&paths, cmd, cli.json),
         Command::Prune(args) => prune::run(&paths, args, cli.json),
         Command::Setup(args) => setup::run(&paths, args),

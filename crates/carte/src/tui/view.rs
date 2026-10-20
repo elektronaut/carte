@@ -55,7 +55,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Confirm(confirm) => render_confirm(frame, main, app, confirm),
         Mode::Env => render_env(frame, main, app),
         Mode::Jump => render_jump(frame, main, app),
-        Mode::Normal | Mode::Filter => {}
+        Mode::Normal | Mode::Filter | Mode::Type => {}
     }
 }
 
@@ -898,6 +898,20 @@ fn highlight(text: &str, search: &str, current: bool) -> Vec<Span<'static>> {
 // Status, footer and popups
 
 fn status_line(app: &App) -> Line<'static> {
+    if let Some(typing) = &app.typing {
+        let keys = format!("  {} stops", app.detach_keys);
+        if !typing.attached {
+            return Line::from(vec![
+                Span::raw(format!(" attaching to {}…", typing.label)).yellow(),
+                Span::raw(keys).dark_gray(),
+            ]);
+        }
+        return Line::from(vec![
+            Span::raw(format!(" {} › ", typing.label)).yellow(),
+            Span::raw(format!("{}▏", typing.pending())),
+            Span::raw(keys).dark_gray(),
+        ]);
+    }
     if app.mode == Mode::Filter {
         let (what, filter) = match app.focus {
             Focus::Tree => ("filter tree", &app.fold.filter),
@@ -1678,6 +1692,39 @@ mod tests {
         let screen = draw(&mut app, 120, 12);
         assert!(screen.contains("restarting"), "{screen}");
         assert!(!screen.contains("restarting in"), "{screen}");
+    }
+
+    #[test]
+    fn typing_shows_the_prompt_and_the_way_out() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(sample())), now);
+        for code in [
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Char('t'),
+        ] {
+            press(&mut app, now, code);
+        }
+        let screen = draw(&mut app, 120, 12);
+        assert!(
+            screen.contains("attaching to nova-billing@main…  ctrl-q d stops"),
+            "{screen}"
+        );
+        app.update(
+            Event::Attached(Ok(carte_api::attach::Attached {
+                instance: "nova-billing@main".into(),
+                process: "web".into(),
+            })),
+            now,
+        );
+        app.update(Event::TypingOutput(b"\x1b[1m(rdbg)\x1b[0m n".to_vec()), now);
+        let screen = draw(&mut app, 120, 12);
+        assert!(
+            screen.contains("nova-billing@main/web › (rdbg) n▏  ctrl-q d stops"),
+            "{screen}"
+        );
     }
 
     #[test]

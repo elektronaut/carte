@@ -171,6 +171,7 @@ What's left:
 
 ```sh
 carte restart   # the app you're in, to apply changes now
+carte attach    # answer a debugger prompt; ctrl-q d detaches
 carte           # open the terminal UI
 ```
 

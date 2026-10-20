@@ -8,12 +8,14 @@ pub mod runner;
 pub mod share;
 mod snapshot;
 mod teardown;
+pub mod terminal;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use carte_api::attach::Attached;
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Event, EventKind, EventSubject,
     ExternalRequest, LogLine, LogsRequest, ShareRequest, ShareResponse, Snapshot, StartFailure,
@@ -123,6 +125,12 @@ pub(crate) enum Msg {
         reply: oneshot::Sender<Result<(InstanceKey, u64), String>>,
     },
     Release(InstanceKey, u64),
+    /// The pty of a running process; `process` when the address names none.
+    Attach {
+        target: Address,
+        process: Option<String>,
+        reply: oneshot::Sender<Result<(Attached, Arc<terminal::Terminal>), String>>,
+    },
     /// Answers with the instances the action applied to.
     Control {
         request: ControlRequest,
@@ -276,6 +284,23 @@ impl Handle {
 
     pub fn release(&self, key: InstanceKey, id: u64) {
         self.send(Msg::Release(key, id));
+    }
+
+    /// The pty of a running process to attach to: the one the address or `process`
+    /// names, else the HTTP process.
+    pub async fn attach(
+        &self,
+        target: Address,
+        process: Option<String>,
+    ) -> Result<(Attached, Arc<terminal::Terminal>), String> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::Attach {
+            target,
+            process,
+            reply,
+        });
+        rx.await
+            .unwrap_or_else(|_| Err("carte is shutting down".into()))
     }
 
     /// Applies a control action; with `wait`, an `up` or `restart` answers once every

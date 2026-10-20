@@ -21,6 +21,13 @@ pub struct MachineConfig {
     pub share: Option<ShareConfig>,
     /// Desktop notifications about crashes.
     pub notifications: bool,
+    pub attach: AttachConfig,
+}
+
+/// `[attach]`: how `carte attach` behaves.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AttachConfig {
+    pub detach_keys: crate::detach::DetachKeys,
 }
 
 impl MachineConfig {
@@ -48,6 +55,7 @@ impl Default for MachineConfig {
             limits: Limits::default(),
             share: None,
             notifications: true,
+            attach: AttachConfig::default(),
         }
     }
 }

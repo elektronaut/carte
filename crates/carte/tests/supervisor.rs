@@ -3370,3 +3370,126 @@ async fn a_path_process_that_never_becomes_ready_five_times_in_a_row_stays_down_
     );
     handle.shutdown().await;
 }
+
+fn here(address: &str) -> Address {
+    Address {
+        address: address.into(),
+        cwd: None,
+        project: None,
+    }
+}
+
+/// Reads an attached client's output until it contains `needle`.
+async fn read_until(client: &mut carte::supervisor::terminal::Client, needle: &str) -> String {
+    let mut seen = String::new();
+    let found = tokio::time::timeout(Duration::from_secs(10), async {
+        while !seen.contains(needle) {
+            match client.output.recv().await {
+                Ok(data) => seen.push_str(&String::from_utf8_lossy(&data)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(err) => panic!("{err}"),
+            }
+        }
+    })
+    .await;
+    assert!(found.is_ok(), "timed out waiting for {needle:?}: {seen:?}");
+    seen
+}
+
+const SHELL: &str = "shell: exec sh -c 'while read line; do echo \"got $line\"; stty size; done'\n";
+
+#[tokio::test]
+async fn attached_clients_share_a_process_and_its_size() {
+    use carte_api::attach::TermSize;
+    let setup = Setup::new();
+    setup.app("acme-web", SHELL);
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+
+    let (attached, terminal) = handle.attach(here("web"), None).await.unwrap();
+    assert_eq!(attached.instance, "acme-web@main");
+    assert_eq!(attached.process, "shell");
+    let mut one = terminal.join(
+        Some(TermSize {
+            cols: 100,
+            rows: 30,
+        }),
+        true,
+    );
+    one.write(b"a\n").await.unwrap();
+    read_until(&mut one, "30 100").await;
+
+    let mut two = terminal.join(Some(TermSize { cols: 80, rows: 40 }), true);
+    assert!(
+        String::from_utf8_lossy(&two.replay).contains("got a"),
+        "{:?}",
+        String::from_utf8_lossy(&two.replay)
+    );
+    two.write(b"b\n").await.unwrap();
+    read_until(&mut one, "30 80").await;
+    read_until(&mut two, "30 80").await;
+
+    drop(one);
+    two.write(b"c\n").await.unwrap();
+    read_until(&mut two, "40 80").await;
+
+    drop(two);
+    let mut watcher = terminal.join(None, false);
+    assert!(watcher.replay.is_empty());
+    watcher.write(b"d\n").await.unwrap();
+    read_until(&mut watcher, "50 200").await;
+
+    handle.control(control("web", Action::Down)).await.unwrap();
+    let ended = tokio::time::timeout(
+        Duration::from_secs(10),
+        watcher.ended.wait_for(Option::is_some),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .clone();
+    assert_eq!(ended.as_deref(), Some("shell was killed by signal 15"));
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn attaching_needs_a_running_process_with_a_pty() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nworker: exec {fixture}\nquiet: exec {fixture}\n",
+    );
+    setup.project("[apps.acme-web.processes.quiet]\npty = false\n");
+    let handle = setup.start();
+    let err = |result: Result<_, String>| result.err().unwrap();
+
+    let stopped = err(handle.attach(here("web"), None).await);
+    assert_eq!(stopped, "acme-web@main isn't running");
+
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "everything running", |s| {
+        status(s, "acme-web", "main")
+            .processes
+            .iter()
+            .all(|p| p.state == ProcessState::Running)
+    })
+    .await;
+    let (attached, _) = handle.attach(here("web"), None).await.unwrap();
+    assert_eq!(attached.process, "web");
+    let (attached, _) = handle.attach(here("web/worker"), None).await.unwrap();
+    assert_eq!(attached.process, "worker");
+    let (attached, _) = handle
+        .attach(here("web"), Some("worker".into()))
+        .await
+        .unwrap();
+    assert_eq!(attached.process, "worker");
+
+    let pipes = err(handle.attach(here("web"), Some("quiet".into())).await);
+    assert!(pipes.contains("pty = false"), "{pipes}");
+    let unknown = err(handle.attach(here("web"), Some("clock".into())).await);
+    assert_eq!(unknown, "acme-web@main has no process named clock");
+    let both = err(handle.attach(here("web/web"), Some("worker".into())).await);
+    assert!(both.contains("already names process web"), "{both}");
+    handle.shutdown().await;
+}

@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use bytes::{Bytes, BytesMut};
 use carte_api::ErrorBody;
-use http::{Method, Request, StatusCode};
+use http::{Method, Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
+use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -73,15 +74,48 @@ impl Client {
         Ok(())
     }
 
+    /// Posts `body` asking to switch the connection to `protocol`, and returns the
+    /// connection once the daemon agrees.
+    pub async fn upgrade<B: Serialize>(
+        &self,
+        path: &str,
+        protocol: &str,
+        body: &B,
+    ) -> anyhow::Result<TokioIo<Upgraded>> {
+        let stream = self.connect().await?;
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+        tokio::spawn(connection.with_upgrades());
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header("host", "carte")
+            .header("content-type", "application/json")
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, protocol)
+            .body(Full::new(Bytes::from(serde_json::to_vec(body)?)))?;
+        let response = sender.send_request(request).await?;
+        if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+            return decode::<serde_json::Value>(response).await.and_then(|_| {
+                bail!("the daemon didn't switch to {protocol}");
+            });
+        }
+        Ok(TokioIo::new(hyper::upgrade::on(response).await?))
+    }
+
+    async fn connect(&self) -> anyhow::Result<UnixStream> {
+        UnixStream::connect(&self.socket)
+            .await
+            .map_err(|err| unreachable(&self.socket, &err).into())
+    }
+
     async fn send(
         &self,
         method: Method,
         path: &str,
         body: Bytes,
     ) -> anyhow::Result<http::Response<Incoming>> {
-        let stream = UnixStream::connect(&self.socket)
-            .await
-            .map_err(|err| unreachable(&self.socket, &err))?;
+        let stream = self.connect().await?;
         let (mut sender, connection) =
             hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
         tokio::spawn(connection);

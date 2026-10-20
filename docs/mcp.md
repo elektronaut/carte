@@ -48,6 +48,7 @@ With `--control`:
 | `start` | Starts an app, stack or process and waits until it's ready, as `carte up` |
 | `restart` | Restarts and waits, as `carte restart` |
 | `stop` | Stops, as `carte down` |
+| `type` | Types `text` into a process's terminal, then enter unless `enter` is false, and returns what it printed until its output went quiet. For answering a debugger prompt, as `carte attach` does. `process` picks the process; it defaults to the HTTP one |
 
 A start or restart that fails returns an error with the last log lines.
 

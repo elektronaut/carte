@@ -7,13 +7,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carte_api::LogLine;
+use carte_api::attach::TermSize;
 use carte_core::model::Readiness;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use super::terminal::Terminal;
 use crate::logs::{LogBuffer, Stripper};
-use crate::process::{SpawnSpec, Spawner};
+use crate::process::{IoMode, SpawnSpec, Spawner};
 
 /// The output of one process: raw bytes for later use, stripped lines for search,
 /// the merged view and following.
@@ -113,6 +115,8 @@ pub struct LogLabel {
 pub enum Event {
     Started {
         pid: u32,
+        /// The pty clients attach to; `None` with pipes.
+        terminal: Option<Arc<Terminal>>,
     },
     SpawnFailed(String),
     /// `code` is `None` when a signal ended the process.
@@ -139,19 +143,36 @@ pub async fn run(
             return;
         }
     };
-    let _ = events.send(Event::Started { pid: handle.pid() });
+    let terminal = match (handle.pty(), spec.io) {
+        (Some(pty), IoMode::Pty { cols, rows }) => {
+            Some(Terminal::new(pty, log.clone(), TermSize { cols, rows }))
+        }
+        _ => None,
+    };
+    let _ = events.send(Event::Started {
+        pid: handle.pid(),
+        terminal: terminal.clone(),
+    });
 
     let reader = handle.take_output().map(|mut output| {
         let log = log.clone();
         let label = label.clone();
         let log_tx = log_tx.clone();
+        let terminal = terminal.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 16 * 1024];
             loop {
                 match output.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let lines = log.lock().unwrap().push(&buf[..n]);
+                        let lines = {
+                            let mut log = log.lock().unwrap();
+                            let lines = log.push(&buf[..n]);
+                            if let Some(terminal) = &terminal {
+                                terminal.output(&buf[..n]);
+                            }
+                            lines
+                        };
                         broadcast_lines(&log_tx, &label, lines);
                     }
                 }
@@ -187,6 +208,19 @@ pub async fn run(
         }
         Err(err) => Event::SpawnFailed(format!("lost track of the process: {err}")),
     };
+    if let Some(terminal) = terminal {
+        let how = match &event {
+            Event::Exited {
+                code: Some(code), ..
+            } => format!("exited with code {code}"),
+            Event::Exited {
+                signal: Some(signal),
+                ..
+            } => format!("was killed by signal {signal}"),
+            _ => "exited".to_string(),
+        };
+        terminal.end(format!("{} {how}", label.process));
+    }
     let _ = events.send(event);
 }
 

@@ -34,6 +34,9 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
     let start_at = here(paths);
     let saved_path = saved::path(&paths.state_dir);
     let restored = saved::load(&saved_path);
+    let detach_keys = carte_core::config::load_machine_config(&paths.machine_config())
+        .map(|machine| machine.attach.detach_keys)
+        .unwrap_or_default();
     runtime
         .block_on(async move {
             let mut terminal = ratatui::try_init()?;
@@ -43,7 +46,7 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
                 restore(info);
             }));
             tasks::set_mouse_capture(true);
-            let result = event_loop(&mut terminal, socket, start_at, restored).await;
+            let result = event_loop(&mut terminal, socket, start_at, restored, detach_keys).await;
             tasks::set_mouse_capture(false);
             ratatui::restore();
             result
@@ -80,11 +83,13 @@ async fn event_loop(
     socket: std::path::PathBuf,
     start_at: Option<tree::NodeId>,
     restored: saved::Saved,
+    detach_keys: carte_core::detach::DetachKeys,
 ) -> anyhow::Result<saved::Saved> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut tasks = tasks::Tasks::start(socket, tx);
     let mut app = app::App::new(Instant::now());
     app.start_at = start_at;
+    app.detach_keys = detach_keys;
     restored.apply(&mut app.fold);
     terminal.draw(|frame| view::render(frame, &mut app))?;
     while let Some(event) = rx.recv().await {
