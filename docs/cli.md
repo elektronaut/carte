@@ -209,14 +209,16 @@ terminal UI. An app whose web process is paused shows as `paused`,
 since its requests wait; a paused worker leaves it `ready`. When nobody
 is attached, a pause sends a [notification](configuration.md#notifications)
 with the `carte attach` command that answers it, at most once a minute
-per app. The pause ends when the process prints a complete line after
+per process. The pause ends when the process prints a complete line after
 the prompt, as answering it does, or exits.
 
 The prompt is all carte goes by. A process that is a console, like a
 `rails console` before Rails 7.1 or `pry` run as a carte process, shows
 as paused for as long as it waits for input. Custom prompts, like IRB's
-`>> `, aren't recognized. A pause that starts while someone is attached
-adds no event or notification, since they're watching.
+`>> `, aren't recognized, and neither is a prompt wider than the pty,
+which wraps it, as it can be with a narrow terminal attached. A pause
+that starts while someone is attached adds no event or notification,
+since they're watching.
 
 In the terminal UI, `t` types into the selected process, or the
 selected app's paused or web process, from either pane; the detach keys

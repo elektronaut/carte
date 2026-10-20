@@ -803,15 +803,16 @@ mod tests {
     fn variants_from_a_newer_daemon_parse_as_unknown() {
         let parse = |json: &str| serde_json::from_str::<InstanceState>(json).unwrap();
         assert_eq!(parse(r#""restarting""#), InstanceState::Restarting);
-        assert_eq!(parse(r#""paused""#), InstanceState::Unknown);
+        assert_eq!(parse(r#""hibernating""#), InstanceState::Unknown);
         assert!(!InstanceState::Unknown.is_running());
+        assert!(InstanceState::Paused.is_running());
 
         let state: ProcessState =
-            serde_json::from_str(r#"{"state":"paused","since_ms":12}"#).unwrap();
+            serde_json::from_str(r#"{"state":"hibernating","since_ms":12}"#).unwrap();
         assert_eq!(state, ProcessState::Unknown);
         let hold: Hold = serde_json::from_str(r#"{"kind":"debugger","pid":7}"#).unwrap();
         assert_eq!(hold, Hold::Unknown);
-        let kind: EventKind = serde_json::from_str(r#""paused""#).unwrap();
+        let kind: EventKind = serde_json::from_str(r#""hibernated""#).unwrap();
         assert_eq!(kind, EventKind::Unknown);
         let policy: Policy = serde_json::from_str(r#""sticky""#).unwrap();
         assert_eq!(policy, Policy::Unknown);
@@ -822,10 +823,10 @@ mod tests {
     #[test]
     fn an_event_of_an_unknown_kind_reads_as_unknown() {
         let event: Event = serde_json::from_str(
-            r#"{"seq":1,"at_ms":0,"kind":"paused","message":"at a breakpoint","subjects":[]}"#,
+            r#"{"seq":1,"at_ms":0,"kind":"hibernated","message":"for the night","subjects":[]}"#,
         )
         .unwrap();
-        assert_eq!(event.summary(), "unknown: at a breakpoint");
+        assert_eq!(event.summary(), "unknown: for the night");
     }
 
     #[test]
