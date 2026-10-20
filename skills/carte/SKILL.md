@@ -123,6 +123,13 @@ own after a short wait, which `carte status` shows as `restarting in 2s`;
 at the fifth crash within a minute carte gives up, and `carte status`
 shows it as `gave up restarting`. Fix the cause, then `carte up /worker`.
 
+The web process is restarted the same way, and a restart that never
+passes its readiness check counts as a crash too. carte gives up on it
+at the fifth crash within a minute, or after 5 readiness timeouts in a
+row. Then it stops the app, and requests get the error page with its
+log instead of starting it. Fix the cause, then run `carte up` or
+`carte restart`; `carte down` also clears it.
+
 `carte env` hides values that come from the environment and env files,
 since they may be secrets. Don't reveal them without asking (see below).
 

@@ -561,9 +561,14 @@ it has `restart = "never"`:
   Requests that arrive meanwhile wait until it's ready again, and the
   instance shows as `restarting` in `carte ls`, `carte status` and the
   terminal UI. A worker restarting on its own leaves the instance
-  `ready`. When carte gives up on the HTTP process, the instance stops,
-  and requests get the error page with its log instead of starting it,
-  until you start it by hand (`carte up` or `carte restart`). Stopping it with `carte down` clears
+  `ready`. A restarted HTTP process that isn't ready within the boot
+  timeout counts as another crash: carte stops it, records the crash
+  in `carte events`, notifies, and restarts it. carte also gives up
+  after 5 such timeouts in a row without the process becoming ready in
+  between, however far apart they are. When carte gives up on the HTTP
+  process, the instance stops, and requests get the error page with
+  its log instead of starting it, until you start it by hand
+  (`carte up` or `carte restart`). Stopping it with `carte down` clears
   that too, so the next request starts it as usual.
 - A process with `scope = "checkout"` is restarted by the instance
   running it. Once it has exited, while it waits to restart or stays
