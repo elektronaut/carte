@@ -204,7 +204,7 @@ impl Instance {
 
     /// Ready, with its HTTP process up: not waiting to restart or to pass its
     /// readiness check again after a crash.
-    fn serving(&self) -> bool {
+    pub(super) fn serving(&self) -> bool {
         self.state == InstanceState::Ready
             && (self.route_port.is_some() || self.http().is_none_or(|p| p.is_running() && p.ready))
     }
@@ -634,7 +634,7 @@ impl Actor {
                     );
                     return;
                 }
-                InstanceState::Starting | InstanceState::Ready => {
+                InstanceState::Starting | InstanceState::Ready | InstanceState::Restarting => {
                     inst.last_activity = Instant::now();
                     inst.waiters.push(reply);
                     return;
@@ -1216,7 +1216,9 @@ impl Actor {
         let done = proc.state == ProcessState::Done;
         let restarting = proc.restart;
         match inst.state {
-            InstanceState::Starting | InstanceState::Ready if done => self.advance(key),
+            InstanceState::Starting | InstanceState::Ready | InstanceState::Restarting if done => {
+                self.advance(key)
+            }
             InstanceState::Starting if http && !manual => {
                 self.crash(key, code, Some(idx), message);
             }
@@ -1227,7 +1229,7 @@ impl Actor {
                 let message = format!("{name} was stopped while {} was starting", inst.label());
                 self.crash(key, None, Some(idx), message);
             }
-            InstanceState::Starting | InstanceState::Ready => {
+            InstanceState::Starting | InstanceState::Ready | InstanceState::Restarting => {
                 let crashed = !manual && code != Some(0);
                 if crashed {
                     inst.last_error = Some(message.clone());
@@ -1373,6 +1375,7 @@ impl Actor {
         match result {
             Ok(()) => {
                 proc.ready = true;
+                self.dirty = true;
                 if !starting
                     && inst.serving()
                     && let Some(upstream) = inst.upstream()

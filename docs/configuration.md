@@ -558,10 +558,12 @@ it has `restart = "never"`:
   on them: they run once per start.
 - The HTTP process takes no `restart`: it's restarted alone whenever it
   exits, with code 0 too, since nothing else answers on its port.
-  Requests that arrive meanwhile wait until it's ready again. When
-  carte gives up on it, the instance stops, and requests get the error
-  page with its log instead of starting it, until you start it by hand
-  (`carte up` or `carte restart`). Stopping it with `carte down` clears
+  Requests that arrive meanwhile wait until it's ready again, and the
+  instance shows as `restarting` in `carte ls`, `carte status` and the
+  terminal UI. A worker restarting on its own leaves the instance
+  `ready`. When carte gives up on the HTTP process, the instance stops,
+  and requests get the error page with its log instead of starting it,
+  until you start it by hand (`carte up` or `carte restart`). Stopping it with `carte down` clears
   that too, so the next request starts it as usual.
 - A process with `scope = "checkout"` is restarted by the instance
   running it. Once it has exited, while it waits to restart or stays

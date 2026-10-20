@@ -462,6 +462,7 @@ fn state_word(inst: &InstanceStatus) -> String {
         InstanceState::Stopped => "stopped",
         InstanceState::Starting => "starting",
         InstanceState::Ready => "ready",
+        InstanceState::Restarting => "restarting",
         InstanceState::Stopping => "stopping",
         InstanceState::Crashed => "crashed",
     }
@@ -508,7 +509,7 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
             }
         })
         .collect();
-    if inst.state == InstanceState::Ready && !down.is_empty() {
+    if matches!(inst.state, InstanceState::Ready | InstanceState::Restarting) && !down.is_empty() {
         parts.push(format!("down: {}", down.join(", ")));
     }
     for hold in &inst.holds {
@@ -1042,6 +1043,28 @@ nova-billing  ready
         );
         let ls = render_ls(&snapshot, false);
         assert!(ls.contains("down: worker (restarting in 4s)"), "{ls}");
+    }
+
+    #[test]
+    fn shows_an_instance_whose_web_process_restarts() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.state = InstanceState::Restarting;
+        billing.processes[0].state = ProcessState::Exited {
+            code: Some(1),
+            signal: None,
+        };
+        billing.processes[0].restart_in_secs = Some(2);
+        let instances = vec![billing.clone()];
+        let status = render_status(&snapshot, &instances);
+        assert!(status.starts_with("nova-billing  restarting\n"), "{status}");
+        let ls = render_ls(&snapshot, false);
+        assert!(
+            ls.lines()
+                .any(|l| l.starts_with("nova-billing ") && l.contains(" restarting  https://")),
+            "{ls}"
+        );
+        assert!(ls.contains("down: web (restarting in 2s)"), "{ls}");
     }
 
     #[test]

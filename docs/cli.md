@@ -191,7 +191,7 @@ An **Instance** is:
 | `app`, `stack`, `checkout` | Names; `checkout` is `main` for an app running from its main checkout in another stack |
 | `checkout_path` | Where its code is |
 | `url`, `public_url` | `public_url` is null unless shared |
-| `state` | `stopped`, `starting`, `ready`, `stopping` or `crashed` |
+| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process is waiting to restart after a crash, or to pass its readiness check again), `stopping` or `crashed` |
 | `processes` | `[{ name, state, policy, temporary, pid, port, http, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `state` is `stopped`, `starting`, `running`, `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
 | `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec", … }`; `exec` counts `carte exec` commands still running |
 | `idle_in_secs` | Until idle shutdown, when counting down |

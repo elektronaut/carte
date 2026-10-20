@@ -75,6 +75,8 @@ impl NodeId {
 pub enum State {
     Ready,
     Starting,
+    /// An instance whose HTTP process is restarting.
+    Restarting,
     Stopping,
     Stopped,
     /// A process that exited cleanly on its own.
@@ -142,7 +144,7 @@ impl Status {
     pub fn is_active(&self) -> bool {
         matches!(
             self.state,
-            State::Ready | State::Starting | State::Stopping | State::Crashed
+            State::Ready | State::Starting | State::Restarting | State::Stopping | State::Crashed
         )
     }
 }
@@ -358,6 +360,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
     let state = match inst.state {
         InstanceState::Ready => State::Ready,
         InstanceState::Starting => State::Starting,
+        InstanceState::Restarting => State::Restarting,
         InstanceState::Stopping => State::Stopping,
         InstanceState::Crashed => State::Crashed,
         InstanceState::Stopped if disabled.is_some() => State::Disabled,
@@ -375,7 +378,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
         })
         .collect();
     let mut status = Status {
-        running: usize::from(matches!(state, State::Ready | State::Starting)),
+        running: usize::from(inst.state.is_running()),
         total: 1,
         pinned,
         disabled,
@@ -386,6 +389,12 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
         cpu_percent: inst.cpu_percent,
         memory_bytes: inst.memory_bytes,
         gave_up: inst.processes.iter().any(|p| p.gave_up),
+        restart_in_secs: inst
+            .processes
+            .iter()
+            .find(|p| p.http)
+            .and_then(|p| p.restart_in_secs)
+            .filter(|_| state == State::Restarting),
         kube: inst.kube.is_some(),
         ..Status::new(state)
     };
@@ -477,6 +486,7 @@ fn aggregate(children: &[Node]) -> Status {
     let state = [
         State::Crashed,
         State::Starting,
+        State::Restarting,
         State::Ready,
         State::Stopping,
     ]
