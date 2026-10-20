@@ -201,6 +201,10 @@ An **Instance** is:
 | `warms` | `[{ app, hits, opens }]`: the apps opening it [warms](configuration.md#learned-warming), each followed `hits` of its last `opens` opens; left out when empty |
 | `memory_bytes`, `cpu_percent` | Summed over its processes |
 
+A `carte` older than the daemon it talks to shows a state, hold, policy or
+event kind it doesn't know as `unknown`, in its output and in `--json`.
+Restart the TUI or run the new `carte` to see what it is.
+
 **`carte logs --json`** prints one line per log line:
 `{ project, app, stack, process, at_ms, text, marker }`.
 

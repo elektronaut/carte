@@ -128,6 +128,9 @@ pub enum TunnelState {
     Starting,
     Connected,
     Failed,
+    /// Sent by a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,6 +321,9 @@ pub enum InstanceState {
     Restarting,
     Stopping,
     Crashed,
+    /// Sent by a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
 }
 
 impl InstanceState {
@@ -347,6 +353,9 @@ pub enum Hold {
     Exec {
         count: u32,
     },
+    /// Sent by a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -387,6 +396,9 @@ pub enum ProcessState {
     Disabled,
     /// A task that finished with exit code 0.
     Done,
+    /// Sent by a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,6 +407,9 @@ pub enum Policy {
     Pinned,
     Auto,
     Disabled,
+    /// Sent by a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -598,6 +613,9 @@ pub enum EventKind {
     TeardownFailed,
     /// A kube project's Service couldn't be reached.
     Failed,
+    /// Sent by a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
 }
 
 impl EventKind {
@@ -626,6 +644,7 @@ impl EventKind {
             EventKind::Failed => "failed",
             EventKind::TeardownFinished => "teardown finished",
             EventKind::TeardownFailed => "teardown failed",
+            EventKind::Unknown => "unknown",
         }
     }
 }
@@ -762,6 +781,35 @@ mod tests {
         assert_eq!(state, r#"{"state":"done"}"#);
         let hold = serde_json::to_string(&Hold::Exec { count: 1 }).unwrap();
         assert_eq!(hold, r#"{"kind":"exec","count":1}"#);
+    }
+
+    #[test]
+    fn variants_from_a_newer_daemon_parse_as_unknown() {
+        let parse = |json: &str| serde_json::from_str::<InstanceState>(json).unwrap();
+        assert_eq!(parse(r#""restarting""#), InstanceState::Restarting);
+        assert_eq!(parse(r#""paused""#), InstanceState::Unknown);
+        assert!(!InstanceState::Unknown.is_running());
+
+        let state: ProcessState =
+            serde_json::from_str(r#"{"state":"paused","since_ms":12}"#).unwrap();
+        assert_eq!(state, ProcessState::Unknown);
+        let hold: Hold = serde_json::from_str(r#"{"kind":"debugger","pid":7}"#).unwrap();
+        assert_eq!(hold, Hold::Unknown);
+        let kind: EventKind = serde_json::from_str(r#""paused""#).unwrap();
+        assert_eq!(kind, EventKind::Unknown);
+        let policy: Policy = serde_json::from_str(r#""sticky""#).unwrap();
+        assert_eq!(policy, Policy::Unknown);
+        let tunnel: TunnelState = serde_json::from_str(r#""reconnecting""#).unwrap();
+        assert_eq!(tunnel, TunnelState::Unknown);
+    }
+
+    #[test]
+    fn an_event_of_an_unknown_kind_reads_as_unknown() {
+        let event: Event = serde_json::from_str(
+            r#"{"seq":1,"at_ms":0,"kind":"paused","message":"at a breakpoint","subjects":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(event.summary(), "unknown: at a breakpoint");
     }
 
     #[test]

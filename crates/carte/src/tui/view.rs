@@ -126,6 +126,7 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
             TunnelState::Starting => ("connecting", Color::Yellow),
             TunnelState::Failed => ("tunnel down (!)", Color::Red),
             TunnelState::Idle => ("", Color::DarkGray),
+            TunnelState::Unknown => ("tunnel unknown", Color::DarkGray),
         };
         let what = if tunnel.state == TunnelState::Idle {
             format!("· {shared} shared ")
@@ -269,6 +270,7 @@ fn symbol(state: State) -> (&'static str, Color) {
         State::Done => ("✓", Color::DarkGray),
         State::Crashed => ("✖", Color::Red),
         State::Disabled => ("⊘", Color::DarkGray),
+        State::Unknown => ("?", Color::DarkGray),
     }
 }
 
@@ -341,6 +343,7 @@ fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
         State::Exited => Span::raw("exited").dark_gray(),
         State::Done => Span::raw("done").dark_gray(),
         State::Disabled => Span::raw("disabled").dark_gray(),
+        State::Unknown => Span::raw("unknown").dark_gray(),
         State::Stopped => Span::raw(""),
     }
 }
@@ -414,6 +417,7 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
         State::Crashed if status.kube => "failed",
         State::Crashed => "crashed",
         State::Disabled => "disabled",
+        State::Unknown => "unknown",
     };
     let state = Span::raw(format!("{symbol} {state_word}")).fg(color);
     let mut lines = Vec::new();
