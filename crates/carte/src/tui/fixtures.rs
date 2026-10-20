@@ -146,3 +146,33 @@ pub fn shared_sample() -> Snapshot {
     });
     snapshot
 }
+
+/// A kube project `prod` with a forward to grafana and a failed vlogs.
+pub fn kube_sample() -> Snapshot {
+    let mut grafana = instance("grafana", "monitoring", "", InstanceState::Ready);
+    grafana.url = "https://grafana.monitoring.prod.test".into();
+    grafana.holds = vec![carte_api::Hold::Connections { count: 2 }];
+    grafana.kube = Some(carte_api::KubeInstanceInfo {
+        pod: Some("grafana-7d9f-x2k".into()),
+        port: Some(3000),
+    });
+    let mut vlogs = instance("vlogs", "logging", "", InstanceState::Crashed);
+    vlogs.last_error = Some("No ready pod is behind vlogs.".into());
+    vlogs.kube = Some(carte_api::KubeInstanceInfo {
+        pod: None,
+        port: None,
+    });
+    let mut prod = project(
+        "prod",
+        &[],
+        vec![
+            stack("logging", vec![vlogs]),
+            stack("monitoring", vec![grafana]),
+        ],
+    );
+    prod.kube = Some(carte_api::KubeProjectInfo {
+        context: "prod-context".into(),
+        error: None,
+    });
+    snapshot(vec![prod])
+}

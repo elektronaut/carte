@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Credentials, EnvResponse, EventsRequest,
-    InstanceStatus, LogLine, LogsRequest, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
+    InstanceStatus, KubeProjectInfo, LogLine, LogsRequest, ShareRequest, ShareResponse, Snapshot,
+    UnshareRequest,
 };
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -235,6 +236,28 @@ impl App {
     }
 
     /// The instance a node belongs to, for nodes at instance level or below.
+    /// The kube project named `project`, when it is one.
+    pub fn kube_project(&self, project: &str) -> Option<&KubeProjectInfo> {
+        self.snapshot
+            .as_ref()?
+            .projects
+            .iter()
+            .find(|p| p.name == project)?
+            .kube
+            .as_ref()
+    }
+
+    /// Warns when the selection is in a kube project, where `what` doesn't apply.
+    fn refuse_kube(&mut self, what: &str) -> bool {
+        let kube = self
+            .selected_node()
+            .is_some_and(|node| self.kube_project(node.id().project()).is_some());
+        if kube {
+            self.warn(&format!("{what} isn't available for kube projects"));
+        }
+        kube
+    }
+
     pub fn instance(&self, id: &NodeId) -> Option<&InstanceStatus> {
         let (NodeId::Instance {
             project,
@@ -604,6 +627,9 @@ impl App {
     /// Asks the daemon for the env of the selected process, or of the selected app's
     /// HTTP process.
     fn show_env(&mut self) -> Option<Command> {
+        if self.refuse_kube("env") {
+            return None;
+        }
         let id = self.selected_node()?.id().clone();
         if !matches!(id, NodeId::Instance { .. } | NodeId::Process { .. }) {
             self.warn("select an app or a process to see its env");
@@ -668,6 +694,14 @@ impl App {
     fn control(&mut self, control: Control) -> Option<Command> {
         if control == Control::Save {
             return self.save();
+        }
+        if matches!(control, Control::TogglePin | Control::ToggleDisable)
+            && self.refuse_kube(match control {
+                Control::TogglePin => "pinning",
+                _ => "disabling",
+            })
+        {
+            return None;
         }
         let node = self.selected_node()?;
         if matches!(node.id(), NodeId::Folder { .. }) {
@@ -824,6 +858,9 @@ impl App {
     /// adds a password to the share. When the provider carries one app at a time and
     /// another app has it, asks before taking its place.
     fn share(&mut self, auth: bool) -> Option<Command> {
+        if self.refuse_kube("sharing") {
+            return None;
+        }
         let snapshot = self.snapshot.as_ref()?;
         let Some((id, instance)) = self.selected_instance() else {
             self.warn("select an app to share");
@@ -915,7 +952,8 @@ impl App {
             return Some(Command::StopLogs);
         }
         let node = self.selected_node();
-        if self.events {
+        let kube = node.is_some_and(|n| self.kube_project(n.id().project()).is_some());
+        if self.events || kube {
             return Some(Command::FollowEvents {
                 generation,
                 request: EventsRequest {
@@ -1067,6 +1105,49 @@ mod tests {
         assert_eq!(follows(&commands), ["nova-billing@main"]);
         assert_eq!(app.logs.prefix, Prefix::Process);
         assert!(press(&mut app, now, KeyCode::Char('?')).is_empty());
+    }
+
+    #[test]
+    fn kube_services_refuse_what_doesnt_apply_and_follow_events() {
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(
+            Event::Snapshot(Box::new(crate::tui::fixtures::kube_sample())),
+            now,
+        );
+        let mut followed = Vec::new();
+        for _ in 0..4 {
+            followed.extend(press(&mut app, now, KeyCode::Down));
+        }
+        assert!(
+            followed
+                .iter()
+                .all(|c| !matches!(c, Command::FollowLogs { .. })),
+            "{followed:?}"
+        );
+        assert!(
+            followed
+                .iter()
+                .any(|c| matches!(c, Command::FollowEvents { .. })),
+            "{followed:?}"
+        );
+        for (key, what) in [
+            ('w', "sharing"),
+            ('v', "env"),
+            ('p', "pinning"),
+            ('d', "disabling"),
+        ] {
+            assert!(press(&mut app, now, KeyCode::Char(key)).is_empty());
+            assert_eq!(
+                app.notice.as_ref().map(|n| n.text.clone()),
+                Some(format!("{what} isn't available for kube projects"))
+            );
+        }
+        let commands = press(&mut app, now, KeyCode::Char('r'));
+        assert!(
+            matches!(commands.as_slice(), [Command::Control { .. }]),
+            "{commands:?}"
+        );
     }
 
     #[test]
