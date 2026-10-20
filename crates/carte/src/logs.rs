@@ -163,8 +163,9 @@ enum State {
 /// Turns raw terminal output into plain lines, incrementally.
 ///
 /// CSI, OSC and other escape sequences are dropped; a carriage return moves
-/// back to the start of the line so later text overwrites it, backspace moves
-/// back one column, and `ESC [ K` erases to the end of the line. Other control
+/// back to the start of the line so later text overwrites it, backspace and
+/// `ESC [ n D` move back, `ESC [ n C` forward and `ESC [ n G` to a column, and
+/// `ESC [ K` erases to the end of the line. Other control
 /// characters except tab are dropped. Invalid UTF-8 becomes U+FFFD.
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
@@ -211,8 +212,12 @@ impl Stripper {
             }
             State::Csi => match b {
                 0x40..=0x7e => {
-                    if b == b'K' {
-                        self.erase_line();
+                    match b {
+                        b'K' => self.erase_line(),
+                        b'G' => self.cursor = self.count().saturating_sub(1),
+                        b'C' => self.cursor += self.count(),
+                        b'D' => self.cursor = self.cursor.saturating_sub(self.count()),
+                        _ => {}
                     }
                     self.state = State::Ground;
                 }
@@ -279,7 +284,19 @@ impl Stripper {
         self.put(c);
     }
 
+    /// A cursor movement's count: its parameter, 1 when there is none.
+    fn count(&self) -> usize {
+        std::str::from_utf8(&self.csi)
+            .ok()
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(1)
+    }
+
     fn put(&mut self, c: char) {
+        while self.line.len() < self.cursor {
+            self.line.push(' ');
+        }
         if self.cursor < self.line.len() {
             self.line[self.cursor] = c;
         } else {
@@ -414,6 +431,15 @@ mod tests {
     fn erase_line_after_carriage_return() {
         assert_eq!(strip(b"long status\r\x1b[Kok\n"), "ok\n");
         assert_eq!(strip(b"long status\r\x1b[2Kok\n"), "ok\n");
+    }
+
+    #[test]
+    fn cursor_movements_place_later_text() {
+        assert_eq!(strip(b"irb(main)> 1+\x1b[2D2 \n"), "irb(main)> 2 \n");
+        assert_eq!(strip(b"(rdbg) cont\x1b[1Gxx\n"), "xxdbg) cont\n");
+        assert_eq!(strip(b"(rdbg) \x1b[8Gc\x1b[G(\n"), "(rdbg) c\n");
+        assert_eq!(strip(b"ab\x1b[3Cc\n"), "ab   c\n");
+        assert_eq!(strip(b"abc\x1b[D\x1b[KX\n"), "abX\n");
     }
 
     #[test]

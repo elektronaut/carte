@@ -123,6 +123,7 @@ impl FrameReader {
                 cols: u16::from_be_bytes([payload[0], payload[1]]),
                 rows: u16::from_be_bytes([payload[2], payload[3]]),
             }),
+            3 => return Err(FrameError(format!("a resize of {len} bytes"))),
             4 => Frame::Ended(String::from_utf8_lossy(&payload).into_owned()),
             _ => return Err(FrameError(format!("unknown tag {tag}"))),
         };
@@ -172,5 +173,11 @@ mod tests {
         let mut reader = FrameReader::default();
         reader.feed(&[1, 0xff, 0, 0, 0]);
         assert!(reader.next_frame().is_err());
+        let mut reader = FrameReader::default();
+        reader.feed(&[3, 0, 0, 0, 1, 7]);
+        assert_eq!(
+            reader.next_frame().unwrap_err().to_string(),
+            "bad attach frame: a resize of 1 bytes"
+        );
     }
 }

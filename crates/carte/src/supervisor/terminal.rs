@@ -64,15 +64,17 @@ impl Terminal {
     /// Attaches a client. `size` takes part in sizing the pty; with `replay` the
     /// client gets the last screen of output, as many lines as its terminal has rows.
     pub fn join(self: &Arc<Self>, size: Option<TermSize>, replay: bool) -> Client {
+        let size = size.filter(|s| s.cols > 0 && s.rows > 0);
         let (output, replay) = {
             let log = self.log.lock().unwrap();
             let output = self.output.subscribe();
             let rows = size.unwrap_or(self.configured).rows;
-            let replay = if replay {
+            let mut replay = if replay {
                 log.raw.last_lines(usize::from(rows))
             } else {
                 Vec::new()
             };
+            replay.drain(..replay.len().saturating_sub(1024 * 1024));
             (output, replay)
         };
         let id = {
@@ -95,6 +97,11 @@ impl Terminal {
     /// Clients attached right now.
     pub fn clients(&self) -> usize {
         self.clients.lock().unwrap().sizes.len()
+    }
+
+    /// The pty's size right now.
+    pub fn size(&self) -> TermSize {
+        self.clients.lock().unwrap().current
     }
 
     /// Writes all of `data` before anyone else's input.
@@ -138,10 +145,27 @@ impl Client {
         self.terminal.write(data).await
     }
 
+    /// Writes the client's input from another task, so a process that doesn't read
+    /// can't hold up the client.
+    pub fn writer(&self) -> Writer {
+        Writer(self.terminal.clone())
+    }
+
     pub fn resize(&self, size: TermSize) {
+        if size.cols == 0 || size.rows == 0 {
+            return;
+        }
         let mut clients = self.terminal.clients.lock().unwrap();
         clients.sizes.insert(self.id, Some(size));
         self.terminal.fit(&mut clients);
+    }
+}
+
+pub struct Writer(Arc<Terminal>);
+
+impl Writer {
+    pub async fn write(&self, data: &[u8]) -> io::Result<()> {
+        self.0.write(data).await
     }
 }
 

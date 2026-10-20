@@ -258,7 +258,10 @@ pub fn key_bytes(key: KeyEvent) -> Vec<u8> {
             'a'..='z' | 'A'..='Z' | '@' | '[' | '\\' | ']' | '^' | '_' => {
                 vec![(c.to_ascii_uppercase() as u8) & 0x1f]
             }
-            ' ' => vec![0],
+            ' ' | '2' => vec![0],
+            '3' => vec![0x1b],
+            '4'..='7' => vec![c as u8 - b'4' + 0x1c],
+            '8' => vec![0x7f],
             _ => c.to_string().into_bytes(),
         },
         KeyCode::Char(c) => c.to_string().into_bytes(),
@@ -308,6 +311,13 @@ mod tests {
         assert_eq!(key_bytes(ctrl('c')), [3]);
         assert_eq!(key_bytes(ctrl('q')), [0x11]);
         assert_eq!(key_bytes(ctrl(']')), [0x1d]);
+        assert_eq!(
+            [ctrl('4'), ctrl('5'), ctrl('6'), ctrl('7')].map(key_bytes),
+            [[0x1c], [0x1d], [0x1e], [0x1f]],
+            "ctrl-\\, ctrl-], ctrl-^ and ctrl-_ as crossterm reports them"
+        );
+        assert_eq!(key_bytes(ctrl('2')), [0]);
+        assert_eq!(key_bytes(ctrl(' ')), [0]);
         assert_eq!(key_bytes(key(KeyCode::Char('å'))), "å".as_bytes());
         assert_eq!(key_bytes(key(KeyCode::Enter)), b"\r");
         assert_eq!(key_bytes(key(KeyCode::Up)), b"\x1b[A");

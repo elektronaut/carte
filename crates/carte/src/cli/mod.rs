@@ -184,6 +184,9 @@ pub struct AttachArgs {
     /// The keys that detach, like `ctrl-q d`; overrides `attach.detach_key`.
     #[arg(long, value_name = "KEYS")]
     pub detach_keys: Option<String>,
+    /// Without a terminal: how long to print output after the input ends, at most.
+    #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = parse_duration)]
+    pub wait: std::time::Duration,
 }
 
 #[derive(Args, Clone)]

@@ -146,6 +146,8 @@ impl Server {
                         "text": { "type": "string", "description": "What to type, like `continue` or `\\u0003` for ctrl-c." },
                         "enter": { "type": "boolean", "description": "Press enter after the text (default true)." },
                         "process": { "type": "string", "description": "The process; defaults to the one serving HTTP." },
+                        "quiet_ms": { "type": "integer", "description": "Return once the output has been quiet this long (default 500); raise it for commands that take a while before they print." },
+                        "wait": { "type": "string", "description": "Return after this long at the latest, like `30s` (default `5s`)." },
                     }),
                     &["text"],
                 ),
@@ -213,7 +215,14 @@ impl Server {
                 if args.enter.unwrap_or(true) {
                     input.push(b'\r');
                 }
-                attach::type_into(paths, &args.at.target(), args.process, input)
+                let wait = args
+                    .wait
+                    .as_deref()
+                    .map(carte_core::duration::parse)
+                    .transpose()?
+                    .unwrap_or(std::time::Duration::from_secs(5));
+                let quiet = std::time::Duration::from_millis(args.quiet_ms.unwrap_or(500));
+                attach::type_into(paths, &args.at.target(), args.process, input, wait, quiet)
             }),
             _ => return None,
         };
@@ -285,6 +294,8 @@ struct TypeTool {
     text: String,
     enter: Option<bool>,
     process: Option<String>,
+    quiet_ms: Option<u64>,
+    wait: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

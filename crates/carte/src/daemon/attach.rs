@@ -6,7 +6,9 @@ use std::io;
 use bytes::Bytes;
 use carte_api::attach::{Attached, Frame, FrameReader};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::mpsc;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::supervisor::terminal::Client;
 
@@ -14,9 +16,12 @@ enum Step {
     Read(io::Result<usize>),
     Output(Result<Bytes, RecvError>),
     Ended(String),
+    WriterGone,
 }
 
 /// Runs one attached client until either side goes away or the process exits.
+/// Input is written by its own task, which the session stops when it ends, so a
+/// process that doesn't read its input never holds up the session.
 pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     io: S,
     attached: Attached,
@@ -30,6 +35,15 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
     if writer.write_all(&first).await.is_err() {
         return;
     }
+    let (input, mut queued) = mpsc::channel::<Vec<u8>>(256);
+    let pty = client.writer();
+    let mut writing = AbortOnDropHandle::new(tokio::spawn(async move {
+        while let Some(data) = queued.recv().await {
+            if pty.write(&data).await.is_err() {
+                return;
+            }
+        }
+    }));
     let mut frames = FrameReader::default();
     let mut buf = vec![0u8; 16 * 1024];
     loop {
@@ -40,17 +54,16 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                 Ok(message) => Step::Ended(message.clone().unwrap_or_default()),
                 Err(_) => return,
             },
+            _ = &mut writing => Step::WriterGone,
         };
         match step {
-            Step::Read(Ok(0) | Err(_)) => return,
+            Step::Read(Ok(0) | Err(_)) | Step::WriterGone => return,
             Step::Read(Ok(n)) => {
                 frames.feed(&buf[..n]);
                 loop {
                     match frames.next_frame() {
                         Ok(Some(Frame::Input(data))) => {
-                            if client.write(&data).await.is_err() {
-                                return;
-                            }
+                            let _ = input.try_send(data);
                         }
                         Ok(Some(Frame::Resize(size))) => client.resize(size),
                         Ok(Some(_)) => {}
@@ -68,12 +81,21 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                     return;
                 }
             }
-            Step::Output(Err(RecvError::Lagged(_))) => {}
+            Step::Output(Err(RecvError::Lagged(_))) => {
+                let notice = Frame::Output(b"\r\n[carte: some output was skipped]\r\n".to_vec());
+                if writer.write_all(&notice.encode()).await.is_err() {
+                    return;
+                }
+            }
             Step::Output(Err(RecvError::Closed)) => return,
             Step::Ended(message) => {
                 let mut last = Vec::new();
-                while let Ok(data) = client.output.try_recv() {
-                    last.extend(Frame::Output(data.to_vec()).encode());
+                loop {
+                    match client.output.try_recv() {
+                        Ok(data) => last.extend(Frame::Output(data.to_vec()).encode()),
+                        Err(TryRecvError::Lagged(_)) => {}
+                        Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+                    }
                 }
                 last.extend(Frame::Ended(message).encode());
                 let _ = writer.write_all(&last).await;

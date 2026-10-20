@@ -406,6 +406,11 @@ async fn attach(State(api): State<Api>, mut request: axum::extract::Request) -> 
     let upgrade = request
         .extensions_mut()
         .remove::<hyper::upgrade::OnUpgrade>();
+    let request_upgrade = request
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
         Ok(body) => body,
         Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
@@ -420,6 +425,9 @@ async fn attach(State(api): State<Api>, mut request: axum::extract::Request) -> 
     if let Some(response) = unresolved(&api, &request.target) {
         return response;
     }
+    let upgrade = upgrade.filter(|_| {
+        request_upgrade.is_some_and(|value| value.eq_ignore_ascii_case(attach::PROTOCOL))
+    });
     let Some(upgrade) = upgrade else {
         return error(
             StatusCode::BAD_REQUEST,
@@ -428,6 +436,9 @@ async fn attach(State(api): State<Api>, mut request: axum::extract::Request) -> 
     };
     let (attached, terminal) = match api.supervisor.attach(request.target, request.process).await {
         Ok(found) => found,
+        Err(message) if message.contains("has no process named") => {
+            return error(StatusCode::NOT_FOUND, message);
+        }
         Err(message) => return error(StatusCode::CONFLICT, message),
     };
     let client = terminal.join(request.size, request.replay);

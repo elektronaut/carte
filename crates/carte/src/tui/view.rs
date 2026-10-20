@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else {
         render_waiting(frame, main, app);
     }
-    frame.render_widget(status_line(app), status);
+    frame.render_widget(status_line(app, status.width), status);
     frame.render_widget(footer_line(app.focus, app.events, footer.width), footer);
 
     match &app.mode {
@@ -897,19 +897,28 @@ fn highlight(text: &str, search: &str, current: bool) -> Vec<Span<'static>> {
 
 // Status, footer and popups
 
-fn status_line(app: &App) -> Line<'static> {
+/// The typing line keeps the detach keys in view and shows the end of a long line.
+fn status_line(app: &App, width: u16) -> Line<'static> {
     if let Some(typing) = &app.typing {
-        let keys = format!("  {} stops", app.detach_keys);
+        let keys = format!(" {} stops ", app.detach_keys);
         if !typing.attached {
             return Line::from(vec![
-                Span::raw(format!(" attaching to {}…", typing.label)).yellow(),
                 Span::raw(keys).dark_gray(),
+                Span::raw(format!("attaching to {}…", typing.label)).yellow(),
             ]);
         }
+        let label = format!("{} › ", typing.label);
+        let room = usize::from(width)
+            .saturating_sub(keys.chars().count() + label.chars().count() + 1)
+            .max(1);
+        let pending: Vec<char> = typing.pending().chars().collect();
+        let shown: String = pending[pending.len().saturating_sub(room)..]
+            .iter()
+            .collect();
         return Line::from(vec![
-            Span::raw(format!(" {} › ", typing.label)).yellow(),
-            Span::raw(format!("{}▏", typing.pending())),
             Span::raw(keys).dark_gray(),
+            Span::raw(label).yellow(),
+            Span::raw(format!("{shown}▏")),
         ]);
     }
     if app.mode == Mode::Filter {
@@ -1709,21 +1718,43 @@ mod tests {
         }
         let screen = draw(&mut app, 120, 12);
         assert!(
-            screen.contains("attaching to nova-billing@main…  ctrl-q d stops"),
+            screen.contains(" ctrl-q d stops attaching to nova-billing@main…"),
             "{screen}"
         );
         app.update(
-            Event::Attached(Ok(carte_api::attach::Attached {
-                instance: "nova-billing@main".into(),
-                process: "web".into(),
-            })),
+            Event::Attached {
+                session: 1,
+                result: Ok(carte_api::attach::Attached {
+                    instance: "nova-billing@main".into(),
+                    process: "web".into(),
+                }),
+            },
             now,
         );
-        app.update(Event::TypingOutput(b"\x1b[1m(rdbg)\x1b[0m n".to_vec()), now);
+        app.update(
+            Event::TypingOutput {
+                session: 1,
+                data: b"\x1b[1m(rdbg)\x1b[0m n".to_vec(),
+            },
+            now,
+        );
         let screen = draw(&mut app, 120, 12);
         assert!(
-            screen.contains("nova-billing@main/web › (rdbg) n▏  ctrl-q d stops"),
+            screen.contains(" ctrl-q d stops nova-billing@main/web › (rdbg) n▏"),
             "{screen}"
+        );
+        app.update(
+            Event::TypingOutput {
+                session: 1,
+                data: vec![b'x'; 300],
+            },
+            now,
+        );
+        let screen = draw(&mut app, 120, 12);
+        assert!(screen.contains("› xxxx"), "{screen}");
+        assert!(
+            screen.contains("xxx▏"),
+            "the end of a long line shows: {screen}"
         );
     }
 

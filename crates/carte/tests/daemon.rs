@@ -1659,7 +1659,7 @@ fn kube_projects_answer_from_the_proxy() {
 #[test]
 fn attach_types_into_a_process_and_shows_its_output() {
     let daemon = Daemon::start_with_project(&format!(
-        "[apps.acme-web.processes.echo]\ncommand = \"FIXTURE_ECHO_STDIN=1 exec {}\"\n",
+        "[apps.acme-web.processes.echo]\ncommand = \"FIXTURE_ECHO_STDIN=1 exec {}\"\n[apps.acme-web.processes.ticker]\ncommand = \"while true; do echo tick; sleep 0.1; done\"\n",
         fixture().display()
     ));
     let output = daemon.command(&["attach", "web", "echo"]).output().unwrap();
@@ -1689,7 +1689,10 @@ fn attach_types_into_a_process_and_shows_its_output() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = stdout(&output);
-    assert!(text.contains("tty: true"), "the last screen first: {text}");
+    assert!(
+        !text.contains("tty: true"),
+        "no replay without a terminal: {text}"
+    );
     assert!(text.contains("echo: hello"), "{text}");
 
     let replies = mcp_session(
@@ -1706,6 +1709,18 @@ fn attach_types_into_a_process_and_shows_its_output() {
     assert!(typed.starts_with("acme-web@main/echo:\n"), "{typed}");
     assert!(typed.contains("echo: from an agent"), "{typed}");
 
+    let started = Instant::now();
+    let output = daemon
+        .command(&["attach", "web", "ticker", "--wait", "2s"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("tick"));
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "a process that keeps printing doesn't keep attach waiting"
+    );
+
     let output = daemon
         .command(&["attach", "web", "--detach-keys", "ctrl-"])
         .output()
@@ -1713,21 +1728,16 @@ fn attach_types_into_a_process_and_shows_its_output() {
     assert_eq!(output.status.code(), Some(2));
 }
 
-#[test]
-fn attach_on_a_terminal_detaches_with_the_keys() {
-    use std::sync::{Arc, Mutex};
-
-    let daemon = Daemon::start_with_project(&format!(
-        "[apps.acme-web.processes.echo]\ncommand = \"FIXTURE_ECHO_STDIN=1 exec {}\"\n",
-        fixture().display()
-    ));
-    daemon.run(&["up", "web"]);
-    eventually("echo to start", || {
-        snapshot(&daemon).projects[0].stacks[0].instances[0]
-            .processes
-            .iter()
-            .any(|p| p.name == "echo" && p.state == carte_api::ProcessState::Running)
-    });
+/// `carte attach web echo` on a new pty: the child, the pty's master, a copy of its
+/// slave, and what the master has read so far.
+fn attach_on_a_pty(
+    daemon: &Daemon,
+) -> (
+    Child,
+    std::fs::File,
+    std::os::fd::OwnedFd,
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) {
     let size = nix::pty::Winsize {
         ws_row: 30,
         ws_col: 100,
@@ -1735,15 +1745,16 @@ fn attach_on_a_terminal_detaches_with_the_keys() {
         ws_ypixel: 0,
     };
     let pty = nix::pty::openpty(Some(&size), None).unwrap();
-    let mut attach = daemon
+    let slave = pty.slave.try_clone().unwrap();
+    let attach = daemon
         .command(&["attach", "web", "echo"])
         .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
         .stdout(Stdio::from(pty.slave.try_clone().unwrap()))
         .stderr(Stdio::from(pty.slave))
         .spawn()
         .unwrap();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let mut master = std::fs::File::from(pty.master);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let master = std::fs::File::from(pty.master);
     let mut reader = master.try_clone().unwrap();
     let reading = seen.clone();
     std::thread::spawn(move || {
@@ -1755,6 +1766,26 @@ fn attach_on_a_terminal_detaches_with_the_keys() {
             reading.lock().unwrap().extend_from_slice(&buf[..n]);
         }
     });
+    (attach, master, slave, seen)
+}
+
+#[test]
+fn attach_on_a_terminal_detaches_and_restores_it() {
+    use nix::sys::termios::tcgetattr;
+    let daemon = Daemon::start_with_project(&format!(
+        "[apps.acme-web.processes.echo]\ncommand = \"FIXTURE_ECHO_STDIN=1 exec {}\"\n",
+        fixture().display()
+    ));
+    daemon.run(&["up", "web"]);
+    eventually("echo to start", || {
+        snapshot(&daemon).projects[0].stacks[0].instances[0]
+            .processes
+            .iter()
+            .any(|p| p.name == "echo" && p.state == carte_api::ProcessState::Running)
+    });
+
+    let (mut attach, mut master, slave, seen) = attach_on_a_pty(&daemon);
+    let before = tcgetattr(&slave).unwrap();
     let wait_for = |needle: &str| {
         eventually(needle, || {
             String::from_utf8_lossy(&seen.lock().unwrap()).contains(needle)
@@ -1763,9 +1794,26 @@ fn attach_on_a_terminal_detaches_with_the_keys() {
     wait_for("Attached to acme-web@main/echo. ctrl-q d detaches.");
     master.write_all(b"hi\r").unwrap();
     wait_for("echo: hi");
+    assert_ne!(tcgetattr(&slave).unwrap(), before, "raw while attached");
     master.write_all(b"\x11\x11\r").unwrap();
     wait_for("echo: \u{11}");
     master.write_all(b"\x11d").unwrap();
     wait_for("Detached from acme-web@main/echo.");
     assert!(attach.wait().unwrap().success());
+    assert_eq!(tcgetattr(&slave).unwrap(), before);
+
+    let (mut attach, mut master, slave, seen) = attach_on_a_pty(&daemon);
+    let before = tcgetattr(&slave).unwrap();
+    eventually("attached", || {
+        String::from_utf8_lossy(&seen.lock().unwrap()).contains("detaches.")
+    });
+    master.write_all(b"again\r").unwrap();
+    eventually("raw mode", || tcgetattr(&slave).unwrap() != before);
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(attach.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    assert!(!attach.wait().unwrap().success());
+    assert_eq!(tcgetattr(&slave).unwrap(), before, "SIGTERM restores it");
 }
