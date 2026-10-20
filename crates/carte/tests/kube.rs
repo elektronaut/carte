@@ -33,7 +33,7 @@ struct FakeState {
     forbid_all: bool,
     /// Listing namespaces is forbidden.
     forbid_namespaces: bool,
-    /// Namespaces whose Services can't be listed.
+    /// Namespaces whose Services can't be listed or read.
     forbidden: HashSet<String>,
     containers: HashMap<String, Vec<ContainerInfo>>,
     /// Each pod's log lines.
@@ -123,8 +123,11 @@ impl Cluster for FakeCluster {
     ) -> BoxFuture<'a, Result<Option<ServiceInfo>, ApiError>> {
         Box::pin(async move {
             self.check_auth()?;
-            Ok(self
-                .state()
+            let state = self.state();
+            if state.forbidden.contains(namespace) {
+                return Err(ApiError::Forbidden("services is forbidden".into()));
+            }
+            Ok(state
                 .services
                 .iter()
                 .find(|s| s.namespace == namespace && s.name == name)
@@ -139,12 +142,19 @@ impl Cluster for FakeCluster {
     ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>> {
         Box::pin(async move {
             self.check_auth()?;
-            Ok(self
-                .state()
+            let state = self.state();
+            let readable: Vec<&String> = namespaces
+                .iter()
+                .filter(|n| !state.forbidden.contains(*n))
+                .collect();
+            if !namespaces.is_empty() && readable.is_empty() {
+                return Err(ApiError::Forbidden("services is forbidden".into()));
+            }
+            Ok(state
                 .services
                 .iter()
                 .filter(|s| s.name == name)
-                .filter(|s| namespaces.is_empty() || namespaces.contains(&s.namespace))
+                .filter(|s| namespaces.is_empty() || readable.contains(&&s.namespace))
                 .cloned()
                 .collect())
         })
@@ -680,6 +690,37 @@ async fn a_listing_where_every_namespace_is_forbidden_fails() {
     setup.cluster.state().forbidden.insert("logging".into());
     let err = setup.kube.services("prod").await.unwrap_err();
     assert!(err.contains("forbidden"), "{err}");
+}
+
+#[tokio::test]
+async fn a_short_hostname_skips_namespaces_that_refuse() {
+    let setup = Setup::new(&format!(
+        "{PROJECT}namespaces = [\"logging\", \"monitoring\"]\n"
+    ));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    setup.cluster.state().forbidden.insert("logging".into());
+    let port = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
+    assert_eq!(get(port).await, "grafana-a");
+}
+
+#[tokio::test]
+async fn a_short_hostname_where_every_namespace_refuses_names_them() {
+    let setup = Setup::new(&format!(
+        "{PROJECT}namespaces = [\"logging\", \"monitoring\"]\n"
+    ));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    setup.cluster.state().forbidden.insert("logging".into());
+    setup.cluster.state().forbidden.insert("monitoring".into());
+    let (status, text) = upstream(setup.kube.route(target("grafana", None)).await).unwrap_err();
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(text.contains("logging, monitoring"), "{text}");
+    assert!(!text.contains("`namespaces`"), "{text}");
 }
 
 #[tokio::test]
