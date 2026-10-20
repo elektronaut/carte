@@ -9,6 +9,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::address::{Address, AddressError};
+use crate::config::check_dns_label;
 use crate::model::{EnvProviderKind, MachineConfig, Policy, World};
 use crate::naming::{self, NotFound};
 
@@ -121,6 +122,9 @@ pub fn resolve_host(world: &World, host: &str) -> Option<Result<KubeTarget, NotF
     let labels = naming::labels_under_tld(world, host).ok()?;
     let (top, left) = labels.split_last()?;
     if let Some(project) = world.kube_project(top) {
+        if left.iter().any(|label| check_dns_label(label).is_err()) {
+            return Some(Err(NotFound::InvalidHost { host: host.into() }));
+        }
         return Some(resolve_in_project(project, left));
     }
     let (project, service) = world.kube_projects.iter().find_map(|project| {
@@ -225,10 +229,22 @@ pub fn resolve_address(
             reason: "a kube project's Services have no processes",
         }));
     }
+    let service = service.map(|s| s.to_lowercase());
+    let namespace = namespace.map(|s| s.to_lowercase());
+    if [&service, &namespace]
+        .into_iter()
+        .flatten()
+        .any(|label| check_dns_label(label).is_err())
+    {
+        return Some(Err(AddressError::Invalid {
+            input: address.to_string(),
+            reason: "Service and namespace names are DNS labels: lowercase letters, digits and dashes",
+        }));
+    }
     Some(Ok(KubeAddress {
         project: project.name.clone(),
-        service: service.map(|s| s.to_lowercase()),
-        namespace: namespace.map(|s| s.to_lowercase()),
+        service,
+        namespace,
     }))
 }
 
@@ -395,6 +411,24 @@ mod tests {
     }
 
     #[test]
+    fn refuses_labels_that_arent_dns_labels() {
+        let world = world();
+        for host in [
+            "graf,ana.monitoring.prod.test",
+            "grafana.mon=itoring.prod.test",
+            "graf/ana.prod.test",
+            "grafana.mon%2citoring.prod.test",
+            "graf,ana.prod.test",
+        ] {
+            assert_eq!(
+                resolve_host(&world, host),
+                Some(Err(NotFound::InvalidHost { host: host.into() })),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
     fn leaves_other_hosts_alone() {
         let world = world();
         assert_eq!(resolve_host(&world, "shop.test"), None);
@@ -453,6 +487,28 @@ mod tests {
             resolve_address(&world, Some("prod"), &address("grafana/web")),
             Some(Err(AddressError::Invalid { .. }))
         ));
+    }
+
+    #[test]
+    fn refuses_addresses_that_arent_dns_labels() {
+        let world = world();
+        for (project, input) in [
+            (Some("prod"), "graf,ana@monitoring"),
+            (Some("prod"), "grafana@mon=itoring"),
+            (Some("prod"), "graf%2cana"),
+            (None, "graf,ana.prod"),
+            (None, "grafana.mon=itoring.prod"),
+            (None, "grafana.prod@mon%2citoring"),
+            (None, "prod@mon,itoring"),
+        ] {
+            assert!(
+                matches!(
+                    resolve_address(&world, project, &address(input)),
+                    Some(Err(AddressError::Invalid { .. }))
+                ),
+                "{project:?} {input}"
+            );
+        }
     }
 
     #[test]
