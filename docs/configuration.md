@@ -43,6 +43,9 @@ hard_ceiling = 50
 [share]
 provider = "cloudflare"
 domain = "dev.example.com"
+
+[attach]
+detach_key = "ctrl-q d"
 ```
 
 | Key | Default | |
@@ -86,6 +89,15 @@ is off.
 | `domain` | required | The domain shared apps are served under. For ngrok, your static domain |
 | `tunnel` | `"carte"` | The Cloudflare tunnel's name |
 | `port` | `9254` | The local port the tunnel delivers requests to |
+
+### `[attach]`
+
+For [`carte attach`](cli.md#attach) and typing into a process from the
+terminal UI.
+
+| Key | Default | |
+| --- | --- | --- |
+| `detach_key` | `"ctrl-q d"` | The keys that detach: `ctrl-<key>` or single characters, separated by spaces. With two different keys, typing the first twice sends it once. A letter after the prefix works on any keyboard layout, unlike `ctrl-]` or `~` |
 
 ## Project files
 
@@ -430,7 +442,7 @@ MAILCATCHER_SMTP = "1025"
 | `preset` | detected | `"vite_ruby"` or `"shakapacker"` fills in `paths` and `provides` for that dev server; `"none"` turns off the detection. See [Presets](#presets) |
 | `ready` | `"port"` | When the app counts as started: `"port"` once the port accepts connections, or a path like `"/up"` once a GET of it answers without a 5xx |
 | `scope` | detected | `instance` runs per stack; `checkout` runs once per checkout and is shared by every stack running from it |
-| `pty` | `true` | Run under a pseudo-terminal. `false` uses pipes |
+| `pty` | `true` | Run under a pseudo-terminal, which [`carte attach`](cli.md#attach) connects to. `false` uses pipes |
 | `policy` | the app's | See [Policies](#policies) |
 | `kind` | none | `"service"` or `"task"`, which start before the other processes, or `"teardown"`, which runs once a stack is removed. See [Services and tasks](#services-and-tasks) and [Teardown](#teardown) |
 | `after` | none | Processes of the same kind this one starts after, like `["migrate"]` |

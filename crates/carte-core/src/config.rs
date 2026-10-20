@@ -9,11 +9,12 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use thiserror::Error;
 
+use crate::detach::DetachKeys;
 use crate::kube::{KubeProject, KubeService, ServicePort};
 use crate::model::{
-    App, AppSettings, EnvProviderKind, EnvTemplate, Limits, MachineConfig, MemoryTarget, Policy,
-    Preset, Problem, ProcessConfig, ProcessKind, ProcessOverride, Project, Readiness, Restart,
-    Scheme, Scope, ShareConfig,
+    App, AppSettings, AttachConfig, EnvProviderKind, EnvTemplate, Limits, MachineConfig,
+    MemoryTarget, Policy, Preset, Problem, ProcessConfig, ProcessKind, ProcessOverride, Project,
+    Readiness, Restart, Scheme, Scope, ShareConfig,
 };
 use crate::{duration, slug};
 
@@ -110,6 +111,14 @@ struct RawMachine {
     #[serde(default)]
     limits: RawLimits,
     share: Option<RawShare>,
+    #[serde(default)]
+    attach: RawAttach,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawAttach {
+    detach_key: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -188,6 +197,15 @@ pub fn parse_machine_config(path: &Path, text: &str) -> Result<MachineConfig, Co
             tunnel: s.tunnel,
             port: s.port,
         }),
+        attach: AttachConfig {
+            detach_keys: match raw.attach.detach_key {
+                Some(keys) => keys.parse().map_err(|err| ConfigError::Invalid {
+                    path: path.to_path_buf(),
+                    message: format!("attach.detach_key: {err}"),
+                })?,
+                None => DetachKeys::default(),
+            },
+        },
     })
 }
 
@@ -1437,6 +1455,9 @@ mod tests {
 
             [share]
             domain = "dev.example.com"
+
+            [attach]
+            detach_key = "ctrl-] d"
             "#,
         )
         .unwrap();
@@ -1466,6 +1487,11 @@ mod tests {
                 port: 9254,
             })
         );
+        assert_eq!(config.attach.detach_keys.to_string(), "ctrl-] d");
+        let err = parse_machine_config(Path::new("c"), "[attach]\ndetach_key = \"ctrl-\"")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("attach.detach_key"), "{err}");
     }
 
     #[test]

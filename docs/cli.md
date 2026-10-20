@@ -59,6 +59,7 @@ address inside it when given one.
 | `carte events [address] [-f] [-n N]` | What carte did and why: starts, stops, crashes, reloads, shares, teardowns |
 | `carte env [address] [KEY] [-p process] [--values]` | The environment a process gets, with where each value comes from |
 | `carte exec [address] [-p process] [--no-check] -- command…` | Run a command, like a console or a rake task, with the app's env |
+| `carte attach [address] [process] [--detach-keys keys]` | Connect your terminal to a running process, to answer a debugger prompt; see below |
 | `carte open [address]` | Open in the browser |
 | `carte share [address] [--apps a,b] [--ttl 2h] [--auth] [--pin] [--replace]` | Put apps on the public internet |
 | `carte unshare [address]` | End a share |
@@ -160,6 +161,37 @@ carte exec billing@feature-x -- bin/rails runner 'ReportJob.perform_later'
   until the command ends: `carte status` shows it as `held by 1 exec`.
   Anything the command leaves running in the background keeps holding
   it until that exits too. A stop or `carte down` still stops it.
+
+### Attach
+
+Every process runs on a pty that only the daemon holds. When an app stops
+at `debugger`, `binding.irb`, `binding.pry` or `byebug`, `carte attach`
+connects your terminal to it:
+
+```sh
+carte attach                  # the web process of the app here
+carte attach shop worker      # another process
+carte attach shop@feature-x/worker
+```
+
+- It prints the last screen of output, then everything the process
+  prints. What you type goes to the process, `ctrl-c` and `ctrl-d`
+  included, and the process follows your terminal's size.
+- `ctrl-q d` detaches; `ctrl-q ctrl-q` sends a `ctrl-q`. `--detach-keys`
+  or [`attach.detach_key`](configuration.md#attach) picks other keys,
+  like `"ctrl-] d"`. Detaching leaves the process running.
+- Several terminals can attach to a process at once, and all of them can
+  type, like a shared tmux session. The pty takes the smallest one's
+  size, so wider terminals show it narrower; it gets its own size back
+  when the last one detaches.
+- When the process exits, `attach` says how and ends.
+- Without a terminal, `attach` types its input into the process, prints
+  the output until it goes quiet for half a second, and detaches:
+  `printf 'continue\n' | carte attach shop`.
+- A process with `pty = false` can't be attached to.
+
+The terminal UI's `t` types into the selected process from the log pane,
+and the [MCP server](mcp.md)'s `type` tool lets an agent do it.
 
 ## JSON output
 

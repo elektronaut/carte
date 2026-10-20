@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use carte_api::attach::Attached;
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Event, EventKind, EventSubject, LogLine,
     LogsRequest, ProcessState, ShareRequest, ShareResponse, Snapshot, TunnelState, TunnelStatus,
@@ -24,6 +25,7 @@ use super::events::{self, EventFilter, EventLog};
 use super::groups::GroupRecord;
 use super::runner::{self, LogLabel, ProcLog};
 use super::teardown::{self, StackId, Teardowns};
+use super::terminal::Terminal;
 use super::{Activity, BootFailure, Handle, LogFilter, Msg, Options, Upstream, share, snapshot};
 use crate::instance_dirs;
 use crate::paths::Paths;
@@ -167,6 +169,8 @@ pub(super) struct Proc {
     stalls: u32,
     /// Disabled or stopped by hand: requests for its paths go to the HTTP process.
     off: bool,
+    /// The latest run's pty, while it runs.
+    terminal: Option<Arc<Terminal>>,
 }
 
 impl Proc {
@@ -516,6 +520,13 @@ impl Actor {
                 let _ = reply.send(self.hold(&target));
             }
             Msg::Release(key, id) => self.release(&key, id),
+            Msg::Attach {
+                target,
+                process,
+                reply,
+            } => {
+                let _ = reply.send(self.attach(&target, process.as_deref()));
+            }
             Msg::Control { request, reply } => {
                 let _ = reply.send(self.control(request));
             }
@@ -884,6 +895,7 @@ impl Actor {
                 memory_bytes: 0,
                 cpu_percent: 0.0,
                 cpu_sample: None,
+                terminal: None,
             });
         }
         inst.procs = procs;
@@ -1254,11 +1266,12 @@ impl Actor {
         }
         self.dirty = true;
         match event {
-            runner::Event::Started { pid } => {
+            runner::Event::Started { pid, terminal } => {
                 if proc.state == ProcessState::Starting {
                     proc.state = ProcessState::Running;
                 }
                 proc.pid = Some(pid);
+                proc.terminal = terminal;
                 if proc.spec.is_checked() {
                     self.check_ready(key, run, idx);
                 }
@@ -1271,6 +1284,7 @@ impl Actor {
                     signal: None,
                 };
                 proc.stop = None;
+                proc.terminal = None;
                 let name = proc.spec.name.clone();
                 proc.log
                     .lock()
@@ -1289,6 +1303,7 @@ impl Actor {
                     self.groups.remove(pid);
                 }
                 proc.stop = None;
+                proc.terminal = None;
                 let manual = proc.manual_stop || inst.state == Lifecycle::Stopping;
                 proc.state = if manual {
                     ProcessState::Stopped
@@ -1791,6 +1806,71 @@ impl Actor {
             inst.last_activity = Instant::now();
             self.dirty = true;
         }
+    }
+
+    /// The pty of a running process to attach to: the one named, else the HTTP
+    /// process, else the only process.
+    fn attach(
+        &self,
+        target: &Address,
+        process: Option<&str>,
+    ) -> Result<(Attached, Arc<Terminal>), String> {
+        let resolved = self.resolve(target)?;
+        let key = resolved
+            .instance()
+            .ok_or_else(|| format!("{:?} names no app", target.address))?;
+        let label = format!("{}@{}", key.app, key.stack.slug());
+        let process = match (resolved.process.as_deref(), process) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(format!("{:?} already names process {a}", target.address));
+            }
+            (a, b) => a.or(b),
+        };
+        let inst = self
+            .instances
+            .get(&key)
+            .filter(|inst| inst.any_running())
+            .ok_or_else(|| format!("{label} isn't running"))?;
+        let proc = match process {
+            Some(name) => inst
+                .procs
+                .iter()
+                .find(|p| p.spec.name == name)
+                .ok_or_else(|| format!("{label} has no process named {name}"))?,
+            None => match (inst.http(), inst.procs.as_slice()) {
+                (Some(http), _) => http,
+                (None, [only]) => only,
+                (None, procs) => {
+                    let names: Vec<&str> = procs.iter().map(|p| p.spec.name.as_str()).collect();
+                    return Err(format!(
+                        "{label} has no HTTP process; name one: {}",
+                        names.join(", ")
+                    ));
+                }
+            },
+        };
+        let name = &proc.spec.name;
+        let terminal = match &proc.terminal {
+            Some(terminal) => terminal.clone(),
+            None if !proc.is_running() => return Err(format!("{label}/{name} isn't running")),
+            None if !proc.spec.pty => {
+                return Err(format!(
+                    "{label}/{name} runs without a pty (pty = false), so there is nothing to attach to"
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "{label}/{name} runs without a pty: ptys were running out when it started"
+                ));
+            }
+        };
+        Ok((
+            Attached {
+                instance: label,
+                process: name.clone(),
+            },
+            terminal,
+        ))
     }
 
     pub(super) fn usages(&self) -> Vec<Usage> {

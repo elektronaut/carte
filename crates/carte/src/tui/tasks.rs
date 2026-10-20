@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use carte_api::attach::{AttachRequest, Frame};
 use carte_api::{
     ControlResponse, EnvResponse, Event as DaemonEvent, KubeServicesRequest, KubeServicesResponse,
     LogLine, MarkRequest, ShareResponse, Snapshot, StopAllRequest, paths,
@@ -14,29 +15,36 @@ use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind, MouseButton,
     MouseEventKind,
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
 use super::app::{Command, Event};
+use crate::cli::attach::Connection;
 use crate::client::Client;
 
 pub struct Tasks {
     client: Arc<Client>,
+    socket: PathBuf,
     tx: UnboundedSender<Event>,
     logs: Option<JoinHandle<()>>,
+    /// Typing into a process: where keys go, and the task that sends them.
+    typing: Option<(UnboundedSender<Vec<u8>>, JoinHandle<()>)>,
 }
 
 impl Tasks {
     pub fn start(socket: PathBuf, tx: UnboundedSender<Event>) -> Self {
         let client = Arc::new(Client::new(&socket));
+        let socket = socket.clone();
         tokio::spawn(watch(client.clone(), tx.clone()));
         tokio::spawn(tick(tx.clone()));
         let input_tx = tx.clone();
         std::thread::spawn(move || read_terminal(input_tx));
         Tasks {
             client,
+            socket,
             tx,
             logs: None,
+            typing: None,
         }
     }
 
@@ -176,6 +184,19 @@ impl Tasks {
                     let _ = tx.send(Event::Services { project, result });
                 });
             }
+            Command::Attach(request) => {
+                self.detach();
+                let (keys_tx, keys) = tokio::sync::mpsc::unbounded_channel();
+                let socket = self.socket.clone();
+                let task = tokio::spawn(type_into(socket, request, keys, tx));
+                self.typing = Some((keys_tx, task));
+            }
+            Command::Type(data) => {
+                if let Some((keys, _)) = &self.typing {
+                    let _ = keys.send(data);
+                }
+            }
+            Command::Detach => self.detach(),
             Command::MouseCapture(on) => set_mouse_capture(on),
             Command::Copy(text) => copy(&text),
             Command::Open(url) => {
@@ -199,9 +220,66 @@ impl Tasks {
         }
     }
 
+    fn detach(&mut self) {
+        if let Some((_, task)) = self.typing.take() {
+            task.abort();
+        }
+    }
+
     fn stop_logs(&mut self) {
         if let Some(task) = self.logs.take() {
             task.abort();
+        }
+    }
+}
+
+/// Attaches to a process and sends it the keys typed, until the process exits or the
+/// task is aborted.
+async fn type_into(
+    socket: PathBuf,
+    request: AttachRequest,
+    mut keys: UnboundedReceiver<Vec<u8>>,
+    tx: UnboundedSender<Event>,
+) {
+    let mut connection = match Connection::open(&socket, &request).await {
+        Ok(connection) => connection,
+        Err(err) => {
+            let _ = tx.send(Event::Attached(Err(format!("{err:#}"))));
+            return;
+        }
+    };
+    let _ = tx.send(Event::Attached(Ok(connection.attached.clone())));
+    loop {
+        let typed = tokio::select! {
+            data = keys.recv() => match data {
+                Some(data) => data,
+                None => return,
+            },
+            frame = connection.next() => {
+                match frame {
+                    Ok(Some(Frame::Output(data))) => {
+                        let _ = tx.send(Event::TypingOutput(data));
+                    }
+                    Ok(Some(Frame::Ended(message))) => {
+                        let _ = tx.send(Event::TypingEnded(Some(message)));
+                        return;
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        let _ = tx.send(Event::TypingEnded(None));
+                        return;
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Event::TypingEnded(Some(format!("{err:#}"))));
+                        return;
+                    }
+                }
+                continue;
+            }
+        };
+        if connection.send(&Frame::Input(typed)).await.is_err() {
+            let _ = tx.send(Event::TypingEnded(None));
+            return;
         }
     }
 }

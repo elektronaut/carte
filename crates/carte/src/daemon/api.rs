@@ -4,10 +4,11 @@ use std::convert::Infallible;
 
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use carte_api::attach::{self, AttachRequest};
 use carte_api::{
     Address, ControlRequest, ErrorBody, EventsRequest, LogsRequest, MarkRequest, Problem,
     PruneRequest, ShareRequest, StopAllRequest, UnshareRequest, paths,
@@ -18,6 +19,8 @@ use carte_core::kube::{self, KubeAddress};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
+
+use hyper_util::rt::TokioIo;
 
 use crate::kube::Kube;
 use crate::paths::Paths;
@@ -49,6 +52,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::PRUNE, get(prune_list).post(prune))
         .route(paths::HOLD, post(hold))
         .route(paths::KUBE_SERVICES, post(kube_services))
+        .route(paths::ATTACH, post(attach))
         .with_state(api)
 }
 
@@ -394,6 +398,50 @@ async fn hold(State(api): State<Api>, Json(target): Json<Address>) -> Response {
         api.supervisor.release(key, id);
     });
     stream(rx)
+}
+
+/// Connects the client to a process's pty: answers `101 Switching Protocols` and
+/// carries attach frames over the connection from then on.
+async fn attach(State(api): State<Api>, mut request: axum::extract::Request) -> Response {
+    let upgrade = request
+        .extensions_mut()
+        .remove::<hyper::upgrade::OnUpgrade>();
+    let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
+        Ok(body) => body,
+        Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+    let request: AttachRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(err) => return error(StatusCode::BAD_REQUEST, err.to_string()),
+    };
+    if let Some(response) = not_for_kube(&api, &request.target, "processes to attach to") {
+        return response;
+    }
+    if let Some(response) = unresolved(&api, &request.target) {
+        return response;
+    }
+    let Some(upgrade) = upgrade else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            format!("attach needs `Upgrade: {}`", attach::PROTOCOL),
+        );
+    };
+    let (attached, terminal) = match api.supervisor.attach(request.target, request.process).await {
+        Ok(found) => found,
+        Err(message) => return error(StatusCode::CONFLICT, message),
+    };
+    let client = terminal.join(request.size, request.replay);
+    tokio::spawn(async move {
+        if let Ok(upgraded) = upgrade.await {
+            super::attach::session(TokioIo::new(upgraded), attached, client).await;
+        }
+    });
+    Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(header::CONNECTION, "upgrade")
+        .header(header::UPGRADE, attach::PROTOCOL)
+        .body(Body::empty())
+        .expect("valid response")
 }
 
 async fn kube_services(

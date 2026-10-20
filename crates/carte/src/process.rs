@@ -15,6 +15,7 @@ use std::time::Duration;
 use nix::errno::Errno;
 use nix::pty::{Winsize, openpty};
 use nix::sys::signal::{Signal, killpg};
+use nix::sys::termios::{self, InputFlags, SetArg};
 use nix::unistd::Pid;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
@@ -24,7 +25,8 @@ use tokio::process::{Child, Command};
 /// How a process's stdio is connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoMode {
-    /// A pty of the given size; stdin, stdout and stderr all go through it.
+    /// A pty of the given size; stdin, stdout and stderr all go through it. Flow
+    /// control is off, so ctrl-s and ctrl-q reach the process.
     Pty { cols: u16, rows: u16 },
     /// stdin from `/dev/null`, stdout and stderr merged into one pipe.
     Pipes,
@@ -102,6 +104,9 @@ impl Spawner {
                     ws_ypixel: 0,
                 };
                 let pty = openpty(Some(&size), None).map_err(io::Error::from)?;
+                let mut modes = termios::tcgetattr(&pty.slave).map_err(io::Error::from)?;
+                modes.input_flags.remove(InputFlags::IXON);
+                termios::tcsetattr(&pty.slave, SetArg::TCSANOW, &modes).map_err(io::Error::from)?;
                 set_cloexec(pty.master.as_raw_fd(), true)?;
                 set_cloexec(pty.slave.as_raw_fd(), true)?;
                 let stdio = [pty.slave.try_clone()?, pty.slave.try_clone()?, pty.slave];
@@ -264,13 +269,41 @@ impl ProcessHandle {
     }
 
     /// Writes to the pty, as if typed. Fails in pipe mode.
-    pub async fn write_input(&self, mut data: &[u8]) -> io::Result<()> {
-        let master = self
-            .master
-            .as_ref()
-            .ok_or_else(|| io::Error::other("process has no pty"))?;
+    pub async fn write_input(&self, data: &[u8]) -> io::Result<()> {
+        self.pty()
+            .ok_or_else(|| io::Error::other("process has no pty"))?
+            .write(data)
+            .await
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        self.pty()
+            .ok_or_else(|| io::Error::other("process has no pty"))?
+            .resize(cols, rows)
+    }
+
+    /// The pty's input and size, for use beside the handle; `None` in pipe mode.
+    pub fn pty(&self) -> Option<Pty> {
+        self.master.clone().map(|master| Pty { master })
+    }
+
+    /// Closes the lifeline without waiting, as a daemon crash would.
+    pub fn close_lifeline(&mut self) {
+        self.lifeline = None;
+    }
+}
+
+/// Writes to a process's pty and sets its size.
+#[derive(Debug, Clone)]
+pub struct Pty {
+    master: Arc<AsyncFd<OwnedFd>>,
+}
+
+impl Pty {
+    /// Writes all of `data`, as if typed.
+    pub async fn write(&self, mut data: &[u8]) -> io::Result<()> {
         while !data.is_empty() {
-            let mut guard = master.writable().await?;
+            let mut guard = self.master.writable().await?;
             match guard.try_io(|fd| write_fd(fd.as_raw_fd(), data)) {
                 Ok(n) => data = &data[n?..],
                 Err(_would_block) => continue,
@@ -280,25 +313,16 @@ impl ProcessHandle {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-        let master = self
-            .master
-            .as_ref()
-            .ok_or_else(|| io::Error::other("process has no pty"))?;
         let size = libc::winsize {
             ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        if unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) } < 0 {
+        if unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &size) } < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
-    }
-
-    /// Closes the lifeline without waiting, as a daemon crash would.
-    pub fn close_lifeline(&mut self) {
-        self.lifeline = None;
     }
 }
 

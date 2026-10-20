@@ -4,11 +4,13 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
+use carte_api::attach::{AttachRequest, Attached};
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Credentials, EnvResponse, EventsRequest,
     InstanceStatus, KubeProjectInfo, KubeServiceEntry, LogLine, LogsRequest, ShareRequest,
     ShareResponse, Snapshot, UnshareRequest,
 };
+use carte_core::detach::{DetachFilter, DetachKeys};
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
@@ -18,6 +20,7 @@ use super::jump::{self, Jump};
 use super::logs::{Logs, Prefix};
 use super::target;
 use super::tree::{self, Fold, Node, NodeId, Row, Show};
+use crate::logs::Stripper;
 
 #[derive(Debug)]
 pub enum Event {
@@ -47,6 +50,12 @@ pub enum Event {
         project: String,
         result: Result<Vec<KubeServiceEntry>, String>,
     },
+    /// The process typing goes to, or why there is none.
+    Attached(Result<Attached, String>),
+    /// Output of the process typing goes to.
+    TypingOutput(Vec<u8>),
+    /// The process typing went to exited, or the connection to it was lost.
+    TypingEnded(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -77,6 +86,11 @@ pub enum Command {
     FetchEnv(Address),
     /// Lists a kube project's Services.
     FetchServices(String),
+    /// Connects to a process to type into it.
+    Attach(AttachRequest),
+    /// Types into the process.
+    Type(Vec<u8>),
+    Detach,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +125,22 @@ pub struct EnvView {
     pub scroll: usize,
     /// Rows the popup showed last time it was drawn.
     pub height: usize,
+}
+
+/// Typing into a process, from the log pane.
+pub struct Typing {
+    /// `app@stack/process` once attached, the selection's address before.
+    pub label: String,
+    pub attached: bool,
+    filter: DetachFilter,
+    stripper: Stripper,
+}
+
+impl Typing {
+    /// The process's unfinished last line, like a prompt and what's typed after it.
+    pub fn pending(&self) -> String {
+        self.stripper.pending()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +188,9 @@ pub struct App {
     pub start_at: Option<NodeId>,
     pub mouse: bool,
     pub quit: bool,
+    /// The keys that stop typing into a process.
+    pub detach_keys: DetachKeys,
+    pub typing: Option<Typing>,
 }
 
 impl App {
@@ -190,6 +223,8 @@ impl App {
             start_at: None,
             mouse: true,
             quit: false,
+            detach_keys: DetachKeys::default(),
+            typing: None,
         }
     }
 
@@ -255,6 +290,27 @@ impl App {
             Event::Env(result) => {
                 if let Some(view) = &mut self.env {
                     view.env = Some(result);
+                }
+            }
+            Event::Attached(Ok(attached)) => {
+                if let Some(typing) = &mut self.typing {
+                    typing.label = format!("{}/{}", attached.instance, attached.process);
+                    typing.attached = true;
+                }
+            }
+            Event::Attached(Err(message)) => {
+                self.stop_typing();
+                self.warn(&message);
+            }
+            Event::TypingOutput(data) => {
+                if let Some(typing) = &mut self.typing {
+                    typing.stripper.feed(&data);
+                }
+            }
+            Event::TypingEnded(message) => {
+                if let Some(typing) = self.stop_typing() {
+                    let message = message.unwrap_or_else(|| "lost the connection".to_string());
+                    self.warn(&format!("{}: {message}", typing.label));
                 }
             }
         }
@@ -506,6 +562,12 @@ impl App {
         if self.mode == Mode::Jump {
             return self.jump_key(intent);
         }
+        if self.mode == Mode::Type {
+            if let Intent::Typed(key) = intent {
+                commands.extend(self.type_key(key));
+            }
+            return;
+        }
         match (intent, self.focus) {
             (Intent::Quit, _) => self.quit = true,
             (Intent::Help, _) => self.mode = Mode::Help,
@@ -612,7 +674,59 @@ impl App {
                 Command::Copy(url)
             })),
             (Intent::Share { auth }, _) => commands.extend(self.share(auth)),
+            (Intent::StartTyping, _) => commands.extend(self.start_typing()),
+            (Intent::Typed(_), _) => {}
         }
+    }
+
+    /// Connects to the selected process, or the selected app's HTTP process, and sends
+    /// it every key until the detach keys.
+    fn start_typing(&mut self) -> Option<Command> {
+        if self.refuse_kube("typing into a process") {
+            return None;
+        }
+        let id = self.selected_node()?.id().clone();
+        if !matches!(id, NodeId::Instance { .. } | NodeId::Process { .. }) {
+            self.warn("select an app or a process to type into");
+            return None;
+        }
+        self.mode = Mode::Type;
+        self.typing = Some(Typing {
+            label: target::label(&id),
+            attached: false,
+            filter: self.detach_keys.filter(),
+            stripper: Stripper::default(),
+        });
+        Some(Command::Attach(AttachRequest {
+            target: target::address(&id),
+            process: None,
+            size: None,
+            replay: true,
+        }))
+    }
+
+    fn type_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        let Some(typing) = &mut self.typing else {
+            self.mode = Mode::Normal;
+            return Vec::new();
+        };
+        let (bytes, detach) = typing.filter.feed(&input::key_bytes(key));
+        let mut commands = Vec::new();
+        if !bytes.is_empty() {
+            commands.push(Command::Type(bytes));
+        }
+        if detach && let Some(typing) = self.stop_typing() {
+            self.inform(&format!("stopped typing into {}", typing.label));
+            commands.push(Command::Detach);
+        }
+        commands
+    }
+
+    fn stop_typing(&mut self) -> Option<Typing> {
+        if self.mode == Mode::Type {
+            self.mode = Mode::Normal;
+        }
+        self.typing.take()
     }
 
     fn jump_key(&mut self, intent: Intent) {
@@ -1608,6 +1722,61 @@ mod tests {
         assert_eq!(
             app.notice.as_ref().map(|n| n.text.as_str()),
             Some("not shared; w shares it")
+        );
+    }
+
+    #[test]
+    fn t_types_into_the_selected_app_until_the_detach_keys() {
+        let (mut app, now) = connected();
+        assert!(press(&mut app, now, KeyCode::Char('t')).is_empty());
+        assert_eq!(app.mode, Mode::Normal, "a project has no process");
+
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down] {
+            press(&mut app, now, code);
+        }
+        let commands = press(&mut app, now, KeyCode::Char('t'));
+        let [Command::Attach(request)] = commands.as_slice() else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(request.target.address, "nova-billing@main");
+        assert_eq!(request.process, None);
+        assert_eq!(app.mode, Mode::Type);
+        app.update(
+            Event::Attached(Ok(Attached {
+                instance: "nova-billing@main".into(),
+                process: "web".into(),
+            })),
+            now,
+        );
+        app.update(Event::TypingOutput(b"=> 1\r\n(rdbg) ".to_vec()), now);
+        assert_eq!(app.typing.as_ref().unwrap().pending(), "(rdbg) ");
+
+        assert_eq!(
+            press(&mut app, now, KeyCode::Char('q')),
+            [Command::Type(b"q".to_vec())],
+            "letters are typed, not commands"
+        );
+        let ctrl = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        assert_eq!(app.update(ctrl('c'), now), [Command::Type(vec![3])]);
+        assert!(!app.quit);
+        assert!(app.update(ctrl('q'), now).is_empty());
+        assert_eq!(press(&mut app, now, KeyCode::Char('d')), [Command::Detach]);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.typing.is_none());
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("stopped typing into nova-billing@main/web")
+        );
+
+        press(&mut app, now, KeyCode::Char('t'));
+        app.update(
+            Event::TypingEnded(Some("web exited with code 1".into())),
+            now,
+        );
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(
+            app.notice.as_ref().map(|n| n.text.as_str()),
+            Some("nova-billing@main: web exited with code 1")
         );
     }
 

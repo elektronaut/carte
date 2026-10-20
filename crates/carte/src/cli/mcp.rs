@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::{EventsArgs, LogsArgs, Target, control, env};
+use super::{EventsArgs, LogsArgs, Target, attach, control, env};
 use crate::paths::Paths;
 
 /// Protocol versions this server speaks, newest last.
@@ -137,6 +137,18 @@ impl Server {
                     &[],
                 ),
                 tool("stop", "Stop an app, stack or process.", json!({}), &[]),
+                tool(
+                    "type",
+                    "Type into a running process's terminal, like a command at a debugger \
+                     prompt (`(rdbg)`, `pry`, `irb`, `(byebug)`), and return what it printed \
+                     until its output went quiet.",
+                    json!({
+                        "text": { "type": "string", "description": "What to type, like `continue` or `\\u0003` for ctrl-c." },
+                        "enter": { "type": "boolean", "description": "Press enter after the text (default true)." },
+                        "process": { "type": "string", "description": "The process; defaults to the one serving HTTP." },
+                    }),
+                    &["text"],
+                ),
             ]);
         }
         tools
@@ -196,6 +208,13 @@ impl Server {
             "start" if self.control => self.control_tool(arguments, Action::Up, true),
             "restart" if self.control => self.control_tool(arguments, Action::Restart, true),
             "stop" if self.control => self.control_tool(arguments, Action::Down, false),
+            "type" if self.control => parse::<TypeTool>(arguments).and_then(|args| {
+                let mut input = args.text.into_bytes();
+                if args.enter.unwrap_or(true) {
+                    input.push(b'\r');
+                }
+                attach::type_into(paths, &args.at.target(), args.process, input)
+            }),
             _ => return None,
         };
         Some(match outcome {
@@ -257,6 +276,15 @@ struct EventsTool {
     #[serde(flatten)]
     at: Addressed,
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct TypeTool {
+    #[serde(flatten)]
+    at: Addressed,
+    text: String,
+    enter: Option<bool>,
+    process: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -374,7 +402,8 @@ mod tests {
                 "env",
                 "start",
                 "restart",
-                "stop"
+                "stop",
+                "type"
             ]
         );
     }

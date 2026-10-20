@@ -74,6 +74,25 @@ impl LogBuffer {
             .collect()
     }
 
+    /// The raw bytes of the last `n` lines, an unfinished last line counting as one.
+    pub fn last_lines(&self, n: usize) -> Vec<u8> {
+        let mut lines = 0;
+        let mut start = 0;
+        for (i, &b) in self.buf.iter().enumerate().rev() {
+            if b == b'\n' && i + 1 < self.buf.len() {
+                lines += 1;
+                if lines == n {
+                    start = i + 1;
+                    break;
+                }
+            }
+        }
+        if n == 0 {
+            return Vec::new();
+        }
+        self.buf.range(start..).copied().collect()
+    }
+
     pub fn clear(&mut self) {
         self.buf.clear();
     }
@@ -342,6 +361,17 @@ mod tests {
         buf.push(b"aaaa\nbbbb\ncccc\n");
         buf.set_cap(6);
         assert_eq!(buf.contents(), b"cccc\n");
+    }
+
+    #[test]
+    fn last_lines_are_raw_and_count_an_unfinished_line() {
+        let mut buf = LogBuffer::new(100);
+        buf.push(b"one\r\ntwo\r\n\x1b[1m(rdbg)\x1b[0m ");
+        assert_eq!(buf.last_lines(2), b"two\r\n\x1b[1m(rdbg)\x1b[0m ");
+        assert_eq!(buf.last_lines(10), buf.contents());
+        assert_eq!(buf.last_lines(0), b"");
+        buf.push(b"\n");
+        assert_eq!(buf.last_lines(1), b"\x1b[1m(rdbg)\x1b[0m \n");
     }
 
     #[test]

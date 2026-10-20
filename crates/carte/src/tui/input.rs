@@ -21,6 +21,8 @@ pub enum Mode {
     Env,
     /// Typing a name to jump to.
     Jump,
+    /// Typing into the selected process.
+    Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +86,10 @@ pub enum Intent {
     Share {
         auth: bool,
     },
+    /// Start typing into the selected process.
+    StartTyping,
+    /// A key to type into the process.
+    Typed(KeyEvent),
     Help,
     Problems,
     Yes,
@@ -127,6 +133,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("O", "open the shared address"),
             ("y Y", "copy the address, the shared address"),
             ("v", "view the env"),
+            ("t", "type into the process, like at a debugger prompt"),
         ],
     ),
     (
@@ -142,6 +149,9 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
 ];
 
 pub fn intent(mode: &Mode, focus: Focus, key: KeyEvent) -> Option<Intent> {
+    if *mode == Mode::Type {
+        return Some(Intent::Typed(key));
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('c') => return Some(Intent::Quit),
@@ -177,6 +187,7 @@ pub fn intent(mode: &Mode, focus: Focus, key: KeyEvent) -> Option<Intent> {
             _ => Intent::Close,
         }),
         Mode::Normal => normal(focus, key),
+        Mode::Type => Some(Intent::Typed(key)),
     }
 }
 
@@ -223,6 +234,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('a') => Some(Intent::CycleShow),
         KeyCode::Char('e') => Some(Intent::ToggleEvents),
         KeyCode::Char('m') => Some(Intent::ToggleMouse),
+        KeyCode::Char('t') => Some(Intent::StartTyping),
         _ => None,
     };
     if shared.is_some() {
@@ -239,9 +251,73 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
     }
 }
 
+/// The bytes a terminal sends for a key.
+pub fn key_bytes(key: KeyEvent) -> Vec<u8> {
+    let mut bytes = match key.code {
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => match c {
+            'a'..='z' | 'A'..='Z' | '@' | '[' | '\\' | ']' | '^' | '_' => {
+                vec![(c.to_ascii_uppercase() as u8) & 0x1f]
+            }
+            ' ' => vec![0],
+            _ => c.to_string().into_bytes(),
+        },
+        KeyCode::Char(c) => c.to_string().into_bytes(),
+        KeyCode::Enter => b"\r".to_vec(),
+        KeyCode::Tab => b"\t".to_vec(),
+        KeyCode::BackTab => b"\x1b[Z".to_vec(),
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::Insert => b"\x1b[2~".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+        _ => Vec::new(),
+    };
+    if key.modifiers.contains(KeyModifiers::ALT) && !bytes.is_empty() {
+        bytes.insert(0, 0x1b);
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_key_is_typed_while_typing() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(
+            intent(&Mode::Type, Focus::Logs, ctrl_c),
+            Some(Intent::Typed(ctrl_c))
+        );
+        assert_eq!(
+            intent(&Mode::Normal, Focus::Logs, key(KeyCode::Char('t'))),
+            Some(Intent::StartTyping)
+        );
+    }
+
+    #[test]
+    fn keys_become_what_a_terminal_sends() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert_eq!(key_bytes(ctrl('c')), [3]);
+        assert_eq!(key_bytes(ctrl('q')), [0x11]);
+        assert_eq!(key_bytes(ctrl(']')), [0x1d]);
+        assert_eq!(key_bytes(key(KeyCode::Char('å'))), "å".as_bytes());
+        assert_eq!(key_bytes(key(KeyCode::Enter)), b"\r");
+        assert_eq!(key_bytes(key(KeyCode::Up)), b"\x1b[A");
+        assert_eq!(key_bytes(key(KeyCode::Backspace)), [0x7f]);
+        assert_eq!(
+            key_bytes(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT)),
+            b"\x1bb"
+        );
+        assert!(key_bytes(key(KeyCode::F(5))).is_empty());
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

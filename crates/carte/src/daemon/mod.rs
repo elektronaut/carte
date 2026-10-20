@@ -1,6 +1,7 @@
 //! The daemon: supervisor, proxy, DNS and the API socket, until a signal stops it.
 
 mod api;
+pub mod attach;
 mod launchd;
 mod notifications;
 mod router;

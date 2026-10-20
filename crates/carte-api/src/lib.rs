@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub mod attach;
+
 /// Endpoint paths, shared by the daemon's router and the client.
 pub mod paths {
     pub const SNAPSHOT: &str = "/v1/snapshot";
@@ -33,6 +35,9 @@ pub mod paths {
     /// POST a `KubeServicesRequest`: every Service of a kube project, as a
     /// `KubeServicesResponse`. Asks the cluster each time.
     pub const KUBE_SERVICES: &str = "/v1/kube/services";
+    /// POST an `attach::AttachRequest` with `Upgrade: carte-attach`: the connection
+    /// then carries `attach::Frame`s to and from a process's pty.
+    pub const ATTACH: &str = "/v1/attach";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
