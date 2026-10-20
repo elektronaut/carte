@@ -59,3 +59,19 @@ jobs:
           toolchain: ${{ env.MSRV }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
+
+  automerge:
+    name: Auto-merge Dependabot
+    needs: [fmt, test, msrv]
+    if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Enable auto-merge
+        run: gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
