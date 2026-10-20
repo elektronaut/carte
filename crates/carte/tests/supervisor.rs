@@ -119,6 +119,16 @@ async fn wait_for(handle: &Handle, what: &str, check: impl Fn(&carte_api::Snapsh
     );
 }
 
+async fn wait_for_file(path: &Path) {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(result.is_ok(), "timed out waiting for {}", path.display());
+}
+
 fn control(address: &str, action: Action) -> ControlRequest {
     ControlRequest {
         target: Address {
@@ -1563,10 +1573,12 @@ async fn services_stop_after_everything_else() {
     let setup = Setup::new();
     let path = setup.root.join("stop.log");
     let log = path.display();
+    let trapped = setup.root.join("trapped");
     setup.app(
         "acme-web",
         &format!(
-            "web: exec {{fixture}}\nworker: trap 'sleep 0.2; echo worker >> {log}; exit 0' TERM; while :; do sleep 0.05; done\n"
+            "web: exec {{fixture}}\nworker: trap 'sleep 0.2; echo worker >> {log}; exit 0' TERM; touch {}; while :; do sleep 0.05; done\n",
+            trapped.display()
         ),
     );
     setup.project(&format!(
@@ -1577,12 +1589,13 @@ kind = "service"
 "#,
         fixture = fixture().display()
     ));
-    let handle = setup.start();
+    let handle = setup.start_with(|options| options.grace = Duration::from_secs(5));
 
     handle
         .ensure_ready(key("acme-web", Stack::Main))
         .await
         .unwrap();
+    wait_for_file(&trapped).await;
     handle.control(control("web", Action::Down)).await.unwrap();
     wait_for(&handle, "stopped", |s| {
         status(s, "acme-web", "main").state == InstanceState::Stopped
@@ -1746,6 +1759,7 @@ command = 'if [ -e {marker} ]; then echo crash >> {log}; exit 1; fi; touch {mark
         .ensure_ready(key("acme-web", Stack::Main))
         .await
         .unwrap();
+    wait_for_file(&marker).await;
     let pid = process(&handle.snapshot(), "acme-web", "worker")
         .pid
         .unwrap();
