@@ -37,7 +37,7 @@ pub trait Cluster: Send + Sync + 'static {
         &'a self,
         name: &'a str,
         namespaces: &'a [String],
-    ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>>;
+    ) -> BoxFuture<'a, Result<Readable<ServiceInfo>, ApiError>>;
 
     fn endpoint_slices<'a>(
         &'a self,
@@ -74,6 +74,42 @@ pub trait Cluster: Send + Sync + 'static {
         pod: &'a str,
         port: u16,
     ) -> BoxFuture<'a, Result<PodStream, ApiError>>;
+}
+
+/// What a read of several namespaces found, and the namespaces the cluster refused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Readable<T> {
+    pub found: Vec<T>,
+    pub refused: Vec<String>,
+}
+
+/// Reads each namespace in turn, skipping the ones the cluster refuses, unless it
+/// refuses all of them. Any other error ends the read.
+pub async fn read_each_namespace<'a, T>(
+    namespaces: &'a [String],
+    mut read: impl FnMut(&'a str) -> BoxFuture<'a, Result<Vec<T>, ApiError>>,
+) -> Result<Readable<T>, ApiError> {
+    let mut readable = Readable {
+        found: Vec::new(),
+        refused: Vec::new(),
+    };
+    let mut forbidden = None;
+    for namespace in namespaces {
+        match read(namespace).await {
+            Ok(found) => readable.found.extend(found),
+            Err(ApiError::Forbidden(message)) => {
+                readable.refused.push(namespace.clone());
+                forbidden = Some(message);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    match forbidden {
+        Some(message) if readable.refused.len() == namespaces.len() => {
+            Err(ApiError::Forbidden(message))
+        }
+        _ => Ok(readable),
+    }
 }
 
 /// Which of a container's log lines to read.
@@ -404,31 +440,23 @@ impl Cluster for KubeCluster {
         &'a self,
         name: &'a str,
         namespaces: &'a [String],
-    ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>> {
+    ) -> BoxFuture<'a, Result<Readable<ServiceInfo>, ApiError>> {
         Box::pin(async move {
             if namespaces.is_empty() {
                 let api: Api<Service> = Api::all(self.client.clone());
                 let params = ListParams::default().fields(&format!("metadata.name={name}"));
                 let list = api.list(&params).await.map_err(|err| self.error(err))?;
-                return Ok(list.items.into_iter().map(service_info).collect());
+                return Ok(Readable {
+                    found: list.items.into_iter().map(service_info).collect(),
+                    refused: Vec::new(),
+                });
             }
-            let mut found = Vec::new();
-            let mut forbidden = None;
-            let mut read = false;
-            for namespace in namespaces {
-                match self.service(namespace, name).await {
-                    Ok(service) => {
-                        read = true;
-                        found.extend(service);
-                    }
-                    Err(ApiError::Forbidden(message)) => forbidden = Some(message),
-                    Err(err) => return Err(err),
-                }
-            }
-            match forbidden {
-                Some(message) if !read => Err(ApiError::Forbidden(message)),
-                _ => Ok(found),
-            }
+            read_each_namespace(namespaces, |namespace| {
+                Box::pin(
+                    async move { Ok(self.service(namespace, name).await?.into_iter().collect()) },
+                )
+            })
+            .await
         })
     }
 
@@ -713,6 +741,48 @@ users:
         )]);
         assert!(matches!(
             read_kubeconfig(&project, &env),
+            Err(ApiError::Other(_))
+        ));
+    }
+
+    fn namespaces(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn read(namespace: &str) -> BoxFuture<'_, Result<Vec<String>, ApiError>> {
+        Box::pin(async move {
+            match namespace {
+                "secret" | "private" => {
+                    Err(ApiError::Forbidden(format!("{namespace} is forbidden")))
+                }
+                "broken" => Err(ApiError::Other("connection refused".into())),
+                _ => Ok(vec![format!("web.{namespace}")]),
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn reading_each_namespace_skips_refusals() {
+        let listed = namespaces(&["blue", "secret", "green"]);
+        let readable = read_each_namespace(&listed, read).await.unwrap();
+        assert_eq!(readable.found, vec!["web.blue", "web.green"]);
+        assert_eq!(readable.refused, vec!["secret"]);
+    }
+
+    #[tokio::test]
+    async fn reading_each_namespace_fails_when_all_refuse() {
+        let listed = namespaces(&["secret", "private"]);
+        assert!(matches!(
+            read_each_namespace(&listed, read).await,
+            Err(ApiError::Forbidden(message)) if message == "private is forbidden"
+        ));
+    }
+
+    #[tokio::test]
+    async fn reading_each_namespace_stops_at_other_errors() {
+        let listed = namespaces(&["blue", "broken", "green"]);
+        assert!(matches!(
+            read_each_namespace(&listed, read).await,
             Err(ApiError::Other(_))
         ));
     }

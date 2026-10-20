@@ -24,7 +24,9 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-pub use cluster::{ApiError, Cluster, KubeCluster, LogLines, LogOptions, PodStream};
+pub use cluster::{
+    ApiError, Cluster, KubeCluster, LogLines, LogOptions, PodStream, Readable, read_each_namespace,
+};
 use forward::{Forward, Reporter};
 use lookup::PodTarget;
 pub use lookup::{ContainerInfo, EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
@@ -803,11 +805,11 @@ impl Inner {
         {
             return Ok(namespace.clone());
         }
-        let found = match cluster
+        let named = match cluster
             .services_named(&target.service, &project.namespaces)
             .await
         {
-            Ok(found) => found,
+            Ok(named) => named,
             Err(ApiError::Forbidden(message)) if !project.namespaces.is_empty() => {
                 return Err(ErrorPage::new(
                     StatusCode::FORBIDDEN,
@@ -840,15 +842,22 @@ impl Inner {
             }
         };
         self.project_reached(&project.name);
-        match found.as_slice() {
-            [] => Err(ErrorPage::new(
-                StatusCode::NOT_FOUND,
-                "No such Service",
-                format!(
-                    "No namespace of {} has a Service named {}.",
-                    project.name, target.service
-                ),
-            )),
+        match named.found.as_slice() {
+            [] => {
+                let refused = if named.refused.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (couldn't read {})", named.refused.join(", "))
+                };
+                Err(ErrorPage::new(
+                    StatusCode::NOT_FOUND,
+                    "No such Service",
+                    format!(
+                        "No namespace of {} has a Service named {}{refused}.",
+                        project.name, target.service
+                    ),
+                ))
+            }
             [one] => {
                 self.state
                     .lock()
@@ -1299,23 +1308,9 @@ async fn each_namespace(
     cluster: &dyn Cluster,
     namespaces: &[String],
 ) -> Result<Vec<ServiceInfo>, ApiError> {
-    let mut services = Vec::new();
-    let mut forbidden = None;
-    let mut listed = false;
-    for namespace in namespaces {
-        match cluster.services(Some(namespace)).await {
-            Ok(found) => {
-                listed = true;
-                services.extend(found);
-            }
-            Err(ApiError::Forbidden(message)) => forbidden = Some(message),
-            Err(err) => return Err(err),
-        }
-    }
-    match forbidden {
-        Some(message) if !listed => Err(ApiError::Forbidden(message)),
-        _ => Ok(services),
-    }
+    read_each_namespace(namespaces, |namespace| cluster.services(Some(namespace)))
+        .await
+        .map(|readable| readable.found)
 }
 
 /// When the kubeconfig carte reads by default last changed.

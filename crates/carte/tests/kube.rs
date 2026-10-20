@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use carte::kube::{
     ApiError, Cluster, Connector, ContainerInfo, EndpointInfo, Kube, LogLines, LogOptions,
-    PodStream, PortInfo, ServiceInfo, SliceInfo,
+    PodStream, PortInfo, Readable, ServiceInfo, SliceInfo, read_each_namespace,
 };
 use carte::paths::Paths;
 use carte::process::Spawner;
@@ -139,24 +139,27 @@ impl Cluster for FakeCluster {
         &'a self,
         name: &'a str,
         namespaces: &'a [String],
-    ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>> {
+    ) -> BoxFuture<'a, Result<Readable<ServiceInfo>, ApiError>> {
         Box::pin(async move {
             self.check_auth()?;
-            let state = self.state();
-            let readable: Vec<&String> = namespaces
-                .iter()
-                .filter(|n| !state.forbidden.contains(*n))
-                .collect();
-            if !namespaces.is_empty() && readable.is_empty() {
-                return Err(ApiError::Forbidden("services is forbidden".into()));
+            if namespaces.is_empty() {
+                return Ok(Readable {
+                    found: self
+                        .state()
+                        .services
+                        .iter()
+                        .filter(|s| s.name == name)
+                        .cloned()
+                        .collect(),
+                    refused: Vec::new(),
+                });
             }
-            Ok(state
-                .services
-                .iter()
-                .filter(|s| s.name == name)
-                .filter(|s| namespaces.is_empty() || readable.contains(&&s.namespace))
-                .cloned()
-                .collect())
+            read_each_namespace(namespaces, |namespace| {
+                Box::pin(
+                    async move { Ok(self.service(namespace, name).await?.into_iter().collect()) },
+                )
+            })
+            .await
         })
     }
 
@@ -704,6 +707,21 @@ async fn a_short_hostname_skips_namespaces_that_refuse() {
     setup.cluster.state().forbidden.insert("logging".into());
     let port = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
     assert_eq!(get(port).await, "grafana-a");
+}
+
+#[tokio::test]
+async fn no_such_service_names_the_namespaces_it_couldnt_read() {
+    let setup = Setup::new(&format!(
+        "{PROJECT}namespaces = [\"logging\", \"monitoring\"]\n"
+    ));
+    setup
+        .cluster
+        .add_service("logging", "grafana", &["grafana-a"])
+        .await;
+    setup.cluster.state().forbidden.insert("logging".into());
+    let (status, text) = upstream(setup.kube.route(target("grafana", None)).await).unwrap_err();
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(text.contains("(couldn't read logging)"), "{text}");
 }
 
 #[tokio::test]

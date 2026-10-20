@@ -921,6 +921,8 @@ service_port = "http"
 
 With `namespaces` set, `grafana.prod.localhost` skips the namespaces the
 cluster doesn't let you read, and fails only when it reads none of them.
+When it doesn't find the Service, the page names the namespaces it
+couldn't read.
 
 A cluster is only reachable when it has a project file, so nothing about
 your kubeconfig is exposed until you add one. `carte import kube` offers
