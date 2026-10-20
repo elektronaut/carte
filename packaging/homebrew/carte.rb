@@ -5,23 +5,30 @@
 class Carte < Formula
   desc "Runs your apps' processes on demand behind *.test hostnames"
   homepage "https://github.com/elektronaut/carte"
-  version "@VERSION@"
+  url "https://github.com/elektronaut/carte/archive/refs/tags/v@VERSION@.tar.gz"
+  sha256 "@SOURCE_SHA256@"
   license "MIT"
 
-  on_arm do
-    url "https://github.com/elektronaut/carte/releases/download/v@VERSION@/carte-@VERSION@-aarch64-apple-darwin.tar.gz"
-    sha256 "@ARM64_SHA256@"
-  end
-
-  on_intel do
-    url "https://github.com/elektronaut/carte/releases/download/v@VERSION@/carte-@VERSION@-x86_64-apple-darwin.tar.gz"
-    sha256 "@X86_64_SHA256@"
+  livecheck do
+    url :stable
+    strategy :github_latest
   end
 
   depends_on :macos
 
+  resource "binary" do
+    on_arm do
+      url "https://github.com/elektronaut/carte/releases/download/v@VERSION@/carte-@VERSION@-aarch64-apple-darwin.tar.gz"
+      sha256 "@ARM64_SHA256@"
+    end
+    on_intel do
+      url "https://github.com/elektronaut/carte/releases/download/v@VERSION@/carte-@VERSION@-x86_64-apple-darwin.tar.gz"
+      sha256 "@X86_64_SHA256@"
+    end
+  end
+
   def install
-    bin.install "carte"
+    resource("binary").stage { bin.install "carte" }
   end
 
   def caveats
