@@ -5,6 +5,7 @@
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use carte_api::EventKind;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -31,6 +32,8 @@ pub struct Forward {
     pub service: String,
     pub port: PortInfo,
     pub target: Mutex<PodTarget>,
+    /// How long a pod's TLS handshake may take.
+    pub timeout: Duration,
     pub cancel: CancellationToken,
     pub reporter: Arc<dyn Reporter>,
 }
@@ -99,6 +102,9 @@ impl Forward {
             return Err(first);
         }
         let next = self.refresh().await?;
+        if matches!(first, ApiError::Timeout(_)) && next.pod == target.pod {
+            return Err(first);
+        }
         self.connect(&next).await
     }
 
@@ -131,9 +137,9 @@ impl Forward {
         }
         let name = ServerName::try_from(self.service.clone())
             .unwrap_or_else(|_| ServerName::try_from("localhost").expect("valid name"));
-        let tls = tls_connector()
-            .connect(name, stream)
+        let tls = tokio::time::timeout(self.timeout, tls_connector().connect(name, stream))
             .await
+            .map_err(|_| ApiError::Timeout(self.timeout))?
             .map_err(|err| match PodError::of(&err) {
                 Some(message) => ApiError::Other(message.to_string()),
                 None => ApiError::Other(format!("TLS to pod {}: {err}", target.pod)),

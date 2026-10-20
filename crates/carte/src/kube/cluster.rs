@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use carte_core::kube::KubeProject;
 use futures_util::AsyncBufReadExt;
@@ -160,6 +162,8 @@ pub enum ApiError {
     },
     Forbidden(String),
     NotFound(String),
+    /// The cluster didn't answer within this long.
+    Timeout(Duration),
     Other(String),
 }
 
@@ -169,6 +173,7 @@ impl ApiError {
             ApiError::Auth { .. } => "Login to the cluster failed",
             ApiError::Forbidden(_) => "The cluster refused",
             ApiError::NotFound(_) => "Not found in the cluster",
+            ApiError::Timeout(_) => "The cluster didn't answer",
             ApiError::Other(_) => "Couldn't reach the cluster",
         }
     }
@@ -179,6 +184,10 @@ impl ApiError {
                 message,
                 hint: Some(hint),
             } => format!("{hint}\n\n{message}"),
+            ApiError::Timeout(timeout) => format!(
+                "No answer from the cluster within {}.",
+                carte_core::duration::format(*timeout)
+            ),
             ApiError::Auth {
                 message,
                 hint: None,
@@ -274,6 +283,84 @@ fn login_hint(plugins: &[String]) -> Option<String> {
             _ => None,
         }
     })
+}
+
+/// Gives each call to a cluster, and the opening of each stream, `timeout` to answer;
+/// the streams themselves may stay quiet for as long as they like.
+pub struct Bounded {
+    pub cluster: Arc<dyn Cluster>,
+    pub timeout: Duration,
+}
+
+impl Bounded {
+    async fn bound<T>(&self, call: BoxFuture<'_, Result<T, ApiError>>) -> Result<T, ApiError> {
+        tokio::time::timeout(self.timeout, call)
+            .await
+            .unwrap_or(Err(ApiError::Timeout(self.timeout)))
+    }
+}
+
+impl Cluster for Bounded {
+    fn service<'a>(
+        &'a self,
+        namespace: &'a str,
+        name: &'a str,
+    ) -> BoxFuture<'a, Result<Option<ServiceInfo>, ApiError>> {
+        Box::pin(self.bound(self.cluster.service(namespace, name)))
+    }
+
+    fn services_named<'a>(
+        &'a self,
+        name: &'a str,
+        namespaces: &'a [String],
+    ) -> BoxFuture<'a, Result<Readable<ServiceInfo>, ApiError>> {
+        Box::pin(self.bound(self.cluster.services_named(name, namespaces)))
+    }
+
+    fn endpoint_slices<'a>(
+        &'a self,
+        namespace: &'a str,
+        service: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<SliceInfo>, ApiError>> {
+        Box::pin(self.bound(self.cluster.endpoint_slices(namespace, service)))
+    }
+
+    fn services<'a>(
+        &'a self,
+        namespace: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>> {
+        Box::pin(self.bound(self.cluster.services(namespace)))
+    }
+
+    fn namespaces(&self) -> BoxFuture<'_, Result<Vec<String>, ApiError>> {
+        Box::pin(self.bound(self.cluster.namespaces()))
+    }
+
+    fn containers<'a>(
+        &'a self,
+        namespace: &'a str,
+        pod: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<ContainerInfo>, ApiError>> {
+        Box::pin(self.bound(self.cluster.containers(namespace, pod)))
+    }
+
+    fn logs<'a>(
+        &'a self,
+        namespace: &'a str,
+        pod: &'a str,
+        options: LogOptions,
+    ) -> BoxFuture<'a, Result<LogLines, ApiError>> {
+        Box::pin(self.bound(self.cluster.logs(namespace, pod, options)))
+    }
+
+    fn connect<'a>(
+        &'a self,
+        namespace: &'a str,
+        pod: &'a str,
+        port: u16,
+    ) -> BoxFuture<'a, Result<PodStream, ApiError>> {
+        Box::pin(self.bound(self.cluster.connect(namespace, pod, port)))
+    }
 }
 
 /// A cluster reached through kube-rs.

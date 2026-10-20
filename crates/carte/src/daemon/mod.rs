@@ -93,6 +93,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         supervisor.clone(),
         Arc::new(KubeConnector),
         Duration::from_secs(15),
+        crate::kube::LOOKUP_TIMEOUT,
     );
     let proxy = Proxy::new(Arc::new(router::DaemonRouter {
         supervisor: router::SupervisorRouter {

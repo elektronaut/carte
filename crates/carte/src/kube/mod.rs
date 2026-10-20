@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+use cluster::Bounded;
 pub use cluster::{
     ApiError, Cluster, KubeCluster, LogLines, LogOptions, PodError, PodStream, Readable,
     read_each_namespace,
@@ -44,8 +45,8 @@ const NAMESPACE_TTL: Duration = Duration::from_secs(60);
 /// The most lines read back to search through or to show since a time.
 const MAX_LOG_LINES: i64 = 10_000;
 
-/// How long a request may wait for the cluster before it gets an error page.
-const LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long carte waits for a cluster to answer a call or open a stream.
+pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One Service in one namespace of a kube project.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -136,6 +137,8 @@ pub struct Kube {
 struct Inner {
     supervisor: Handle,
     connector: Arc<dyn Connector>,
+    /// How long a call to a cluster may take; see `LOOKUP_TIMEOUT`.
+    timeout: Duration,
     /// Each project's client, behind a lock of its own so that a slow login only holds
     /// up its own project.
     clusters: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<ClusterEntry>>>>>,
@@ -194,12 +197,19 @@ impl Instance {
 }
 
 impl Kube {
-    /// `tick` is how often idle forwards are looked for.
-    pub fn new(supervisor: Handle, connector: Arc<dyn Connector>, tick: Duration) -> Self {
+    /// `tick` is how often idle forwards are looked for; `timeout` how long a call to
+    /// a cluster may take.
+    pub fn new(
+        supervisor: Handle,
+        connector: Arc<dyn Connector>,
+        tick: Duration,
+        timeout: Duration,
+    ) -> Self {
         let kube = Kube {
             inner: Arc::new(Inner {
                 supervisor,
                 connector,
+                timeout,
                 clusters: Mutex::new(HashMap::new()),
                 state: Mutex::new(State::default()),
                 changes: watch::channel(0).0,
@@ -221,20 +231,12 @@ impl Kube {
 
     /// Resolves the target to a running forward, opening one when needed.
     pub async fn route(&self, target: KubeTarget) -> Route {
-        match tokio::time::timeout(LOOKUP_TIMEOUT, self.inner.clone().route(target)).await {
+        match tokio::time::timeout(self.inner.outer_timeout(), self.inner.clone().route(target))
+            .await
+        {
             Ok(Ok(route)) => route,
             Ok(Err(page)) => Route::Error(page),
-            Err(_) => Route::Error(
-                ErrorPage::new(
-                    StatusCode::GATEWAY_TIMEOUT,
-                    "The cluster didn't answer",
-                    format!(
-                        "No answer from the cluster within {}s.",
-                        LOOKUP_TIMEOUT.as_secs()
-                    ),
-                )
-                .with_retry_after(Duration::from_secs(5)),
-            ),
+            Err(_) => Route::Error(api_page(&ApiError::Timeout(self.inner.timeout))),
         }
     }
 
@@ -384,8 +386,11 @@ impl Kube {
                 None => format!("{}.{}", target.service, target.project),
             };
             response.affected.push(label.clone());
-            match tokio::time::timeout(LOOKUP_TIMEOUT, self.inner.clone().start_target(target))
-                .await
+            match tokio::time::timeout(
+                self.inner.outer_timeout(),
+                self.inner.clone().start_target(target),
+            )
+            .await
             {
                 Ok(Ok(key)) => {
                     response.affected.pop();
@@ -397,12 +402,15 @@ impl Kube {
                     detail: page.detail,
                     log: Vec::new(),
                 }),
-                Err(_) => response.failures.push(StartFailure {
-                    instance: label,
-                    title: "The cluster didn't answer".into(),
-                    detail: format!("No answer within {}s.", LOOKUP_TIMEOUT.as_secs()),
-                    log: Vec::new(),
-                }),
+                Err(_) => {
+                    let err = ApiError::Timeout(self.inner.timeout);
+                    response.failures.push(StartFailure {
+                        instance: label,
+                        title: err.title().into(),
+                        detail: err.detail(),
+                        log: Vec::new(),
+                    });
+                }
             }
         }
         Ok(response)
@@ -486,7 +494,7 @@ impl Kube {
             via_alias: false,
         };
         let page = |page: ErrorPage| format!("{}: {}", page.title, page.detail);
-        let found = tokio::time::timeout(LOOKUP_TIMEOUT, async {
+        let found = tokio::time::timeout(self.inner.outer_timeout(), async {
             let (project, cluster, key) = self.inner.resolve(&target).await?;
             let running = self
                 .inner
@@ -505,7 +513,7 @@ impl Kube {
             Ok::<_, ErrorPage>((cluster, key, port, pod))
         })
         .await
-        .map_err(|_| "the cluster didn't answer".to_string())?;
+        .map_err(|_| page(api_page(&ApiError::Timeout(self.inner.timeout))))?;
         let (cluster, key, port, pod) = found.map_err(page)?;
         let containers = cluster
             .containers(&key.namespace, &pod.pod)
@@ -543,6 +551,7 @@ impl Kube {
             since_secs,
             last_ns: None,
             catching_up: false,
+            timeout: self.inner.timeout,
             tx,
         };
         tokio::spawn(lines.run(initial, request.follow));
@@ -783,7 +792,16 @@ impl Inner {
             entry.stamps = stamps;
             return Ok(entry.cluster.clone());
         }
-        let cluster = self.connector.connect(project, kubeconfig, &env).await?;
+        let cluster = tokio::time::timeout(
+            self.timeout,
+            self.connector.connect(project, kubeconfig, &env),
+        )
+        .await
+        .unwrap_or(Err(ApiError::Timeout(self.timeout)))?;
+        let cluster: Arc<dyn Cluster> = Arc::new(Bounded {
+            cluster,
+            timeout: self.timeout,
+        });
         *slot = Some(ClusterEntry {
             project: project.clone(),
             env,
@@ -792,6 +810,12 @@ impl Inner {
             cluster: cluster.clone(),
         });
         Ok(cluster)
+    }
+
+    /// How long a whole lookup may take: a little longer than one call, so that a call
+    /// that doesn't answer reports itself.
+    fn outer_timeout(&self) -> Duration {
+        self.timeout + Duration::from_secs(1)
     }
 
     /// The target's namespace; for a short hostname, the one namespace whose
@@ -961,6 +985,7 @@ impl Inner {
             service: key.service.clone(),
             port,
             target: Mutex::new(target),
+            timeout: self.timeout,
             cancel: CancellationToken::new(),
             reporter: Arc::new(InstanceReporter {
                 inner: Arc::downgrade(self),
@@ -1035,7 +1060,10 @@ impl Inner {
     }
 
     fn project_failed(&self, project: &str, err: &ApiError) {
-        if !matches!(err, ApiError::Auth { .. } | ApiError::Other(_)) {
+        if !matches!(
+            err,
+            ApiError::Auth { .. } | ApiError::Timeout(_) | ApiError::Other(_)
+        ) {
             return;
         }
         let summary = err.summary();
@@ -1212,6 +1240,8 @@ struct PodLines {
     /// Skipping the lines a reopened stream repeats, up to the first one after
     /// `last_ns`.
     catching_up: bool,
+    /// How long to wait for each of the lines it has.
+    timeout: Duration,
     tx: mpsc::Sender<LogLine>,
 }
 
@@ -1223,6 +1253,7 @@ impl PodLines {
         loop {
             let next = tokio::select! {
                 _ = self.tx.closed() => return,
+                _ = tokio::time::sleep(self.timeout) => None,
                 next = initial.next() => next,
             };
             let Some(line) = next else {
@@ -1232,6 +1263,7 @@ impl PodLines {
             self.fresh(&line);
             lines.extend(self.line(&line));
         }
+        drop(initial);
         let skip = self.tail.map_or(0, |tail| lines.len().saturating_sub(tail));
         for line in lines.into_iter().skip(skip) {
             if self.tx.send(line).await.is_err() {
@@ -1253,7 +1285,10 @@ impl PodLines {
             },
         };
         self.catching_up = self.last_ns.is_some();
-        let mut stream = self.open(first).await;
+        let mut stream = tokio::select! {
+            _ = self.tx.closed() => return,
+            stream = self.open(first) => stream,
+        };
         loop {
             if let Some(stream) = stream.take()
                 && !self.send_all(stream).await
@@ -1267,11 +1302,13 @@ impl PodLines {
                     _ = self.tx.closed() => return,
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                 }
-                let Ok(slices) = self
-                    .cluster
-                    .endpoint_slices(&self.key.namespace, &self.key.service)
-                    .await
-                else {
+                let slices = tokio::select! {
+                    _ = self.tx.closed() => return,
+                    slices = self
+                        .cluster
+                        .endpoint_slices(&self.key.namespace, &self.key.service) => slices,
+                };
+                let Ok(slices) = slices else {
                     continue;
                 };
                 let Ok(next) = lookup::choose_pod(&self.port, &slices, Some(&self.pod)) else {
@@ -1299,7 +1336,10 @@ impl PodLines {
                     self.last_ns = None;
                     self.catching_up = false;
                 }
-                stream = self.open(options).await;
+                stream = tokio::select! {
+                    _ = self.tx.closed() => return,
+                    stream = self.open(options) => stream,
+                };
             }
         }
     }
@@ -1412,9 +1452,14 @@ fn api_page(err: &ApiError) -> ErrorPage {
     let status = match err {
         ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
         ApiError::NotFound(_) => StatusCode::NOT_FOUND,
+        ApiError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
         ApiError::Auth { .. } | ApiError::Other(_) => StatusCode::BAD_GATEWAY,
     };
-    ErrorPage::new(status, err.title(), err.detail())
+    let page = ErrorPage::new(status, err.title(), err.detail());
+    match err {
+        ApiError::Timeout(_) => page.with_retry_after(Duration::from_secs(5)),
+        _ => page,
+    }
 }
 
 struct InstanceReporter {

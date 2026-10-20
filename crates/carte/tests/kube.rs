@@ -54,6 +54,10 @@ struct FakeState {
     clients: usize,
     /// Which client opened each port-forward stream.
     connected_by: Vec<usize>,
+    /// Calls that never answer.
+    hangs: HashSet<&'static str>,
+    /// Held by each call that doesn't answer, for as long as it waits.
+    hung: Arc<()>,
     /// What the pod side of every port-forward stream reports.
     pod_error: Option<String>,
 }
@@ -105,6 +109,22 @@ struct FakeCluster {
 impl FakeCluster {
     fn state(&self) -> std::sync::MutexGuard<'_, FakeState> {
         self.state.lock().unwrap()
+    }
+
+    /// Waits forever when `call` hangs.
+    async fn hang(&self, call: &str) {
+        let held = {
+            let state = self.state();
+            state.hangs.contains(call).then(|| state.hung.clone())
+        };
+        if let Some(_held) = held {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// How many calls wait without answering.
+    fn hanging(&self) -> usize {
+        Arc::strong_count(&self.state().hung) - 1
     }
 
     fn check_auth(&self) -> Result<(), ApiError> {
@@ -237,6 +257,7 @@ impl Cluster for FakeCluster {
         service: &'a str,
     ) -> BoxFuture<'a, Result<Vec<SliceInfo>, ApiError>> {
         Box::pin(async move {
+            self.hang("endpoint_slices").await;
             self.check_auth()?;
             Ok(self
                 .state()
@@ -252,6 +273,7 @@ impl Cluster for FakeCluster {
         namespace: Option<&'a str>,
     ) -> BoxFuture<'a, Result<Vec<ServiceInfo>, ApiError>> {
         Box::pin(async move {
+            self.hang("services").await;
             self.check_auth()?;
             let state = self.state();
             if namespace.is_none() && state.forbid_all
@@ -288,6 +310,7 @@ impl Cluster for FakeCluster {
         pod: &'a str,
     ) -> BoxFuture<'a, Result<Vec<ContainerInfo>, ApiError>> {
         Box::pin(async move {
+            self.hang("containers").await;
             Ok(self
                 .state()
                 .containers
@@ -304,6 +327,7 @@ impl Cluster for FakeCluster {
         options: LogOptions,
     ) -> BoxFuture<'a, Result<LogLines, ApiError>> {
         Box::pin(async move {
+            self.hang("logs").await;
             let mut state = self.state();
             state.log_requests.push(options.clone());
             let lines = state.logs.get(pod).cloned().unwrap_or_default();
@@ -327,7 +351,15 @@ impl Cluster for FakeCluster {
                         .or_default()
                         .extend(written);
                 }
-                return Ok(futures_util::stream::iter(lines.into_iter().skip(start)).boxed());
+                let fake = self.clone();
+                let stalled = futures_util::stream::once(async move {
+                    fake.hang("reading logs").await;
+                    None
+                })
+                .filter_map(|line: Option<String>| async move { line });
+                return Ok(futures_util::stream::iter(lines.into_iter().skip(start))
+                    .chain(stalled)
+                    .boxed());
             }
             drop(state);
             let fake = self.clone();
@@ -365,6 +397,8 @@ impl Cluster for FakeCluster {
         _port: u16,
     ) -> BoxFuture<'a, Result<PodStream, ApiError>> {
         Box::pin(async move {
+            self.hang("connect").await;
+            self.hang(&format!("connect {pod}")).await;
             let port = {
                 let mut state = self.state();
                 state.connects += 1;
@@ -397,6 +431,7 @@ impl Connector for FakeConnector {
         _env: &'a BTreeMap<String, String>,
     ) -> BoxFuture<'a, Result<Arc<dyn Cluster>, ApiError>> {
         Box::pin(async move {
+            self.0.hang("login").await;
             let client = {
                 let mut state = self.0.state();
                 state.clients += 1;
@@ -442,6 +477,11 @@ struct Setup {
 
 impl Setup {
     fn new(project: &str) -> Self {
+        Self::with_timeout(project, carte::kube::LOOKUP_TIMEOUT)
+    }
+
+    /// With `timeout` for each call to the cluster.
+    fn with_timeout(project: &str, timeout: Duration) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(&dir.path().canonicalize().unwrap());
         std::fs::create_dir_all(paths.projects_dir()).unwrap();
@@ -467,6 +507,7 @@ impl Setup {
             handle.clone(),
             Arc::new(FakeConnector(cluster.clone())),
             Duration::from_millis(100),
+            timeout,
         );
         Setup {
             _dir: dir,
@@ -1687,4 +1728,234 @@ async fn namespaces_outside_the_project_are_refused() {
         response.failures[0].title,
         "Not one of the project's namespaces"
     );
+}
+
+#[tokio::test]
+async fn a_forward_whose_cluster_stops_answering_fails_in_time() {
+    let setup = Setup::with_timeout(PROJECT, Duration::from_millis(300));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let dialer = upstream(
+        setup
+            .kube
+            .route(target("grafana", Some("monitoring")))
+            .await,
+    )
+    .unwrap();
+    setup.cluster.state().hangs.insert("connect");
+    let dialed = tokio::time::timeout(Duration::from_secs(3), dialer.dial())
+        .await
+        .expect("the dial ends");
+    assert!(dialed.is_err());
+    let events = setup.events().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == EventKind::Failed
+                && e.message.starts_with("No answer from the cluster")),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn listing_services_times_out() {
+    for call in ["login", "services"] {
+        let setup = Setup::with_timeout(PROJECT, Duration::from_millis(300));
+        setup.cluster.state().hangs.insert(call);
+        let err = tokio::time::timeout(Duration::from_secs(3), setup.kube.services("prod"))
+            .await
+            .unwrap_or_else(|_| panic!("the listing ends when {call} hangs"))
+            .unwrap_err();
+        assert!(
+            err.starts_with("No answer from the cluster"),
+            "{call}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_forward_moves_off_a_pod_that_doesnt_answer() {
+    let setup = Setup::with_timeout(PROJECT, Duration::from_millis(300));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a", "grafana-b"])
+        .await;
+    let dialer = upstream(
+        setup
+            .kube
+            .route(target("grafana", Some("monitoring")))
+            .await,
+    )
+    .unwrap();
+    assert_eq!(get(&dialer).await, "grafana-a");
+    {
+        let mut state = setup.cluster.state();
+        state.hangs.insert("connect grafana-a");
+        let slices = state
+            .slices
+            .get_mut(&("monitoring".into(), "grafana".into()))
+            .unwrap();
+        slices[0].endpoints[0].ready = false;
+    }
+    let body = tokio::time::timeout(Duration::from_secs(3), get(&dialer))
+        .await
+        .expect("the request ends");
+    assert_eq!(body, "grafana-b");
+}
+
+#[tokio::test]
+async fn a_route_that_times_out_says_the_cluster_didnt_answer() {
+    let setup = Setup::with_timeout(PROJECT, Duration::from_millis(300));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    setup.cluster.state().hangs.insert("endpoint_slices");
+    let (status, text) = upstream(
+        setup
+            .kube
+            .route(target("grafana", Some("monitoring")))
+            .await,
+    )
+    .unwrap_err();
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        text.starts_with("The cluster didn't answer\nNo answer from the cluster"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn reading_logs_times_out() {
+    let setup = Setup::with_timeout(PROJECT, Duration::from_millis(300));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    for call in ["containers", "logs"] {
+        {
+            let mut state = setup.cluster.state();
+            state.hangs.clear();
+            state.hangs.insert(call);
+        }
+        let err = tokio::time::timeout(
+            Duration::from_secs(3),
+            setup.kube.logs(
+                address(Some("grafana"), Some("monitoring")),
+                &logs_request(false),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("reading logs ends when {call} hangs"))
+        .unwrap_err();
+        assert!(
+            err.starts_with("No answer from the cluster"),
+            "{call}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn logs_that_stall_end_with_the_lines_read() {
+    let setup = Setup::with_timeout(PROJECT, Duration::from_millis(300));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    {
+        let mut state = setup.cluster.state();
+        state.logs.insert("grafana-a".into(), vec!["one".into()]);
+        state.hangs.insert("reading logs");
+    }
+    let mut lines = setup
+        .kube
+        .logs(
+            address(Some("grafana"), Some("monitoring")),
+            &logs_request(false),
+        )
+        .await
+        .unwrap();
+    let read = async {
+        let mut got = Vec::new();
+        while let Some(line) = lines.recv().await {
+            got.push(line.text);
+        }
+        got
+    };
+    let got = tokio::time::timeout(Duration::from_secs(3), read)
+        .await
+        .expect("the logs end");
+    assert_eq!(got, vec!["one"]);
+}
+
+#[tokio::test]
+async fn a_stalled_read_is_let_go_while_following() {
+    let setup = Setup::with_timeout(PROJECT, Duration::from_millis(300));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    {
+        let mut state = setup.cluster.state();
+        state.logs.insert("grafana-a".into(), vec!["one".into()]);
+        state.hangs.insert("reading logs");
+    }
+    let mut lines = setup
+        .kube
+        .logs(
+            address(Some("grafana"), Some("monitoring")),
+            &logs_request(true),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lines.recv().await.unwrap().text, "one");
+    let let_go = async {
+        while setup.cluster.hanging() > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(3), let_go)
+        .await
+        .expect("the stalled read is dropped");
+}
+
+#[tokio::test]
+async fn following_logs_stops_waiting_for_the_cluster_when_the_reader_goes() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let lines = setup
+        .kube
+        .logs(
+            address(Some("grafana"), Some("monitoring")),
+            &logs_request(true),
+        )
+        .await
+        .unwrap();
+    {
+        let mut state = setup.cluster.state();
+        state.hangs.insert("endpoint_slices");
+        state.gone.insert("grafana-a".into());
+    }
+    let waiting = async {
+        while setup.cluster.hanging() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the follow looks for the next pod");
+    drop(lines);
+    let gone = async {
+        while setup.cluster.hanging() > 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), gone)
+        .await
+        .expect("the follow stops waiting once nobody reads");
 }

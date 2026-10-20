@@ -1129,6 +1129,12 @@ opens again on the next request.
   project's env provider gives in your home directory, so they find the
   tools and profiles your shell has. When one fails, the error page shows its
   output, with a hint for `aws`, `gcloud` and `kubelogin`.
+- **A cluster that doesn't answer**, like after the laptop sleeps or a
+  VPN drops, gets 30 seconds for each call, login and stream it opens.
+  Then the request gets a 504 page, "The cluster didn't answer", and
+  the Service listing and `carte logs` fail with the same message.
+  Streams already open, like a followed log or a WebSocket, may stay
+  quiet as long as they like.
 - **Ports that speak TLS** get a TLS connection without certificate
   checks; anything else is plain HTTP. A port speaks TLS when its
   `appProtocol` is `https` or `wss` (or `kubernetes.io/wss`), else when
