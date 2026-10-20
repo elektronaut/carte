@@ -5,7 +5,7 @@ carte reads three kinds of TOML files:
 | File | Holds |
 | --- | --- |
 | `~/.config/carte/config.toml` | Machine settings: TLD, ports, idle timeout, limits, sharing |
-| `~/.config/carte/projects/<name>.toml` | One project: where its apps are, env and per-app settings |
+| `~/.config/carte/projects/<name>.toml` | One project: where its apps are, env and per-app settings; or a [kube project](#kube-projects) |
 | `carte.toml` in a repo | Defaults for that app, which can be committed |
 
 The config directory is `~/.config/carte` and carte's state (logs, the
@@ -891,3 +891,57 @@ every app a variable pointing at every other:
 
 A key template that uses `public_url:app` or `public_host:app` skips apps
 that aren't shared.
+
+## Kube projects
+
+A project file with a `kube` table is a kube project: its apps are the
+Services of a Kubernetes cluster, and its stacks are the cluster's
+namespaces. carte forwards a request for one to a pod behind the Service,
+the way `kubectl port-forward` would, without anything to start by hand.
+
+```toml
+# ~/.config/carte/projects/prod.toml
+kube = { context = "arn:aws:eks:eu-west-1:123456:cluster/production" }
+namespaces = ["monitoring", "logging"]
+
+[apps.grafana]
+aliases = ["grafana-prod"]
+
+[apps.vlogs]
+service_port = "http"
+```
+
+| Host | Goes to |
+| --- | --- |
+| `grafana.monitoring.prod.localhost` | Service `grafana` in namespace `monitoring` |
+| `grafana.prod.localhost` | The namespace that has a Service `grafana`; when several do, an error page lists them |
+| `grafana-prod.localhost` | An alias of the Service |
+
+A cluster is only reachable when it has a project file, so nothing about
+your kubeconfig is exposed until you add one. Kube projects are never
+reachable through [sharing](sharing.md).
+
+| Key | Default | |
+| --- | --- | --- |
+| `kube.context` | required | The kubeconfig context |
+| `kube.kubeconfig` | `$KUBECONFIG`, then `~/.kube/config` | The kubeconfig file |
+| `namespaces` | all | The namespaces carte looks in |
+| `env_provider` | detected | `mise`, `direnv`, `shell` or `none`: the env kubeconfig login plugins like `aws` or `gke-gcloud-auth-plugin` run with. Detected as for apps, in your home directory. See [Environment](#environment) |
+| `idle_timeout` | machine's | How long a Service stays connected without requests |
+
+`[apps.<service>]` tables add settings to a Service the cluster has; they
+don't declare one. Every Service can be reached without a table.
+
+| Key | Default | |
+| --- | --- | --- |
+| `aliases` | none | Extra hostnames, as for [apps](#apps) |
+| `namespace` | looked up | The namespace `service.project` and the aliases mean; one of `namespaces` when that's set |
+| `service_port` | see below | The Service's port, by name or number, for a Service with several |
+| `policy` | `"auto"` | `"disabled"` refuses the hostname |
+
+Without `service_port`, carte takes the Service's only port, else one
+named `http`, `web` or starting with `http-`, else port 80, 8080 or 443.
+Otherwise the error page lists the ports.
+
+The keys about apps on disk (`root`, `include`, `env`, `processes` and
+the like) don't apply to a kube project and are errors.

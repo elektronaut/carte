@@ -182,6 +182,16 @@ pub enum NotFound {
     },
     #[error("nothing is shared as {label}")]
     UnknownPublicLabel { label: String },
+    #[error(
+        "kube project {project} has no subdomains ({}): a host is service.namespace.{project}",
+        labels.join(".")
+    )]
+    KubeSubdomains {
+        project: String,
+        labels: Vec<String>,
+    },
+    #[error("namespace {namespace} isn't one of the namespaces of kube project {project}")]
+    KubeNamespace { project: String, namespace: String },
 }
 
 fn unknown_name_message(project: &str, stack: Option<&str>, label: &str) -> String {
@@ -220,25 +230,8 @@ fn host_labels(host: &str) -> Result<Vec<String>, NotFound> {
 /// tld, project (or an alias), an optional stack, then the app unless it is collapsed.
 /// Anything left over is a subdomain for apps that allow them.
 pub fn resolve_host(world: &World, host: &str) -> Result<Resolved, NotFound> {
-    let labels = host_labels(host)?;
-    let tlds = world.machine.served_tlds();
-    let matched = tlds.iter().find_map(|tld| {
-        let tld_labels: Vec<&str> = tld.split('.').collect();
-        let under = labels.len() > tld_labels.len()
-            && labels[labels.len() - tld_labels.len()..]
-                .iter()
-                .zip(&tld_labels)
-                .all(|(a, b)| a == b);
-        under.then_some(tld_labels.len())
-    });
-    let Some(tld_len) = matched else {
-        return Err(NotFound::UnknownTld {
-            host: labels.join("."),
-            tld: tlds.join(" or ."),
-        });
-    };
-    let rest = &labels[..labels.len() - tld_len];
-    let (top, left) = rest.split_last().expect("checked above");
+    let rest = labels_under_tld(world, host)?;
+    let (top, left) = rest.split_last().expect("at least one label under the tld");
 
     if let Some(state) = world.project(top) {
         return resolve_in_project(state, left);
@@ -260,6 +253,29 @@ pub fn resolve_host(world: &World, host: &str) -> Result<Resolved, NotFound> {
         stack: Stack::Main,
     };
     with_subdomains(app, key, left, true)
+}
+
+/// The labels of a `Host` left of one of the served TLDs; never empty.
+pub(crate) fn labels_under_tld(world: &World, host: &str) -> Result<Vec<String>, NotFound> {
+    let mut labels = host_labels(host)?;
+    let tlds = world.machine.served_tlds();
+    let matched = tlds.iter().find_map(|tld| {
+        let tld_labels: Vec<&str> = tld.split('.').collect();
+        let under = labels.len() > tld_labels.len()
+            && labels[labels.len() - tld_labels.len()..]
+                .iter()
+                .zip(&tld_labels)
+                .all(|(a, b)| a == b);
+        under.then_some(tld_labels.len())
+    });
+    let Some(tld_len) = matched else {
+        return Err(NotFound::UnknownTld {
+            host: labels.join("."),
+            tld: tlds.join(" or ."),
+        });
+    };
+    labels.truncate(labels.len() - tld_len);
+    Ok(labels)
 }
 
 fn resolve_in_project(state: &ProjectState, labels: &[String]) -> Result<Resolved, NotFound> {

@@ -10,6 +10,7 @@ pub mod discovery;
 pub mod duration;
 pub mod env;
 pub mod include;
+pub mod kube;
 pub mod lifecycle;
 pub mod model;
 pub mod naming;
