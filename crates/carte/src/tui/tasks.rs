@@ -184,11 +184,11 @@ impl Tasks {
                     let _ = tx.send(Event::Services { project, result });
                 });
             }
-            Command::Attach(request) => {
+            Command::Attach { session, request } => {
                 self.detach();
                 let (keys_tx, keys) = tokio::sync::mpsc::unbounded_channel();
                 let socket = self.socket.clone();
-                let task = tokio::spawn(type_into(socket, request, keys, tx));
+                let task = tokio::spawn(type_into(socket, session, request, keys, tx));
                 self.typing = Some((keys_tx, task));
             }
             Command::Type(data) => {
@@ -237,6 +237,7 @@ impl Tasks {
 /// task is aborted.
 async fn type_into(
     socket: PathBuf,
+    session: u64,
     request: AttachRequest,
     mut keys: UnboundedReceiver<Vec<u8>>,
     tx: UnboundedSender<Event>,
@@ -244,11 +245,18 @@ async fn type_into(
     let mut connection = match Connection::open(&socket, &request).await {
         Ok(connection) => connection,
         Err(err) => {
-            let _ = tx.send(Event::Attached(Err(format!("{err:#}"))));
+            let _ = tx.send(Event::Attached {
+                session,
+                result: Err(format!("{err:#}")),
+            });
             return;
         }
     };
-    let _ = tx.send(Event::Attached(Ok(connection.attached.clone())));
+    let _ = tx.send(Event::Attached {
+        session,
+        result: Ok(connection.attached.clone()),
+    });
+    let ended = |message| Event::TypingEnded { session, message };
     loop {
         let typed = tokio::select! {
             data = keys.recv() => match data {
@@ -258,19 +266,19 @@ async fn type_into(
             frame = connection.next() => {
                 match frame {
                     Ok(Some(Frame::Output(data))) => {
-                        let _ = tx.send(Event::TypingOutput(data));
+                        let _ = tx.send(Event::TypingOutput { session, data });
                     }
                     Ok(Some(Frame::Ended(message))) => {
-                        let _ = tx.send(Event::TypingEnded(Some(message)));
+                        let _ = tx.send(ended(Some(message)));
                         return;
                     }
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        let _ = tx.send(Event::TypingEnded(None));
+                        let _ = tx.send(ended(None));
                         return;
                     }
                     Err(err) => {
-                        let _ = tx.send(Event::TypingEnded(Some(format!("{err:#}"))));
+                        let _ = tx.send(ended(Some(format!("{err:#}"))));
                         return;
                     }
                 }
@@ -278,7 +286,7 @@ async fn type_into(
             }
         };
         if connection.send(&Frame::Input(typed)).await.is_err() {
-            let _ = tx.send(Event::TypingEnded(None));
+            let _ = tx.send(ended(None));
             return;
         }
     }

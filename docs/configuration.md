@@ -97,7 +97,7 @@ terminal UI.
 
 | Key | Default | |
 | --- | --- | --- |
-| `detach_key` | `"ctrl-q d"` | The keys that detach: `ctrl-<key>` or single characters, separated by spaces. With two different keys, typing the first twice sends it once. A letter after the prefix works on any keyboard layout, unlike `ctrl-]` or `~` |
+| `detach_key` | `"ctrl-q d"` | The keys that detach: `ctrl-<key>` or single characters, separated by spaces. With two different keys, typing the first twice sends it once. One character alone isn't allowed. A letter after the prefix works on any keyboard layout, unlike `ctrl-]` or `~` |
 
 ## Project files
 

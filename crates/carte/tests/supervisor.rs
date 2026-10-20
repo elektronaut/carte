@@ -3493,3 +3493,74 @@ async fn attaching_needs_a_running_process_with_a_pty() {
     assert!(both.contains("already names process web"), "{both}");
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_process_that_doesnt_read_holds_up_no_attached_client() {
+    use carte_api::attach::{Frame, TermSize};
+    use tokio::io::AsyncWriteExt;
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "stuck: stty raw -echo; echo raw; exec sleep 600\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    let (attached, terminal) = handle.attach(here("web"), None).await.unwrap();
+    let mut watcher = terminal.join(None, true);
+    if !String::from_utf8_lossy(&watcher.replay).contains("raw") {
+        read_until(&mut watcher, "raw").await;
+    }
+    drop(watcher);
+    let open = |size: TermSize| {
+        let (theirs, ours) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(carte::daemon::attach::session(
+            theirs,
+            attached.clone(),
+            terminal.join(Some(size), false),
+        ));
+        ours
+    };
+    let size = |cols, rows| TermSize { cols, rows };
+    let mut one = open(size(100, 30));
+    let mut two = open(size(80, 40));
+    let fits = |want: TermSize| {
+        let terminal = terminal.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while terminal.size() != want {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "size {:?}, not {want:?}",
+                    terminal.size()
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    fits(size(80, 30)).await;
+
+    let flood = Frame::Input(vec![b'x'; 256 * 1024]).encode();
+    tokio::time::timeout(Duration::from_secs(10), one.write_all(&flood))
+        .await
+        .expect("the session keeps reading while the process doesn't")
+        .unwrap();
+    one.write_all(&Frame::Resize(size(120, 50)).encode())
+        .await
+        .unwrap();
+    fits(size(80, 40)).await;
+
+    two.write_all(&Frame::Input(vec![3]).encode())
+        .await
+        .unwrap();
+    two.write_all(&Frame::Resize(size(90, 45)).encode())
+        .await
+        .unwrap();
+    fits(size(90, 45)).await;
+
+    drop(one);
+    drop(two);
+    fits(size(200, 50)).await;
+    assert_eq!(terminal.clients(), 0);
+    handle.shutdown().await;
+}

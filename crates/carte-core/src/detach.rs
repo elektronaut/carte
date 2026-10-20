@@ -37,7 +37,8 @@ impl FromStr for DetachKeys {
     type Err = DetachKeysError;
 
     /// Keys separated by spaces or commas: `ctrl-<key>` (also `^<key>`) for a letter
-    /// or one of `@[\]^_`, or a single character.
+    /// or one of `@[\]^_`, or a single character. One character alone isn't
+    /// enough, since it couldn't be typed into the process.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let error = || DetachKeysError(text.to_string());
         let mut keys = Vec::new();
@@ -61,7 +62,7 @@ impl FromStr for DetachKeys {
             };
             keys.push(byte);
         }
-        if keys.is_empty() {
+        if keys.is_empty() || matches!(keys.as_slice(), [0x21..=0x7e]) {
             return Err(error());
         }
         Ok(DetachKeys(keys))
@@ -136,7 +137,7 @@ mod tests {
         assert_eq!(keys("~ .").bytes(), b"~.");
         assert_eq!(DetachKeys::default().to_string(), "ctrl-q d");
         assert_eq!(keys("ctrl-] ~").to_string(), "ctrl-] ~");
-        for bad in ["", " , ", "ctrl-", "ctrl-1", "ctrl-qq", "dd", "é"] {
+        for bad in ["", " , ", "ctrl-", "ctrl-1", "ctrl-qq", "dd", "é", "d", "~"] {
             assert!(bad.parse::<DetachKeys>().is_err(), "{bad:?}");
         }
     }

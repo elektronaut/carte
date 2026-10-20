@@ -84,14 +84,23 @@ enum End {
     Detached,
     Exited(String),
     Lost,
+    /// A signal told the client to stop.
+    Signalled,
 }
 
 enum Step {
     Typed(Option<Vec<u8>>),
     Frame(anyhow::Result<Option<Frame>>),
     Resized,
+    Signalled,
     Quiet,
+    TimeUp,
 }
+
+/// What a process may have left on that the terminal shouldn't keep after a detach:
+/// colours, a hidden cursor, bracketed paste and mouse reporting.
+const RESET_MODES: &[u8] =
+    b"\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
 
 pub fn run(paths: &Paths, args: AttachArgs) -> anyhow::Result<ExitCode> {
     let keys = match &args.detach_keys {
@@ -109,34 +118,86 @@ pub fn run(paths: &Paths, args: AttachArgs) -> anyhow::Result<ExitCode> {
         target: control::address(&args.target),
         process: args.process.clone(),
         size: tty.then(terminal_size).flatten(),
-        replay: true,
+        replay: tty,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async {
+        let mut signals = Signals::new()?;
         let mut connection = Connection::open(&paths.socket(), &request).await?;
         let label = connection.label();
         if tty {
             eprintln!("Attached to {label}. {keys} detaches.");
         }
         let raw = tty.then(RawMode::enable).transpose()?;
-        let end = session(&mut connection, &keys, tty).await;
-        drop(raw);
-        match end? {
-            End::Detached if tty => eprintln!("\nDetached from {label}."),
-            End::Detached => {}
-            End::Exited(message) => eprintln!("\n{}: {message}", connection.attached.instance),
-            End::Lost => eprintln!("\nThe daemon closed the connection to {label}."),
+        let end = session(&mut connection, &keys, tty, args.wait, &mut signals).await;
+        if tty {
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(RESET_MODES);
+            let _ = stdout.flush();
         }
-        Ok(ExitCode::SUCCESS)
+        drop(raw);
+        Ok(match end? {
+            End::Detached if tty => {
+                eprintln!("\nDetached from {label}.");
+                ExitCode::SUCCESS
+            }
+            End::Detached => ExitCode::SUCCESS,
+            End::Exited(message) => {
+                eprintln!("\n{}: {message}", connection.attached.instance);
+                ExitCode::SUCCESS
+            }
+            End::Lost => {
+                eprintln!("\nThe daemon closed the connection to {label}.");
+                ExitCode::FAILURE
+            }
+            End::Signalled => {
+                eprintln!("\nDetached from {label}.");
+                ExitCode::FAILURE
+            }
+        })
     })
 }
 
+/// The signals that end a session, and the terminal's size changes.
+struct Signals {
+    resized: tokio::signal::unix::Signal,
+    stops: [tokio::signal::unix::Signal; 3],
+}
+
+impl Signals {
+    fn new() -> std::io::Result<Self> {
+        Ok(Signals {
+            resized: signal(SignalKind::window_change())?,
+            stops: [
+                signal(SignalKind::terminate())?,
+                signal(SignalKind::hangup())?,
+                signal(SignalKind::interrupt())?,
+            ],
+        })
+    }
+}
+
+async fn stopped([term, hup, int]: &mut [tokio::signal::unix::Signal; 3]) {
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = hup.recv() => {}
+        _ = int.recv() => {}
+    }
+}
+
 /// Copies typing to the process and its output to the terminal until the detach keys,
-/// the end of the process or the end of the connection. Without a terminal, it
-/// detaches once its input has run out and the output has been quiet for a moment.
-async fn session(connection: &mut Connection, keys: &DetachKeys, tty: bool) -> anyhow::Result<End> {
+/// the end of the process, the end of the connection or a signal. Without a terminal,
+/// stdin is typed as it is, and once it has run out the session detaches when the
+/// output has been quiet for half a second, or after `wait` at the latest.
+async fn session(
+    connection: &mut Connection,
+    keys: &DetachKeys,
+    tty: bool,
+    wait: Duration,
+    signals: &mut Signals,
+) -> anyhow::Result<End> {
     let (typed_tx, mut typed) = mpsc::channel::<Vec<u8>>(16);
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin();
@@ -152,21 +213,33 @@ async fn session(connection: &mut Connection, keys: &DetachKeys, tty: bool) -> a
             }
         }
     });
-    let mut resized = signal(SignalKind::window_change())?;
     let mut filter = keys.filter();
     let mut stdout = std::io::stdout();
     let mut input_open = true;
     let quiet = Duration::from_millis(500);
+    let mut deadline = None;
     loop {
+        let time_up = async {
+            match deadline {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         let step = tokio::select! {
             data = typed.recv(), if input_open => Step::Typed(data),
             frame = connection.next() => Step::Frame(frame),
-            _ = resized.recv(), if tty => Step::Resized,
+            _ = signals.resized.recv(), if tty => Step::Resized,
+            () = stopped(&mut signals.stops) => Step::Signalled,
             () = tokio::time::sleep(quiet), if !input_open => Step::Quiet,
+            () = time_up => Step::TimeUp,
         };
         match step {
             Step::Typed(Some(data)) => {
-                let (data, detach) = filter.feed(&data);
+                let (data, detach) = if tty {
+                    filter.feed(&data)
+                } else {
+                    (data, false)
+                };
                 if !data.is_empty() {
                     connection.send(&Frame::Input(data)).await?;
                 }
@@ -174,7 +247,10 @@ async fn session(connection: &mut Connection, keys: &DetachKeys, tty: bool) -> a
                     return Ok(End::Detached);
                 }
             }
-            Step::Typed(None) => input_open = false,
+            Step::Typed(None) => {
+                input_open = false;
+                deadline = Some(tokio::time::Instant::now() + wait);
+            }
             Step::Frame(frame) => match frame? {
                 Some(Frame::Output(data)) => {
                     stdout.write_all(&data)?;
@@ -189,18 +265,22 @@ async fn session(connection: &mut Connection, keys: &DetachKeys, tty: bool) -> a
                     connection.send(&Frame::Resize(size)).await?;
                 }
             }
-            Step::Quiet => return Ok(End::Detached),
+            Step::Signalled => return Ok(End::Signalled),
+            Step::Quiet | Step::TimeUp => return Ok(End::Detached),
         }
     }
 }
 
-/// Types `input` into a process and returns what it printed until its output went
-/// quiet, without escape codes: for agents, which have no terminal to attach.
+/// Types `input` into a process and returns what it printed until its output was
+/// quiet for `quiet`, or for `wait` at most, without escape codes and keeping the
+/// last 64 KB: for agents, which have no terminal to attach.
 pub(crate) fn type_into(
     paths: &Paths,
     target: &super::Target,
     process: Option<String>,
     input: Vec<u8>,
+    wait: Duration,
+    quiet: Duration,
 ) -> anyhow::Result<String> {
     let request = AttachRequest {
         target: control::address(target),
@@ -216,14 +296,21 @@ pub(crate) fn type_into(
         connection.send(&Frame::Input(input)).await?;
         let mut output = Vec::new();
         let mut ended = None;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let quiet = Duration::from_millis(500);
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut cut = false;
         loop {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
             match tokio::time::timeout(quiet.min(left), connection.next()).await {
                 Err(_) => break,
                 Ok(frame) => match frame? {
-                    Some(Frame::Output(data)) => output.extend_from_slice(&data),
+                    Some(Frame::Output(data)) => {
+                        output.extend_from_slice(&data);
+                        let over = output.len().saturating_sub(64 * 1024);
+                        if over > 0 {
+                            output.drain(..over);
+                            cut = true;
+                        }
+                    }
                     Some(Frame::Ended(message)) => {
                         ended = Some(message);
                         break;
@@ -234,6 +321,9 @@ pub(crate) fn type_into(
             }
         }
         let mut text = crate::logs::strip(&output);
+        if cut {
+            text.insert_str(0, "[earlier output cut]\n");
+        }
         if let Some(message) = ended {
             text.push_str(&format!("\n{}: {message}", connection.attached.instance));
         }

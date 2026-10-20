@@ -59,7 +59,7 @@ address inside it when given one.
 | `carte events [address] [-f] [-n N]` | What carte did and why: starts, stops, crashes, reloads, shares, teardowns |
 | `carte env [address] [KEY] [-p process] [--values]` | The environment a process gets, with where each value comes from |
 | `carte exec [address] [-p process] [--no-check] -- command…` | Run a command, like a console or a rake task, with the app's env |
-| `carte attach [address] [process] [--detach-keys keys]` | Connect your terminal to a running process, to answer a debugger prompt; see below |
+| `carte attach [address] [process] [--detach-keys keys] [--wait 5s]` | Connect your terminal to a running process, to answer a debugger prompt; see below |
 | `carte open [address]` | Open in the browser |
 | `carte share [address] [--apps a,b] [--ttl 2h] [--auth] [--pin] [--replace]` | Put apps on the public internet |
 | `carte unshare [address]` | End a share |
@@ -184,14 +184,18 @@ carte attach shop@feature-x/worker
   type, like a shared tmux session. The pty takes the smallest one's
   size, so wider terminals show it narrower; it gets its own size back
   when the last one detaches.
-- When the process exits, `attach` says how and ends.
-- Without a terminal, `attach` types its input into the process, prints
-  the output until it goes quiet for half a second, and detaches:
+- When the process exits, `attach` says how and ends. It also ends, and
+  puts your terminal back, on `SIGTERM`, `SIGHUP` or `SIGINT`.
+- Without a terminal, `attach` types its input into the process as it
+  is, with no detach keys and no replay, and prints the output that
+  follows. Once the input has run out, it detaches when the output has
+  been quiet for half a second, or after `--wait` (5s) at the latest:
   `printf 'continue\n' | carte attach shop`.
 - A process with `pty = false` can't be attached to.
 
-The terminal UI's `t` types into the selected process from the log pane,
-and the [MCP server](mcp.md)'s `type` tool lets an agent do it.
+In the terminal UI, `t` types into the selected process, or the
+selected app's web process; the detach keys stop. The
+[MCP server](mcp.md)'s `type` tool lets an agent do it.
 
 ## JSON output
 

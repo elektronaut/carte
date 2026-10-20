@@ -51,11 +51,20 @@ pub enum Event {
         result: Result<Vec<KubeServiceEntry>, String>,
     },
     /// The process typing goes to, or why there is none.
-    Attached(Result<Attached, String>),
+    Attached {
+        session: u64,
+        result: Result<Attached, String>,
+    },
     /// Output of the process typing goes to.
-    TypingOutput(Vec<u8>),
+    TypingOutput {
+        session: u64,
+        data: Vec<u8>,
+    },
     /// The process typing went to exited, or the connection to it was lost.
-    TypingEnded(Option<String>),
+    TypingEnded {
+        session: u64,
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,8 +95,11 @@ pub enum Command {
     FetchEnv(Address),
     /// Lists a kube project's Services.
     FetchServices(String),
-    /// Connects to a process to type into it.
-    Attach(AttachRequest),
+    /// Connects to a process to type into it; its events carry `session`.
+    Attach {
+        session: u64,
+        request: AttachRequest,
+    },
     /// Types into the process.
     Type(Vec<u8>),
     Detach,
@@ -129,6 +141,7 @@ pub struct EnvView {
 
 /// Typing into a process, from the log pane.
 pub struct Typing {
+    session: u64,
     /// `app@stack/process` once attached, the selection's address before.
     pub label: String,
     pub attached: bool,
@@ -191,6 +204,7 @@ pub struct App {
     /// The keys that stop typing into a process.
     pub detach_keys: DetachKeys,
     pub typing: Option<Typing>,
+    typing_sessions: u64,
 }
 
 impl App {
@@ -225,6 +239,7 @@ impl App {
             quit: false,
             detach_keys: DetachKeys::default(),
             typing: None,
+            typing_sessions: 0,
         }
     }
 
@@ -292,27 +307,30 @@ impl App {
                     view.env = Some(result);
                 }
             }
-            Event::Attached(Ok(attached)) => {
-                if let Some(typing) = &mut self.typing {
-                    typing.label = format!("{}/{}", attached.instance, attached.process);
-                    typing.attached = true;
+            Event::Attached { session, result } if self.typing_to(session) => match result {
+                Ok(attached) => {
+                    if let Some(typing) = &mut self.typing {
+                        typing.label = format!("{}/{}", attached.instance, attached.process);
+                        typing.attached = true;
+                    }
                 }
-            }
-            Event::Attached(Err(message)) => {
-                self.stop_typing();
-                self.warn(&message);
-            }
-            Event::TypingOutput(data) => {
+                Err(message) => {
+                    self.stop_typing();
+                    self.warn(&message);
+                }
+            },
+            Event::TypingOutput { session, data } if self.typing_to(session) => {
                 if let Some(typing) = &mut self.typing {
                     typing.stripper.feed(&data);
                 }
             }
-            Event::TypingEnded(message) => {
+            Event::TypingEnded { session, message } if self.typing_to(session) => {
                 if let Some(typing) = self.stop_typing() {
                     let message = message.unwrap_or_else(|| "lost the connection".to_string());
                     self.warn(&format!("{}: {message}", typing.label));
                 }
             }
+            Event::Attached { .. } | Event::TypingOutput { .. } | Event::TypingEnded { .. } => {}
         }
         if let Some(notice) = &self.notice {
             let lasts = Duration::from_secs(if notice.error { 10 } else { 5 });
@@ -691,18 +709,29 @@ impl App {
             return None;
         }
         self.mode = Mode::Type;
+        self.typing_sessions += 1;
+        let session = self.typing_sessions;
         self.typing = Some(Typing {
+            session,
             label: target::label(&id),
             attached: false,
             filter: self.detach_keys.filter(),
             stripper: Stripper::default(),
         });
-        Some(Command::Attach(AttachRequest {
-            target: target::address(&id),
-            process: None,
-            size: None,
-            replay: true,
-        }))
+        Some(Command::Attach {
+            session,
+            request: AttachRequest {
+                target: target::address(&id),
+                process: None,
+                size: None,
+                replay: true,
+            },
+        })
+    }
+
+    /// Typing is under way in `session`, not an earlier one.
+    fn typing_to(&self, session: u64) -> bool {
+        self.typing.as_ref().is_some_and(|t| t.session == session)
     }
 
     fn type_key(&mut self, key: KeyEvent) -> Vec<Command> {
@@ -1735,20 +1764,30 @@ mod tests {
             press(&mut app, now, code);
         }
         let commands = press(&mut app, now, KeyCode::Char('t'));
-        let [Command::Attach(request)] = commands.as_slice() else {
+        let [Command::Attach { session, request }] = commands.as_slice() else {
             panic!("{commands:?}");
         };
+        let session = *session;
         assert_eq!(request.target.address, "nova-billing@main");
         assert_eq!(request.process, None);
         assert_eq!(app.mode, Mode::Type);
         app.update(
-            Event::Attached(Ok(Attached {
-                instance: "nova-billing@main".into(),
-                process: "web".into(),
-            })),
+            Event::Attached {
+                session,
+                result: Ok(Attached {
+                    instance: "nova-billing@main".into(),
+                    process: "web".into(),
+                }),
+            },
             now,
         );
-        app.update(Event::TypingOutput(b"=> 1\r\n(rdbg) ".to_vec()), now);
+        app.update(
+            Event::TypingOutput {
+                session,
+                data: b"=> 1\r\n(rdbg) ".to_vec(),
+            },
+            now,
+        );
         assert_eq!(app.typing.as_ref().unwrap().pending(), "(rdbg) ");
 
         assert_eq!(
@@ -1770,7 +1809,22 @@ mod tests {
 
         press(&mut app, now, KeyCode::Char('t'));
         app.update(
-            Event::TypingEnded(Some("web exited with code 1".into())),
+            Event::TypingEnded {
+                session,
+                message: Some("an earlier session".into()),
+            },
+            now,
+        );
+        assert_eq!(
+            app.mode,
+            Mode::Type,
+            "events of an earlier session don't count"
+        );
+        app.update(
+            Event::TypingEnded {
+                session: session + 1,
+                message: Some("web exited with code 1".into()),
+            },
             now,
         );
         assert_eq!(app.mode, Mode::Normal);
@@ -1778,6 +1832,25 @@ mod tests {
             app.notice.as_ref().map(|n| n.text.as_str()),
             Some("nova-billing@main: web exited with code 1")
         );
+    }
+
+    #[test]
+    fn typing_stops_with_control_punctuation_as_crossterm_reports_it() {
+        let (mut app, now) = connected();
+        app.detach_keys = "ctrl-] d".parse().unwrap();
+        for code in [
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Char('t'),
+        ] {
+            press(&mut app, now, code);
+        }
+        assert_eq!(app.mode, Mode::Type);
+        let ctrl_close_bracket = KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL);
+        assert!(app.update(Event::Key(ctrl_close_bracket), now).is_empty());
+        assert_eq!(press(&mut app, now, KeyCode::Char('d')), [Command::Detach]);
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]
