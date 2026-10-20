@@ -453,7 +453,7 @@ three tiers, each once the one before is done:
 | --- | --- | --- |
 | 1 | `"service"` | Ready, as checked by `ready` |
 | 2 | `"task"` | Exited with code 0 |
-| 3 | none: everything else, from the Procfile or config | Ready |
+| 3 | none: everything else, from the Procfile or config | Ready; a process that serves no HTTP, such as a worker, once it has started |
 
 ```toml
 [apps.acme-billing.processes.redis]
