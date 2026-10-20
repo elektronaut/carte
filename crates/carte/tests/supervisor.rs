@@ -50,7 +50,7 @@ impl Setup {
     }
 
     fn start(&self) -> Handle {
-        self.start_with_backoff(Duration::from_millis(100))
+        self.start_with(|_| {})
     }
 
     fn start_with_backoff(&self, restart_backoff: Duration) -> Handle {
@@ -1803,11 +1803,13 @@ async fn a_crashed_instance_restarts_once_its_processes_have_stopped_services_la
     let path = setup.root.join("stop.log");
     let log = path.display();
     let marker = setup.root.join("crashed");
+    let trapped = setup.root.join("trapped");
     setup.app(
         "acme-web",
         &format!(
-            "web: if [ ! -e {marker} ]; then touch {marker}; sleep 0.3; exit 1; fi; exec {{fixture}}\nworker: trap 'sleep 0.3; echo worker >> {log}; exit 0' TERM; while :; do sleep 0.05; done\n",
-            marker = marker.display()
+            "web: if [ ! -e {marker} ]; then touch {marker}; while [ ! -e {trapped} ]; do sleep 0.05; done; exit 1; fi; exec {{fixture}}\nworker: trap 'sleep 0.3; echo worker >> {log}; exit 0' TERM; touch {trapped}; while :; do sleep 0.05; done\n",
+            marker = marker.display(),
+            trapped = trapped.display()
         ),
     );
     setup.project(&format!(
@@ -1920,13 +1922,7 @@ kind = "task"
     let handle = setup.start();
 
     handle.control(control("web", Action::Up)).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !marker.exists() {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for_file(&marker).await;
     handle
         .control(control("web/migrate", Action::Down))
         .await
