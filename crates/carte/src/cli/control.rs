@@ -7,7 +7,8 @@ use carte_api::{
     InstanceStatus, LogLine, LogsRequest, MarkRequest, ProcessState, Snapshot, StartFailure,
     StatusResponse, StopAllRequest, paths,
 };
-use carte_core::model::World;
+use carte_core::kube::{self, KubeAddress};
+use carte_core::model::{Stack, World};
 use carte_core::{address, discovery, naming};
 use http::Method;
 
@@ -133,7 +134,23 @@ fn status_of(
     target: &Target,
 ) -> anyhow::Result<(Snapshot, address::Target, StatusResponse)> {
     let world = discovery::load_world(&paths.config_dir);
-    let resolved = resolve_locally(&world, &address(target))?;
+    let address = address(target);
+    if let Some(kube) = resolve_kube(&world, &address) {
+        let kube = kube?;
+        let snapshot: Snapshot =
+            runtime()?.block_on(Client::new(&paths.socket()).get(paths::SNAPSHOT))?;
+        let response = StatusResponse {
+            instances: select_kube(&snapshot, &kube).into_iter().cloned().collect(),
+        };
+        let resolved = address::Target {
+            project: kube.project,
+            app: kube.service,
+            stack: kube.namespace.map(Stack::Branch),
+            process: None,
+        };
+        return Ok((snapshot, resolved, response));
+    }
+    let resolved = resolve_locally(&world, &address)?;
     let snapshot: Snapshot =
         runtime()?.block_on(Client::new(&paths.socket()).get(paths::SNAPSHOT))?;
     let response = StatusResponse {
@@ -145,6 +162,66 @@ fn status_of(
 /// What `carte status --json` prints.
 pub(crate) fn status_response(paths: &Paths, target: &Target) -> anyhow::Result<StatusResponse> {
     Ok(status_of(paths, target)?.2)
+}
+
+/// A Service's URL: with its namespace when the address or the project file names
+/// one, otherwise the short form that leaves it to the cluster.
+fn kube_url(world: &World, address: KubeAddress) -> anyhow::Result<String> {
+    let Some(service) = &address.service else {
+        bail!(
+            "name a Service to open, like `carte open grafana.{}`",
+            address.project
+        );
+    };
+    let project = world
+        .kube_project(&address.project)
+        .expect("resolved project");
+    let namespace = address
+        .namespace
+        .clone()
+        .or_else(|| project.service(service).and_then(|s| s.namespace.clone()));
+    if let Some(namespace) = namespace.as_ref().filter(|n| !project.allows_namespace(n)) {
+        bail!(
+            "{namespace} isn't in `namespaces` of the {} project file",
+            project.name
+        );
+    }
+    Ok(match namespace {
+        Some(namespace) => kube::url(&world.machine, &project.name, &namespace, service),
+        None => {
+            let host = format!("{service}.{}.{}", project.name, world.machine.tld);
+            match world.machine.https_port {
+                443 => format!("https://{host}"),
+                port => format!("https://{host}:{port}"),
+            }
+        }
+    })
+}
+
+fn resolve_kube(world: &World, address: &Address) -> Option<Result<KubeAddress, Failure>> {
+    let parsed: address::Address = match address.address.parse() {
+        Ok(parsed) => parsed,
+        Err(err) => return Some(Err(Failure::from(err))),
+    };
+    kube::resolve_address(world, address.project.as_deref(), &parsed)
+        .map(|resolved| resolved.map_err(Failure::from))
+}
+
+/// The kube instances an address names: a Service's in every namespace carte knows
+/// it in, otherwise the running or failed ones.
+fn select_kube<'a>(snapshot: &'a Snapshot, address: &KubeAddress) -> Vec<&'a InstanceStatus> {
+    snapshot
+        .projects
+        .iter()
+        .filter(|p| p.name == address.project)
+        .flat_map(|p| &p.stacks)
+        .filter(|s| address.namespace.as_ref().is_none_or(|n| s.name == *n))
+        .flat_map(|s| &s.instances)
+        .filter(|i| match &address.service {
+            Some(service) => i.app == *service,
+            None => i.state != InstanceState::Stopped,
+        })
+        .collect()
 }
 
 /// The instances a resolved address names: an app's instance in its stack (main when
@@ -201,15 +278,24 @@ pub fn render_status(snapshot: &Snapshot, instances: &[InstanceStatus]) -> Strin
             }
             rows.push(("public", public));
         }
-        let fallback = if inst.stack != "main" && inst.checkout == "main" {
-            " (main checkout)"
-        } else {
-            ""
-        };
-        rows.push((
-            "checkout",
-            format!("{}{fallback}", inst.checkout_path.display()),
-        ));
+        match &inst.kube {
+            Some(kube) => {
+                if let (Some(pod), Some(port)) = (&kube.pod, kube.port) {
+                    rows.push(("pod", format!("{pod} :{port}")));
+                }
+            }
+            None => {
+                let fallback = if inst.stack != "main" && inst.checkout == "main" {
+                    " (main checkout)"
+                } else {
+                    ""
+                };
+                rows.push((
+                    "checkout",
+                    format!("{}{fallback}", inst.checkout_path.display()),
+                ));
+            }
+        }
         if !inst.processes.is_empty() {
             let processes: Vec<String> = inst.processes.iter().map(process_word).collect();
             rows.push(("processes", processes.join(", ")));
@@ -315,8 +401,12 @@ pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
                     .shares
                     .iter()
                     .find(|s| s.project == project.name && s.stack == stack.name);
+                let name = match inst.kube {
+                    Some(_) => format!("{}.{}@{}", inst.app, project.name, inst.stack),
+                    None => instance_name(inst),
+                };
                 rows.push(vec![
-                    instance_name(inst),
+                    name,
                     state_word(inst),
                     inst.url.clone(),
                     notes(inst, share),
@@ -339,6 +429,11 @@ pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
             snapshot.running_instances
         ));
     }
+    for project in &snapshot.projects {
+        if let Some(error) = project.kube.as_ref().and_then(|k| k.error.as_ref()) {
+            out.push_str(&format!("cluster: {}: {error}\n", project.name));
+        }
+    }
     if let Some(tunnel) = &snapshot.tunnel
         && tunnel.state == carte_api::TunnelState::Failed
     {
@@ -360,6 +455,9 @@ pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
 }
 
 fn state_word(inst: &InstanceStatus) -> String {
+    if inst.kube.is_some() && inst.state == InstanceState::Crashed {
+        return "failed".into();
+    }
     match inst.state {
         InstanceState::Stopped => "stopped",
         InstanceState::Starting => "starting",
@@ -383,6 +481,9 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
     let mut parts = Vec::new();
     if inst.stack != "main" && inst.checkout == "main" {
         parts.push("main checkout".to_string());
+    }
+    if let Some(pod) = inst.kube.as_ref().and_then(|k| k.pod.as_ref()) {
+        parts.push(format!("pod {pod}"));
     }
     let down: Vec<String> = inst
         .processes
@@ -692,13 +793,18 @@ pub fn events(paths: &Paths, args: EventsArgs, json: bool) -> anyhow::Result<Exi
 pub fn open(paths: &Paths, target: Target) -> anyhow::Result<ExitCode> {
     let world = discovery::load_world(&paths.config_dir);
     let address = address(&target);
-    let resolved = resolve_locally(&world, &address)?;
-    let Some(key) = resolved.instance() else {
-        bail!("name an app to open");
+    let url = match resolve_kube(&world, &address) {
+        Some(kube) => kube_url(&world, kube?)?,
+        None => {
+            let resolved = resolve_locally(&world, &address)?;
+            let Some(key) = resolved.instance() else {
+                bail!("name an app to open");
+            };
+            let state = world.project(&key.project).expect("resolved project");
+            let app = state.project.app(&key.app).expect("resolved app");
+            naming::instance_url(&world.machine, &state.project, app, &key.stack)
+        }
     };
-    let state = world.project(&key.project).expect("resolved project");
-    let app = state.project.app(&key.app).expect("resolved app");
-    let url = naming::instance_url(&world.machine, &state.project, app, &key.stack);
     println!("{url}");
     let status = std::process::Command::new("open").arg(&url).status()?;
     Ok(if status.success() {

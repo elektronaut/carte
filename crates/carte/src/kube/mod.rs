@@ -10,11 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-use carte_api::{EventKind, EventSubject};
-use carte_core::kube::{KubeProject, KubeTarget};
+use carte_api::{
+    Action, ControlResponse, EventKind, EventSubject, Hold, InstanceState, InstanceStatus,
+    KubeInstanceInfo, KubeProjectInfo, ProjectStatus, StackStatus, StartFailure,
+};
+use carte_core::kube::{KubeAddress, KubeProject, KubeTarget};
 use carte_core::model::{Policy, World};
 use carte_core::{duration, env};
 use http::StatusCode;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -40,6 +44,11 @@ pub struct Key {
 }
 
 impl Key {
+    /// `service.project@namespace`, as the CLI takes it.
+    pub fn label(&self) -> String {
+        format!("{}.{}@{}", self.service, self.project, self.namespace)
+    }
+
     fn subject(&self) -> EventSubject {
         EventSubject {
             project: self.project.clone(),
@@ -105,6 +114,8 @@ struct Inner {
     /// up its own project.
     clusters: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<ClusterEntry>>>>>,
     state: Mutex<State>,
+    /// Bumped when what `status` shows changes.
+    changes: watch::Sender<u64>,
 }
 
 struct ClusterEntry {
@@ -162,6 +173,7 @@ impl Kube {
                 connector,
                 clusters: Mutex::new(HashMap::new()),
                 state: Mutex::new(State::default()),
+                changes: watch::channel(0).0,
             }),
         };
         let weak = Arc::downgrade(&kube.inner);
@@ -195,6 +207,203 @@ impl Kube {
                 .with_retry_after(Duration::from_secs(5)),
             ),
         }
+    }
+
+    /// How many forwards run.
+    pub fn running(&self) -> u32 {
+        self.inner.running_count()
+    }
+
+    /// Wakes up when what `status` shows changes.
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.inner.changes.subscribe()
+    }
+
+    /// Every kube project with the Services carte knows of: configured ones with a
+    /// namespace, and those requested since the daemon started.
+    pub fn status(&self, world: &World) -> Vec<ProjectStatus> {
+        let state = self.inner.state.lock().expect("kube state");
+        world
+            .kube_projects
+            .iter()
+            .map(|project| {
+                let mut stacks: BTreeMap<String, Vec<InstanceStatus>> = BTreeMap::new();
+                for (key, instance) in state
+                    .instances
+                    .iter()
+                    .filter(|(k, _)| k.project == project.name)
+                {
+                    stacks
+                        .entry(key.namespace.clone())
+                        .or_default()
+                        .push(instance_status(world, project, key, Some(instance)));
+                }
+                for (service, settings) in &project.services {
+                    let Some(namespace) = &settings.namespace else {
+                        continue;
+                    };
+                    let key = Key {
+                        project: project.name.clone(),
+                        namespace: namespace.clone(),
+                        service: service.clone(),
+                    };
+                    if !state.instances.contains_key(&key) {
+                        stacks
+                            .entry(namespace.clone())
+                            .or_default()
+                            .push(instance_status(world, project, &key, None));
+                    }
+                }
+                ProjectStatus {
+                    name: project.name.clone(),
+                    folder: project.folder.clone(),
+                    apps: Vec::new(),
+                    stacks: stacks
+                        .into_iter()
+                        .map(|(name, mut instances)| {
+                            instances.sort_by(|a, b| a.app.cmp(&b.app));
+                            StackStatus {
+                                name,
+                                branch: None,
+                                instances,
+                            }
+                        })
+                        .collect(),
+                    kube: Some(KubeProjectInfo {
+                        context: project.context.clone(),
+                        error: state.project_errors.get(&project.name).cloned(),
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// Starts, stops or restarts what the address names.
+    pub async fn control(
+        &self,
+        address: KubeAddress,
+        action: Action,
+    ) -> Result<ControlResponse, String> {
+        let world = self.inner.supervisor.world();
+        let project = world
+            .kube_project(&address.project)
+            .cloned()
+            .ok_or_else(|| format!("no kube project {}", address.project))?;
+        let mut response = ControlResponse {
+            affected: Vec::new(),
+            messages: Vec::new(),
+            failures: Vec::new(),
+        };
+        let to_start: Vec<KubeTarget> = match action {
+            Action::Up => {
+                let service = address.service.clone().ok_or_else(|| {
+                    format!(
+                        "name a Service to start, like `carte up grafana.{}`",
+                        project.name
+                    )
+                })?;
+                vec![KubeTarget {
+                    project: project.name.clone(),
+                    service,
+                    namespace: address.namespace.clone(),
+                    via_alias: false,
+                }]
+            }
+            Action::Down => {
+                for key in self.inner.stop_matching(&address, "stopped on request") {
+                    response.affected.push(key.label());
+                }
+                self.inner.forget_failures(&address);
+                return Ok(response);
+            }
+            Action::Restart => {
+                let stopped = self.inner.stop_matching(&address, "restarting");
+                let mut targets: Vec<KubeTarget> = stopped
+                    .into_iter()
+                    .map(|key| KubeTarget {
+                        project: key.project,
+                        service: key.service,
+                        namespace: Some(key.namespace),
+                        via_alias: false,
+                    })
+                    .collect();
+                if targets.is_empty()
+                    && let Some(service) = &address.service
+                {
+                    targets.push(KubeTarget {
+                        project: project.name.clone(),
+                        service: service.clone(),
+                        namespace: address.namespace.clone(),
+                        via_alias: false,
+                    });
+                }
+                targets
+            }
+            Action::Pin { .. } | Action::Unpin { .. } => {
+                return Err("kube projects' Services can't be pinned; idling costs nothing".into());
+            }
+            Action::Disable { .. } | Action::Enable { .. } => {
+                return Err(format!(
+                    "set `policy = \"disabled\"` in [apps.<service>] of the {} project file instead",
+                    project.name
+                ));
+            }
+        };
+        for target in to_start {
+            let label = match &target.namespace {
+                Some(namespace) => format!("{}.{}@{namespace}", target.service, target.project),
+                None => format!("{}.{}", target.service, target.project),
+            };
+            response.affected.push(label.clone());
+            match tokio::time::timeout(LOOKUP_TIMEOUT, self.inner.clone().start_target(target))
+                .await
+            {
+                Ok(Ok(key)) => {
+                    response.affected.pop();
+                    response.affected.push(key.label());
+                }
+                Ok(Err(page)) => response.failures.push(StartFailure {
+                    instance: label,
+                    title: page.title,
+                    detail: page.detail,
+                    log: Vec::new(),
+                }),
+                Err(_) => response.failures.push(StartFailure {
+                    instance: label,
+                    title: "The cluster didn't answer".into(),
+                    detail: format!("No answer within {}s.", LOOKUP_TIMEOUT.as_secs()),
+                    log: Vec::new(),
+                }),
+            }
+        }
+        Ok(response)
+    }
+
+    /// Stops every forward, or only those without requests or connections; answers
+    /// with `service.project@namespace` for each.
+    pub fn stop_all(&self, idle_only: bool) -> Vec<String> {
+        let world = self.inner.supervisor.world();
+        let keys: Vec<Key> = {
+            let state = self.inner.state.lock().expect("kube state");
+            state
+                .instances
+                .iter()
+                .filter(|(_, i)| i.forward.is_some() && (!idle_only || i.idle()))
+                .map(|(k, _)| k.clone())
+                .collect()
+        };
+        keys.into_iter()
+            .filter(|key| world.kube_project(&key.project).is_some())
+            .flat_map(|key| {
+                let address = KubeAddress {
+                    project: key.project.clone(),
+                    service: Some(key.service.clone()),
+                    namespace: Some(key.namespace.clone()),
+                };
+                self.inner.stop_matching(&address, "stopped on request")
+            })
+            .map(|key| key.label())
+            .collect()
     }
 
     /// The page for a forward the proxy couldn't use, with what went wrong last.
@@ -283,6 +492,69 @@ impl Inner {
             self.start(&project, cluster, &key).await?;
         }
         Ok(key)
+    }
+
+    /// Stops the running forwards the address names.
+    fn stop_matching(&self, address: &KubeAddress, why: &str) -> Vec<Key> {
+        let mut stopped = Vec::new();
+        {
+            let mut state = self.state.lock().expect("kube state");
+            for (key, instance) in state.instances.iter_mut() {
+                let matches = key.project == address.project
+                    && address.service.as_ref().is_none_or(|s| *s == key.service)
+                    && address
+                        .namespace
+                        .as_ref()
+                        .is_none_or(|n| *n == key.namespace);
+                if let (true, Some(running)) = (matches, instance.forward.take()) {
+                    running.forward.cancel.cancel();
+                    stopped.push(key.clone());
+                }
+            }
+        }
+        for key in &stopped {
+            self.supervisor
+                .event(EventKind::Stopped, why, vec![key.subject()]);
+        }
+        if !stopped.is_empty() {
+            self.changed();
+        }
+        stopped
+    }
+
+    /// Forgets why the instances the address names couldn't start, for those not
+    /// running.
+    fn forget_failures(&self, address: &KubeAddress) {
+        let mut state = self.state.lock().expect("kube state");
+        let before = state.instances.len();
+        state.instances.retain(|key, instance| {
+            let matches = key.project == address.project
+                && address.service.as_ref().is_none_or(|s| *s == key.service)
+                && address
+                    .namespace
+                    .as_ref()
+                    .is_none_or(|n| *n == key.namespace);
+            !(matches && instance.forward.is_none())
+        });
+        let forgot = state.instances.len() != before;
+        drop(state);
+        if forgot {
+            self.changed();
+        }
+    }
+
+    /// Forwards running now.
+    fn running_count(&self) -> u32 {
+        let state = self.state.lock().expect("kube state");
+        state
+            .instances
+            .values()
+            .filter(|i| i.forward.is_some())
+            .count() as u32
+    }
+
+    fn changed(&self) {
+        self.changes.send_modify(|n| *n += 1);
     }
 
     fn running_port(&self, key: &Key) -> Option<u16> {
@@ -430,15 +702,7 @@ impl Inner {
                 let hosts: Vec<String> = many
                     .iter()
                     .map(|s| {
-                        format!(
-                            "https://{}",
-                            carte_core::kube::host(
-                                &world.machine.tld,
-                                &project.name,
-                                &s.namespace,
-                                &s.name
-                            )
-                        )
+                        carte_core::kube::url(&world.machine, &project.name, &s.namespace, &s.name)
                     })
                     .collect();
                 Err(ErrorPage::new(
@@ -507,6 +771,7 @@ impl Inner {
             format!("pod {} port {}", target.pod, target.port),
             vec![key.subject()],
         );
+        self.changed();
         Ok(port)
     }
 
@@ -581,6 +846,7 @@ impl Inner {
         if changed {
             self.supervisor
                 .event(EventKind::Failed, message, vec![key.subject()]);
+            self.changed();
         }
     }
 
@@ -598,6 +864,7 @@ impl Inner {
             .as_ref()
             != Some(&summary);
         if changed {
+            self.changed();
             self.supervisor.event(
                 EventKind::Failed,
                 summary,
@@ -612,11 +879,15 @@ impl Inner {
     }
 
     fn project_reached(&self, project: &str) {
-        self.state
+        let removed = self
+            .state
             .lock()
             .expect("kube state")
             .project_errors
             .remove(project);
+        if removed.is_some() {
+            self.changed();
+        }
     }
 
     /// Stops forwards nobody used for the idle timeout, and those of projects that
@@ -624,7 +895,7 @@ impl Inner {
     fn sweep(&self) {
         let world = self.supervisor.world();
         let mut stopped = Vec::new();
-        {
+        let running = {
             let mut state = self.state.lock().expect("kube state");
             state.instances.retain(|key, instance| {
                 let Some(project) = world.kube_project(&key.project) else {
@@ -657,6 +928,10 @@ impl Inner {
             state
                 .project_errors
                 .retain(|name, _| world.kube_project(name).is_some());
+            state.instances.values().any(|i| i.forward.is_some())
+        };
+        if running || !stopped.is_empty() {
+            self.changed();
         }
         self.clusters
             .lock()
@@ -669,6 +944,62 @@ impl Inner {
                 vec![key.subject()],
             );
         }
+    }
+}
+
+fn instance_status(
+    world: &World,
+    project: &KubeProject,
+    key: &Key,
+    instance: Option<&Instance>,
+) -> InstanceStatus {
+    let running = instance.and_then(|i| i.forward.as_ref());
+    let last_error = instance.and_then(|i| i.last_error.clone());
+    let state = match (running, &last_error) {
+        (Some(_), _) => InstanceState::Ready,
+        (None, Some(_)) => InstanceState::Crashed,
+        (None, None) => InstanceState::Stopped,
+    };
+    let mut holds = Vec::new();
+    let mut idle_in_secs = None;
+    if let (Some(instance), Some(_)) = (instance, running) {
+        if instance.active > 0 {
+            holds.push(Hold::Requests {
+                count: instance.active as u32,
+            });
+        }
+        if holds.is_empty() {
+            let timeout = project.idle_timeout.unwrap_or(world.machine.idle_timeout);
+            idle_in_secs = Some(
+                timeout
+                    .saturating_sub(instance.last_active.elapsed())
+                    .as_secs(),
+            );
+        }
+    }
+    let target = running.map(|r| r.forward.target());
+    InstanceStatus {
+        app: key.service.clone(),
+        stack: key.namespace.clone(),
+        checkout: String::new(),
+        checkout_path: PathBuf::new(),
+        url: carte_core::kube::url(&world.machine, &key.project, &key.namespace, &key.service),
+        public_url: None,
+        state,
+        processes: Vec::new(),
+        holds,
+        idle_in_secs,
+        memory_bytes: 0,
+        cpu_percent: 0.0,
+        last_error,
+        env_changed: false,
+        last_event: None,
+        boot: None,
+        warms: Vec::new(),
+        kube: Some(KubeInstanceInfo {
+            pod: target.as_ref().map(|t| t.pod.clone()),
+            port: target.map(|t| t.port),
+        }),
     }
 }
 
@@ -717,6 +1048,9 @@ impl Reporter for InstanceReporter {
             instance.last_error = error.clone();
             changed
         };
+        if changed {
+            inner.changed();
+        }
         if let (true, Some(message)) = (changed, error) {
             inner
                 .supervisor

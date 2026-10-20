@@ -493,3 +493,164 @@ async fn a_changed_project_restarts_its_forwards() {
             .any(|e| e.kind == EventKind::Stopped && e.message == "the project changed")
     );
 }
+
+fn address(service: Option<&str>, namespace: Option<&str>) -> carte_core::kube::KubeAddress {
+    carte_core::kube::KubeAddress {
+        project: "prod".into(),
+        service: service.map(Into::into),
+        namespace: namespace.map(Into::into),
+    }
+}
+
+#[tokio::test]
+async fn reports_status_and_controls_forwards() {
+    use carte_api::{Action, Hold, InstanceState};
+
+    let setup = Setup::new(&format!("{PROJECT}[apps.vlogs]\nnamespace = \"logging\"\n"));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    setup
+        .cluster
+        .add_service("logging", "vlogs", &["vlogs-a"])
+        .await;
+    let world = setup.handle.world();
+
+    let status = setup.kube.status(&world);
+    let prod = &status[0];
+    assert_eq!(prod.name, "prod");
+    assert_eq!(prod.kube.as_ref().unwrap().context, "prod");
+    let names: Vec<_> = prod.stacks.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["logging"],
+        "configured Services with a namespace show"
+    );
+    assert_eq!(prod.stacks[0].instances[0].state, InstanceState::Stopped);
+
+    let response = setup
+        .kube
+        .control(address(Some("grafana"), None), Action::Up)
+        .await
+        .unwrap();
+    assert_eq!(response.affected, vec!["grafana.prod@monitoring"]);
+    let route = setup.kube.route(target("grafana", None)).await;
+    let status = setup.kube.status(&world);
+    let grafana = status[0]
+        .stacks
+        .iter()
+        .find(|s| s.name == "monitoring")
+        .unwrap()
+        .instances[0]
+        .clone();
+    assert_eq!(grafana.state, InstanceState::Ready);
+    assert_eq!(grafana.url, "https://grafana.monitoring.prod.localhost");
+    assert_eq!(grafana.holds, vec![Hold::Requests { count: 1 }]);
+    let kube = grafana.kube.unwrap();
+    assert_eq!(kube.pod.as_deref(), Some("grafana-a"));
+    assert_eq!(kube.port, Some(3000));
+    drop(route);
+
+    let response = setup
+        .kube
+        .control(address(None, Some("monitoring")), Action::Restart)
+        .await
+        .unwrap();
+    assert_eq!(response.affected, vec!["grafana.prod@monitoring"]);
+    let response = setup
+        .kube
+        .control(address(None, None), Action::Down)
+        .await
+        .unwrap();
+    assert_eq!(response.affected, vec!["grafana.prod@monitoring"]);
+    let status = setup.kube.status(&world);
+    assert!(
+        status[0]
+            .stacks
+            .iter()
+            .flat_map(|s| &s.instances)
+            .all(|i| i.state == InstanceState::Stopped)
+    );
+
+    let response = setup
+        .kube
+        .control(address(Some("nope"), Some("monitoring")), Action::Up)
+        .await
+        .unwrap();
+    assert_eq!(response.failures[0].instance, "nope.prod@monitoring");
+    assert_eq!(response.failures[0].title, "No such Service");
+    assert!(
+        setup
+            .kube
+            .control(address(Some("grafana"), None), Action::Pin { save: false })
+            .await
+            .is_err()
+    );
+    assert!(
+        setup
+            .kube
+            .control(address(None, None), Action::Up)
+            .await
+            .is_err(),
+        "up needs a Service"
+    );
+}
+
+#[tokio::test]
+async fn stop_all_includes_forwards() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let route = setup.kube.route(target("grafana", None)).await;
+    assert!(setup.kube.stop_all(true).is_empty(), "a request holds it");
+    drop(route);
+    assert_eq!(setup.kube.stop_all(true), vec!["grafana.prod@monitoring"]);
+}
+#[tokio::test]
+async fn failed_lookups_are_forgotten_after_the_idle_timeout() {
+    let setup = Setup::new(PROJECT);
+    let (status, _) =
+        upstream(setup.kube.route(target("nope", Some("monitoring"))).await).unwrap_err();
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let listed = |setup: &Setup| {
+        setup.kube.status(&setup.handle.world())[0]
+            .stacks
+            .iter()
+            .flat_map(|s| &s.instances)
+            .any(|i| i.app == "nope")
+    };
+    assert!(listed(&setup));
+    let mut gone = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if !listed(&setup) {
+            gone = true;
+            break;
+        }
+    }
+    assert!(gone);
+}
+
+#[tokio::test]
+async fn namespaces_outside_the_project_are_refused() {
+    let setup = Setup::new(&format!("{PROJECT}namespaces = [\"logging\"]\n"));
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let response = setup
+        .kube
+        .control(
+            address(Some("grafana"), Some("monitoring")),
+            carte_api::Action::Up,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.failures[0].title,
+        "Not one of the project's namespaces"
+    );
+}

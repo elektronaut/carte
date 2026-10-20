@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{EnvProviderKind, Policy, World};
+use crate::address::{Address, AddressError};
+use crate::model::{EnvProviderKind, MachineConfig, Policy, World};
 use crate::naming::{self, NotFound};
 
 /// A loaded kube project file.
@@ -181,9 +182,78 @@ fn resolve_in_project(project: &KubeProject, labels: &[String]) -> Result<KubeTa
     })
 }
 
+/// What a CLI address names in a kube project: the whole project, a namespace, or a
+/// Service (in a namespace, or wherever the cluster has it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KubeAddress {
+    pub project: String,
+    pub service: Option<String>,
+    pub namespace: Option<String>,
+}
+
+/// Resolves an address naming a kube project: `--project prod` with
+/// `service@namespace` (either part optional), `service.prod[@namespace]`, or `prod`.
+/// `None` when the address isn't about a kube project.
+pub fn resolve_address(
+    world: &World,
+    project: Option<&str>,
+    address: &Address,
+) -> Option<Result<KubeAddress, AddressError>> {
+    let mut namespace = address.stack.clone();
+    let (project, service) = match project {
+        Some(name) => (
+            world.kube_project(&name.to_lowercase())?,
+            address.app.clone(),
+        ),
+        None => {
+            let app = address.app.as_deref()?.to_lowercase();
+            let labels: Vec<&str> = app.split('.').collect();
+            match labels.as_slice() {
+                [service, name] => (world.kube_project(name)?, Some(service.to_string())),
+                [service, ns, name] if namespace.is_none() => {
+                    namespace = Some(ns.to_string());
+                    (world.kube_project(name)?, Some(service.to_string()))
+                }
+                [name] if !is_local_app(world, name) => (world.kube_project(name)?, None),
+                _ => return None,
+            }
+        }
+    };
+    if address.process.is_some() {
+        return Some(Err(AddressError::Invalid {
+            input: address.to_string(),
+            reason: "a kube project's Services have no processes",
+        }));
+    }
+    Some(Ok(KubeAddress {
+        project: project.name.clone(),
+        service: service.map(|s| s.to_lowercase()),
+        namespace: namespace.map(|s| s.to_lowercase()),
+    }))
+}
+
+/// An app of a local project is named exactly like this, which wins over a kube
+/// project of that name, as an app wins over a project locally.
+fn is_local_app(world: &World, name: &str) -> bool {
+    world
+        .projects
+        .iter()
+        .flat_map(|state| &state.project.apps)
+        .any(|app| app.name == name || app.short == name)
+}
+
 /// `service.namespace.project.<tld>`.
 pub fn host(tld: &str, project: &str, namespace: &str, service: &str) -> String {
     format!("{service}.{namespace}.{project}.{tld}")
+}
+
+/// The Service's HTTPS URL, with the port only when it isn't 443.
+pub fn url(machine: &MachineConfig, project: &str, namespace: &str, service: &str) -> String {
+    let host = host(&machine.tld, project, namespace, service);
+    match machine.https_port {
+        443 => format!("https://{host}"),
+        port => format!("https://{host}:{port}"),
+    }
 }
 
 /// The hostname label a kubeconfig context suggests for its project: the cluster name
@@ -330,6 +400,84 @@ mod tests {
         assert_eq!(resolve_host(&world, "shop.test"), None);
         assert_eq!(resolve_host(&world, "grafana.prod.example.com"), None);
         assert_eq!(resolve_host(&world, "[::1]"), None);
+    }
+
+    fn address(input: &str) -> Address {
+        input.parse().unwrap()
+    }
+
+    fn kube_address(service: Option<&str>, namespace: Option<&str>) -> KubeAddress {
+        KubeAddress {
+            project: "prod".into(),
+            service: service.map(Into::into),
+            namespace: namespace.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn resolves_cli_addresses() {
+        let world = world();
+        assert_eq!(
+            resolve_address(&world, Some("prod"), &address("grafana@monitoring")),
+            Some(Ok(kube_address(Some("grafana"), Some("monitoring"))))
+        );
+        assert_eq!(
+            resolve_address(&world, Some("prod"), &address("@monitoring")),
+            Some(Ok(kube_address(None, Some("monitoring"))))
+        );
+        assert_eq!(
+            resolve_address(&world, Some("prod"), &address("")),
+            Some(Ok(kube_address(None, None)))
+        );
+        assert_eq!(
+            resolve_address(&world, None, &address("grafana.prod")),
+            Some(Ok(kube_address(Some("grafana"), None)))
+        );
+        assert_eq!(
+            resolve_address(&world, None, &address("vlogs.prod@logging")),
+            Some(Ok(kube_address(Some("vlogs"), Some("logging"))))
+        );
+        assert_eq!(
+            resolve_address(&world, None, &address("prod")),
+            Some(Ok(kube_address(None, None)))
+        );
+        assert_eq!(
+            resolve_address(&world, None, &address("prod@monitoring")),
+            Some(Ok(kube_address(None, Some("monitoring"))))
+        );
+        assert_eq!(
+            resolve_address(&world, None, &address("grafana.monitoring.prod")),
+            Some(Ok(kube_address(Some("grafana"), Some("monitoring"))))
+        );
+        assert!(matches!(
+            resolve_address(&world, Some("prod"), &address("grafana/web")),
+            Some(Err(AddressError::Invalid { .. }))
+        ));
+    }
+
+    #[test]
+    fn a_local_app_wins_over_a_kube_project_of_its_name() {
+        let mut world = world();
+        world.kube_projects[1].name = "eventportal".into();
+        assert_eq!(resolve_address(&world, None, &address("eventportal")), None);
+        assert!(resolve_address(&world, None, &address("grafana.eventportal")).is_some());
+    }
+
+    #[test]
+    fn leaves_other_addresses_alone() {
+        let world = world();
+        for (project, input) in [
+            (Some("nova"), "billing"),
+            (None, "billing"),
+            (None, "billing.nova"),
+            (None, ""),
+        ] {
+            assert_eq!(
+                resolve_address(&world, project, &address(input)),
+                None,
+                "{project:?} {input}"
+            );
+        }
     }
 
     #[test]

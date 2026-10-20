@@ -161,8 +161,31 @@ pub struct ProjectStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
     pub apps: Vec<AppInfo>,
-    /// `main` first, then stacks by name.
+    /// `main` first, then stacks by name. A kube project's stacks are namespaces,
+    /// by name, with the Services carte knows about.
     pub stacks: Vec<StackStatus>,
+    /// Set for a kube project, whose apps are a cluster's Services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kube: Option<KubeProjectInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubeProjectInfo {
+    pub context: String,
+    /// Why the cluster can't be reached, while it can't, like a failed login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Where a kube instance's connections go.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubeInstanceInfo {
+    /// The pod connections go to, while the forward is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pod: Option<String>,
+    /// The pod's port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +259,9 @@ pub struct InstanceStatus {
     /// The apps an open of it starts ahead, from what usually opens next.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warms: Vec<Warm>,
+    /// Set for a Service of a kube project, which has no processes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kube: Option<KubeInstanceInfo>,
 }
 
 /// An app that followed `hits` of an app's last `opens` opens.

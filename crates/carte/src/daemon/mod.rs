@@ -89,16 +89,17 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         .with_context(|| format!("binding DNS on {}", loopback(machine.dns_port)))?;
     tokio::spawn(dns.run());
 
+    let kube = Kube::new(
+        supervisor.clone(),
+        Arc::new(KubeConnector),
+        Duration::from_secs(15),
+    );
     let proxy = Proxy::new(Arc::new(router::DaemonRouter {
         supervisor: router::SupervisorRouter {
             supervisor: supervisor.clone(),
             hold,
         },
-        kube: Kube::new(
-            supervisor.clone(),
-            Arc::new(KubeConnector),
-            Duration::from_secs(15),
-        ),
+        kube: kube.clone(),
     }));
     let bind_hint = |port| {
         format!(
@@ -163,6 +164,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let config_dir = paths.config_dir.clone();
     let api = api::Api {
         supervisor: supervisor.clone(),
+        kube,
         paths: paths.clone(),
         reload: Arc::new(move || {
             let world = discovery::load_world(&config_dir);

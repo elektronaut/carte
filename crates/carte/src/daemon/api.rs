@@ -12,17 +12,21 @@ use carte_api::{
     Address, ControlRequest, ErrorBody, EventsRequest, LogsRequest, MarkRequest, Problem,
     PruneRequest, ShareRequest, StopAllRequest, UnshareRequest, paths,
 };
+use carte_api::{Event, Snapshot};
 use carte_core::address;
+use carte_core::kube::{self, KubeAddress};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::kube::Kube;
 use crate::paths::Paths;
 use crate::supervisor::Handle;
 
 #[derive(Clone)]
 pub struct Api {
     pub supervisor: Handle,
+    pub kube: Kube,
     pub paths: Paths,
     /// Reloads the configuration from disk and returns its problems.
     pub reload: std::sync::Arc<dyn Fn() -> Vec<Problem> + Send + Sync>,
@@ -57,6 +61,51 @@ fn error(status: StatusCode, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// What the address names in a kube project, or `None` when it isn't about one.
+fn kube_address(api: &Api, target: &Address) -> Option<Result<KubeAddress, String>> {
+    let parsed: address::Address = match target.address.parse() {
+        Ok(parsed) => parsed,
+        Err(err) => return Some(Err(err.to_string())),
+    };
+    let world = api.supervisor.world();
+    kube::resolve_address(&world, target.project.as_deref(), &parsed)
+        .map(|resolved| resolved.map_err(|err| err.to_string()))
+}
+
+/// A 400 answer for an address in a kube project, which `what` doesn't apply to.
+fn not_for_kube(api: &Api, target: &Address, what: &str) -> Option<Response> {
+    kube_address(api, target).map(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            format!("kube projects' Services have no {what}"),
+        )
+    })
+}
+
+/// The supervisor's snapshot with the kube projects added.
+fn full_snapshot(api: &Api) -> Snapshot {
+    let mut snapshot = api.supervisor.snapshot().as_ref().clone();
+    let world = api.supervisor.world();
+    snapshot.projects.extend(api.kube.status(&world));
+    snapshot.running_instances += api.kube.running();
+    snapshot
+}
+
+/// Whether an event is about what a kube address names.
+fn kube_event_matches(address: &KubeAddress, event: &Event) -> bool {
+    event.subjects.iter().any(|subject| {
+        subject.project == address.project
+            && address
+                .namespace
+                .as_ref()
+                .is_none_or(|n| subject.stack.as_ref() == Some(n))
+            && address
+                .service
+                .as_ref()
+                .is_none_or(|s| subject.app.as_ref() == Some(s))
+    })
+}
+
 /// A 404 answer when the address names nothing in the current world.
 fn unresolved(api: &Api, target: &Address) -> Option<Response> {
     let parsed: address::Address = match target.address.parse() {
@@ -75,16 +124,25 @@ fn unresolved(api: &Api, target: &Address) -> Option<Response> {
 }
 
 async fn snapshot(State(api): State<Api>) -> Response {
-    Json(api.supervisor.snapshot().as_ref().clone()).into_response()
+    Json(full_snapshot(&api)).into_response()
 }
 
 async fn watch(State(api): State<Api>) -> Response {
     let mut watch = api.supervisor.watch();
+    let mut kube = api.kube.changes();
     let (tx, rx) = mpsc::channel(4);
     tokio::spawn(async move {
         loop {
-            let snapshot = watch.borrow_and_update().clone();
-            if tx.send(ndjson(snapshot.as_ref())).await.is_err() || watch.changed().await.is_err() {
+            watch.borrow_and_update();
+            kube.borrow_and_update();
+            if tx.send(ndjson(&full_snapshot(&api))).await.is_err() {
+                break;
+            }
+            let changed = tokio::select! {
+                changed = watch.changed() => changed.is_ok(),
+                changed = kube.changed() => changed.is_ok(),
+            };
+            if !changed {
                 break;
             }
         }
@@ -93,6 +151,16 @@ async fn watch(State(api): State<Api>) -> Response {
 }
 
 async fn control(State(api): State<Api>, Json(request): Json<ControlRequest>) -> Response {
+    if let Some(address) = kube_address(&api, &request.target) {
+        let result = match address {
+            Ok(address) => api.kube.control(address, request.action).await,
+            Err(message) => Err(message),
+        };
+        return match result {
+            Ok(response) => Json(response).into_response(),
+            Err(message) => error(StatusCode::BAD_REQUEST, message),
+        };
+    }
     if let Some(response) = unresolved(&api, &request.target) {
         return response;
     }
@@ -103,10 +171,17 @@ async fn control(State(api): State<Api>, Json(request): Json<ControlRequest>) ->
 }
 
 async fn stop_all(State(api): State<Api>, Json(request): Json<StopAllRequest>) -> Response {
-    Json(api.supervisor.stop_all(request.idle_only).await).into_response()
+    let mut response = api.supervisor.stop_all(request.idle_only).await;
+    response
+        .affected
+        .extend(api.kube.stop_all(request.idle_only));
+    Json(response).into_response()
 }
 
 async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Response {
+    if let Some(response) = not_for_kube(&api, &request.target, "logs yet") {
+        return response;
+    }
     if let Some(response) = unresolved(&api, &request.target) {
         return response;
     }
@@ -142,6 +217,9 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
 }
 
 async fn mark(State(api): State<Api>, Json(request): Json<MarkRequest>) -> Response {
+    if let Some(response) = not_for_kube(&api, &request.target, "logs yet") {
+        return response;
+    }
     if let Some(response) = unresolved(&api, &request.target) {
         return response;
     }
@@ -152,6 +230,16 @@ async fn mark(State(api): State<Api>, Json(request): Json<MarkRequest>) -> Respo
 }
 
 async fn events(State(api): State<Api>, Json(request): Json<EventsRequest>) -> Response {
+    if let Some(address) = request
+        .target
+        .as_ref()
+        .and_then(|target| kube_address(&api, target))
+    {
+        return match address {
+            Ok(address) => kube_events(api, address, request.follow, request.tail).await,
+            Err(message) => error(StatusCode::NOT_FOUND, message),
+        };
+    }
     if let Some(response) = request
         .target
         .as_ref()
@@ -191,7 +279,57 @@ async fn events(State(api): State<Api>, Json(request): Json<EventsRequest>) -> R
     stream(rx)
 }
 
+/// The events about a kube address, which the supervisor can't resolve itself.
+async fn kube_events(
+    api: Api,
+    address: KubeAddress,
+    follow: bool,
+    tail: Option<usize>,
+) -> Response {
+    let mut follow = follow.then(|| api.supervisor.follow_events());
+    let events = match api.supervisor.events(None, usize::MAX).await {
+        Ok((events, _)) => events,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let mut events: Vec<Event> = events
+        .into_iter()
+        .filter(|e| kube_event_matches(&address, e))
+        .collect();
+    let skip = events.len().saturating_sub(tail.unwrap_or(100));
+    events.drain(..skip);
+    let last = events.last().map_or(0, |e| e.seq);
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        for event in &events {
+            if tx.send(ndjson(event)).await.is_err() {
+                return;
+            }
+        }
+        let Some(follow) = follow.as_mut() else {
+            return;
+        };
+        loop {
+            match follow.recv().await {
+                Ok(event) if event.seq > last && kube_event_matches(&address, &event) => {
+                    if tx.send(ndjson(&event)).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+    stream(rx)
+}
+
 async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Response {
+    if kube_address(&api, &request.target).is_some() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "kube projects can't be shared: their Services are reachable only from this machine",
+        );
+    }
     if let Some(response) = unresolved(&api, &request.target) {
         return response;
     }
@@ -202,6 +340,9 @@ async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Res
 }
 
 async fn unshare(State(api): State<Api>, Json(request): Json<UnshareRequest>) -> Response {
+    if let Some(response) = not_for_kube(&api, &request.target, "shares") {
+        return response;
+    }
     if let Some(response) = unresolved(&api, &request.target) {
         return response;
     }
@@ -213,6 +354,9 @@ async fn unshare(State(api): State<Api>, Json(request): Json<UnshareRequest>) ->
 
 /// Holds the instance until the client goes away, which drops the response body.
 async fn hold(State(api): State<Api>, Json(target): Json<Address>) -> Response {
+    if let Some(response) = not_for_kube(&api, &target, "processes to run commands beside") {
+        return response;
+    }
     if let Some(response) = unresolved(&api, &target) {
         return response;
     }
@@ -274,6 +418,9 @@ async fn daemon_env(State(api): State<Api>) -> Response {
 }
 
 async fn process_env(State(api): State<Api>, Json(target): Json<Address>) -> Response {
+    if let Some(response) = not_for_kube(&api, &target, "env") {
+        return response;
+    }
     let world = api.supervisor.world();
     let snapshot = api.supervisor.snapshot();
     let paths = api.paths.clone();
