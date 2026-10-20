@@ -13,6 +13,7 @@ mod control;
 mod env;
 mod exec;
 mod import;
+mod import_kube;
 mod mcp;
 mod project;
 pub(crate) mod prompt;
@@ -298,6 +299,22 @@ pub enum ImportCommand {
         #[arg(long, value_name = "DIR")]
         from: Option<PathBuf>,
     },
+    /// Create kube projects from the contexts of your kubeconfig.
+    Kube {
+        /// Show what would be written without writing it.
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask; add every context whose name is free.
+        #[arg(long, short)]
+        yes: bool,
+        /// Read this kubeconfig, and name it in the projects, instead of
+        /// $KUBECONFIG or ~/.kube/config.
+        #[arg(long, value_name = "FILE")]
+        kubeconfig: Option<PathBuf>,
+        /// Write the projects into this folder of projects/, like `clusters`.
+        #[arg(long, value_name = "FOLDER")]
+        folder: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -421,6 +438,12 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Import(ImportCommand::PumaDev { dry_run, yes, from }) => {
             import::puma_dev(&paths, from, dry_run, yes)
         }
+        Command::Import(ImportCommand::Kube {
+            dry_run,
+            yes,
+            kubeconfig,
+            folder,
+        }) => import_kube::run(&paths, kubeconfig, folder, dry_run, yes),
     };
     finish(result)
 }
