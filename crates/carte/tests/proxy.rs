@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use carte::proxy::{
-    ActivityGuard, BoxFuture, ErrorPage, Listener, ListenerKind, ListenerOptions, Proxy, Route,
-    RouteRequest, Router,
+    ActivityGuard, BoxFuture, Dial, Dialer, ErrorPage, Listener, ListenerKind, ListenerOptions,
+    Proxy, Route, RouteRequest, Router, UpstreamError, UpstreamStream,
 };
 use futures_util::{SinkExt, StreamExt};
 use http::header::{ACCEPT, CONNECTION, CONTENT_TYPE, COOKIE, HOST, RETRY_AFTER, SET_COOKIE};
@@ -79,6 +79,7 @@ impl Drop for Guard {
 #[derive(Clone)]
 enum Target {
     Port(u16),
+    Dialed(Dialer),
     Page(ErrorPage),
     /// Waits for a permit before routing, like a booting instance, and sets the
     /// flag if the routing future is dropped while waiting.
@@ -126,6 +127,12 @@ impl Router for TestRouter {
                 }
                 Some(Target::Page(page)) => return Route::Error(page),
                 Some(Target::Port(port)) => port,
+                Some(Target::Dialed(dialer)) => {
+                    return Route::Dialed {
+                        dialer,
+                        guard: Box::new(Guard::new(self.activity.clone())),
+                    };
+                }
                 Some(Target::Booting(port, gate, dropped)) => {
                     let flag = SetOnDrop(dropped);
                     let _permit = gate.acquire().await.unwrap();
@@ -287,6 +294,76 @@ async fn forwards_requests_with_forwarding_headers() {
         [("app.test".to_string(), false, ListenerKind::Local)]
     );
     eventually("the request to end", || router.activity.counts() == (0, 0)).await;
+}
+
+/// Dials a loopback port, or fails without one.
+struct TestDial {
+    port: Option<u16>,
+    dials: AtomicUsize,
+}
+
+impl Dial for TestDial {
+    fn dial(&self) -> BoxFuture<'_, std::io::Result<UpstreamStream>> {
+        Box::pin(async move {
+            self.dials.fetch_add(1, Ordering::SeqCst);
+            let port = self
+                .port
+                .ok_or_else(|| std::io::Error::other("the pod is gone"))?;
+            let stream = TcpStream::connect(("127.0.0.1", port)).await?;
+            Ok(Box::new(stream) as UpstreamStream)
+        })
+    }
+
+    fn failed(&self, error: &UpstreamError) -> ErrorPage {
+        ErrorPage::new(StatusCode::BAD_GATEWAY, "Dial failed", format!("{error:?}"))
+    }
+}
+
+#[tokio::test]
+async fn forwards_over_connections_a_dialer_opens() {
+    let port = echo_upstream("127.0.0.1:0").await;
+    let dial = Arc::new(TestDial {
+        port: Some(port),
+        dials: AtomicUsize::new(0),
+    });
+    let broken = Arc::new(TestDial {
+        port: None,
+        dials: AtomicUsize::new(0),
+    });
+    let router = Arc::new(
+        TestRouter::default()
+            .with("app.test", Target::Dialed(Dialer::new(dial.clone())))
+            .with("gone.test", Target::Dialed(Dialer::new(broken))),
+    );
+    let proxy = start(router.clone(), ListenerOptions::local()).await;
+
+    for _ in 0..2 {
+        let response = send(
+            proxy.addr,
+            get("app.test", "/a?b").body(Empty::new()).unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let echoed = body_text(response).await;
+        assert!(echoed.starts_with("GET /a?b\n"), "{echoed}");
+        assert!(echoed.contains("\nhost: app.test\n"), "{echoed}");
+    }
+    assert_eq!(
+        dial.dials.load(Ordering::SeqCst),
+        1,
+        "the connection is reused"
+    );
+
+    let response = send(
+        proxy.addr,
+        get("gone.test", "/").body(Empty::new()).unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let page = body_text(response).await;
+    assert!(page.contains("Dial failed"), "{page}");
+    assert!(page.contains("the pod is gone"), "{page}");
+    eventually("the requests to end", || router.activity.counts() == (0, 0)).await;
 }
 
 #[tokio::test]

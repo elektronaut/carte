@@ -1,8 +1,11 @@
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use http::StatusCode;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::ErrorPage;
 
@@ -48,6 +51,12 @@ pub enum Route {
         port: u16,
         guard: Box<dyn ActivityGuard>,
     },
+    /// Forward over connections `dialer` opens inside the daemon, for an upstream with
+    /// no listener of its own.
+    Dialed {
+        dialer: Dialer,
+        guard: Box<dyn ActivityGuard>,
+    },
     /// Answer with a file from the app's `serve_files` folder.
     File {
         path: std::path::PathBuf,
@@ -67,9 +76,71 @@ impl ActivityGuard for () {
     fn long_lived(&mut self) {}
 }
 
+pub trait UpstreamIo: AsyncRead + AsyncWrite + Send + Unpin {}
+
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> UpstreamIo for T {}
+
+/// A connection to an upstream that a [`Dial`] opened.
+pub type UpstreamStream = Box<dyn UpstreamIo>;
+
+/// Opens connections to an upstream inside the daemon.
+pub trait Dial: Send + Sync + 'static {
+    fn dial(&self) -> BoxFuture<'_, io::Result<UpstreamStream>>;
+
+    /// The page shown when no connection could be opened or the request failed.
+    fn failed(&self, error: &UpstreamError) -> ErrorPage;
+}
+
+/// A [`Dial`] with an identity of its own: the proxy keeps idle connections per
+/// dialer, and clones share them.
+#[derive(Clone)]
+pub struct Dialer {
+    id: u64,
+    dial: Arc<dyn Dial>,
+}
+
+impl Dialer {
+    pub fn new(dial: Arc<dyn Dial>) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Dialer {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            dial,
+        }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn dial(&self) -> BoxFuture<'_, io::Result<UpstreamStream>> {
+        self.dial.dial()
+    }
+
+    pub fn failed(&self, error: &UpstreamError) -> ErrorPage {
+        self.dial.failed(error)
+    }
+
+    pub(crate) fn downgrade(&self) -> std::sync::Weak<dyn Dial> {
+        Arc::downgrade(&self.dial)
+    }
+}
+
+impl PartialEq for Dialer {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl std::fmt::Debug for Dialer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dialer").field("id", &self.id).finish()
+    }
+}
+
 #[derive(Debug)]
 pub enum UpstreamError {
-    /// No connection could be made on either `127.0.0.1` or `::1`.
+    /// No connection could be made: on neither `127.0.0.1` nor `::1`, or by the
+    /// dialer.
     Connect(io::Error),
     /// The connection was made but the request failed, e.g. the app closed it
     /// before responding.

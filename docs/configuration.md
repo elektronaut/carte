@@ -970,13 +970,28 @@ the like) don't apply to a kube project and are errors.
 
 ### Forwarding
 
-carte looks up the Service when a request comes in, picks a ready pod
-behind it, and opens a loopback port for it. Every connection to that
-port gets its own port-forward stream, so a forward survives the laptop
-sleeping, a network change and an expired token: the next connection
-simply opens a new stream. When the pod goes away, carte picks another
-ready one. A forward nobody used for `idle_timeout` is closed and opens
-again on the next request.
+carte looks up the Service when a request comes in and picks a ready pod
+behind it. Every connection the proxy opens to it gets its own
+port-forward stream, so a forward survives the laptop sleeping, a network
+change and an expired token: the next connection simply opens a new
+stream. There's no local port to reach a forward by; only requests
+through carte's proxy get there. When the pod goes away, carte picks
+another ready one. A forward nobody used for `idle_timeout` is closed and
+opens again on the next request.
+
+- **Kubeconfig changes**: carte fetches the provider env and reads the
+  kubeconfig again when one of its files changes: `kube.kubeconfig`,
+  else each file in `KUBECONFIG` of the provider env, else
+  `~/.kube/config`. It connects again only when what the project's
+  context resolves to changed: the context, its cluster or its user, and
+  for a user with a login plugin, the env the plugin runs with. Switching
+  `current-context` with `kubectx` or `kubectl config use-context`
+  changes nothing. After a change, and after a change to the project
+  file, new connections use the new settings while open ones, websockets
+  included, run until they close. Open connections end only with `carte
+  down`, `carte restart` or `carte stop-all`, the idle timeout, setting
+  the Service to `disabled`, the pod going away, or the daemon stopping.
+  Idle connections the proxy keeps are closed after 30 seconds.
 
 - **Login plugins**, like `aws eks get-token`, run with the env the
   project's env provider gives in your home directory, so they find the
