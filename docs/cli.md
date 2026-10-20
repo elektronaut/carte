@@ -224,6 +224,13 @@ which wraps it, as it can be with a narrow terminal attached. A pause
 that starts while someone is attached adds no event or notification,
 since they're watching.
 
+While a process is paused, carte leaves its app alone: it doesn't stop
+for idleness or to meet a [limit](configuration.md#limits), and
+`carte status` shows it as `held by worker at a breakpoint`. A process
+paused before it's ready, at the start or after a restart, isn't failed
+by the boot timeout: the time at the prompt doesn't count, and the
+readiness check waits until the prompt is answered.
+
 In the terminal UI, `t` types into the selected process, or the
 selected app's paused or web process, from either pane; the detach keys
 stop. The
@@ -261,7 +268,7 @@ An **Instance** is:
 | `url`, `public_url` | `public_url` is null unless shared |
 | `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](configuration.md#paths), is waiting to restart after a crash or to pass its readiness check again), `paused` (one of those waits at a debugger prompt), `stopping` or `crashed` |
 | `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](configuration.md#paths) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `paused` (at a debugger prompt), `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
-| `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec", … }`; `exec` counts `carte exec` commands still running |
+| `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec" \| "paused", … }`; `exec` counts `carte exec` commands still running, and `paused` names a process waiting at a debugger prompt |
 | `idle_in_secs` | Until idle shutdown, when counting down |
 | `last_error`, `last_event` | Null when there's none |
 | `boot` | `{ elapsed_ms, waiting_for }` while starting |

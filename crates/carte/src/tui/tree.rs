@@ -387,6 +387,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
             Hold::Connections { count } => Some(plural(*count, "connection")),
             Hold::Dependent { app } => Some(short(app)),
             Hold::Exec { count } => Some(plural(*count, "exec")),
+            Hold::Paused { process } => Some(format!("{process} at a breakpoint")),
             Hold::Unknown => Some("unknown".into()),
         })
         .collect();

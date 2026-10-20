@@ -204,6 +204,11 @@ fn stack_status(
                     count: inst.execs.len() as u32,
                 });
             }
+            for proc in inst.procs.iter().filter(|p| p.paused.is_some()) {
+                holds.push(Hold::Paused {
+                    process: proc.spec.name.clone(),
+                });
+            }
             for dependent in holders.get(&key).into_iter().flatten() {
                 let app = if dependent.stack == key.stack {
                     dependent.app.clone()

@@ -143,7 +143,8 @@ log instead of starting it. Fix the cause, then run `carte up` or
 When `carte status` shows a process as `paused at a breakpoint` (the
 app as `paused` when it's the web process), it stopped at a debugger
 prompt (`(rdbg)`, `pry(…)>`, `irb(…)>`, `(byebug)`) and waits for input;
-a paused web process's requests hang until someone answers. `carte attach` connects the
+a paused web process's requests hang until someone answers. A paused app
+doesn't idle out or fail its start, so it can wait for the user. `carte attach` connects the
 user's terminal to it. Typing into it runs code in the app, so only do
 it when the user asks: `printf 'continue\n' | carte attach` types a
 line and prints what the process answers until its output has been

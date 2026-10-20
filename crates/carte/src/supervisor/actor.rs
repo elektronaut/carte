@@ -175,6 +175,8 @@ pub(super) struct Proc {
     terminal: Option<Arc<Terminal>>,
     /// The debugger prompt it waits at.
     pub paused: Option<String>,
+    /// Whether it waits at one, for the latest run's readiness check.
+    held: watch::Sender<bool>,
 }
 
 impl Proc {
@@ -901,6 +903,7 @@ impl Actor {
                 cpu_sample: None,
                 terminal: None,
                 paused: None,
+                held: watch::channel(false).0,
             });
         }
         inst.procs = procs;
@@ -1136,6 +1139,8 @@ impl Actor {
         proc.ready = false;
         proc.stalled = false;
         proc.paused = None;
+        let (held, paused) = watch::channel(false);
+        proc.held = held;
         let label = LogLabel {
             project: key.project.clone(),
             app: key.app.clone(),
@@ -1171,7 +1176,7 @@ impl Actor {
             let tx = self.tx.clone();
             let ready_key = key.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(boot_timeout).await;
+                runner::held_sleep(boot_timeout, paused).await;
                 let _ = tx.send(Msg::Internal(Internal::Ready {
                     key: ready_key,
                     run,
@@ -1249,8 +1254,9 @@ impl Actor {
         let readiness = proc.spec.ready.clone();
         let boot_timeout = self.options.boot_timeout;
         let key = key.clone();
+        let paused = proc.held.subscribe();
         tokio::spawn(async move {
-            let result = runner::wait_ready(port, &readiness, boot_timeout).await;
+            let result = runner::wait_ready(port, &readiness, boot_timeout, paused).await;
             let _ = tx.send(Msg::Internal(Internal::Ready {
                 key,
                 run,
@@ -1288,6 +1294,7 @@ impl Actor {
                 let attached = proc.terminal.as_ref().is_some_and(|t| t.clients() > 0);
                 let name = proc.spec.name.clone();
                 proc.paused = prompt.clone();
+                proc.held.send_replace(prompt.is_some());
                 if let Some(prompt) = prompt.filter(|_| !attached) {
                     self.event(
                         EventKind::Paused,
@@ -1934,6 +1941,7 @@ impl Actor {
                     connections: inst.connections,
                     execs: inst.execs.len() as u32,
                     held_by: holders.get(key).cloned().unwrap_or_default(),
+                    paused: inst.procs.iter().filter(|p| p.paused.is_some()).count() as u32,
                     last_activity: inst.last_activity,
                     memory_bytes: inst.procs.iter().map(|p| p.memory_bytes).sum(),
                     ptys: inst
