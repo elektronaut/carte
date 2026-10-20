@@ -972,9 +972,10 @@ again on the next request.
   output, with a hint for `aws`, `gcloud` and `kubelogin`.
 - **Ports that speak TLS** get a TLS connection without certificate
   checks; anything else is plain HTTP. A port speaks TLS when its
-  `appProtocol` is `https` or `wss`, else when it's named `https` or
-  `wss`, else when it's 443 and neither its `appProtocol` nor its name
-  says HTTP. Names starting with `https-` or `wss-` count too.
+  `appProtocol` is `https` or `wss` (or `kubernetes.io/wss`), else when
+  it's named `https` or `wss`, else when it's 443 and neither its
+  `appProtocol` nor its name says HTTP. Values starting with `https-`
+  or `wss-` count too, in either.
 - **The `Host` header** is passed on as received. An app whose own URL
   setting names its public domain may redirect there.
 - **Requests other sites make** are refused with a 403, so a web page

@@ -146,6 +146,7 @@ pub fn choose_port(
 pub fn is_tls(port: &PortInfo) -> bool {
     let says = |value: Option<&str>| {
         let value = value?.to_ascii_lowercase();
+        let value = value.strip_prefix("kubernetes.io/").unwrap_or(&value);
         if value == "https"
             || value.starts_with("https-")
             || value == "wss"
@@ -283,6 +284,13 @@ mod tests {
         assert!(is_tls(&with(None, 8443, Some("wss"))));
         assert!(!is_tls(&with(Some("ws"), 443, None)));
         assert!(!is_tls(&with(None, 443, Some("ws"))));
+        assert!(is_tls(&with(None, 8443, Some("kubernetes.io/wss"))));
+        assert!(!is_tls(&with(None, 443, Some("kubernetes.io/ws"))));
+        assert!(!is_tls(&with(
+            Some("https"),
+            8443,
+            Some("kubernetes.io/ws")
+        )));
     }
 
     fn service(ports: Vec<PortInfo>) -> ServiceInfo {
