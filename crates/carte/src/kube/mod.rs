@@ -518,7 +518,11 @@ impl Kube {
         let tail = request.tail.unwrap_or(100);
         let initial = LogOptions {
             container: container.clone(),
-            tail: Some(if filtered { MAX_LOG_LINES } else { tail as i64 }),
+            tail: Some(if filtered {
+                MAX_LOG_LINES
+            } else {
+                tail.max(1) as i64
+            }),
             since_secs,
             ..LogOptions::default()
         };
@@ -535,6 +539,9 @@ impl Kube {
             container,
             search: request.search.clone(),
             tail: (since_secs.is_none()).then_some(tail),
+            since_secs,
+            last_ns: None,
+            catching_up: false,
             tx,
         };
         tokio::spawn(lines.run(initial, request.follow));
@@ -1196,6 +1203,14 @@ struct PodLines {
     search: Option<String>,
     /// How many of the lines it has to send; all with `since`.
     tail: Option<usize>,
+    /// How far back the lines it has go, in seconds; all of them when `None`.
+    since_secs: Option<i64>,
+    /// The latest timestamp of the lines read from this pod, in nanoseconds since the
+    /// Unix epoch.
+    last_ns: Option<u64>,
+    /// Skipping the lines a reopened stream repeats, up to the first one after
+    /// `last_ns`.
+    catching_up: bool,
     tx: mpsc::Sender<LogLine>,
 }
 
@@ -1203,6 +1218,7 @@ impl PodLines {
     async fn run(mut self, initial: LogLines, follow: bool) {
         let mut lines = Vec::new();
         let mut initial = initial;
+        let mut read_any = false;
         loop {
             let next = tokio::select! {
                 _ = self.tx.closed() => return,
@@ -1211,6 +1227,8 @@ impl PodLines {
             let Some(line) = next else {
                 break;
             };
+            read_any = true;
+            self.fresh(&line);
             lines.extend(self.line(&line));
         }
         let skip = self.tail.map_or(0, |tail| lines.len().saturating_sub(tail));
@@ -1222,7 +1240,19 @@ impl PodLines {
         if !follow {
             return;
         }
-        let mut stream = self.open(Some(0), None).await;
+        let first = match (self.last_ns, read_any) {
+            (Some(_), _) => self.after_last(),
+            (None, false) => LogOptions {
+                since_secs: self.since_secs,
+                ..LogOptions::default()
+            },
+            (None, true) => LogOptions {
+                tail: Some(0),
+                ..LogOptions::default()
+            },
+        };
+        self.catching_up = self.last_ns.is_some();
+        let mut stream = self.open(first).await;
         loop {
             if let Some(stream) = stream.take()
                 && !self.send_all(stream).await
@@ -1230,6 +1260,7 @@ impl PodLines {
                 return;
             }
             let ended = Instant::now();
+            let ended_ms = crate::clock::now_ms();
             while stream.is_none() {
                 tokio::select! {
                     _ = self.tx.closed() => return,
@@ -1245,19 +1276,47 @@ impl PodLines {
                 let Ok(next) = lookup::choose_pod(&self.port, &slices, Some(&self.pod)) else {
                     continue;
                 };
-                self.pod = next.pod;
-                let since = ended.elapsed().as_secs() as i64 + 1;
-                stream = self.open(None, Some(since)).await;
+                let options = match self.last_ns {
+                    Some(last_ns) if next.pod != self.pod => {
+                        let last = (last_ns / 1_000_000_000) as i64;
+                        let ended = (ended_ms / 1000) as i64 - 30;
+                        LogOptions {
+                            since_time: Some(last.max(ended)),
+                            ..LogOptions::default()
+                        }
+                    }
+                    Some(_) => self.after_last(),
+                    None => LogOptions {
+                        since_secs: Some(ended.elapsed().as_secs() as i64 + 1),
+                        ..LogOptions::default()
+                    },
+                };
+                if next.pod == self.pod {
+                    self.catching_up = self.last_ns.is_some();
+                } else {
+                    self.pod = next.pod;
+                    self.last_ns = None;
+                    self.catching_up = false;
+                }
+                stream = self.open(options).await;
             }
         }
     }
 
-    async fn open(&self, tail: Option<i64>, since_secs: Option<i64>) -> Option<LogLines> {
+    /// From the second of the last line read; `fresh` skips the lines up to it on the
+    /// same pod.
+    fn after_last(&self) -> LogOptions {
+        LogOptions {
+            since_time: self.last_ns.map(|ns| (ns / 1_000_000_000) as i64),
+            ..LogOptions::default()
+        }
+    }
+
+    async fn open(&self, options: LogOptions) -> Option<LogLines> {
         let options = LogOptions {
             container: self.container.clone(),
             follow: true,
-            tail,
-            since_secs,
+            ..options
         };
         self.cluster
             .logs(&self.key.namespace, &self.pod, options)
@@ -1265,8 +1324,8 @@ impl PodLines {
             .ok()
     }
 
-    /// Sends every line of the stream; `false` once the receiver is gone.
-    async fn send_all(&self, mut stream: LogLines) -> bool {
+    /// Sends every new line of the stream; `false` once the receiver is gone.
+    async fn send_all(&mut self, mut stream: LogLines) -> bool {
         loop {
             let next = tokio::select! {
                 _ = self.tx.closed() => return false,
@@ -1275,6 +1334,9 @@ impl PodLines {
             let Some(line) = next else {
                 return true;
             };
+            if !self.fresh(&line) {
+                continue;
+            }
             if let Some(line) = self.line(&line)
                 && self.tx.send(line).await.is_err()
             {
@@ -1283,9 +1345,27 @@ impl PodLines {
         }
     }
 
+    /// Whether to send the line: every line, except while catching up those at or
+    /// before `last_ns`.
+    fn fresh(&mut self, line: &str) -> bool {
+        let at_ns = lookup::split_timestamp(line).0;
+        if self.catching_up {
+            if let (Some(at_ns), Some(last)) = (at_ns, self.last_ns)
+                && at_ns <= last
+            {
+                return false;
+            }
+            self.catching_up = false;
+        }
+        if let Some(at_ns) = at_ns {
+            self.last_ns = Some(self.last_ns.map_or(at_ns, |last| last.max(at_ns)));
+        }
+        true
+    }
+
     /// The log line for a line of output, unless the search leaves it out.
     fn line(&self, line: &str) -> Option<LogLine> {
-        let (at_ms, text) = lookup::split_timestamp(line);
+        let (at_ns, text) = lookup::split_timestamp(line);
         if self
             .search
             .as_ref()
@@ -1298,7 +1378,7 @@ impl PodLines {
             app: self.key.service.clone(),
             stack: self.key.namespace.clone(),
             process: self.container.clone().unwrap_or_default(),
-            at_ms: at_ms.unwrap_or_else(crate::clock::now_ms),
+            at_ms: at_ns.map_or_else(crate::clock::now_ms, |ns| ns / 1_000_000),
             text: text.to_string(),
             marker: false,
         })

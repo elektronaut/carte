@@ -39,6 +39,11 @@ struct FakeState {
     containers: HashMap<String, Vec<ContainerInfo>>,
     /// Each pod's log lines.
     logs: HashMap<String, Vec<String>>,
+    /// Lines a pod writes right after its logs were read without following.
+    written_after_read: HashMap<String, Vec<String>>,
+    /// How many following streams end once they caught up, rather than when their
+    /// pod goes.
+    follows_to_end: usize,
     log_requests: Vec<LogOptions>,
     /// The provider env the connector hands out.
     env: BTreeMap<String, String>,
@@ -257,32 +262,57 @@ impl Cluster for FakeCluster {
         options: LogOptions,
     ) -> BoxFuture<'a, Result<LogLines, ApiError>> {
         Box::pin(async move {
-            let lines = {
-                let mut state = self.state();
-                state.log_requests.push(options.clone());
-                let lines = state.logs.get(pod).cloned().unwrap_or_default();
-                let skip = options
-                    .tail
-                    .map_or(0, |tail| lines.len().saturating_sub(tail as usize));
-                lines.into_iter().skip(skip).collect::<Vec<_>>()
-            };
-            let lines = futures_util::stream::iter(lines);
+            let mut state = self.state();
+            state.log_requests.push(options.clone());
+            let lines = state.logs.get(pod).cloned().unwrap_or_default();
+            let since = options.since_time.map_or(0, |secs| {
+                let second = k8s_openapi::jiff::Timestamp::from_second(secs)
+                    .unwrap()
+                    .to_string();
+                lines
+                    .iter()
+                    .take_while(|line| line.get(..19) < second.get(..19))
+                    .count()
+            });
+            let start = options.tail.map_or(since, |tail| {
+                lines.len().saturating_sub(tail as usize).max(since)
+            });
             if !options.follow {
-                return Ok(lines.boxed());
+                if let Some(written) = state.written_after_read.remove(pod) {
+                    state
+                        .logs
+                        .entry(pod.to_string())
+                        .or_default()
+                        .extend(written);
+                }
+                return Ok(futures_util::stream::iter(lines.into_iter().skip(start)).boxed());
             }
+            drop(state);
             let fake = self.clone();
             let pod = pod.to_string();
-            let until_gone = futures_util::stream::unfold((), move |_| {
+            let follow = futures_util::stream::unfold(start, move |next| {
                 let fake = fake.clone();
                 let pod = pod.clone();
                 async move {
-                    while !fake.state().gone.contains(&pod) {
+                    loop {
+                        {
+                            let mut state = fake.state();
+                            if let Some(line) = state.logs.get(&pod).and_then(|l| l.get(next)) {
+                                return Some((line.clone(), next + 1));
+                            }
+                            if state.gone.contains(&pod) {
+                                return None;
+                            }
+                            if state.follows_to_end > 0 {
+                                state.follows_to_end -= 1;
+                                return None;
+                            }
+                        }
                         tokio::time::sleep(Duration::from_millis(20)).await;
                     }
-                    None::<(String, ())>
                 }
             });
-            Ok(lines.chain(until_gone).boxed())
+            Ok(follow.boxed())
         })
     }
 
@@ -953,6 +983,220 @@ async fn following_logs_continue_on_the_next_pod() {
         .collect();
     assert_eq!(follows[0].tail, Some(0), "following adds only new lines");
     assert!(follows[1].since_secs.is_some());
+}
+
+#[tokio::test]
+async fn followed_logs_arrive_once() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    {
+        let mut state = setup.cluster.state();
+        state.logs.insert(
+            "grafana-a".into(),
+            vec![
+                "2026-10-20T08:15:29.1Z one".into(),
+                "2026-10-20T08:15:30.2Z two".into(),
+            ],
+        );
+        state.written_after_read.insert(
+            "grafana-a".into(),
+            vec!["2026-10-20T08:15:30.25Z three".into()],
+        );
+        state.follows_to_end = 1;
+    }
+    let mut lines = setup
+        .kube
+        .logs(
+            address(Some("grafana"), Some("monitoring")),
+            &logs_request(true),
+        )
+        .await
+        .unwrap();
+    let mut got = Vec::new();
+    for _ in 0..3 {
+        let line = tokio::time::timeout(Duration::from_secs(5), lines.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        got.push(line.text);
+    }
+    setup
+        .cluster
+        .state()
+        .logs
+        .get_mut("grafana-a")
+        .unwrap()
+        .push("2026-10-20T08:15:30.3Z four".into());
+    let line = tokio::time::timeout(Duration::from_secs(5), lines.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    got.push(line.text);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1500), lines.recv())
+            .await
+            .is_err(),
+        "no line comes again"
+    );
+    assert_eq!(got, vec!["one", "two", "three", "four"]);
+    let follows: Vec<_> = setup
+        .cluster
+        .state()
+        .log_requests
+        .iter()
+        .filter(|o| o.follow)
+        .cloned()
+        .collect();
+    assert_eq!(follows.len(), 2, "the follow reopened once");
+    for follow in follows {
+        assert_eq!(
+            follow.since_time,
+            Some(1_792_484_130),
+            "from the last line's second"
+        );
+    }
+}
+
+#[tokio::test]
+async fn followed_lines_out_of_order_arrive() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    setup.cluster.state().logs.insert(
+        "grafana-a".into(),
+        vec!["2026-10-20T08:15:30.2Z one".into()],
+    );
+    let mut lines = setup
+        .kube
+        .logs(
+            address(Some("grafana"), Some("monitoring")),
+            &logs_request(true),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lines.recv().await.unwrap().text, "one");
+    setup
+        .cluster
+        .state()
+        .logs
+        .get_mut("grafana-a")
+        .unwrap()
+        .extend([
+            "2026-10-20T08:15:30.5Z two on stderr".into(),
+            "2026-10-20T08:15:30.4Z three on stdout".into(),
+        ]);
+    let mut got = Vec::new();
+    for _ in 0..2 {
+        let line = tokio::time::timeout(Duration::from_secs(5), lines.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        got.push(line.text);
+    }
+    assert_eq!(got, vec!["two on stderr", "three on stdout"]);
+}
+
+fn now_ms() -> i128 {
+    k8s_openapi::jiff::Timestamp::now().as_millisecond() as i128
+}
+
+/// A log line stamped `at_ms`, in milliseconds since the Unix epoch.
+fn stamped(at_ms: i128, text: &str) -> String {
+    let at = k8s_openapi::jiff::Timestamp::from_nanosecond(at_ms * 1_000_000).unwrap();
+    format!("{at} {text}")
+}
+
+/// Follows grafana-a's logs until its first line, replaces the pod with grafana-b
+/// and answers with the first line from it and the follow requests.
+async fn switch_pods(
+    setup: &Setup,
+    a: Vec<String>,
+    b: Vec<String>,
+) -> (String, Vec<carte::kube::LogOptions>) {
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a", "grafana-b"])
+        .await;
+    {
+        let mut state = setup.cluster.state();
+        state.logs.insert("grafana-a".into(), a);
+        state.logs.insert("grafana-b".into(), b);
+    }
+    let mut lines = setup
+        .kube
+        .logs(
+            address(Some("grafana"), Some("monitoring")),
+            &logs_request(true),
+        )
+        .await
+        .unwrap();
+    lines.recv().await.unwrap();
+    {
+        let mut state = setup.cluster.state();
+        state.gone.insert("grafana-a".into());
+        let slices = state
+            .slices
+            .get_mut(&("monitoring".into(), "grafana".into()))
+            .unwrap();
+        slices[0].endpoints.remove(0);
+    }
+    let next = tokio::time::timeout(Duration::from_secs(5), lines.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let follows = setup
+        .cluster
+        .state()
+        .log_requests
+        .iter()
+        .filter(|o| o.follow)
+        .cloned()
+        .collect();
+    (next.text, follows)
+}
+
+#[tokio::test]
+async fn the_next_pod_is_followed_from_the_last_second_without_skipping() {
+    let setup = Setup::new(PROJECT);
+    let second = now_ms() / 1000 - 1;
+    let (next, follows) = switch_pods(
+        &setup,
+        vec![stamped(second * 1000 + 500, "from a")],
+        vec![
+            stamped(second * 1000 - 60_000, "long before a"),
+            stamped(second * 1000 + 200, "from b, its node's clock behind"),
+        ],
+    )
+    .await;
+    assert_eq!(next, "from b, its node's clock behind");
+    assert_eq!(
+        follows[1].since_time,
+        Some(second as i64),
+        "from a's last second"
+    );
+}
+
+#[tokio::test]
+async fn the_next_pod_is_followed_from_shortly_before_the_switch() {
+    let setup = Setup::new(PROJECT);
+    let (next, follows) = switch_pods(
+        &setup,
+        vec![stamped(now_ms() - 3 * 3_600_000, "from a, hours ago")],
+        vec![
+            stamped(now_ms() - 3 * 3_600_000 + 60_000, "the backlog of b"),
+            stamped(now_ms(), "from b now"),
+        ],
+    )
+    .await;
+    assert_eq!(next, "from b now", "and not hours of backlog");
+    let since = follows[1].since_time.unwrap();
+    let now = k8s_openapi::jiff::Timestamp::now().as_second();
+    assert!((now - 40..now).contains(&since), "{since} vs {now}");
 }
 
 #[tokio::test]
