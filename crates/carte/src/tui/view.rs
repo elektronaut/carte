@@ -387,17 +387,20 @@ fn render_selection(frame: &mut Frame, area: Rect, app: &mut App) {
         return;
     };
     let title = format!(" {} ", target::label(node.id()));
-    let lines = details(app, node);
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
+    let paragraph = Paragraph::new(details(app, node))
+        .wrap(Wrap { trim: false })
+        .block(pane(Line::from(title).bold(), false));
+    let height = bordered_height(&paragraph, area.width).min(area.height.saturating_sub(4));
     let [top, bottom] =
         Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(pane(Line::from(title).bold(), false)),
-        top,
-    );
+    frame.render_widget(paragraph, top);
     render_logs(frame, bottom, app);
+}
+
+/// The rows a wrapped paragraph in a bordered pane takes at `width`, borders
+/// included.
+fn bordered_height(paragraph: &Paragraph, width: u16) -> u16 {
+    u16::try_from(paragraph.line_count(width.saturating_sub(2))).unwrap_or(u16::MAX)
 }
 
 fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
@@ -1244,6 +1247,15 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn a_bordered_pane_is_as_tall_as_its_wrapped_lines() {
+        let paragraph = Paragraph::new("x".repeat(9))
+            .wrap(Wrap { trim: false })
+            .block(pane(Line::from("t"), false));
+        assert_eq!(bordered_height(&paragraph, 11), 3);
+        assert_eq!(bordered_height(&paragraph, 10), 4);
     }
 
     fn press(app: &mut App, now: Instant, code: KeyCode) -> Vec<Command> {
