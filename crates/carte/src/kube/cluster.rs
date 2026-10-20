@@ -255,15 +255,20 @@ impl KubeCluster {
 }
 
 /// The project's kubeconfig, else the files in `KUBECONFIG`, else `~/.kube/config`.
+/// Missing files in `KUBECONFIG` are skipped, as kubectl does, unless all are missing.
 fn read_kubeconfig(
     project: &KubeProject,
     env: &BTreeMap<String, String>,
 ) -> Result<Kubeconfig, ApiError> {
     let paths: Vec<PathBuf> = match (&project.kubeconfig, env.get("KUBECONFIG")) {
         (Some(path), _) => vec![path.clone()],
-        (None, Some(list)) if !list.is_empty() => std::env::split_paths(list)
-            .filter(|p| !p.as_os_str().is_empty())
-            .collect(),
+        (None, Some(list)) if !list.is_empty() => {
+            let listed: Vec<PathBuf> = std::env::split_paths(list)
+                .filter(|p| !p.as_os_str().is_empty())
+                .collect();
+            let present: Vec<PathBuf> = listed.iter().filter(|p| p.exists()).cloned().collect();
+            if present.is_empty() { listed } else { present }
+        }
         _ => {
             let home = env
                 .get("HOME")
@@ -663,6 +668,40 @@ users:
         };
         assert!(matches!(
             read_kubeconfig(&missing, &BTreeMap::new()),
+            Err(ApiError::Other(_))
+        ));
+    }
+
+    #[test]
+    fn skips_missing_files_in_kubeconfig_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config");
+        std::fs::write(&path, KUBECONFIG).unwrap();
+        let missing = tmp.path().join("missing");
+        let project = KubeProject {
+            name: "prod".into(),
+            config_path: tmp.path().join("prod.toml"),
+            folder: None,
+            context: "prod".into(),
+            kubeconfig: None,
+            namespaces: Vec::new(),
+            env_provider: None,
+            idle_timeout: None,
+            services: BTreeMap::new(),
+        };
+        let list = std::env::join_paths([&missing, &path]).unwrap();
+        let env = BTreeMap::from([(
+            "KUBECONFIG".to_string(),
+            list.to_string_lossy().into_owned(),
+        )]);
+        let kubeconfig = read_kubeconfig(&project, &env).unwrap();
+        assert_eq!(kubeconfig.contexts[0].name, "prod");
+        let env = BTreeMap::from([(
+            "KUBECONFIG".to_string(),
+            missing.to_string_lossy().into_owned(),
+        )]);
+        assert!(matches!(
+            read_kubeconfig(&project, &env),
             Err(ApiError::Other(_))
         ));
     }
