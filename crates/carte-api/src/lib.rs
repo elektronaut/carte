@@ -324,6 +324,9 @@ pub enum InstanceState {
     /// Running, but its HTTP process is waiting to restart after a crash or to pass
     /// its readiness check again; requests wait for it.
     Restarting,
+    /// Running, but its HTTP process stopped at a debugger prompt; requests wait until
+    /// someone answers it, with `carte attach`.
+    Paused,
     Stopping,
     Crashed,
     /// Sent by a newer daemon than this client knows.
@@ -336,7 +339,10 @@ impl InstanceState {
     pub fn is_running(self) -> bool {
         matches!(
             self,
-            InstanceState::Starting | InstanceState::Ready | InstanceState::Restarting
+            InstanceState::Starting
+                | InstanceState::Ready
+                | InstanceState::Restarting
+                | InstanceState::Paused
         )
     }
 }
@@ -393,6 +399,8 @@ pub enum ProcessState {
     Stopped,
     Starting,
     Running,
+    /// Running, and waiting at a debugger prompt.
+    Paused,
     Stopping,
     Exited {
         code: Option<i32>,
@@ -618,6 +626,8 @@ pub enum EventKind {
     TeardownFailed,
     /// A kube project's Service couldn't be reached.
     Failed,
+    /// A process stopped at a debugger prompt.
+    Paused,
     /// Sent by a newer daemon than this client knows.
     #[serde(other)]
     Unknown,
@@ -647,6 +657,7 @@ impl EventKind {
             EventKind::TeardownPaused => "teardown paused",
             EventKind::TeardownCancelled => "teardown cancelled",
             EventKind::Failed => "failed",
+            EventKind::Paused => "paused",
             EventKind::TeardownFinished => "teardown finished",
             EventKind::TeardownFailed => "teardown failed",
             EventKind::Unknown => "unknown",

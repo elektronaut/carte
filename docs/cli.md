@@ -169,7 +169,7 @@ at `debugger`, `binding.irb`, `binding.pry` or `byebug`, `carte attach`
 connects your terminal to it:
 
 ```sh
-carte attach                  # the web process of the app here
+carte attach                  # the app here: a paused process, else web
 carte attach shop worker      # another process
 carte attach shop@feature-x/worker
 ```
@@ -196,10 +196,22 @@ carte attach shop@feature-x/worker
 - It exits with 0 when it detaches or the process exits, 1 when the
   daemon closes the connection, and 128 plus the signal's number after
   a signal.
+- Without a process name, it picks the process paused at a debugger
+  prompt, otherwise the web process.
 - A process with `pty = false` can't be attached to.
 
+carte watches each process's output for a debugger prompt: `(rdbg)`,
+`pry(…)>`, `irb(…)>` or `(byebug)` as its last, unfinished line. Such a
+process shows as `paused at a breakpoint` in `carte status`, as
+`paused: worker (carte attach)` in `carte ls` and with a ◆ in the
+terminal UI. An app whose web process is paused shows as `paused`,
+since its requests wait; a paused worker leaves it `ready`. When nobody
+is attached, a pause sends a [notification](configuration.md#notifications)
+with the `carte attach` command that answers it. The pause ends when the
+prompt is answered or the process exits.
+
 In the terminal UI, `t` types into the selected process, or the
-selected app's web process; the detach keys stop. The
+selected app's paused or web process; the detach keys stop. The
 [MCP server](mcp.md)'s `type` tool lets an agent do it.
 
 ## JSON output
@@ -232,8 +244,8 @@ An **Instance** is:
 | `app`, `stack`, `checkout` | Names; `checkout` is `main` for an app running from its main checkout in another stack |
 | `checkout_path` | Where its code is |
 | `url`, `public_url` | `public_url` is null unless shared |
-| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](configuration.md#paths), is waiting to restart after a crash or to pass its readiness check again), `stopping` or `crashed` |
-| `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](configuration.md#paths) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
+| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](configuration.md#paths), is waiting to restart after a crash or to pass its readiness check again), `paused` (one of those waits at a debugger prompt), `stopping` or `crashed` |
+| `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](configuration.md#paths) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `paused` (at a debugger prompt), `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
 | `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec", … }`; `exec` counts `carte exec` commands still running |
 | `idle_in_secs` | Until idle shutdown, when counting down |
 | `last_error`, `last_event` | Null when there's none |
@@ -255,8 +267,9 @@ where `kind` is one of `started`, `ready`, `stopped`, `crashed`,
 `gave-up`, `exited`, `restarted`, `config-reloaded`, `config-error`, `worktree-added`,
 `worktree-removed`, `shared`, `unshared`, `share-expired`,
 `tunnel-connected`, `tunnel-failed`, `policy-changed`,
-`teardown-scheduled`, `teardown-paused`, `teardown-cancelled`, `teardown-finished` and
-`teardown-failed`. A [teardown](configuration.md#teardown) has one
+`teardown-scheduled`, `teardown-paused`, `teardown-cancelled`, `teardown-finished`,
+`teardown-failed` and `paused` (a process stopped at a debugger prompt while
+no terminal was attached). A [teardown](configuration.md#teardown) has one
 `teardown-finished` or `teardown-failed` event per process, about
 `app@stack/process` and with its `exit_code`, and one about the stack
 when its folders are removed or kept. A process that exits with code 0

@@ -265,6 +265,7 @@ fn symbol(state: State) -> (&'static str, Color) {
     match state {
         State::Ready => ("●", Color::Green),
         State::Starting | State::Restarting => ("◐", Color::Yellow),
+        State::Paused => ("◆", Color::Magenta),
         State::Stopping => ("◑", Color::Yellow),
         State::Stopped | State::Exited => ("○", Color::DarkGray),
         State::Done => ("✓", Color::DarkGray),
@@ -330,6 +331,7 @@ fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
             }
             None => Span::raw("restarting").yellow(),
         },
+        State::Paused => Span::raw("paused").magenta(),
         State::Stopping => Span::raw("stopping").yellow(),
         State::Crashed if process && status.gave_up => Span::raw("gave up").red(),
         State::Crashed if process => match status.restart_in_secs {
@@ -413,6 +415,7 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
         State::Ready => "running",
         State::Starting => "starting",
         State::Restarting => "restarting",
+        State::Paused => "paused at a breakpoint",
         State::Stopping => "stopping",
         State::Stopped => "stopped",
         State::Exited => "exited",
@@ -1701,6 +1704,41 @@ mod tests {
         let screen = draw(&mut app, 120, 12);
         assert!(screen.contains("restarting"), "{screen}");
         assert!(!screen.contains("restarting in"), "{screen}");
+    }
+
+    #[test]
+    fn renders_a_process_paused_at_a_breakpoint() {
+        let mut snapshot = sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.processes[1].state = ProcessState::Paused;
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        for code in [
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Right,
+            KeyCode::Down,
+            KeyCode::Down,
+        ] {
+            press(&mut app, now, code);
+        }
+        let screen = draw(&mut app, 120, 14);
+        assert!(
+            screen.contains("● billing"),
+            "a paused worker leaves it ready: {screen}"
+        );
+        assert!(screen.contains("◆ worker        paused"), "{screen}");
+        assert!(screen.contains("◆ paused at a breakpoint"), "{screen}");
+
+        let mut snapshot = sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.state = InstanceState::Paused;
+        billing.processes[0].state = ProcessState::Paused;
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let screen = draw(&mut app, 120, 14);
+        assert!(screen.contains("◆ billing"), "{screen}");
     }
 
     #[test]

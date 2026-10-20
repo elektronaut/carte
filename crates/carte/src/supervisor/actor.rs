@@ -173,6 +173,8 @@ pub(super) struct Proc {
     off: bool,
     /// The latest run's pty, while it runs.
     terminal: Option<Arc<Terminal>>,
+    /// The debugger prompt it waits at.
+    pub paused: Option<String>,
 }
 
 impl Proc {
@@ -898,6 +900,7 @@ impl Actor {
                 cpu_percent: 0.0,
                 cpu_sample: None,
                 terminal: None,
+                paused: None,
             });
         }
         inst.procs = procs;
@@ -1132,6 +1135,7 @@ impl Actor {
         proc.manual_stop = false;
         proc.ready = false;
         proc.stalled = false;
+        proc.paused = None;
         let label = LogLabel {
             project: key.project.clone(),
             app: key.app.clone(),
@@ -1280,6 +1284,18 @@ impl Actor {
                 self.groups.add(pid);
                 self.advance(key);
             }
+            runner::Event::Paused(prompt) => {
+                let attached = proc.terminal.as_ref().is_some_and(|t| t.clients() > 0);
+                let name = proc.spec.name.clone();
+                proc.paused = prompt.clone();
+                if let Some(prompt) = prompt.filter(|_| !attached) {
+                    self.event(
+                        EventKind::Paused,
+                        format!("at {prompt}"),
+                        vec![events::process(key, &name)],
+                    );
+                }
+            }
             runner::Event::SpawnFailed(message) => {
                 proc.state = ProcessState::Exited {
                     code: None,
@@ -1287,6 +1303,7 @@ impl Actor {
                 };
                 proc.stop = None;
                 proc.terminal = None;
+                proc.paused = None;
                 let name = proc.spec.name.clone();
                 proc.log
                     .lock()
@@ -1306,6 +1323,7 @@ impl Actor {
                 }
                 proc.stop = None;
                 proc.terminal = None;
+                proc.paused = None;
                 let manual = proc.manual_stop || inst.state == Lifecycle::Stopping;
                 proc.state = if manual {
                     ProcessState::Stopped
@@ -1810,8 +1828,8 @@ impl Actor {
         }
     }
 
-    /// The pty of a running process to attach to: the one named, else the HTTP
-    /// process, else the only process.
+    /// The pty of a running process to attach to: the one named, else one paused at
+    /// a debugger prompt, else the HTTP process, else the only process.
     fn attach(
         &self,
         target: &Address,
@@ -1837,6 +1855,10 @@ impl Actor {
             .get(&key)
             .filter(|inst| inst.any_running())
             .ok_or_else(|| refused(format!("{label} isn't running")))?;
+        let paused = inst
+            .procs
+            .iter()
+            .find(|p| p.paused.is_some() && p.terminal.is_some());
         let proc = match process {
             Some(name) => inst
                 .procs
@@ -1845,10 +1867,11 @@ impl Actor {
                 .ok_or_else(|| {
                     AttachError::NoProcess(format!("{label} has no process named {name}"))
                 })?,
-            None => match (inst.http(), inst.procs.as_slice()) {
-                (Some(http), _) => http,
-                (None, [only]) => only,
-                (None, procs) => {
+            None => match (paused, inst.http(), inst.procs.as_slice()) {
+                (Some(paused), _, _) => paused,
+                (None, Some(http), _) => http,
+                (None, None, [only]) => only,
+                (None, None, procs) => {
                     let names: Vec<&str> = procs.iter().map(|p| p.spec.name.as_str()).collect();
                     return Err(refused(format!(
                         "{label} has no HTTP process; name one: {}",

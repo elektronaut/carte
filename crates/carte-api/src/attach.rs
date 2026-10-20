@@ -16,7 +16,8 @@ const MAX_FRAME: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachRequest {
     pub target: Address,
-    /// The process, when the address doesn't name one: the HTTP process by default.
+    /// The process, when the address doesn't name one. By default, one paused at a
+    /// debugger prompt, else the HTTP process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<String>,
     /// The client's terminal. The pty takes the smallest attached terminal's size;

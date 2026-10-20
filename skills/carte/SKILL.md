@@ -140,9 +140,10 @@ row. Then it stops the app, and requests get the error page with its
 log instead of starting it. Fix the cause, then run `carte up` or
 `carte restart`; `carte down` also clears it.
 
-When the logs end in a debugger prompt (`(rdbg)`, `pry(…)>`, `irb(…)>`,
-`(byebug)`), the app stopped at a breakpoint and waits for input, and
-its requests hang until someone answers. `carte attach` connects the
+When `carte status` shows a process as `paused at a breakpoint` (the
+app as `paused` when it's the web process), it stopped at a debugger
+prompt (`(rdbg)`, `pry(…)>`, `irb(…)>`, `(byebug)`) and waits for input;
+a paused web process's requests hang until someone answers. `carte attach` connects the
 user's terminal to it. Typing into it runs code in the app, so only do
 it when the user asks: `printf 'continue\n' | carte attach` types a
 line and prints what the process answers until its output has been

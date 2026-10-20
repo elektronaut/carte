@@ -304,7 +304,7 @@ impl Handle {
     }
 
     /// The pty of a running process to attach to: the one the address or `process`
-    /// names, else the HTTP process.
+    /// names, else one paused at a debugger prompt, else the HTTP process.
     pub async fn attach(
         &self,
         target: Address,

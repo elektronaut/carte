@@ -301,6 +301,13 @@ pub fn render_status(snapshot: &Snapshot, instances: &[InstanceStatus]) -> Strin
             let processes: Vec<String> = inst.processes.iter().map(process_word).collect();
             rows.push(("processes", processes.join(", ")));
         }
+        if inst
+            .processes
+            .iter()
+            .any(|p| p.state == ProcessState::Paused)
+        {
+            rows.push(("answer", format!("carte attach {}", instance_name(inst))));
+        }
         let holds: Vec<String> = inst.holds.iter().map(hold_word).collect();
         if !holds.is_empty() {
             rows.push(("held by", holds.join(", ")));
@@ -338,6 +345,7 @@ fn process_word(process: &carte_api::ProcessStatus) -> String {
         ProcessState::Stopped => "stopped".to_string(),
         ProcessState::Starting => "starting".to_string(),
         ProcessState::Running => "running".to_string(),
+        ProcessState::Paused => "paused at a breakpoint".to_string(),
         ProcessState::Stopping => "stopping".to_string(),
         ProcessState::Exited {
             code: Some(code), ..
@@ -471,6 +479,7 @@ fn state_word(inst: &InstanceStatus) -> String {
         InstanceState::Starting => "starting",
         InstanceState::Ready => "ready",
         InstanceState::Restarting => "restarting",
+        InstanceState::Paused => "paused",
         InstanceState::Stopping => "stopping",
         InstanceState::Crashed => "crashed",
         InstanceState::Unknown => "unknown",
@@ -501,7 +510,10 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
         .filter(|p| {
             !matches!(
                 p.state,
-                ProcessState::Running | ProcessState::Starting | ProcessState::Done
+                ProcessState::Running
+                    | ProcessState::Paused
+                    | ProcessState::Starting
+                    | ProcessState::Done
             )
         })
         .map(|p| {
@@ -520,8 +532,21 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
             }
         })
         .collect();
-    if matches!(inst.state, InstanceState::Ready | InstanceState::Restarting) && !down.is_empty() {
+    if matches!(
+        inst.state,
+        InstanceState::Ready | InstanceState::Restarting | InstanceState::Paused
+    ) && !down.is_empty()
+    {
         parts.push(format!("down: {}", down.join(", ")));
+    }
+    let paused: Vec<&str> = inst
+        .processes
+        .iter()
+        .filter(|p| p.state == ProcessState::Paused)
+        .map(|p| p.name.as_str())
+        .collect();
+    if !paused.is_empty() {
+        parts.push(format!("paused: {} (carte attach)", paused.join(", ")));
     }
     for hold in &inst.holds {
         parts.push(match hold {
@@ -1137,6 +1162,30 @@ nova-billing  ready
         billing.holds = Vec::new();
         let ls = render_ls(&snapshot, false);
         assert!(ls.contains("down: web (unknown)"), "{ls}");
+    }
+
+    #[test]
+    fn shows_a_process_paused_at_a_breakpoint() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.state = InstanceState::Paused;
+        billing.processes[0].state = ProcessState::Paused;
+        let instances = vec![billing.clone()];
+        let status = render_status(&snapshot, &instances);
+        assert!(status.starts_with("nova-billing  paused\n"), "{status}");
+        assert!(status.contains("web paused at a breakpoint,"), "{status}");
+        assert!(
+            status.contains("  answer     carte attach nova-billing\n"),
+            "{status}"
+        );
+        let ls = render_ls(&snapshot, false);
+        assert!(
+            ls.lines()
+                .any(|l| l.starts_with("nova-billing ") && l.contains(" paused   https://")),
+            "{ls}"
+        );
+        assert!(ls.contains("paused: web (carte attach)"), "{ls}");
+        assert!(!ls.contains("down:"), "{ls}");
     }
 
     #[test]
