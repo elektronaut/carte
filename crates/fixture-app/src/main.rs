@@ -15,6 +15,8 @@
 //! | `FIXTURE_DAEMON_PIDFILE` | Spawn a self-daemonising grandchild (double fork + setsid), write its pid here |
 //! | `FIXTURE_ECHO_STDIN` | `1` echoes each stdin line to stdout as `echo: <line>` |
 //!
+//! Every response names the app in an `X-Fixture-Name` header.
+//!
 //! On start it prints `tty: true` or `tty: false` for stdout, then `ready` once listening.
 
 use std::env;
@@ -175,7 +177,7 @@ fn serve(stream: TcpStream, name: &str) -> io::Result<()> {
     let mut stream = stream;
     write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nX-Fixture-Name: {name}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
     stream.flush()

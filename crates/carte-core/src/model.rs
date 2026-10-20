@@ -197,6 +197,11 @@ pub struct ProcessOverride {
     pub restart: Option<Restart>,
     /// Env templates added to every process of the instance.
     pub provides: Vec<EnvTemplate>,
+    /// Paths on the app's hostname the proxy sends to this process instead of the
+    /// HTTP process.
+    pub paths: Option<Vec<String>>,
+    /// Fills in `paths` and `provides` for a known dev server.
+    pub preset: Option<Preset>,
     /// Adjusts the process only where it exists: a project-wide entry without a
     /// command, which apps without the process skip silently.
     pub if_present: bool,
@@ -226,6 +231,12 @@ pub struct ProcessSpec {
     pub provides: Vec<EnvTemplate>,
     #[serde(default)]
     pub restart: Restart,
+    /// Paths on the app's hostname the proxy sends to this process.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// The dev server preset it runs with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<Preset>,
 }
 
 impl ProcessSpec {
@@ -247,6 +258,31 @@ impl ProcessSpec {
     pub fn is_task(&self) -> bool {
         self.kind == Some(ProcessKind::Task)
     }
+
+    /// Serves paths of the app's hostname next to the HTTP process.
+    pub fn serves_paths(&self) -> bool {
+        !self.paths.is_empty()
+    }
+
+    /// Done starting once its readiness check passes, rather than once it runs.
+    pub fn is_checked(&self) -> bool {
+        self.http || self.is_service() || self.serves_paths()
+    }
+
+    /// Whether a request for `path` goes to this process: a path it serves, or one
+    /// under it. The longer of two matches wins, by the returned length.
+    pub fn path_match(&self, path: &str) -> Option<usize> {
+        let path = path.split(['?', '#']).next().unwrap_or(path);
+        self.paths
+            .iter()
+            .map(|prefix| prefix.trim_end_matches('/'))
+            .filter(|prefix| {
+                path.strip_prefix(prefix)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            })
+            .map(str::len)
+            .max()
+    }
 }
 
 /// The role a process plays in its instance's start and stop.
@@ -259,6 +295,29 @@ pub enum ProcessKind {
     Task,
     /// Runs once, in the app's main checkout, after the stack's worktrees are gone.
     Teardown,
+}
+
+/// A dev server that runs next to a Rails app's HTTP process, whose paths and
+/// port carte knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Preset {
+    #[serde(rename = "vite_ruby")]
+    ViteRuby,
+    #[serde(rename = "shakapacker")]
+    Shakapacker,
+    /// Turns off the preset detected from the command.
+    #[serde(rename = "none")]
+    None,
+}
+
+impl Preset {
+    pub fn name(self) -> &'static str {
+        match self {
+            Preset::ViteRuby => "vite_ruby",
+            Preset::Shakapacker => "shakapacker",
+            Preset::None => "none",
+        }
+    }
 }
 
 /// Whether carte restarts a process that crashes after its instance is ready.

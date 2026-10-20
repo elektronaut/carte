@@ -13,7 +13,8 @@ use carte_core::dirs::DirRoots;
 use carte_core::env::{self, Env, EnvRequest, SystemRunner};
 use carte_core::lifecycle::{self, Capacity, EvictionReason, Targets, Usage};
 use carte_core::model::{
-    App, Checkout, InstanceKey, Policy, ProcessSpec, ProjectState, Restart, Scope, Stack, World,
+    App, Checkout, InstanceKey, Policy, Preset, ProcessSpec, ProjectState, Restart, Scope, Stack,
+    World,
 };
 use carte_core::warming::{Edge, Warming};
 use carte_core::{naming, procfile};
@@ -84,7 +85,7 @@ pub(super) struct Instance {
     pub checkout: Option<Checkout>,
     pub procs: Vec<Proc>,
     pub route_port: Option<u16>,
-    waiters: Vec<oneshot::Sender<Result<Upstream, BootFailure>>>,
+    waiters: Vec<Waiter>,
     pub in_flight: u32,
     pub connections: u32,
     /// Holds from `carte exec`, by id.
@@ -106,6 +107,13 @@ pub(super) struct Instance {
     warmed_after: Option<String>,
     /// Its HTTP process crashed too often: requests get this until it's started by hand.
     gave_up: Option<BootFailure>,
+}
+
+/// A request waiting for an instance, or one of its processes, to serve it.
+struct Waiter {
+    /// The request's path; `None` waits for the HTTP process.
+    path: Option<String>,
+    reply: oneshot::Sender<Result<Upstream, BootFailure>>,
 }
 
 /// Why an instance starts, for its `started` event.
@@ -157,6 +165,8 @@ pub(super) struct Proc {
     stalled: bool,
     /// Readiness timeouts after a restart since it last passed its readiness check.
     stalls: u32,
+    /// Disabled or stopped by hand: requests for its paths go to the HTTP process.
+    off: bool,
 }
 
 impl Proc {
@@ -165,6 +175,11 @@ impl Proc {
             self.state,
             ProcessState::Starting | ProcessState::Running | ProcessState::Stopping
         )
+    }
+
+    /// Running and ready, and not being stopped: requests can go to it.
+    fn serving(&self) -> bool {
+        matches!(self.state, ProcessState::Starting | ProcessState::Running) && self.ready
     }
 
     /// Holds back what starts after it: still queued, or running and not yet done.
@@ -179,7 +194,7 @@ impl Proc {
         }
         if self.spec.is_task() {
             true
-        } else if self.spec.http || self.spec.is_service() {
+        } else if self.spec.is_checked() {
             !self.ready
         } else {
             self.state != ProcessState::Running
@@ -220,9 +235,20 @@ impl Instance {
 
     /// Ready, with its HTTP process up: not waiting to restart or to pass its
     /// readiness check again after a crash.
-    pub(super) fn serving(&self) -> bool {
+    fn web_serving(&self) -> bool {
         self.state == Lifecycle::Ready
             && (self.route_port.is_some() || self.http().is_none_or(|p| p.is_running() && p.ready))
+    }
+
+    /// Ready, but its HTTP process or a process serving paths, other than one
+    /// carte gave up on, waits to restart or to pass its readiness check again.
+    pub(super) fn restarting(&self) -> bool {
+        self.state == Lifecycle::Ready
+            && (!self.web_serving()
+                || self
+                    .procs
+                    .iter()
+                    .any(|p| p.spec.serves_paths() && !p.off && !p.gave_up && !p.serving()))
     }
 
     fn http(&self) -> Option<&Proc> {
@@ -241,8 +267,59 @@ impl Instance {
 
     fn fail_waiters(&mut self, failure: BootFailure) {
         for waiter in self.waiters.drain(..) {
-            let _ = waiter.send(Err(failure.clone()));
+            let _ = waiter.reply.send(Err(failure.clone()));
         }
+    }
+
+    /// The process that serves `path` instead of the HTTP process, unless it's off.
+    fn path_proc(&self, path: &str) -> Option<&Proc> {
+        self.procs
+            .iter()
+            .filter(|p| !p.off)
+            .filter_map(|p| p.spec.path_match(path).map(|len| (len, p)))
+            .max_by_key(|(len, _)| *len)
+            .map(|(_, p)| p)
+    }
+
+    /// Where a request for `path` goes once the instance is ready; `None` while
+    /// the process serving it starts or restarts.
+    fn answer(&self, path: Option<&str>) -> Option<Result<Upstream, BootFailure>> {
+        if self.state != Lifecycle::Ready {
+            return None;
+        }
+        if let Some(proc) = path.and_then(|path| self.path_proc(path)) {
+            if proc.gave_up {
+                let name = &proc.spec.name;
+                let label = self.label();
+                let mut failure = BootFailure::new(
+                    format!("{label}: {name} crashed"),
+                    format!(
+                        "carte gave up restarting {name}, which serves this path. Run `carte restart {label}/{name}` to start it again."
+                    ),
+                );
+                failure.log = proc.log.lock().unwrap().tail(40);
+                return Some(Err(failure));
+            }
+            return proc.serving().then_some(Ok(Upstream { port: proc.port }));
+        }
+        self.web_serving().then(|| {
+            self.upstream()
+                .ok_or_else(|| BootFailure::no_web_process(&self.key.app))
+        })
+    }
+
+    /// Answers the waiters whose process can take their request now.
+    fn release_waiters(&mut self) {
+        let mut waiting = Vec::new();
+        for waiter in std::mem::take(&mut self.waiters) {
+            match self.answer(waiter.path.as_deref()) {
+                Some(result) => {
+                    let _ = waiter.reply.send(result);
+                }
+                None => waiting.push(waiter),
+            }
+        }
+        self.waiters = waiting;
     }
 
     fn label(&self) -> String {
@@ -425,10 +502,11 @@ impl Actor {
         match msg {
             Msg::EnsureReady {
                 key,
+                path,
                 reply,
                 request,
             } => {
-                self.ensure_ready(key.clone(), reply);
+                self.ensure_ready(key.clone(), path, reply);
                 if let Some(referrer) = request {
                     self.requested(&key, referrer.as_ref());
                 }
@@ -639,26 +717,27 @@ impl Actor {
     fn ensure_ready(
         &mut self,
         key: InstanceKey,
+        path: Option<String>,
         reply: oneshot::Sender<Result<Upstream, BootFailure>>,
     ) {
         if let Some(inst) = self.instances.get_mut(&key) {
             match inst.state {
-                Lifecycle::Ready if inst.serving() => {
-                    let _ = reply.send(
-                        inst.upstream()
-                            .ok_or_else(|| BootFailure::no_web_process(&key.app)),
-                    );
-                    return;
-                }
                 Lifecycle::Starting | Lifecycle::Ready => {
-                    inst.last_activity = Instant::now();
-                    inst.waiters.push(reply);
+                    match inst.answer(path.as_deref()) {
+                        Some(result) => {
+                            let _ = reply.send(result);
+                        }
+                        None => {
+                            inst.last_activity = Instant::now();
+                            inst.waiters.push(Waiter { path, reply });
+                        }
+                    }
                     return;
                 }
                 Lifecycle::Stopping => {
                     inst.restart_pending = true;
                     inst.restart_why.get_or_insert(Why::Request);
-                    inst.waiters.push(reply);
+                    inst.waiters.push(Waiter { path, reply });
                     return;
                 }
                 Lifecycle::Stopped | Lifecycle::Crashed => {}
@@ -667,13 +746,11 @@ impl Actor {
         match self.start(&key, None, Why::Request) {
             Ok(()) => {
                 let inst = self.instances.get_mut(&key).expect("started instance");
-                if inst.state == Lifecycle::Ready {
-                    let _ = reply.send(
-                        inst.upstream()
-                            .ok_or_else(|| BootFailure::no_web_process(&key.app)),
-                    );
-                } else {
-                    inst.waiters.push(reply);
+                match inst.answer(path.as_deref()) {
+                    Some(result) => {
+                        let _ = reply.send(result);
+                    }
+                    None => inst.waiters.push(Waiter { path, reply }),
                 }
             }
             Err(failure) => {
@@ -797,6 +874,7 @@ impl Actor {
                 gave_up: false,
                 stalled: false,
                 stalls: 0,
+                off: false,
                 memory_bytes: 0,
                 cpu_percent: 0.0,
                 cpu_sample: None,
@@ -826,9 +904,11 @@ impl Actor {
         inst.route_port = None;
 
         let mut to_run = Vec::new();
+        let mut off = Vec::new();
         for (idx, proc) in inst.procs.iter().enumerate() {
             let (policy, _) = effective_policy(overrides, key, &proc.spec);
             if policy == Policy::Disabled && !inst.forced.contains(&proc.spec.name) {
+                off.push(idx);
                 if proc.spec.http {
                     inst.state = Lifecycle::Stopped;
                     return Err(BootFailure::new(
@@ -864,6 +944,9 @@ impl Actor {
         let inst = self.instances.get_mut(key).expect("instance");
         for &idx in &shared {
             inst.procs[idx].deferred = !to_run.contains(&idx);
+        }
+        for idx in off {
+            inst.procs[idx].off = true;
         }
         for &idx in &to_run {
             inst.procs[idx].queued = true;
@@ -916,6 +999,7 @@ impl Actor {
             .ok_or_else(|| format!("{} has no process named {name}", inst.label()))?;
         let proc = &mut inst.procs[idx];
         proc.restart_at = None;
+        proc.off = false;
         if std::mem::take(&mut proc.gave_up) {
             proc.crashes.clear();
             proc.stalls = 0;
@@ -1059,7 +1143,7 @@ impl Actor {
                 }
             }
         });
-        if proc.spec.http || proc.spec.is_service() {
+        if proc.spec.is_checked() {
             let tx = self.tx.clone();
             let port = proc.port;
             let readiness = proc.spec.ready.clone();
@@ -1128,13 +1212,7 @@ impl Actor {
         }
         inst.state = Lifecycle::Ready;
         inst.last_activity = Instant::now();
-        let result = match inst.http() {
-            Some(_) => Ok(inst.upstream().expect("http process")),
-            None => Err(BootFailure::no_web_process(&key.app)),
-        };
-        for waiter in inst.waiters.drain(..) {
-            let _ = waiter.send(result.clone());
-        }
+        inst.release_waiters();
         self.ready_event(key);
     }
 
@@ -1210,6 +1288,15 @@ impl Actor {
                     (None, None) => "exited".to_string(),
                 };
                 let message = format!("{} {how}", proc.spec.name);
+                if proc.spec.preset == Some(Preset::ViteRuby)
+                    && let Some(checkout) = &inst.checkout
+                {
+                    let dir = match &proc.spec.cwd {
+                        Some(cwd) => checkout.path().join(cwd),
+                        None => checkout.path().clone(),
+                    };
+                    forget_vite_dev_server(&dir, proc.port);
+                }
                 self.after_exit(key, idx, manual, code, message);
             }
         }
@@ -1230,14 +1317,15 @@ impl Actor {
         let proc = &inst.procs[idx];
         let name = proc.spec.name.clone();
         let name = name.as_str();
-        let http = proc.spec.http;
+        let always_restarted = proc.spec.http || proc.spec.serves_paths();
         let boot_step = proc.spec.kind.is_some();
-        let restarts = http || (proc.spec.restart == Restart::OnFailure && code != Some(0));
+        let restarts =
+            always_restarted || (proc.spec.restart == Restart::OnFailure && code != Some(0));
         let done = proc.state == ProcessState::Done;
         let restarting = proc.restart;
         match inst.state {
             Lifecycle::Starting | Lifecycle::Ready if done => self.advance(key),
-            Lifecycle::Starting if http && !manual => {
+            Lifecycle::Starting if always_restarted && !manual => {
                 self.crash(key, code, Some(idx), message);
             }
             Lifecycle::Starting if boot_step && !manual => {
@@ -1336,6 +1424,8 @@ impl Actor {
             );
             if http {
                 self.give_up(key, idx, message);
+            } else if let Some(inst) = self.instances.get_mut(key) {
+                inst.release_waiters();
             }
             return;
         }
@@ -1413,13 +1503,8 @@ impl Actor {
                 proc.ready = true;
                 self.dirty = true;
                 proc.stalls = 0;
-                if !starting
-                    && inst.serving()
-                    && let Some(upstream) = inst.upstream()
-                {
-                    for waiter in inst.waiters.drain(..) {
-                        let _ = waiter.send(Ok(upstream));
-                    }
+                if !starting {
+                    inst.release_waiters();
                 }
                 self.advance(key);
             }
@@ -1427,7 +1512,11 @@ impl Actor {
                 let message = format!("{} {message}", proc.spec.name);
                 self.crash(key, None, Some(idx), message);
             }
-            Err(message) if proc.spec.http && is_ready && !proc.manual_stop => {
+            Err(message)
+                if (proc.spec.http || proc.spec.serves_paths())
+                    && is_ready
+                    && !proc.manual_stop =>
+            {
                 let name = proc.spec.name.clone();
                 let message = format!("{name} {message}");
                 if let Some(stop) = proc.stop.take() {
@@ -1586,6 +1675,9 @@ impl Actor {
             return Ok(());
         }
         proc.restart_at = None;
+        if !proc.restart {
+            proc.off = true;
+        }
         let mut event = None;
         if inst.state == Lifecycle::Starting
             && proc.spec.kind.is_some()
@@ -1606,6 +1698,7 @@ impl Actor {
             event = why.map(|why| (kind, why));
         }
         inst.forced.remove(name);
+        inst.release_waiters();
         if let Some((kind, why)) = event {
             self.events
                 .push(kind, why, vec![events::process(key, name)]);
@@ -1638,7 +1731,7 @@ impl Actor {
                 match &result {
                     Ok(()) => inst.waiters.push(waiter),
                     Err(failure) => {
-                        let _ = waiter.send(Err(failure.clone()));
+                        let _ = waiter.reply.send(Err(failure.clone()));
                     }
                 }
             }
@@ -3213,6 +3306,29 @@ fn current_branch(path: &Path) -> String {
 }
 
 /// Checks a project's `requires`: `tcp://host:port` or `unix:///path`.
+/// Removes vite_ruby's record of a dev server on `port` from `dir/tmp`. Rails
+/// trusts the record while its port matches, and the dev server only removes it
+/// when it exits by itself, not when it's killed.
+fn forget_vite_dev_server(dir: &Path, port: u16) {
+    let Ok(entries) = std::fs::read_dir(dir.join("tmp")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("vite-ruby-") && name.ends_with(".json")) {
+            continue;
+        }
+        let recorded = std::fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|meta| meta.get("port")?.as_u64());
+        if recorded == Some(u64::from(port)) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn check_requires(requires: &[String]) -> Result<(), String> {
     use std::net::ToSocketAddrs;
     let timeout = Duration::from_millis(500);

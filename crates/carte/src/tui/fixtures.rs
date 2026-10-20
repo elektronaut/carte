@@ -77,6 +77,7 @@ pub fn process(name: &str, state: ProcessState) -> ProcessStatus {
         pid: None,
         port: None,
         http: name == "web",
+        paths: Vec::new(),
         restarts: 0,
         memory_bytes: 0,
         cpu_percent: 0.0,

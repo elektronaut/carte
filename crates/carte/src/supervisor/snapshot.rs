@@ -234,6 +234,7 @@ fn stack_status(
                             pid: p.pid,
                             port: Some(p.port),
                             http: p.spec.http,
+                            paths: p.spec.paths.clone(),
                             restarts: p.restarts,
                             gave_up: p.gave_up,
                             restart_in_secs: p
@@ -309,6 +310,7 @@ fn stopped_processes(
                 pid: None,
                 port: earlier.map(|p| p.port),
                 http: spec.http,
+                paths: spec.paths.clone(),
                 restarts: earlier.map_or(0, |p| p.restarts),
                 memory_bytes: 0,
                 cpu_percent: 0.0,
@@ -364,7 +366,7 @@ fn instance_state(inst: &Instance) -> InstanceState {
     match inst.state {
         Lifecycle::Stopped => InstanceState::Stopped,
         Lifecycle::Starting => InstanceState::Starting,
-        Lifecycle::Ready if !inst.serving() => InstanceState::Restarting,
+        Lifecycle::Ready if inst.restarting() => InstanceState::Restarting,
         Lifecycle::Ready => InstanceState::Ready,
         Lifecycle::Stopping => InstanceState::Stopping,
         Lifecycle::Crashed => InstanceState::Crashed,

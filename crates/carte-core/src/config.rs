@@ -12,8 +12,8 @@ use thiserror::Error;
 use crate::kube::{KubeProject, KubeService, ServicePort};
 use crate::model::{
     App, AppSettings, EnvProviderKind, EnvTemplate, Limits, MachineConfig, MemoryTarget, Policy,
-    Problem, ProcessConfig, ProcessKind, ProcessOverride, Project, Readiness, Restart, Scheme,
-    Scope, ShareConfig,
+    Preset, Problem, ProcessConfig, ProcessKind, ProcessOverride, Project, Readiness, Restart,
+    Scheme, Scope, ShareConfig,
 };
 use crate::{duration, slug};
 
@@ -367,6 +367,8 @@ fn merge_process(over: ProcessOverride, base: ProcessOverride) -> ProcessOverrid
         after: over.after.or(base.after),
         restart: over.restart.or(base.restart),
         provides: merge_env(base.provides, over.provides),
+        paths: over.paths.or(base.paths),
+        preset: over.preset.or(base.preset),
         if_present: over.if_present && base.if_present,
     }
 }
@@ -388,6 +390,8 @@ struct RawProcess {
     restart: Option<Restart>,
     #[serde(default)]
     provides: EnvTable,
+    paths: Option<Vec<String>>,
+    preset: Option<Preset>,
     apps: Option<Vec<String>>,
 }
 
@@ -398,6 +402,11 @@ impl RawProcess {
                 "process {name:?} provides {:?}: names in `provides` can't be templates",
                 entry.key
             )));
+        }
+        for path in self.paths.iter().flatten() {
+            check_process_path(path).map_err(|message| {
+                E::custom(format!("process {name:?}: path {path:?} {message}"))
+            })?;
         }
         Ok(ProjectProcess {
             apps: self.apps,
@@ -414,6 +423,8 @@ impl RawProcess {
                 after: self.after,
                 restart: self.restart,
                 provides: self.provides.0,
+                paths: self.paths,
+                preset: self.preset,
                 if_present: false,
             },
         })
@@ -948,6 +959,19 @@ pub fn assemble_project(
         apps,
     };
     (project, problems)
+}
+
+/// A path a process serves: absolute, below the root, without a query.
+fn check_process_path(path: &str) -> Result<(), &'static str> {
+    if !path.starts_with('/') {
+        Err("must start with /")
+    } else if path.trim_end_matches('/').is_empty() {
+        Err("is the whole app: everything outside other processes' paths goes to the HTTP process")
+    } else if path.contains(['?', '#']) || path.chars().any(char::is_whitespace) {
+        Err("can't have a query, a fragment or spaces")
+    } else {
+        Ok(())
+    }
 }
 
 /// `serve_files` must name a folder inside the checkout.
@@ -1737,6 +1761,35 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("unknown field `app`"), "{err}");
+    }
+
+    #[test]
+    fn parses_paths_and_presets() {
+        let file = project(
+            "[apps.foo.processes.vite]\npaths = [\"/vite-dev/\"]\npreset = \"vite_ruby\"\n[processes.webpack]\npreset = \"shakapacker\"\n",
+        )
+        .unwrap();
+        let vite = &file.apps["foo"].processes["vite"];
+        assert_eq!(vite.paths, Some(vec!["/vite-dev/".to_string()]));
+        assert_eq!(vite.preset, Some(Preset::ViteRuby));
+        assert_eq!(
+            file.processes["webpack"].process.preset,
+            Some(Preset::Shakapacker)
+        );
+        for (path, message) in [
+            ("assets/", "must start with /"),
+            ("/", "is the whole app"),
+            ("/assets?x", "can't have a query"),
+        ] {
+            let err = project(&format!("[processes.assets]\npaths = [\"{path}\"]\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(message), "{err}");
+        }
+        let err = project("[processes.assets]\npreset = \"webpacker\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown variant"), "{err}");
     }
 
     #[test]

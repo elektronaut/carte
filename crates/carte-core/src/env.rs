@@ -522,6 +522,8 @@ mod tests {
             after: Vec::new(),
             provides: Vec::new(),
             restart: Restart::Never,
+            paths: Vec::new(),
+            preset: None,
         }
     }
 

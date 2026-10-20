@@ -108,6 +108,8 @@ impl Options {
 pub(crate) enum Msg {
     EnsureReady {
         key: InstanceKey,
+        /// The request's path, which may belong to a process other than the HTTP one.
+        path: Option<String>,
         reply: oneshot::Sender<Result<Upstream, BootFailure>>,
         /// The start is for a proxied request, which came from a page of this
         /// instance when `Some(Some(_))`.
@@ -226,28 +228,32 @@ impl Handle {
     /// Starts the instance if needed and waits until it serves HTTP. The boot goes
     /// on if this future is dropped.
     pub async fn ensure_ready(&self, key: InstanceKey) -> Result<Upstream, BootFailure> {
-        self.ready(key, None).await
+        self.ready(key, None, None).await
     }
 
-    /// Like [`Handle::ensure_ready`], for a proxied request: the first since the
-    /// instance started opens it. `referrer` is the instance its `Origin` or `Referer`
-    /// names.
+    /// Like [`Handle::ensure_ready`], for a proxied request for `path`, which goes to
+    /// the process serving it: the first request since the instance started opens
+    /// it. `referrer` is the instance its `Origin` or `Referer` names.
     pub async fn request(
         &self,
         key: InstanceKey,
+        path: &str,
         referrer: Option<InstanceKey>,
     ) -> Result<Upstream, BootFailure> {
-        self.ready(key, Some(referrer)).await
+        self.ready(key, Some(path.to_string()), Some(referrer))
+            .await
     }
 
     async fn ready(
         &self,
         key: InstanceKey,
+        path: Option<String>,
         request: Option<Option<InstanceKey>>,
     ) -> Result<Upstream, BootFailure> {
         let (reply, rx) = oneshot::channel();
         self.send(Msg::EnsureReady {
             key,
+            path,
             reply,
             request,
         });

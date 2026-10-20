@@ -359,9 +359,14 @@ fn process_word(process: &carte_api::ProcessStatus) -> String {
     } else {
         state
     };
-    match process.port {
+    let word = match process.port {
         Some(port) if process.pid.is_some() => format!("{} {state} :{port}", process.name),
         _ => format!("{} {state}", process.name),
+    };
+    if process.paths.is_empty() {
+        word
+    } else {
+        format!("{word} {}", process.paths.join(" "))
     }
 }
 
@@ -1002,6 +1007,19 @@ nova-billing  ready
   idle in     14m
   last error  worker exited with code 1
 "
+        );
+    }
+
+    #[test]
+    fn shows_the_paths_a_process_serves() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.processes[1].paths = vec!["/vite-dev/".into()];
+        let instances = vec![billing.clone()];
+        let status = render_status(&snapshot, &instances);
+        assert!(
+            status.contains("web running, worker running /vite-dev/\n"),
+            "{status}"
         );
     }
 

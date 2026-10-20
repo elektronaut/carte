@@ -2145,7 +2145,11 @@ async fn requests_wait_while_the_web_process_restarts() {
     );
     let mut request = {
         let handle = handle.clone();
-        tokio::spawn(async move { handle.request(key("acme-web", Stack::Main), None).await })
+        tokio::spawn(async move {
+            handle
+                .request(key("acme-web", Stack::Main), "/", None)
+                .await
+        })
     };
     assert!(
         tokio::time::timeout(Duration::from_millis(300), &mut request)
@@ -2259,7 +2263,7 @@ async fn a_web_process_that_keeps_crashing_stops_the_instance_until_started_by_h
     );
 
     let failure = handle
-        .request(key("acme-web", Stack::Main), None)
+        .request(key("acme-web", Stack::Main), "/", None)
         .await
         .unwrap_err();
     assert_eq!(failure.title, "acme-web@main crashed");
@@ -2283,7 +2287,7 @@ async fn a_web_process_that_keeps_crashing_stops_the_instance_until_started_by_h
         .unwrap();
     assert!(response.failures.is_empty(), "{response:?}");
     handle
-        .request(key("acme-web", Stack::Main), None)
+        .request(key("acme-web", Stack::Main), "/", None)
         .await
         .unwrap();
     assert!(!process(&handle.snapshot(), "acme-web", "web").gave_up);
@@ -2330,7 +2334,7 @@ async fn stopping_an_instance_carte_gave_up_on_lets_the_next_request_start_it() 
 
     std::fs::remove_file(&marker).unwrap();
     handle
-        .request(key("acme-web", Stack::Main), None)
+        .request(key("acme-web", Stack::Main), "/", None)
         .await
         .unwrap();
     handle.shutdown().await;
@@ -2395,7 +2399,7 @@ async fn a_web_process_that_never_becomes_ready_after_a_restart_counts_as_a_cras
     })
     .await;
     let failure = handle
-        .request(key("acme-web", Stack::Main), None)
+        .request(key("acme-web", Stack::Main), "/", None)
         .await
         .unwrap_err();
     assert!(
@@ -2457,7 +2461,7 @@ async fn a_web_process_that_never_becomes_ready_five_times_in_a_row_stops_the_in
     })
     .await;
     let failure = handle
-        .request(key("acme-web", Stack::Main), None)
+        .request(key("acme-web", Stack::Main), "/", None)
         .await
         .unwrap_err();
     assert!(
@@ -2864,7 +2868,10 @@ async fn one_parked_copy_takes_over_a_checkout_watcher_when_its_owner_stops() {
 /// Opens `first` then `second` by request, then stops the project.
 async fn open_in_turn(handle: &Handle, first: &str, second: &str) {
     for app in [first, second] {
-        handle.request(key(app, Stack::Main), None).await.unwrap();
+        handle
+            .request(key(app, Stack::Main), "/", None)
+            .await
+            .unwrap();
     }
     handle.control(control("acme", Action::Down)).await.unwrap();
     wait_for(handle, "everything stopped", |s| {
@@ -2897,7 +2904,7 @@ async fn apps_that_usually_open_next_are_warmed() {
     );
 
     handle
-        .request(key("acme-web", Stack::Main), None)
+        .request(key("acme-web", Stack::Main), "/", None)
         .await
         .unwrap();
     wait_for(&handle, "billing warmed", |s| {
@@ -2936,13 +2943,392 @@ async fn apps_with_warm_off_are_never_warmed() {
             .is_empty()
     );
     handle
-        .request(key("acme-web", Stack::Main), None)
+        .request(key("acme-web", Stack::Main), "/", None)
         .await
         .unwrap();
     let snapshot = handle.snapshot();
     assert_eq!(
         status(&snapshot, "acme-billing", "main").state,
         InstanceState::Stopped
+    );
+    handle.shutdown().await;
+}
+
+fn assets(extra: &str) -> String {
+    format!(
+        "[apps.acme-web.processes.assets]\npaths = [\"/assets/\"]\n{extra}\n[apps.acme-web.processes.assets.provides]\nASSETS_PORT = \"{{{{port}}}}\"\n"
+    )
+}
+
+#[tokio::test]
+async fn paths_go_to_their_process_once_it_is_ready_with_the_web_process() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: FIXTURE_NAME=web FIXTURE_ENV=ASSETS_PORT exec {fixture}\nassets: FIXTURE_NAME=assets FIXTURE_BOOT_DELAY_MS=500 exec {fixture}\n",
+    );
+    setup.project(&assets(""));
+    let handle = setup.start();
+
+    let web = handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    let snapshot = handle.snapshot();
+    let assets = process(&snapshot, "acme-web", "assets");
+    assert_eq!(assets.state, ProcessState::Running);
+    assert_eq!(assets.paths, ["/assets/"]);
+    let assets_port = assets.port.unwrap();
+    assert!(http_get(assets_port, "/").contains("assets"));
+    assert!(http_get(web.port, "/").contains("web"));
+    assert!(
+        echoed_env(web.port)
+            .await
+            .contains(&assets_port.to_string())
+    );
+
+    for (path, port) in [
+        ("/assets/app.js?v=1", assets_port),
+        ("/assets", assets_port),
+        ("/assetsx", web.port),
+        ("/", web.port),
+    ] {
+        let upstream = handle
+            .request(key("acme-web", Stack::Main), path, None)
+            .await
+            .unwrap();
+        assert_eq!(upstream.port, port, "{path}");
+    }
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn requests_for_paths_wait_while_their_process_restarts() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nassets: FIXTURE_BOOT_DELAY_MS=300 exec {fixture}\n",
+    );
+    setup.project(&assets(""));
+    let handle = setup.start_with_backoff(Duration::from_millis(500));
+
+    let web = handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    let assets = process(&handle.snapshot(), "acme-web", "assets").clone();
+    kill(
+        Pid::from_raw(assets.pid.unwrap() as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    wait_for(&handle, "assets to wait for its restart", |s| {
+        process(s, "acme-web", "assets").restart_in_secs.is_some()
+    })
+    .await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Restarting
+    );
+    assert_eq!(
+        handle
+            .request(key("acme-web", Stack::Main), "/", None)
+            .await
+            .unwrap(),
+        web
+    );
+    let mut request = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .request(key("acme-web", Stack::Main), "/assets/app.js", None)
+                .await
+        })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut request)
+            .await
+            .is_err(),
+        "the request didn't wait"
+    );
+    assert_eq!(request.await.unwrap().unwrap().port, assets.port.unwrap());
+    wait_for(&handle, "the instance to be ready again", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Ready
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_path_process_that_keeps_exiting_stays_down_alone() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    setup.app("acme-web", "web: exec {fixture}\n");
+    setup.project(&assets(&format!(
+        "command = 'if [ -e {marker} ]; then echo exiting; exit 0; fi; touch {marker}; exec {fixture}'",
+        marker = marker.display(),
+        fixture = fixture().display()
+    )));
+    let handle = setup.start();
+
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "assets")
+        .pid
+        .unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for_events(&handle, "carte to give up", |lines| {
+        lines.iter().any(|l| {
+            l == "acme-web/assets gave up: assets crashed 5 times within a minute; it stays down"
+        })
+    })
+    .await;
+    let snapshot = handle.snapshot();
+    assert!(process(&snapshot, "acme-web", "assets").gave_up);
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Ready
+    );
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    let failure = handle
+        .request(key("acme-web", Stack::Main), "/assets/app.js", None)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.title, "acme-web@main: assets crashed");
+    assert!(!failure.transient);
+    assert!(
+        failure.log.iter().any(|l| l.contains("exiting")),
+        "{failure:?}"
+    );
+
+    std::fs::remove_file(&marker).unwrap();
+    handle
+        .control(control("web/assets", Action::Restart))
+        .await
+        .unwrap();
+    let upstream = handle
+        .request(key("acme-web", Stack::Main), "/assets/app.js", None)
+        .await
+        .unwrap();
+    let assets = process(&handle.snapshot(), "acme-web", "assets").clone();
+    assert!(!assets.gave_up);
+    assert_eq!(Some(upstream.port), assets.port);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_path_process_that_fails_to_start_fails_the_start() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nassets: FIXTURE_CRASH=3 exec {fixture}\n",
+    );
+    setup.project(&assets(""));
+    let handle = setup.start();
+
+    let failure = handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.title, "acme-web@main crashed");
+    assert!(failure.detail.contains("assets"), "{failure:?}");
+    assert!(
+        failure.log.iter().any(|l| l.contains("crashing with 3")),
+        "{failure:?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_paths_of_a_disabled_or_stopped_path_process_go_to_the_web_process() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\nassets: exec {fixture}\n");
+    setup.project(&assets("policy = \"disabled\""));
+    let handle = setup.start();
+
+    let web = handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        handle
+            .request(key("acme-web", Stack::Main), "/assets/app.js", None)
+            .await
+            .unwrap(),
+        web
+    );
+
+    handle
+        .control(control("web/assets", Action::Up))
+        .await
+        .unwrap();
+    wait_for(&handle, "assets to run", |s| {
+        process(s, "acme-web", "assets").state == ProcessState::Running
+    })
+    .await;
+    let assets = handle
+        .request(key("acme-web", Stack::Main), "/assets/app.js", None)
+        .await
+        .unwrap();
+    assert_ne!(assets, web);
+
+    handle
+        .control(control("web/assets", Action::Down))
+        .await
+        .unwrap();
+    assert_eq!(
+        handle
+            .request(key("acme-web", Stack::Main), "/assets/app.js", None)
+            .await
+            .unwrap(),
+        web
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_killed_vite_ruby_dev_server_leaves_no_record_that_it_runs() {
+    let setup = Setup::new();
+    let dir = setup.app("acme-web", "web: exec {fixture}\n");
+    setup.project(&format!(
+        "[apps.acme-web.processes.vite]\ncommand = \"exec {fixture}\"\npreset = \"vite_ruby\"\n",
+        fixture = fixture().display()
+    ));
+    let handle = setup.start();
+
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    let vite = process(&handle.snapshot(), "acme-web", "vite").clone();
+    assert_eq!(vite.paths, ["/vite-dev/"]);
+    let port = vite.port.unwrap();
+    std::fs::create_dir_all(dir.join("tmp")).unwrap();
+    let ours = dir.join("tmp/vite-ruby-development.json");
+    let other = dir.join("tmp/vite-ruby-test.json");
+    std::fs::write(&ours, format!("{{\"port\":{port},\"pid\":1}}")).unwrap();
+    std::fs::write(&other, format!("{{\"port\":{},\"pid\":1}}", port + 1)).unwrap();
+    kill(
+        Pid::from_raw(vite.pid.unwrap() as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    wait_for(&handle, "vite to exit", |s| {
+        process(s, "acme-web", "vite").pid != vite.pid
+    })
+    .await;
+    assert!(!ours.exists());
+    assert!(other.exists());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn requests_for_paths_wait_while_their_process_is_restarted_by_hand() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nassets: FIXTURE_IGNORE_TERM=1 exec {fixture}\n",
+    );
+    setup.project(&assets(""));
+    let handle = setup.start();
+
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "assets").pid;
+    handle
+        .control(control("web/assets", Action::Restart))
+        .await
+        .unwrap();
+    let mut request = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .request(key("acme-web", Stack::Main), "/assets/app.js", None)
+                .await
+        })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut request)
+            .await
+            .is_err(),
+        "the request went to the stopping process"
+    );
+    request.await.unwrap().unwrap();
+    assert_ne!(process(&handle.snapshot(), "acme-web", "assets").pid, pid);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_path_process_that_never_becomes_ready_five_times_in_a_row_stays_down_alone() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    setup.app("acme-web", "web: exec {fixture}\n");
+    setup.project(&assets(&format!(
+        "command = 'if [ -e {marker} ]; then echo hanging; exec sleep 600; fi; touch {marker}; exec {fixture}'",
+        marker = marker.display(),
+        fixture = fixture().display()
+    )));
+    let handle = setup.start_with(|options| {
+        options.boot_timeout = Duration::from_secs(3);
+        options.crash_window = Duration::from_secs(1);
+    });
+
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "assets")
+        .pid
+        .unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    let gave_up =
+        "acme-web/assets gave up: assets didn't become ready 5 times in a row; it stays down";
+    let result = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let (events, _) = handle.events(None, 100).await.unwrap();
+            if event_lines(&events).iter().any(|l| l == gave_up) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(result.is_ok(), "{:#?}", event_lines(&events));
+    let crashes = events
+        .iter()
+        .filter(|e| e.kind == carte_api::EventKind::Crashed)
+        .count();
+    assert_eq!(crashes, 6, "{:#?}", event_lines(&events));
+
+    wait_for(&handle, "assets to stop", |s| {
+        let assets = process(s, "acme-web", "assets");
+        assets.gave_up && assets.pid.is_none()
+    })
+    .await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Ready
+    );
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    let failure = handle
+        .request(key("acme-web", Stack::Main), "/assets/app.js", None)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.title, "acme-web@main: assets crashed");
+    assert!(
+        failure.log.iter().any(|l| l.contains("hanging")),
+        "{failure:?}"
     );
     handle.shutdown().await;
 }
