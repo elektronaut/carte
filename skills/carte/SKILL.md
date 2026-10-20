@@ -145,7 +145,9 @@ When the logs end in a debugger prompt (`(rdbg)`, `pry(…)>`, `irb(…)>`,
 its requests hang until someone answers. `carte attach` connects the
 user's terminal to it. Typing into it runs code in the app, so only do
 it when the user asks: `printf 'continue\n' | carte attach` types a
-line and prints what the process answers.
+line and prints what the process answers until its output has been
+quiet for 500 ms. For a slow command, add `--quiet 3000`; the MCP
+server's `type` tool takes `quiet_ms` for the same.
 
 `carte env` hides values that come from the environment and env files,
 since they may be secrets. Don't reveal them without asking (see below).

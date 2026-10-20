@@ -129,7 +129,7 @@ pub(crate) enum Msg {
     Attach {
         target: Address,
         process: Option<String>,
-        reply: oneshot::Sender<Result<(Attached, Arc<terminal::Terminal>), String>>,
+        reply: oneshot::Sender<Result<(Attached, Arc<terminal::Terminal>), AttachError>>,
     },
     /// Answers with the instances the action applied to.
     Control {
@@ -187,6 +187,23 @@ pub(crate) enum Msg {
         reply: oneshot::Sender<Option<Vec<(Orphan, prune::Detached)>>>,
     },
     Internal(actor::Internal),
+}
+
+/// Why there is nothing to attach to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachError {
+    /// The address or the name matches no process of the app.
+    NoProcess(String),
+    /// Not running, without a pty, or an address that names no app.
+    Refused(String),
+}
+
+impl std::fmt::Display for AttachError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttachError::NoProcess(message) | AttachError::Refused(message) => f.write_str(message),
+        }
+    }
 }
 
 /// Which log lines a follower wants.
@@ -292,7 +309,7 @@ impl Handle {
         &self,
         target: Address,
         process: Option<String>,
-    ) -> Result<(Attached, Arc<terminal::Terminal>), String> {
+    ) -> Result<(Attached, Arc<terminal::Terminal>), AttachError> {
         let (reply, rx) = oneshot::channel();
         self.send(Msg::Attach {
             target,
@@ -300,7 +317,7 @@ impl Handle {
             reply,
         });
         rx.await
-            .unwrap_or_else(|_| Err("carte is shutting down".into()))
+            .unwrap_or_else(|_| Err(AttachError::Refused("carte is shutting down".into())))
     }
 
     /// Applies a control action; with `wait`, an `up` or `restart` answers once every

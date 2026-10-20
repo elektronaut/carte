@@ -26,7 +26,9 @@ use super::groups::GroupRecord;
 use super::runner::{self, LogLabel, ProcLog};
 use super::teardown::{self, StackId, Teardowns};
 use super::terminal::Terminal;
-use super::{Activity, BootFailure, Handle, LogFilter, Msg, Options, Upstream, share, snapshot};
+use super::{
+    Activity, AttachError, BootFailure, Handle, LogFilter, Msg, Options, Upstream, share, snapshot,
+};
 use crate::instance_dirs;
 use crate::paths::Paths;
 use crate::process::{IoMode, SpawnSpec, Spawner};
@@ -1814,15 +1816,19 @@ impl Actor {
         &self,
         target: &Address,
         process: Option<&str>,
-    ) -> Result<(Attached, Arc<Terminal>), String> {
-        let resolved = self.resolve(target)?;
+    ) -> Result<(Attached, Arc<Terminal>), AttachError> {
+        let refused = AttachError::Refused;
+        let resolved = self.resolve(target).map_err(refused)?;
         let key = resolved
             .instance()
-            .ok_or_else(|| format!("{:?} names no app", target.address))?;
+            .ok_or_else(|| refused(format!("{:?} names no app", target.address)))?;
         let label = format!("{}@{}", key.app, key.stack.slug());
         let process = match (resolved.process.as_deref(), process) {
             (Some(a), Some(b)) if a != b => {
-                return Err(format!("{:?} already names process {a}", target.address));
+                return Err(refused(format!(
+                    "{:?} already names process {a}",
+                    target.address
+                )));
             }
             (a, b) => a.or(b),
         };
@@ -1830,38 +1836,42 @@ impl Actor {
             .instances
             .get(&key)
             .filter(|inst| inst.any_running())
-            .ok_or_else(|| format!("{label} isn't running"))?;
+            .ok_or_else(|| refused(format!("{label} isn't running")))?;
         let proc = match process {
             Some(name) => inst
                 .procs
                 .iter()
                 .find(|p| p.spec.name == name)
-                .ok_or_else(|| format!("{label} has no process named {name}"))?,
+                .ok_or_else(|| {
+                    AttachError::NoProcess(format!("{label} has no process named {name}"))
+                })?,
             None => match (inst.http(), inst.procs.as_slice()) {
                 (Some(http), _) => http,
                 (None, [only]) => only,
                 (None, procs) => {
                     let names: Vec<&str> = procs.iter().map(|p| p.spec.name.as_str()).collect();
-                    return Err(format!(
+                    return Err(refused(format!(
                         "{label} has no HTTP process; name one: {}",
                         names.join(", ")
-                    ));
+                    )));
                 }
             },
         };
         let name = &proc.spec.name;
         let terminal = match &proc.terminal {
             Some(terminal) => terminal.clone(),
-            None if !proc.is_running() => return Err(format!("{label}/{name} isn't running")),
+            None if !proc.is_running() => {
+                return Err(refused(format!("{label}/{name} isn't running")));
+            }
             None if !proc.spec.pty => {
-                return Err(format!(
+                return Err(refused(format!(
                     "{label}/{name} runs without a pty (pty = false), so there is nothing to attach to"
-                ));
+                )));
             }
             None => {
-                return Err(format!(
+                return Err(refused(format!(
                     "{label}/{name} runs without a pty: ptys were running out when it started"
-                ));
+                )));
             }
         };
         Ok((
