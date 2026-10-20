@@ -8,6 +8,8 @@ edition = "2024"
 rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/elektronaut/carte"
+homepage = "https://github.com/elektronaut/carte"
+keywords = ["dev-server", "localhost", "procfile", "puma-dev", "reverse-proxy"]
 
 [workspace.dependencies]
 carte-core = { path = "crates/carte-core", version = "0.3.0" }
