@@ -2,6 +2,7 @@
 //! at a debugger prompt.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -39,11 +40,11 @@ const PAUSE_QUIET_MS: u64 = 60 * 1000;
 
 /// Decides which crashes to tell about: the first one right away, later ones within
 /// the quiet period as one summary when it ends, and every give-up. A pause is told
-/// about unless the instance paused within the last minute.
+/// about unless the same process paused within the last minute.
 #[derive(Default)]
 pub struct Throttle {
     quiet: BTreeMap<InstanceKey, Quiet>,
-    paused: BTreeMap<InstanceKey, u64>,
+    paused: BTreeMap<(InstanceKey, String), u64>,
 }
 
 impl Throttle {
@@ -94,8 +95,9 @@ impl Throttle {
             EventKind::Paused => {
                 self.paused
                     .retain(|_, at| now_ms.saturating_sub(*at) < PAUSE_QUIET_MS);
-                if !self.paused.contains_key(&key) {
-                    self.paused.insert(key.clone(), now_ms);
+                if let Entry::Vacant(entry) = self.paused.entry((key.clone(), process.to_string()))
+                {
+                    entry.insert(now_ms);
                     notices.push(Notice {
                         subtitle: format!("{label} paused in {process}"),
                         message: format!("carte attach {label}/{process}"),
@@ -487,17 +489,22 @@ mod tests {
         assert_eq!(notices[0].message, "carte attach acme-web@feature-x/worker");
         assert!(
             throttle
-                .event(&pause("feature-x", "web"), 30_000)
+                .event(&pause("feature-x", "worker"), 20_000)
                 .is_empty(),
             "stepping through code doesn't notify at each step"
+        );
+        assert_eq!(
+            subtitles(&throttle.event(&pause("feature-x", "web"), 30_000)),
+            ["acme-web@feature-x paused in web"],
+            "another process does"
         );
         assert_eq!(
             subtitles(&throttle.event(&pause("main", "web"), 30_000)),
             ["acme-web paused in web"]
         );
         assert_eq!(
-            subtitles(&throttle.event(&pause("feature-x", "web"), 60_000)),
-            ["acme-web@feature-x paused in web"]
+            subtitles(&throttle.event(&pause("feature-x", "worker"), 60_000)),
+            ["acme-web@feature-x paused in worker"]
         );
         assert_eq!(throttle.next_due(), None);
     }

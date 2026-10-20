@@ -734,7 +734,7 @@ carte shows a desktop notification when a process crashes after its
 instance has started, when it gives up restarting one, and when a
 process stops at a debugger prompt while no terminal is attached to it
 ("shop paused in web", with the [`carte attach`](cli.md#attach) command),
-at most once a minute per app. Clean exits,
+at most once a minute per process. Clean exits,
 stops and failed starts, which show an error page, don't notify. After
 a crash notification, further crashes of that instance within 5 minutes
 come as one summary when the 5 minutes are up.

@@ -359,11 +359,34 @@ mod tests {
         assert_eq!(log.prompt().as_deref(), Some("(rdbg)"));
         log.push(b"o\r\n\x1b[?2004l");
         assert_eq!(log.prompt(), None);
+        log.push(b"\x1b[?2004h\x1b[1G\xe2\x96\xbd\x1b[6n\x1b[1G\x1b[K\x1b[6n\x1b[?25l\x1b[1G\x1b[K\x1b[1G\x1b[0m(rdbg) \x1b[0m\x1b[?25h\x1b[8G");
+        assert_eq!(
+            log.prompt().as_deref(),
+            Some("(rdbg)"),
+            "after reline's width probe"
+        );
+        let lines = log.push(b"\x1b[?25l\x1b[1G\x1b[K\x1b[?25h\x1b[1G(rdbg) \x1b[36m\x1b[4mc\x1b[0m\x1b[2m    # continue command\x1b[0m \r\r\n\x1b[1G\x1b[?2004l");
+        assert_eq!(lines.len(), 1, "answering ends the line");
+        assert_eq!(log.prompt(), None);
         log.push(b"irb:rdbg(#<Order:0x01>):002> ");
         assert_eq!(
             log.prompt().as_deref(),
             Some("irb:rdbg(#<Order:0x01>):002>")
         );
+    }
+
+    #[test]
+    fn completion_room_at_the_bottom_of_the_terminal_keeps_the_prompt() {
+        let mut log = ProcLog::new(64 * 1024);
+        log.push(b"\x1b[?25l\x1b[1G\x1b[K\x1b[1G\x1b[0mirb(main):001> \x1b[0m\x1b[?25h\x1b[16G");
+        assert_eq!(log.prompt().as_deref(), Some("irb(main):001>"));
+        let lines = log.push(b"\x1b[?25l\r\n\r\n\x1b[2A\x1b[16G\x1b[0mS\x1b[0m\x1b[1B\x1b[1G\x1b[K\x1b[16G\x1b[97;100mSTDERR \x1b[0m\x1b[1B\x1b[1G\x1b[K\x1b[16G\x1b[97;100mSTDIN  \x1b[0m\x1b[?25h\x1b[17G\x1b[2A");
+        assert!(lines.is_empty(), "still paused while typing: {lines:?}");
+        assert_eq!(log.prompt().as_deref(), Some("irb(main):001>"));
+        let lines = log.push(b"\x1b[?25l\x1b[1G\x1b[K\x1b[1B\x1b[1G\x1b[K\x1b[1B\x1b[1G\x1b[K\x1b[?25h\x1b[1G\x1b[2Airb(main):001> S\r\r\n\x1b[1G\x1b[?2004l=> nil\r\n\x1b[?2004h\x1b[6n\x1b[?25l\x1b[1G\x1b[K\x1b[1G\x1b[0mirb(main):002> \x1b[0m\x1b[?25h\x1b[16G");
+        let texts: Vec<&str> = lines.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(texts, ["irb(main):001> S", "=> nil"]);
+        assert_eq!(log.prompt().as_deref(), Some("irb(main):002>"));
     }
 
     #[test]

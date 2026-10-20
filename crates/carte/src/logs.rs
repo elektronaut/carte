@@ -168,10 +168,16 @@ const MAX_COLUMN: usize = 4096;
 /// CSI, OSC and other escape sequences are dropped; a carriage return moves
 /// back to the start of the line so later text overwrites it, backspace and
 /// `ESC [ n D` move back, `ESC [ n C` forward and `ESC [ n G` to a column, and
-/// `ESC [ K` erases to the end of the line. Text written after the cursor moved up
-/// or down (`ESC [ A`, `ESC [ B`) is dropped until it is back on the current line;
-/// a newline below it ends the current line as usual. Other control
-/// characters except tab are dropped. Invalid UTF-8 becomes U+FFFD.
+/// `ESC [ K` erases to the end of the line. Within one chunk of output, the rows
+/// it writes are kept as a small screen that `ESC [ A`, `ESC [ B` and newlines move
+/// around in; at the end of the chunk the rows above the cursor are lines, the
+/// cursor's row is the unfinished line, and rows below it are dropped. So Reline
+/// making room below its prompt, or drawing a completion dialog there, leaves the
+/// prompt line unfinished. Rows of earlier chunks can't be changed: text written
+/// after moving up into them is dropped until the cursor is back, so redraws of
+/// earlier rows, like a multi-line progress bar, don't reach the log, and a move up
+/// of more than a screen counts as one. Other control characters except tab are
+/// dropped. Invalid UTF-8 becomes U+FFFD.
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
     state: State,
@@ -179,10 +185,17 @@ pub struct Stripper {
     line: Vec<char>,
     cursor: usize,
     utf8: Vec<u8>,
-    /// Rows the cursor is above (negative) or below the current line. Text written
-    /// there belongs to other lines, and is dropped.
+    /// Rows the cursor is above the first row of the chunk being fed, in lines
+    /// already ended. Text written there is dropped.
     row: isize,
+    /// Rows of the chunk being fed above the cursor's, top first.
+    above: Vec<Vec<char>>,
+    /// Rows of the chunk being fed below the cursor's, nearest first.
+    below: std::collections::VecDeque<Vec<char>>,
 }
+
+/// The farthest a move up reaches into lines already ended.
+const ROWS_UP: isize = 24;
 
 impl Stripper {
     /// Feeds bytes and returns the lines they complete.
@@ -191,7 +204,32 @@ impl Stripper {
         for &b in data {
             self.byte(b, &mut lines);
         }
+        lines.extend(self.above.drain(..).map(|line| line.into_iter().collect()));
+        self.below.clear();
         lines
+    }
+
+    fn up(&mut self, mut n: usize) {
+        if self.row == 0 {
+            while n > 0
+                && let Some(line) = self.above.pop()
+            {
+                self.below
+                    .push_front(std::mem::replace(&mut self.line, line));
+                n -= 1;
+            }
+        }
+        self.row = (self.row - n as isize).max(-ROWS_UP);
+    }
+
+    fn down(&mut self, mut n: usize) {
+        let back = n.min(self.row.unsigned_abs());
+        self.row += back as isize;
+        n -= back;
+        for _ in 0..n {
+            let next = self.below.pop_front().unwrap_or_default();
+            self.above.push(std::mem::replace(&mut self.line, next));
+        }
     }
 
     /// The current incomplete line.
@@ -226,8 +264,8 @@ impl Stripper {
             State::Csi => match b {
                 0x40..=0x7e => {
                     match b {
-                        b'A' => self.row -= self.count() as isize,
-                        b'B' => self.row += self.count() as isize,
+                        b'A' => self.up(self.count()),
+                        b'B' => self.down(self.count()),
                         _ if self.row != 0 => {}
                         b'K' => self.erase_line(),
                         b'G' => self.cursor = self.count().saturating_sub(1).min(MAX_COLUMN),
@@ -268,12 +306,11 @@ impl Stripper {
         }
         match b {
             0x1b => self.state = State::Escape,
-            b'\n' if self.row < 0 => self.row += 1,
             b'\n' => {
-                self.row = 0;
-                lines.push(self.line.iter().collect());
-                self.line.clear();
-                self.cursor = 0;
+                if self.row == 0 {
+                    self.cursor = 0;
+                }
+                self.down(1);
             }
             _ if self.row != 0 && matches!(b, b'\r' | 0x08) => {}
             b'\r' => self.cursor = 0,
@@ -496,7 +533,7 @@ mod tests {
     fn text_written_on_other_rows_leaves_the_current_line_alone() {
         assert_eq!(
             strip(
-                b"[1] pry(main)> 1\r\n\x1b[1A\x1b[0G[1] pry(main)> \x1b[1m1\x1b[0m\x1b[1B=> 1\r\n"
+                b"[1] pry(main)> 1\r\n\x1b[1A\x1b[0G[1] pry(main)> \x1b[1m1\x1b[0m\x1b[1B\r=> 1\r\n"
             ),
             "[1] pry(main)> 1\n=> 1\n"
         );
@@ -504,10 +541,40 @@ mod tests {
         s.feed(b"irb(main):001> Str\x1b[1B\x1b[1G\x1b[KString\x1b[1B\x1b[1G\x1b[KStruct\x1b[2A\x1b[18G");
         assert_eq!(s.pending(), "irb(main):001> Str");
         assert_eq!(
-            s.feed(b"\x1b[3Bnext\n"),
-            ["irb(main):001> Str"],
-            "a newline below ends it"
+            s.feed(b"\x1b[3B\rnext\n"),
+            ["irb(main):001> Str", "", "", "next"],
+            "moving below it ends it"
         );
+    }
+
+    #[test]
+    fn newlines_reline_moves_back_over_dont_end_the_line() {
+        let mut s = Stripper::default();
+        s.feed(b"\x1b[?25l\x1b[1G\x1b[K\x1b[1G\x1b[0mirb(main):001> \x1b[0m\x1b[?25h\x1b[16G");
+        assert_eq!(s.pending(), "irb(main):001> ");
+        let lines = s.feed(b"\x1b[?25l\r\n\r\n\x1b[2A\x1b[16G\x1b[0mS\x1b[0m\x1b[1B\x1b[1G\x1b[K\x1b[16G\x1b[97;100mSTDERR \x1b[0m\x1b[1B\x1b[1G\x1b[K\x1b[16G\x1b[97;100mSTDIN  \x1b[0m\x1b[?25h\x1b[17G\x1b[2A");
+        assert!(lines.is_empty(), "{lines:?}");
+        assert_eq!(s.pending(), "irb(main):001> S");
+        let lines = s.feed(b"\x1b[?25l\x1b[1G\x1b[K\x1b[1B\x1b[1G\x1b[K\x1b[1B\x1b[1G\x1b[K\x1b[?25h\x1b[1G\x1b[2Airb(main):001> S\r\r\n\x1b[1G\x1b[?2004l=> nil\r\n\x1b[?2004h\x1b[6n\x1b[?25l\x1b[1G\x1b[K\x1b[1G\x1b[0mirb(main):002> \x1b[0m\x1b[?25h\x1b[16G");
+        assert_eq!(lines, ["irb(main):001> S", "=> nil"]);
+        assert_eq!(s.pending(), "irb(main):002> ");
+    }
+
+    #[test]
+    fn a_move_up_reaches_a_screen_at_most() {
+        let mut s = Stripper::default();
+        assert_eq!(s.feed(b"top\n"), ["top"]);
+        s.feed(b"\x1b[999A");
+        let lines = s.feed(&b"redrawn\n".repeat(30));
+        assert_eq!(lines.len(), 30 - 24, "{lines:?}");
+    }
+
+    #[test]
+    fn a_line_ends_when_its_chunk_does() {
+        let mut s = Stripper::default();
+        assert_eq!(s.feed(b"one\r\n"), ["one"]);
+        assert_eq!(s.feed(b"\x1b[1Atwo\n"), Vec::<String>::new());
+        assert_eq!(s.feed(b"three\n"), ["three"]);
     }
 
     #[test]
