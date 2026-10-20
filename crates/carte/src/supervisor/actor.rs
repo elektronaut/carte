@@ -569,7 +569,7 @@ impl Actor {
                         TunnelState::Failed => {
                             self.events.push(EventKind::TunnelFailed, message, vec![])
                         }
-                        TunnelState::Idle | TunnelState::Starting => {}
+                        TunnelState::Idle | TunnelState::Starting | TunnelState::Unknown => {}
                     }
                 }
                 self.tunnel = Some(status);

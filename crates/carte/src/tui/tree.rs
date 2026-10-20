@@ -85,6 +85,8 @@ pub enum State {
     Done,
     Crashed,
     Disabled,
+    /// A state from a newer daemon than this client knows.
+    Unknown,
 }
 
 /// Where a pin or disable comes from.
@@ -144,7 +146,12 @@ impl Status {
     pub fn is_active(&self) -> bool {
         matches!(
             self.state,
-            State::Ready | State::Starting | State::Restarting | State::Stopping | State::Crashed
+            State::Ready
+                | State::Starting
+                | State::Restarting
+                | State::Stopping
+                | State::Crashed
+                | State::Unknown
         )
     }
 }
@@ -365,6 +372,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
         InstanceState::Crashed => State::Crashed,
         InstanceState::Stopped if disabled.is_some() => State::Disabled,
         InstanceState::Stopped => State::Stopped,
+        InstanceState::Unknown => State::Unknown,
     };
     let held_by = inst
         .holds
@@ -375,6 +383,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
             Hold::Connections { count } => Some(plural(*count, "connection")),
             Hold::Dependent { app } => Some(short(app)),
             Hold::Exec { count } => Some(plural(*count, "exec")),
+            Hold::Unknown => Some("unknown".into()),
         })
         .collect();
     let mut status = Status {
@@ -439,6 +448,7 @@ fn process_node(instance: &NodeId, process: &ProcessStatus) -> Node {
         ProcessState::Done => State::Done,
         ProcessState::Stopped if disabled.is_some() => State::Disabled,
         ProcessState::Stopped => State::Stopped,
+        ProcessState::Unknown => State::Unknown,
     };
     let status = Status {
         running: usize::from(matches!(state, State::Ready | State::Starting)),
@@ -489,6 +499,7 @@ fn aggregate(children: &[Node]) -> Status {
         State::Restarting,
         State::Ready,
         State::Stopping,
+        State::Unknown,
     ]
     .into_iter()
     .find(|s| any(*s))
@@ -698,6 +709,26 @@ mod tests {
         assert_eq!(roots[0].status.state, State::Stopped);
         let states: Vec<State> = roots[0].children.iter().map(|c| c.status.state).collect();
         assert_eq!(states, [State::Stopped, State::Disabled]);
+    }
+
+    #[test]
+    fn an_unknown_state_is_shown_but_not_counted_as_running() {
+        let mut web = instance("acme", "main", "main", InstanceState::Unknown);
+        web.processes = vec![
+            process("web", ProcessState::Unknown),
+            process("worker", ProcessState::Running),
+        ];
+        let snap = snapshot(vec![project(
+            "acme",
+            &["acme"],
+            vec![stack("main", vec![web])],
+        )]);
+        let roots = build(&snap);
+        assert_eq!(roots[0].status.state, State::Unknown);
+        assert_eq!(roots[0].status.running, 0);
+        assert!(roots[0].status.is_active());
+        let states: Vec<State> = roots[0].children.iter().map(|c| c.status.state).collect();
+        assert_eq!(states, [State::Unknown, State::Ready]);
     }
 
     #[test]

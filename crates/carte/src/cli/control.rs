@@ -348,6 +348,7 @@ fn process_word(process: &carte_api::ProcessStatus) -> String {
         ProcessState::Exited { .. } => "exited".to_string(),
         ProcessState::Disabled => "disabled".to_string(),
         ProcessState::Done => "done".to_string(),
+        ProcessState::Unknown => "unknown".to_string(),
     };
     let state = if process.gave_up {
         format!("{state}, gave up restarting")
@@ -377,6 +378,7 @@ fn hold_word(hold: &Hold) -> String {
         Hold::Connections { count } => format!("{count} connections"),
         Hold::Dependent { app } => app.clone(),
         Hold::Exec { count } => execs(*count),
+        Hold::Unknown => "unknown".into(),
     }
 }
 
@@ -470,6 +472,7 @@ fn state_word(inst: &InstanceStatus) -> String {
         InstanceState::Restarting => "restarting",
         InstanceState::Stopping => "stopping",
         InstanceState::Crashed => "crashed",
+        InstanceState::Unknown => "unknown",
     }
     .to_string()
 }
@@ -503,6 +506,8 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
         .map(|p| {
             if p.gave_up {
                 format!("{} (gave up)", p.name)
+            } else if matches!(p.state, ProcessState::Unknown) {
+                format!("{} (unknown)", p.name)
             } else if let Some(secs) = p.restart_in_secs {
                 format!(
                     "{} (restarting in {})",
@@ -524,6 +529,7 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
             Hold::Connections { count } => format!("held by {count} connections"),
             Hold::Dependent { app } => format!("held by {app}"),
             Hold::Exec { count } => format!("held by {}", execs(*count)),
+            Hold::Unknown => "held by unknown".into(),
         });
     }
     if let Some(secs) = inst.idle_in_secs {
@@ -1097,6 +1103,33 @@ nova-billing  ready
             "{ls}"
         );
         assert!(ls.contains("down: web (restarting in 2s)"), "{ls}");
+    }
+
+    #[test]
+    fn shows_states_from_a_newer_daemon_as_unknown() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.state = InstanceState::Unknown;
+        billing.processes[0].state = ProcessState::Unknown;
+        billing.holds = vec![Hold::Unknown];
+        let instances = vec![billing.clone()];
+        let status = render_status(&snapshot, &instances);
+        assert!(status.starts_with("nova-billing  unknown\n"), "{status}");
+        assert!(status.contains("web unknown"), "{status}");
+        assert!(status.contains("  held by    unknown\n"), "{status}");
+        let ls = render_ls(&snapshot, false);
+        assert!(
+            ls.lines()
+                .any(|l| l.starts_with("nova-billing ") && l.contains(" unknown  https://")),
+            "{ls}"
+        );
+        assert!(ls.contains("held by unknown"), "{ls}");
+
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.state = InstanceState::Ready;
+        billing.holds = Vec::new();
+        let ls = render_ls(&snapshot, false);
+        assert!(ls.contains("down: web (unknown)"), "{ls}");
     }
 
     #[test]
