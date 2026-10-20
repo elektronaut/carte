@@ -982,7 +982,7 @@ fn short_name(name: &str, strip_prefix: Option<&str>) -> String {
         .to_string()
 }
 
-fn check_dns_label(label: &str) -> Result<(), String> {
+pub(crate) fn check_dns_label(label: &str) -> Result<(), String> {
     if label.is_empty() {
         return Err("must not be empty".into());
     }
