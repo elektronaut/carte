@@ -588,7 +588,8 @@ On macOS, carte uses `terminal-notifier` if it's installed
 (`brew install terminal-notifier`), and clicking the notification opens
 the app; otherwise it uses macOS's built-in notifications. On Linux it
 uses `notify-send`. Set `notifications = false` in the
-[machine config](#machine-config) to turn them off.
+[machine config](#machine-config) to turn them off; crashes while they're
+off don't count towards a summary once they're back on.
 
 ### Project-level processes
 
