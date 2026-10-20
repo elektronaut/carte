@@ -63,7 +63,15 @@ pub async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                 loop {
                     match frames.next_frame() {
                         Ok(Some(Frame::Input(data))) => {
-                            let _ = input.try_send(data);
+                            if input.try_send(data).is_err() {
+                                let notice = Frame::Output(
+                                    b"\r\n[carte: input dropped; the process isn't reading]\r\n"
+                                        .to_vec(),
+                                );
+                                if writer.write_all(&notice.encode()).await.is_err() {
+                                    return;
+                                }
+                            }
                         }
                         Ok(Some(Frame::Resize(size))) => client.resize(size),
                         Ok(Some(_)) => {}

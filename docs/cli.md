@@ -59,7 +59,7 @@ address inside it when given one.
 | `carte events [address] [-f] [-n N]` | What carte did and why: starts, stops, crashes, reloads, shares, teardowns |
 | `carte env [address] [KEY] [-p process] [--values]` | The environment a process gets, with where each value comes from |
 | `carte exec [address] [-p process] [--no-check] -- command…` | Run a command, like a console or a rake task, with the app's env |
-| `carte attach [address] [process] [--detach-keys keys] [--wait 5s]` | Connect your terminal to a running process, to answer a debugger prompt; see below |
+| `carte attach [address] [process] [--detach-keys keys] [--quiet ms] [--wait 5s]` | Connect your terminal to a running process, to answer a debugger prompt; see below |
 | `carte open [address]` | Open in the browser |
 | `carte share [address] [--apps a,b] [--ttl 2h] [--auth] [--pin] [--replace]` | Put apps on the public internet |
 | `carte unshare [address]` | End a share |
@@ -189,8 +189,13 @@ carte attach shop@feature-x/worker
 - Without a terminal, `attach` types its input into the process as it
   is, with no detach keys and no replay, and prints the output that
   follows. Once the input has run out, it detaches when the output has
-  been quiet for half a second, or after `--wait` (5s) at the latest:
-  `printf 'continue\n' | carte attach shop`.
+  been quiet for `--quiet` milliseconds (500), or after `--wait` (5s) at
+  the latest: `printf 'continue\n' | carte attach shop`. The quiet time
+  starts at the echo of what was typed, so raise `--quiet` for commands
+  that take a while to answer.
+- It exits with 0 when it detaches or the process exits, 1 when the
+  daemon closes the connection, and 128 plus the signal's number after
+  a signal.
 - A process with `pty = false` can't be attached to.
 
 In the terminal UI, `t` types into the selected process, or the

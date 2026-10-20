@@ -1729,13 +1729,15 @@ fn attach_types_into_a_process_and_shows_its_output() {
 }
 
 /// `carte attach web echo` on a new pty: the child, the pty's master, a copy of its
-/// slave, and what the master has read so far.
+/// slave, the slave's modes before the child started, and what the master has read
+/// so far.
 fn attach_on_a_pty(
     daemon: &Daemon,
 ) -> (
     Child,
     std::fs::File,
     std::os::fd::OwnedFd,
+    nix::sys::termios::Termios,
     std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 ) {
     let size = nix::pty::Winsize {
@@ -1746,6 +1748,7 @@ fn attach_on_a_pty(
     };
     let pty = nix::pty::openpty(Some(&size), None).unwrap();
     let slave = pty.slave.try_clone().unwrap();
+    let before = nix::sys::termios::tcgetattr(&slave).unwrap();
     let attach = daemon
         .command(&["attach", "web", "echo"])
         .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
@@ -1766,7 +1769,7 @@ fn attach_on_a_pty(
             reading.lock().unwrap().extend_from_slice(&buf[..n]);
         }
     });
-    (attach, master, slave, seen)
+    (attach, master, slave, before, seen)
 }
 
 #[test]
@@ -1784,8 +1787,7 @@ fn attach_on_a_terminal_detaches_and_restores_it() {
             .any(|p| p.name == "echo" && p.state == carte_api::ProcessState::Running)
     });
 
-    let (mut attach, mut master, slave, seen) = attach_on_a_pty(&daemon);
-    let before = tcgetattr(&slave).unwrap();
+    let (mut attach, mut master, slave, before, seen) = attach_on_a_pty(&daemon);
     let wait_for = |needle: &str| {
         eventually(needle, || {
             String::from_utf8_lossy(&seen.lock().unwrap()).contains(needle)
@@ -1802,8 +1804,7 @@ fn attach_on_a_terminal_detaches_and_restores_it() {
     assert!(attach.wait().unwrap().success());
     assert_eq!(tcgetattr(&slave).unwrap(), before);
 
-    let (mut attach, mut master, slave, seen) = attach_on_a_pty(&daemon);
-    let before = tcgetattr(&slave).unwrap();
+    let (mut attach, mut master, slave, before, seen) = attach_on_a_pty(&daemon);
     eventually("attached", || {
         String::from_utf8_lossy(&seen.lock().unwrap()).contains("detaches.")
     });
@@ -1814,6 +1815,54 @@ fn attach_on_a_terminal_detaches_and_restores_it() {
         nix::sys::signal::Signal::SIGTERM,
     )
     .unwrap();
-    assert!(!attach.wait().unwrap().success());
+    assert_eq!(attach.wait().unwrap().code(), Some(128 + 15));
     assert_eq!(tcgetattr(&slave).unwrap(), before, "SIGTERM restores it");
+}
+
+#[test]
+fn attach_stops_on_a_signal_while_the_daemon_doesnt_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let socket = carte::paths::Paths::under(&root).socket();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let (accepted, connected) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming() {
+            held.push(stream);
+            let _ = accepted.send(());
+        }
+    });
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    let mut attach = Command::new(env!("CARGO_BIN_EXE_carte"))
+        .args(["attach", "--project", "acme"])
+        .env("CARTE_CONFIG_DIR", root.join("config"))
+        .env("CARTE_STATE_HOME", root.join("state"))
+        .env("CARTE_RUNTIME_HOME", root.join("tmp"))
+        .env("CARTE_SKILL_REFRESH", "0")
+        .env("CARTE_SOCKET", &socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    connected.recv_timeout(Duration::from_secs(10)).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(attach.try_wait().unwrap().is_none(), "waits for the daemon");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(attach.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    let started = Instant::now();
+    while attach.try_wait().unwrap().is_none() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "ignored SIGTERM"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = attach.wait().unwrap();
+    assert_eq!(status.code(), Some(128 + 15), "{status:?}");
 }

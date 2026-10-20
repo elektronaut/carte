@@ -3462,7 +3462,7 @@ async fn attaching_needs_a_running_process_with_a_pty() {
     );
     setup.project("[apps.acme-web.processes.quiet]\npty = false\n");
     let handle = setup.start();
-    let err = |result: Result<_, String>| result.err().unwrap();
+    let err = |result: Result<_, carte::supervisor::AttachError>| result.err().unwrap().to_string();
 
     let stopped = err(handle.attach(here("web"), None).await);
     assert_eq!(stopped, "acme-web@main isn't running");
@@ -3489,6 +3489,10 @@ async fn attaching_needs_a_running_process_with_a_pty() {
     assert!(pipes.contains("pty = false"), "{pipes}");
     let unknown = err(handle.attach(here("web"), Some("clock".into())).await);
     assert_eq!(unknown, "acme-web@main has no process named clock");
+    assert!(matches!(
+        handle.attach(here("web"), Some("clock".into())).await,
+        Err(carte::supervisor::AttachError::NoProcess(_))
+    ));
     let both = err(handle.attach(here("web/web"), Some("worker".into())).await);
     assert!(both.contains("already names process web"), "{both}");
     handle.shutdown().await;

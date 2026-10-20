@@ -24,7 +24,7 @@ use hyper_util::rt::TokioIo;
 
 use crate::kube::Kube;
 use crate::paths::Paths;
-use crate::supervisor::Handle;
+use crate::supervisor::{AttachError, Handle};
 
 #[derive(Clone)]
 pub struct Api {
@@ -436,10 +436,8 @@ async fn attach(State(api): State<Api>, mut request: axum::extract::Request) -> 
     };
     let (attached, terminal) = match api.supervisor.attach(request.target, request.process).await {
         Ok(found) => found,
-        Err(message) if message.contains("has no process named") => {
-            return error(StatusCode::NOT_FOUND, message);
-        }
-        Err(message) => return error(StatusCode::CONFLICT, message),
+        Err(AttachError::NoProcess(message)) => return error(StatusCode::NOT_FOUND, message),
+        Err(AttachError::Refused(message)) => return error(StatusCode::CONFLICT, message),
     };
     let client = terminal.join(request.size, request.replay);
     tokio::spawn(async move {
