@@ -90,7 +90,9 @@ and the app is at `https://myapp.localhost`.
 
 carte runs the processes in `Procfile.dev`, or `Procfile`, and gives each
 one its own `PORT`. Apps without a Procfile work too: a Rack app runs
-with Puma, and a Node app runs its `dev` script.
+with Puma, and a Node app runs its `dev` script. A dev server next to
+Rails, like vite_ruby's or Shakapacker's, gets its paths on the app's
+hostname; see [Paths](docs/configuration.md#paths).
 
 A project can also hold several apps that work together. Say the acme
 product is three repos in `~/work`, next to some unrelated ones:

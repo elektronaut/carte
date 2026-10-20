@@ -243,6 +243,8 @@ pub fn render_subject(
                 after: Vec::new(),
                 provides: Vec::new(),
                 restart: Default::default(),
+                paths: Vec::new(),
+                preset: None,
             };
             &shared_only
         }

@@ -359,6 +359,9 @@ pub struct ProcessStatus {
     pub pid: Option<u32>,
     pub port: Option<u16>,
     pub http: bool,
+    /// Paths of the app's hostname the proxy sends to this process.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
     pub restarts: u32,
     pub memory_bytes: u64,
     pub cpu_percent: f32,

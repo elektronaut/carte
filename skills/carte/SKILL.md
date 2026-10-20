@@ -80,6 +80,14 @@ cancels them. `carte events` shows `teardown-scheduled`, `teardown-paused` (the
 project has a problem, so carte can't tell), `teardown-cancelled`,
 `teardown-finished` and `teardown-failed`.
 
+A Rails app's JavaScript dev server (vite_ruby's `bin/vite dev`,
+Shakapacker's `bin/shakapacker-dev-server`) runs as a process with
+`paths`: carte sends `/vite-dev/` or `/packs/` on the app's hostname to
+it and the rest to Rails, and sets `VITE_RUBY_PORT` or
+`SHAKAPACKER_DEV_SERVER_PORT` on every process. Don't start the dev
+server on its fixed port yourself. `carte status` lists the paths next to
+the process.
+
 A service may also be declared in the project file for several apps at
 once (`[processes.redis]`), so it isn't always in the repo's Procfile or
 `carte.toml`. Its `provides` sets variables such as `REDIS_URL` on every
@@ -115,8 +123,9 @@ carte env -p worker                   # another process's env
 
 A request to an app that failed to boot gets an error page with the last
 log lines. `carte events` answers "why did it stop or restart?". While
-the web process restarts after a crash, the app shows as `restarting`
-and requests wait for it.
+the web process (or the dev server serving `/vite-dev/` or `/packs/`)
+restarts after a crash, the app shows as `restarting` and requests wait
+for it.
 
 A worker or service that crashes after the start is restarted on its
 own after a short wait, which `carte status` shows as `restarting in 2s`

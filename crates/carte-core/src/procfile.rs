@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::model::{AppSettings, ProcessKind, ProcessSpec, Readiness, Restart, Scope};
+use crate::model::{
+    AppSettings, EnvTemplate, Preset, ProcessKind, ProcessOverride, ProcessSpec, Readiness,
+    Restart, Scope,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessSource {
@@ -49,6 +52,13 @@ pub enum Notice {
     },
     /// Config adjusts a process that doesn't exist and gives no command to add it.
     UnknownProcess { process: String },
+    /// The command looks like a preset's dev server, but its config rules out
+    /// serving paths.
+    PresetSkipped {
+        process: String,
+        preset: Preset,
+        setting: &'static str,
+    },
 }
 
 impl fmt::Display for Notice {
@@ -64,6 +74,15 @@ impl fmt::Display for Notice {
             Notice::UnknownProcess { process } => write!(
                 f,
                 "config for process {process:?} is ignored: it is not in the Procfile and has no command"
+            ),
+            Notice::PresetSkipped {
+                process,
+                preset,
+                setting,
+            } => write!(
+                f,
+                "{process}: looks like {preset}'s dev server, but `{setting}` keeps carte from routing its paths; remove it and set preset = \"{preset}\" to have carte route them",
+                preset = preset.name()
             ),
         }
     }
@@ -98,6 +117,28 @@ pub enum ProcfileError {
         "process {process:?} serves HTTP, so it can't have `restart`: carte always restarts it when it exits"
     )]
     RestartOnHttp { process: String },
+    #[error(
+        "process {process:?} serves HTTP, so it can't have `paths`: it gets every path the other processes don't"
+    )]
+    PathsOnHttp { process: String },
+    #[error("process {process:?} serves paths, so it can't have a kind")]
+    KindOnPaths { process: String },
+    #[error(
+        "process {process:?} serves paths, so it can't have `restart`: carte always restarts it when it exits"
+    )]
+    RestartOnPaths { process: String },
+    #[error(
+        "process {process:?} serves paths, which runs per instance: remove scope = \"checkout\""
+    )]
+    CheckoutScopedPaths { process: String },
+    #[error("process {process:?} lists path {path:?} twice")]
+    RepeatedPath { process: String, path: String },
+    #[error("path {path:?} is served by both {first:?} and {second:?}")]
+    DuplicatePath {
+        path: String,
+        first: String,
+        second: String,
+    },
     #[error("process {process:?} is a teardown, which runs once: remove `restart`")]
     RestartOnTeardown { process: String },
     #[error(
@@ -258,10 +299,41 @@ pub fn build(
     let processes: Vec<ProcessSpec> = commands
         .into_iter()
         .map(|(name, mut command)| {
-            let ov = config.entries.get(&name).cloned().unwrap_or_default();
+            let mut ov = config.entries.get(&name).cloned().unwrap_or_default();
             let http = ov.http.unwrap_or(name == "web" && !explicit_http);
-            let restart = restart(&name, http, ov.kind, ov.restart)?;
-            if http && let Some(rewritten) = rewrite_port(&command) {
+            let detected = (!http && ov.preset.is_none())
+                .then(|| detect_preset(&command))
+                .flatten();
+            let conflict = if ov.paths.is_some() {
+                None
+            } else if ov.kind.is_some() {
+                Some("kind")
+            } else if ov.restart.is_some() {
+                Some("restart")
+            } else if ov.scope == Some(Scope::Checkout) {
+                Some("scope = \"checkout\"")
+            } else {
+                None
+            };
+            let preset = match (detected, conflict) {
+                (Some(preset), Some(setting)) => {
+                    notices.push(Notice::PresetSkipped {
+                        process: name.clone(),
+                        preset,
+                        setting,
+                    });
+                    None
+                }
+                (Some(preset), None) => Some(preset),
+                (None, _) => ov.preset.filter(|p| *p != Preset::None),
+            };
+            if let Some(preset) = preset {
+                apply_preset(preset, &mut ov);
+            }
+            let paths = ov.paths.unwrap_or_default();
+            let always_restarted = http || !paths.is_empty();
+            let restart = restart(&name, http, &paths, ov.kind, ov.restart)?;
+            if always_restarted && let Some(rewritten) = rewrite_port(&command) {
                 notices.push(Notice::PortRewritten {
                     process: name.clone(),
                     from: command.clone(),
@@ -270,7 +342,7 @@ pub fn build(
                 command = rewritten;
             }
             let scope = ov.scope.unwrap_or(
-                if !http
+                if !always_restarted
                     && ov.kind.is_none()
                     && ov.provides.is_empty()
                     && is_watcher(&name, &command)
@@ -292,6 +364,8 @@ pub fn build(
                 after: ov.after.unwrap_or_default(),
                 provides: ov.provides,
                 restart,
+                paths,
+                preset,
                 name,
                 command,
             })
@@ -306,6 +380,7 @@ pub fn build(
     if http.len() > 1 {
         return Err(ProcfileError::MultipleHttp { processes: http });
     }
+    check_paths(&processes)?;
     check_kinds(&processes)?;
     let (teardown, processes) = processes
         .into_iter()
@@ -319,26 +394,63 @@ pub fn build(
 }
 
 /// The restart policy a process gets: `on-failure` for services and ordinary
-/// processes, `never` for tasks and teardowns. The HTTP process gets `never` too,
-/// though the supervisor restarts it whenever it exits after the start.
+/// processes, `never` for tasks and teardowns. The HTTP process and processes that
+/// serve paths get `never` too, though the supervisor restarts them whenever they
+/// exit after the start.
 fn restart(
     name: &str,
     http: bool,
+    paths: &[String],
     kind: Option<ProcessKind>,
     configured: Option<Restart>,
 ) -> Result<Restart, ProcfileError> {
     let process = name.to_string();
     match (configured, kind) {
         (Some(_), _) if http => Err(ProcfileError::RestartOnHttp { process }),
+        (Some(_), _) if !paths.is_empty() => Err(ProcfileError::RestartOnPaths { process }),
         (Some(_), Some(ProcessKind::Teardown)) => Err(ProcfileError::RestartOnTeardown { process }),
         (Some(Restart::OnFailure), Some(ProcessKind::Task)) => {
             Err(ProcfileError::RestartOnTask { process })
         }
         (Some(restart), _) => Ok(restart),
         (None, Some(ProcessKind::Task | ProcessKind::Teardown)) => Ok(Restart::Never),
-        (None, _) if http => Ok(Restart::Never),
+        (None, _) if http || !paths.is_empty() => Ok(Restart::Never),
         (None, _) => Ok(Restart::OnFailure),
     }
+}
+
+fn check_paths(processes: &[ProcessSpec]) -> Result<(), ProcfileError> {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for p in processes.iter().filter(|p| p.serves_paths()) {
+        let process = p.name.clone();
+        if p.http {
+            return Err(ProcfileError::PathsOnHttp { process });
+        }
+        if p.kind.is_some() {
+            return Err(ProcfileError::KindOnPaths { process });
+        }
+        if p.scope == Scope::Checkout {
+            return Err(ProcfileError::CheckoutScopedPaths { process });
+        }
+        for path in &p.paths {
+            let normalized = path.trim_end_matches('/');
+            if let Some((_, first)) = seen.iter().find(|(seen, _)| *seen == normalized) {
+                if *first == p.name {
+                    return Err(ProcfileError::RepeatedPath {
+                        process,
+                        path: path.clone(),
+                    });
+                }
+                return Err(ProcfileError::DuplicatePath {
+                    path: path.clone(),
+                    first: first.to_string(),
+                    second: process,
+                });
+            }
+            seen.push((normalized, &p.name));
+        }
+    }
+    Ok(())
 }
 
 fn check_kinds(processes: &[ProcessSpec]) -> Result<(), ProcfileError> {
@@ -417,6 +529,54 @@ fn find_cycle<'a>(processes: &'a [ProcessSpec], path: &mut Vec<&'a str>) -> Opti
         path.pop();
     }
     None
+}
+
+/// The preset a command's dev server matches: vite_ruby's `bin/vite dev` or
+/// Shakapacker's `bin/shakapacker-dev-server`.
+pub fn detect_preset(command: &str) -> Option<Preset> {
+    let tokens: Vec<&str> = command.split_whitespace().collect();
+    let binstub = |token: &str, name: &str| {
+        let path = format!("bin/{name}");
+        token == path || token.ends_with(&format!("/{path}"))
+    };
+    let bundle = |token: &str| token == "bundle" || binstub(token, "bundle");
+    let vite_ruby = tokens
+        .windows(2)
+        .any(|pair| matches!(pair, [vite, "dev"] if binstub(vite, "vite")))
+        || tokens
+            .windows(4)
+            .any(|four| matches!(four, [b, "exec", "vite", "dev"] if bundle(b)));
+    if vite_ruby {
+        Some(Preset::ViteRuby)
+    } else if tokens
+        .iter()
+        .any(|token| binstub(token, "shakapacker-dev-server"))
+    {
+        Some(Preset::Shakapacker)
+    } else {
+        None
+    }
+}
+
+/// Fills in the paths a preset's dev server serves and the variable that tells
+/// it and Rails its port, under what the process configures itself.
+fn apply_preset(preset: Preset, ov: &mut ProcessOverride) {
+    let (paths, port_var): (&[&str], &str) = match preset {
+        Preset::ViteRuby => (&["/vite-dev/"], "VITE_RUBY_PORT"),
+        Preset::Shakapacker => (&["/packs/", "/ws"], "SHAKAPACKER_DEV_SERVER_PORT"),
+        Preset::None => return,
+    };
+    ov.paths
+        .get_or_insert_with(|| paths.iter().map(|p| p.to_string()).collect());
+    if !ov.provides.iter().any(|e| e.key == port_var) {
+        ov.provides.insert(
+            0,
+            EnvTemplate {
+                key: port_var.into(),
+                value: "{{port}}".into(),
+            },
+        );
+    }
 }
 
 /// Whether a process looks like a file watcher, which runs once per checkout.
@@ -1049,6 +1209,296 @@ mod tests {
         };
         let err = with_kinds(&[("web", web)]).unwrap_err();
         assert!(matches!(err, ProcfileError::KindOnHttp { .. }), "{err}");
+    }
+
+    fn paths(list: &[&str]) -> Option<Vec<String>> {
+        Some(list.iter().map(|p| p.to_string()).collect())
+    }
+
+    #[test]
+    fn a_process_with_paths_runs_per_instance_and_is_always_restarted() {
+        let base = vec![
+            ("web".into(), "bin/rails server".into()),
+            ("assets".into(), "bin/assets --watch --port 3036".into()),
+        ];
+        let s = settings(
+            false,
+            &[(
+                "assets",
+                ProcessOverride {
+                    paths: paths(&["/assets/"]),
+                    ..Default::default()
+                },
+            )],
+        );
+        let list = build(ProcessSource::ProcfileDev, base, &s).unwrap();
+        let assets = &list.processes[1];
+        assert_eq!(assets.paths, ["/assets/"]);
+        assert_eq!(assets.scope, Scope::Instance);
+        assert_eq!(assets.restart, Restart::Never);
+        assert_eq!(assets.command, "bin/assets --watch --port $PORT");
+        assert!(assets.is_checked());
+    }
+
+    #[test]
+    fn matches_paths_by_whole_segments() {
+        let spec = build(
+            ProcessSource::Config,
+            vec![("assets".into(), "x".into())],
+            &settings(
+                false,
+                &[(
+                    "assets",
+                    ProcessOverride {
+                        paths: paths(&["/vite-dev/", "/vite-dev/@fs"]),
+                        ..Default::default()
+                    },
+                )],
+            ),
+        )
+        .unwrap()
+        .processes
+        .remove(0);
+        assert_eq!(spec.path_match("/vite-dev/@vite/client"), Some(9));
+        assert_eq!(spec.path_match("/vite-dev"), Some(9));
+        assert_eq!(spec.path_match("/vite-dev?x=1"), Some(9));
+        assert_eq!(spec.path_match("/vite-dev/@fs/src/app.ts"), Some(13));
+        assert_eq!(spec.path_match("/vite-development"), None);
+        assert_eq!(spec.path_match("/"), None);
+    }
+
+    #[test]
+    fn rejects_paths_where_they_cant_work() {
+        let check = |entries: &[(&str, ProcessOverride)]| {
+            let base = vec![
+                ("web".into(), "bin/rails server".into()),
+                ("assets".into(), "bin/assets".into()),
+                ("other".into(), "bin/other".into()),
+            ];
+            build(ProcessSource::Procfile, base, &settings(false, entries)).unwrap_err()
+        };
+        let with = |ov: ProcessOverride| ProcessOverride {
+            paths: paths(&["/assets/"]),
+            ..ov
+        };
+        let err = check(&[("web", with(ProcessOverride::default()))]);
+        assert!(matches!(err, ProcfileError::PathsOnHttp { .. }), "{err}");
+        let err = check(&[(
+            "assets",
+            with(ProcessOverride {
+                restart: Some(Restart::OnFailure),
+                ..Default::default()
+            }),
+        )]);
+        assert!(matches!(err, ProcfileError::RestartOnPaths { .. }), "{err}");
+        let err = check(&[(
+            "assets",
+            with(ProcessOverride {
+                kind: Some(ProcessKind::Service),
+                ..Default::default()
+            }),
+        )]);
+        assert!(matches!(err, ProcfileError::KindOnPaths { .. }), "{err}");
+        let err = check(&[(
+            "assets",
+            with(ProcessOverride {
+                scope: Some(Scope::Checkout),
+                ..Default::default()
+            }),
+        )]);
+        assert!(
+            matches!(err, ProcfileError::CheckoutScopedPaths { .. }),
+            "{err}"
+        );
+        let err = check(&[
+            ("assets", with(ProcessOverride::default())),
+            (
+                "other",
+                ProcessOverride {
+                    paths: paths(&["/assets"]),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        assert_eq!(
+            err.to_string(),
+            "path \"/assets\" is served by both \"assets\" and \"other\""
+        );
+        let err = check(&[(
+            "assets",
+            ProcessOverride {
+                paths: paths(&["/assets/", "/assets"]),
+                ..Default::default()
+            },
+        )]);
+        assert_eq!(
+            err.to_string(),
+            "process \"assets\" lists path \"/assets\" twice"
+        );
+    }
+
+    #[test]
+    fn a_detected_preset_gives_way_to_settings_that_rule_out_paths() {
+        let base = || vec![("vite".into(), "bin/vite dev".into())];
+        let checkout = ProcessOverride {
+            scope: Some(Scope::Checkout),
+            ..Default::default()
+        };
+        let list = build(
+            ProcessSource::ProcfileDev,
+            base(),
+            &settings(false, &[("vite", checkout.clone())]),
+        )
+        .unwrap();
+        let vite = &list.processes[0];
+        assert!(vite.paths.is_empty());
+        assert!(vite.provides.is_empty());
+        assert_eq!(vite.preset, None);
+        assert_eq!(vite.scope, Scope::Checkout);
+        assert_eq!(
+            list.notices,
+            [Notice::PresetSkipped {
+                process: "vite".into(),
+                preset: Preset::ViteRuby,
+                setting: "scope = \"checkout\"",
+            }]
+        );
+        assert!(
+            list.notices[0]
+                .to_string()
+                .contains("set preset = \"vite_ruby\"")
+        );
+
+        let restart = ProcessOverride {
+            restart: Some(Restart::Never),
+            ..Default::default()
+        };
+        let list = build(
+            ProcessSource::ProcfileDev,
+            base(),
+            &settings(false, &[("vite", restart)]),
+        )
+        .unwrap();
+        assert_eq!(list.processes[0].restart, Restart::Never);
+        assert!(list.processes[0].paths.is_empty());
+
+        let explicit = ProcessOverride {
+            preset: Some(Preset::ViteRuby),
+            ..checkout
+        };
+        let err = build(
+            ProcessSource::ProcfileDev,
+            base(),
+            &settings(false, &[("vite", explicit)]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ProcfileError::CheckoutScopedPaths { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn detects_presets_from_the_command() {
+        assert_eq!(detect_preset("bin/vite dev"), Some(Preset::ViteRuby));
+        assert_eq!(
+            detect_preset("./bin/vite dev --debug"),
+            Some(Preset::ViteRuby)
+        );
+        assert_eq!(
+            detect_preset("bundle exec vite dev"),
+            Some(Preset::ViteRuby)
+        );
+        assert_eq!(
+            detect_preset("FOO=1 bundle exec vite dev"),
+            Some(Preset::ViteRuby)
+        );
+        assert_eq!(
+            detect_preset("exec bin/bundle exec vite dev"),
+            Some(Preset::ViteRuby)
+        );
+        assert_eq!(detect_preset("bin/webpacker-dev-server"), None);
+        assert_eq!(detect_preset("bin/webpack-dev-server"), None);
+        assert_eq!(detect_preset("vite dev"), None);
+        assert_eq!(detect_preset("bin/vite build --watch"), None);
+        assert_eq!(
+            detect_preset("bin/shakapacker-dev-server"),
+            Some(Preset::Shakapacker)
+        );
+        assert_eq!(
+            detect_preset("./bin/shakapacker-dev-server"),
+            Some(Preset::Shakapacker)
+        );
+        assert_eq!(detect_preset("bin/shakapacker --watch"), None);
+    }
+
+    #[test]
+    fn presets_fill_in_paths_and_the_port_under_config() {
+        let base = vec![
+            ("web".into(), "bin/rails server".into()),
+            ("vite".into(), "bin/vite dev".into()),
+            ("webpack".into(), "bin/shakapacker-dev-server".into()),
+            ("custom".into(), "bin/my-vite".into()),
+        ];
+        let custom_paths = paths(&["/custom/"]);
+        let s = settings(
+            false,
+            &[
+                (
+                    "webpack",
+                    ProcessOverride {
+                        paths: paths(&["/packs/"]),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "custom",
+                    ProcessOverride {
+                        preset: Some(Preset::ViteRuby),
+                        paths: custom_paths,
+                        provides: vec![EnvTemplate {
+                            key: "VITE_RUBY_PORT".into(),
+                            value: "4000".into(),
+                        }],
+                        ..Default::default()
+                    },
+                ),
+            ],
+        );
+        let list = build(ProcessSource::ProcfileDev, base, &s).unwrap();
+        let [web, vite, webpack, custom] = &list.processes[..] else {
+            unreachable!()
+        };
+        assert!(web.paths.is_empty());
+        assert_eq!(vite.paths, ["/vite-dev/"]);
+        let port = |key: &str| EnvTemplate {
+            key: key.into(),
+            value: "{{port}}".into(),
+        };
+        assert_eq!(vite.provides, [port("VITE_RUBY_PORT")]);
+        assert_eq!(webpack.paths, ["/packs/"]);
+        assert_eq!(webpack.provides, [port("SHAKAPACKER_DEV_SERVER_PORT")]);
+        assert_eq!(custom.paths, ["/custom/"]);
+        assert_eq!(custom.provides[0].value, "4000");
+
+        let off = settings(
+            false,
+            &[(
+                "vite",
+                ProcessOverride {
+                    preset: Some(Preset::None),
+                    ..Default::default()
+                },
+            )],
+        );
+        let list = build(
+            ProcessSource::ProcfileDev,
+            vec![("vite".into(), "bin/vite dev".into())],
+            &off,
+        )
+        .unwrap();
+        assert!(list.processes[0].paths.is_empty());
+        assert!(list.processes[0].provides.is_empty());
     }
 
     #[test]

@@ -339,6 +339,29 @@ fn serves_files_ahead_of_the_app_and_without_one() {
 }
 
 #[test]
+fn sends_a_path_process_its_paths_ahead_of_served_files() {
+    let fixture = fixture().display().to_string();
+    let daemon = Daemon::start_prepared(
+        &format!(
+            "\n[apps.acme-web]\nserve_files = \"public\"\n\n[apps.acme-web.processes.assets]\ncommand = \"FIXTURE_NAME=assets exec {fixture}\"\npaths = [\"/assets/\"]\n"
+        ),
+        |work| {
+            std::fs::create_dir_all(work.join("acme-web/public/assets")).unwrap();
+            std::fs::write(work.join("acme-web/public/assets/app.js"), "stale").unwrap();
+            std::fs::write(work.join("acme-web/public/robots.txt"), "User-agent: *\n").unwrap();
+        },
+    );
+
+    let asset = daemon.request("web.acme.test", "/assets/app.js");
+    assert!(asset.contains("x-fixture-name: assets"), "{asset}");
+    assert!(!asset.contains("stale"), "{asset}");
+    let page = daemon.request("web.acme.test", "/");
+    assert!(page.contains("x-fixture-name: web"), "{page}");
+    let robots = daemon.request("web.acme.test", "/robots.txt");
+    assert!(robots.contains("User-agent: *"), "{robots}");
+}
+
+#[test]
 fn answers_on_ipv6_loopback() {
     let daemon = Daemon::start();
     let response = daemon.request_on("::1", "web.acme.test", "/");

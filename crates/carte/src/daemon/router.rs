@@ -168,7 +168,7 @@ impl Router for SupervisorRouter {
                 }
                 None => {}
             }
-            let ready = self.supervisor.request(key.clone(), referrer);
+            let ready = self.supervisor.request(key.clone(), request.path, referrer);
             match tokio::time::timeout(self.hold, ready).await {
                 Ok(Ok(upstream)) => Route::Upstream {
                     port: upstream.port,
@@ -256,7 +256,8 @@ enum Served {
 }
 
 /// A GET or HEAD for a file in the app's `serve_files` folder, in the checkout of the
-/// request's stack. `None` sends the request on to the app.
+/// request's stack. `None` sends the request on to the app, as for paths a process
+/// serves.
 fn served_files(world: &World, key: &InstanceKey, request: RouteRequest<'_>) -> Option<Served> {
     if !matches!(*request.method, http::Method::GET | http::Method::HEAD) {
         return None;
@@ -266,13 +267,19 @@ fn served_files(world: &World, key: &InstanceKey, request: RouteRequest<'_>) -> 
     let app = state.app_at(app, &key.stack);
     let dir = app.settings.serve_files.as_ref()?;
     let checkout = state.checkout(app, &key.stack)?;
+    let list = state.process_list(app, &key.stack);
+    if let Some(Ok(list)) = list
+        && list
+            .processes
+            .iter()
+            .any(|p| p.path_match(request.path).is_some())
+    {
+        return None;
+    }
     if let Some(path) = crate::proxy::files::find(&checkout.path().join(dir), request.path) {
         return Some(Served::File(path));
     }
-    let files_only = matches!(
-        state.process_list(app, &key.stack),
-        Some(Ok(list)) if list.source == ProcessSource::ServeFiles
-    );
+    let files_only = matches!(list, Some(Ok(list)) if list.source == ProcessSource::ServeFiles);
     files_only.then_some(Served::Missing)
 }
 
