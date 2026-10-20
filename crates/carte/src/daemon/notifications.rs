@@ -41,6 +41,20 @@ pub struct Throttle {
 }
 
 impl Throttle {
+    /// What to tell after `event`, or after a quiet period ends when there is none.
+    /// While notifications are disabled it drops everything it was holding, so it
+    /// starts fresh when they're enabled again.
+    pub fn step(&mut self, event: Option<&Event>, enabled: bool, now_ms: u64) -> Vec<Notice> {
+        if !enabled {
+            self.quiet.clear();
+            return Vec::new();
+        }
+        match event {
+            Some(event) => self.event(event, now_ms),
+            None => self.due(now_ms),
+        }
+    }
+
     pub fn event(&mut self, event: &Event, now_ms: u64) -> Vec<Notice> {
         let mut notices = self.due(now_ms);
         let Some(subject) = event.subjects.first() else {
@@ -304,21 +318,16 @@ pub async fn run(supervisor: Handle) {
     let mut throttle = Throttle::default();
     loop {
         let wait = throttle.next_due().map(|at| at.saturating_sub(now_ms()));
-        let notices = tokio::select! {
+        let event = tokio::select! {
             received = events.recv() => match received {
-                Ok(event) => throttle.event(&event, now_ms()),
+                Ok(event) => Some(event),
                 Err(RecvError::Lagged(_)) => continue,
                 Err(RecvError::Closed) => return,
             },
-            () = sleep_ms(wait) => throttle.due(now_ms()),
+            () = sleep_ms(wait) => None,
         };
-        if notices.is_empty() {
-            continue;
-        }
         let world = supervisor.world();
-        if !world.machine.notifications {
-            continue;
-        }
+        let notices = throttle.step(event.as_ref(), world.machine.notifications, now_ms());
         for notice in notices {
             tokio::spawn(deliver(Notification::new(notice, &world)));
         }
@@ -460,6 +469,38 @@ mod tests {
         ] {
             assert!(throttle.event(&event, 0).is_empty());
         }
+        assert_eq!(throttle.next_due(), None);
+    }
+
+    #[test]
+    fn keeps_nothing_while_disabled_and_starts_fresh() {
+        let mut throttle = Throttle::default();
+        throttle.step(Some(&crash("main", "one")), true, 0);
+        assert!(
+            throttle
+                .step(Some(&crash("main", "two")), false, 1_000)
+                .is_empty()
+        );
+        assert_eq!(throttle.next_due(), None);
+        assert!(
+            throttle
+                .step(Some(&crash("main", "three")), false, 2_000)
+                .is_empty()
+        );
+        assert_eq!(throttle.next_due(), None);
+
+        let notices = throttle.step(Some(&crash("main", "four")), true, 3_000);
+        assert_eq!(subtitles(&notices), ["acme-web crashed"]);
+        assert_eq!(notices[0].message, "four");
+        assert!(throttle.step(None, true, 3_000 + QUIET_MS).is_empty());
+    }
+
+    #[test]
+    fn a_quiet_period_ending_while_disabled_tells_nothing() {
+        let mut throttle = Throttle::default();
+        throttle.step(Some(&crash("main", "one")), true, 0);
+        throttle.step(Some(&crash("main", "two")), true, 1_000);
+        assert!(throttle.step(None, false, QUIET_MS).is_empty());
         assert_eq!(throttle.next_due(), None);
     }
 
