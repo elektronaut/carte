@@ -3730,7 +3730,7 @@ async fn a_paused_worker_keeps_the_app_from_idling_out() {
         "acme-web",
         "web: exec {fixture}\nworker: printf '(byebug) '; while read line; do echo \"echo: $line\"; done\n",
     );
-    setup.project("idle_timeout = \"1s\"\n");
+    setup.project("idle_timeout = \"2s\"\n");
     let handle = setup.start();
     handle.control(waiting("web", Action::Up)).await.unwrap();
     wait_for(&handle, "the worker to pause", |s| {
@@ -3750,6 +3750,16 @@ async fn a_paused_worker_keeps_the_app_from_idling_out() {
 
     let (_, terminal) = handle.attach(here("web"), None).await.unwrap();
     terminal.join(None, false).write(b"next\n").await.unwrap();
+    wait_for(&handle, "the worker to run on", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(
+        inst(&handle.snapshot()).state,
+        InstanceState::Ready,
+        "the idle timeout starts over once the prompt is answered"
+    );
     wait_for(&handle, "the app to idle out once answered", |s| {
         inst(s).state == InstanceState::Stopped
     })

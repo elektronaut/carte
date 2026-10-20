@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use carte_api::ExternalRequest;
+use carte_api::{ExternalRequest, ProcessState, Snapshot};
 use carte_core::kube::{self, KubeTarget};
 use carte_core::model::{InstanceKey, World};
 use carte_core::naming;
@@ -186,17 +186,42 @@ impl Router for SupervisorRouter {
                     }
                     Route::Error(page)
                 }
-                Err(_) => Route::Error(
-                    ErrorPage::new(
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        format!("{}@{} is still starting", key.app, key.stack.slug()),
-                        "It is taking a while to boot. This page will work once it is ready.",
-                    )
-                    .with_retry_after(Duration::from_secs(5)),
-                ),
+                Err(_) => Route::Error(still_starting(&self.supervisor.snapshot(), &key)),
             }
         })
     }
+}
+
+/// The page for a request that waited too long for its instance: why it isn't
+/// ready, and how to answer a debugger prompt that holds it up.
+fn still_starting(snapshot: &Snapshot, key: &InstanceKey) -> ErrorPage {
+    let label = format!("{}@{}", key.app, key.stack.slug());
+    let paused = snapshot
+        .projects
+        .iter()
+        .filter(|p| p.name == key.project)
+        .flat_map(|p| &p.stacks)
+        .filter(|s| s.name == key.stack.slug())
+        .flat_map(|s| &s.instances)
+        .filter(|i| i.app == key.app)
+        .flat_map(|i| &i.processes)
+        .find(|p| p.state == ProcessState::Paused && (p.http || !p.paths.is_empty()));
+    let page = match paused {
+        Some(process) => ErrorPage::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{label} is paused at a breakpoint"),
+            format!(
+                "Its {} process waits at a debugger prompt. Run `carte attach {label}/{}` to answer it; this page will work once it goes on.",
+                process.name, process.name
+            ),
+        ),
+        None => ErrorPage::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{label} is still starting"),
+            "It is taking a while to boot. This page will work once it is ready.",
+        ),
+    };
+    page.with_retry_after(Duration::from_secs(5))
 }
 
 impl SupervisorRouter {
@@ -531,5 +556,28 @@ mod tests {
         for host in ["evil.example", "test.example", "eviltest", "10.0.0.1"] {
             assert!(!is_local_host(&world, host), "{host}");
         }
+    }
+
+    #[test]
+    fn a_paused_web_process_explains_the_wait() {
+        let mut snapshot = crate::tui::fixtures::sample();
+        let key = InstanceKey {
+            project: "nova".into(),
+            app: "nova-billing".into(),
+            stack: carte_core::model::Stack::Main,
+        };
+        let page = still_starting(&snapshot, &key);
+        assert_eq!(page.title, "nova-billing@main is still starting");
+        let web = &mut snapshot.projects[0].stacks[0].instances[0].processes[0];
+        web.state = ProcessState::Paused;
+        let name = web.name.clone();
+        let page = still_starting(&snapshot, &key);
+        assert_eq!(page.title, "nova-billing@main is paused at a breakpoint");
+        assert!(
+            page.detail
+                .contains(&format!("carte attach nova-billing@main/{name}")),
+            "{}",
+            page.detail
+        );
     }
 }

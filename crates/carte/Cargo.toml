@@ -58,6 +58,7 @@ x509-parser.workspace = true
 futures-util.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 
