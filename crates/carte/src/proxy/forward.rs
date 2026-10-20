@@ -11,18 +11,22 @@ use http_body_util::{BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use hyper::ext::Protocol;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use super::body::{GuardedBody, ProxyBody, boxed};
 use super::cookies::strip_cookie_domains;
-use super::upstream::LoopbackConnector;
-use super::{ActivityGuard, ErrorPage, ListenerKind, Route, RouteRequest, Router, UpstreamError};
+use super::upstream::{DialConnector, LoopbackConnector};
+use super::{
+    ActivityGuard, Dialer, ErrorPage, ListenerKind, Route, RouteRequest, Router, UpstreamError,
+};
 
 pub(crate) struct Shared {
     pub(crate) router: Arc<dyn Router>,
     client: Client<LoopbackConnector, Incoming>,
+    dialers: DialConnector,
+    dialed: Client<DialConnector, Incoming>,
 }
 
 impl Shared {
@@ -30,8 +34,25 @@ impl Shared {
         let client = Client::builder(TokioExecutor::new())
             .set_host(false)
             .build(LoopbackConnector::default());
-        Self { router, client }
+        let dialers = DialConnector::default();
+        let dialed = Client::builder(TokioExecutor::new())
+            .set_host(false)
+            .pool_timer(TokioTimer::new())
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .build(dialers.clone());
+        Self {
+            router,
+            client,
+            dialers,
+            dialed,
+        }
     }
+}
+
+/// Where a request goes.
+enum Upstream<'a> {
+    Port(u16),
+    Dialed(&'a Dialer),
 }
 
 /// What the proxy knows about the connection a request arrived on.
@@ -108,7 +129,12 @@ pub(crate) async fn handle(
     Ok(match route {
         Route::Error(page) => render(&page, request.headers()),
         Route::Upstream { port, guard } => {
-            forward(&shared, &inbound, route_request, port, guard, request).await
+            let upstream = Upstream::Port(port);
+            forward(&shared, &inbound, route_request, upstream, guard, request).await
+        }
+        Route::Dialed { dialer, guard } => {
+            let upstream = Upstream::Dialed(&dialer);
+            forward(&shared, &inbound, route_request, upstream, guard, request).await
         }
         Route::File { path, guard } => {
             super::files::respond(&path, request.method(), request.headers(), guard).await
@@ -120,7 +146,7 @@ async fn forward(
     shared: &Shared,
     inbound: &Inbound,
     route_request: RouteRequest<'_>,
-    port: u16,
+    upstream: Upstream<'_>,
     mut guard: Box<dyn ActivityGuard>,
     mut request: Request<Incoming>,
 ) -> Response<ProxyBody> {
@@ -148,9 +174,18 @@ async fn forward(
     {
         request.headers_mut().insert(HOST, host);
     }
-    *request.uri_mut() = upstream_uri(port, request.uri());
+    let sent = match upstream {
+        Upstream::Port(port) => {
+            *request.uri_mut() = upstream_uri(port, request.uri());
+            shared.client.request(request)
+        }
+        Upstream::Dialed(dialer) => {
+            *request.uri_mut() = shared.dialers.uri(dialer, request.uri());
+            shared.dialed.request(request)
+        }
+    };
 
-    let mut response = match shared.client.request(request).await {
+    let mut response = match sent.await {
         Ok(response) => response,
         Err(error) => {
             let error = if error.is_connect() {
@@ -160,7 +195,10 @@ async fn forward(
             } else {
                 UpstreamError::Request(error_chain(&error))
             };
-            let page = shared.router.upstream_failed(route_request, port, &error);
+            let page = match upstream {
+                Upstream::Port(port) => shared.router.upstream_failed(route_request, port, &error),
+                Upstream::Dialed(dialer) => dialer.failed(&error),
+            };
             return render(&page, &request_headers);
         }
     };

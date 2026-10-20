@@ -72,10 +72,7 @@ impl Router for DaemonRouter {
         port: u16,
         error: &UpstreamError,
     ) -> ErrorPage {
-        match self.kube_target(&request) {
-            Some(_) => self.kube.upstream_failed(port, error),
-            None => self.supervisor.upstream_failed(request, port, error),
-        }
+        self.supervisor.upstream_failed(request, port, error)
     }
 }
 

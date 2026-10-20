@@ -6,7 +6,7 @@ mod forward;
 mod lookup;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -28,10 +28,13 @@ pub use cluster::{
     ApiError, Cluster, KubeCluster, LogLines, LogOptions, PodStream, Readable, read_each_namespace,
 };
 use forward::{Forward, Reporter};
+pub use kube::config::Kubeconfig;
 use lookup::PodTarget;
 pub use lookup::{ContainerInfo, EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
 
-use crate::proxy::{ActivityGuard, BoxFuture, ErrorPage, Route, UpstreamError};
+use crate::proxy::{
+    ActivityGuard, BoxFuture, Dial, Dialer, ErrorPage, Route, UpstreamError, UpstreamStream,
+};
 use crate::supervisor::Handle;
 
 /// How long a short hostname's namespace is remembered.
@@ -69,9 +72,16 @@ impl Key {
 
 /// Builds a client for a kube project; tests substitute a fake cluster.
 pub trait Connector: Send + Sync + 'static {
+    /// The env login plugins run with. Its `KUBECONFIG` names the kubeconfig files of
+    /// a project that names none.
+    fn env<'a>(&'a self, project: &'a KubeProject) -> BoxFuture<'a, BTreeMap<String, String>>;
+
+    /// A client for the project's context in `kubeconfig`.
     fn connect<'a>(
         &'a self,
         project: &'a KubeProject,
+        kubeconfig: Kubeconfig,
+        env: &'a BTreeMap<String, String>,
     ) -> BoxFuture<'a, Result<Arc<dyn Cluster>, ApiError>>;
 }
 
@@ -79,16 +89,23 @@ pub trait Connector: Send + Sync + 'static {
 pub struct KubeConnector;
 
 impl Connector for KubeConnector {
+    fn env<'a>(&'a self, project: &'a KubeProject) -> BoxFuture<'a, BTreeMap<String, String>> {
+        Box::pin(async move {
+            let kind = project.env_provider;
+            tokio::task::spawn_blocking(move || provider_env(kind))
+                .await
+                .unwrap_or_else(|_| crate::supervisor::base_env())
+        })
+    }
+
     fn connect<'a>(
         &'a self,
         project: &'a KubeProject,
+        kubeconfig: Kubeconfig,
+        env: &'a BTreeMap<String, String>,
     ) -> BoxFuture<'a, Result<Arc<dyn Cluster>, ApiError>> {
         Box::pin(async move {
-            let kind = project.env_provider;
-            let env = tokio::task::spawn_blocking(move || provider_env(kind))
-                .await
-                .unwrap_or_else(|_| crate::supervisor::base_env());
-            let cluster = KubeCluster::connect(project, &env).await?;
+            let cluster = KubeCluster::connect(project, kubeconfig, env).await?;
             Ok(Arc::new(cluster) as Arc<dyn Cluster>)
         })
     }
@@ -128,8 +145,11 @@ struct Inner {
 
 struct ClusterEntry {
     project: KubeProject,
-    /// When the kubeconfig changed last, as of the connect.
-    stamp: Option<SystemTime>,
+    env: BTreeMap<String, String>,
+    /// When each kubeconfig file changed last, as of the last read.
+    stamps: Vec<Option<SystemTime>>,
+    /// What the project's context resolved to.
+    context: [u8; 32],
     cluster: Arc<dyn Cluster>,
 }
 
@@ -152,7 +172,7 @@ struct Instance {
 
 struct Running {
     forward: Arc<Forward>,
-    port: u16,
+    dialer: Dialer,
 }
 
 impl Instance {
@@ -475,7 +495,7 @@ impl Kube {
                 .instances
                 .get(&key)
                 .and_then(|i| i.forward.as_ref())
-                .filter(|r| Arc::ptr_eq(&r.forward.cluster, &cluster))
+                .filter(|r| Arc::ptr_eq(&r.forward.cluster(), &cluster))
                 .map(|r| (r.forward.port.clone(), r.forward.target()));
             let (port, pod) = match running {
                 Some(found) => found,
@@ -547,44 +567,20 @@ impl Kube {
             .map(|key| key.label())
             .collect()
     }
-
-    /// The page for a forward the proxy couldn't use, with what went wrong last.
-    pub fn upstream_failed(&self, port: u16, error: &UpstreamError) -> ErrorPage {
-        let state = self.inner.state.lock().expect("kube state");
-        let found = state
-            .instances
-            .iter()
-            .find(|(_, i)| i.forward.as_ref().is_some_and(|r| r.port == port));
-        let (title, detail) = match found {
-            Some((key, instance)) => (
-                format!("{} didn't answer", key.service),
-                instance.last_error.clone().unwrap_or_else(|| match error {
-                    UpstreamError::Connect(err) => err.to_string(),
-                    UpstreamError::Request(err) | UpstreamError::NotHttp(err) => err.clone(),
-                }),
-            ),
-            None => (
-                "The forward is gone".to_string(),
-                "It stopped while the request was on its way; reload to open it again.".into(),
-            ),
-        };
-        ErrorPage::new(StatusCode::BAD_GATEWAY, title, detail)
-            .with_retry_after(Duration::from_secs(2))
-    }
 }
 
 impl Inner {
     async fn route(self: Arc<Self>, target: KubeTarget) -> Result<Route, ErrorPage> {
         let key = self.clone().start_target(target).await?;
-        let port = self.acquire(&key).ok_or_else(|| {
+        let dialer = self.acquire(&key).ok_or_else(|| {
             ErrorPage::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "The forward stopped",
                 "It stopped while the request was on its way; reload to open it again.",
             )
         })?;
-        Ok(Route::Upstream {
-            port,
+        Ok(Route::Dialed {
+            dialer,
             guard: Box::new(Guard { inner: self, key }),
         })
     }
@@ -592,8 +588,7 @@ impl Inner {
     /// Resolves the target and makes sure its forward runs.
     async fn start_target(self: Arc<Self>, target: KubeTarget) -> Result<Key, ErrorPage> {
         let (project, cluster, key) = self.resolve(&target).await?;
-        self.stop_if_stale(&key, &cluster);
-        if self.running_port(&key).is_none() {
+        if !self.running_with(&key, &cluster) {
             self.start(&project, cluster, &key).await?;
         }
         Ok(key)
@@ -708,49 +703,34 @@ impl Inner {
         self.changes.send_modify(|n| *n += 1);
     }
 
-    fn running_port(&self, key: &Key) -> Option<u16> {
+    /// Whether the key's forward runs; when it does, its new connections use
+    /// `cluster`, which replaced the client of a changed project or kubeconfig.
+    fn running_with(&self, key: &Key, cluster: &Arc<dyn Cluster>) -> bool {
         let state = self.state.lock().expect("kube state");
-        state.instances.get(key)?.forward.as_ref().map(|r| r.port)
+        let Some(running) = state.instances.get(key).and_then(|i| i.forward.as_ref()) else {
+            return false;
+        };
+        if !Arc::ptr_eq(&running.forward.cluster(), cluster) {
+            running.forward.set_cluster(cluster.clone());
+        }
+        true
     }
 
-    /// The running forward's port, counting a request on it so the sweep leaves it be.
-    fn acquire(&self, key: &Key) -> Option<u16> {
+    /// The running forward's dialer, counting a request on it so the sweep leaves it
+    /// be.
+    fn acquire(&self, key: &Key) -> Option<Dialer> {
         let mut state = self.state.lock().expect("kube state");
         let instance = state.instances.get_mut(key)?;
-        let port = instance.forward.as_ref()?.port;
+        let dialer = instance.forward.as_ref()?.dialer.clone();
         instance.active += 1;
         instance.last_active = Instant::now();
-        Some(port)
+        Some(dialer)
     }
 
-    /// Stops the forward when it still talks to a client the project replaced, since
-    /// its context, kubeconfig or settings changed.
-    fn stop_if_stale(&self, key: &Key, cluster: &Arc<dyn Cluster>) {
-        let stale = {
-            let mut state = self.state.lock().expect("kube state");
-            let Some(instance) = state.instances.get_mut(key) else {
-                return;
-            };
-            match &instance.forward {
-                Some(running) if !Arc::ptr_eq(&running.forward.cluster, cluster) => {
-                    instance.forward.take()
-                }
-                _ => None,
-            }
-        };
-        if let Some(running) = stale {
-            running.forward.cancel.cancel();
-            self.supervisor.event(
-                EventKind::Stopped,
-                "the project changed",
-                vec![key.subject()],
-            );
-        }
-    }
-
-    /// The project's client, connecting again when its settings or kubeconfig changed.
+    /// The project's client. When a kubeconfig file changed, the provider env is
+    /// fetched and the kubeconfig read again, and a new client built only when what
+    /// the project's context resolves to, with its login plugin's env, changed.
     async fn cluster(&self, project: &KubeProject) -> Result<Arc<dyn Cluster>, ErrorPage> {
-        let stamp = kubeconfig_stamp(project);
         let slot = self
             .clusters
             .lock()
@@ -761,25 +741,49 @@ impl Inner {
         let mut slot = slot.lock().await;
         if let Some(entry) = slot.as_ref()
             && entry.project == *project
-            && entry.stamp == stamp
+            && kubeconfig_stamps(project, &entry.env) == entry.stamps
         {
             return Ok(entry.cluster.clone());
         }
-        match self.connector.connect(project).await {
-            Ok(cluster) => {
-                *slot = Some(ClusterEntry {
-                    project: project.clone(),
-                    stamp,
-                    cluster: cluster.clone(),
-                });
-                Ok(cluster)
-            }
+        let env = self.connector.env(project).await;
+        match self.reconnect(project, env, &mut slot).await {
+            Ok(cluster) => Ok(cluster),
             Err(err) => {
                 *slot = None;
                 self.project_failed(&project.name, &err);
                 Err(api_page(&err))
             }
         }
+    }
+
+    /// Reads the kubeconfig and keeps the slot's client while what the context
+    /// resolves to, with its login plugin's env, is the same, else connects again.
+    async fn reconnect(
+        &self,
+        project: &KubeProject,
+        env: BTreeMap<String, String>,
+        slot: &mut Option<ClusterEntry>,
+    ) -> Result<Arc<dyn Cluster>, ApiError> {
+        let stamps = kubeconfig_stamps(project, &env);
+        let kubeconfig = cluster::read_kubeconfig(project, &env)?;
+        let context = cluster::context_digest(&kubeconfig, &project.context, &env)?;
+        if let Some(entry) = slot.as_mut()
+            && entry.project == *project
+            && entry.context == context
+        {
+            entry.env = env;
+            entry.stamps = stamps;
+            return Ok(entry.cluster.clone());
+        }
+        let cluster = self.connector.connect(project, kubeconfig, &env).await?;
+        *slot = Some(ClusterEntry {
+            project: project.clone(),
+            env,
+            stamps,
+            context,
+            cluster: cluster.clone(),
+        });
+        Ok(cluster)
     }
 
     /// The target's namespace; for a short hostname, the one namespace whose
@@ -894,7 +898,7 @@ impl Inner {
         project: &KubeProject,
         cluster: Arc<dyn Cluster>,
         key: &Key,
-    ) -> Result<u16, ErrorPage> {
+    ) -> Result<(), ErrorPage> {
         let result = self.prepare(project, cluster, key).await;
         let forward = match result {
             Ok(forward) => forward,
@@ -905,31 +909,24 @@ impl Inner {
             }
         };
         let target = forward.target();
-        let port = match forward.clone().listen().await {
-            Ok(port) => port,
-            Err(err) => {
-                let message = format!("couldn't listen on loopback: {err}");
-                self.failed(key, message.clone());
-                return Err(ErrorPage::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Couldn't open the forward",
-                    message,
-                ));
-            }
-        };
+        let dialer = Dialer::new(Arc::new(ForwardDial {
+            forward: forward.clone(),
+            inner: Arc::downgrade(self),
+            key: key.clone(),
+        }));
         {
             let mut state = self.state.lock().expect("kube state");
             let instance = state
                 .instances
                 .entry(key.clone())
                 .or_insert_with(Instance::new);
-            if let Some(running) = &instance.forward {
+            if instance.forward.is_some() {
                 forward.cancel.cancel();
-                return Ok(running.port);
+                return Ok(());
             }
             instance.forward = Some(Running {
                 forward: forward.clone(),
-                port,
+                dialer,
             });
             instance.last_active = Instant::now();
             instance.last_error = None;
@@ -940,7 +937,7 @@ impl Inner {
             vec![key.subject()],
         );
         self.changed();
-        Ok(port)
+        Ok(())
     }
 
     async fn prepare(
@@ -951,7 +948,7 @@ impl Inner {
     ) -> Result<Arc<Forward>, ErrorPage> {
         let (port, target) = self.lookup_pod(project, &*cluster, key).await?;
         Ok(Arc::new(Forward {
-            cluster,
+            cluster: Mutex::new(cluster),
             namespace: key.namespace.clone(),
             service: key.service.clone(),
             port,
@@ -1069,8 +1066,8 @@ impl Inner {
         }
     }
 
-    /// Stops forwards nobody used for the idle timeout, and those of projects that
-    /// are gone.
+    /// Stops forwards nobody used for the idle timeout, those of disabled Services,
+    /// and those of projects that are gone.
     fn sweep(&self) {
         let world = self.supervisor.world();
         let mut stopped = Vec::new();
@@ -1083,6 +1080,12 @@ impl Inner {
                     }
                     return false;
                 };
+                if project.policy(&key.service) == Policy::Disabled
+                    && let Some(running) = instance.forward.take()
+                {
+                    running.forward.cancel.cancel();
+                    stopped.push((key.clone(), "disabled".to_string()));
+                }
                 let timeout = project.idle_timeout.unwrap_or(world.machine.idle_timeout);
                 let configured = project
                     .service(&key.service)
@@ -1100,7 +1103,10 @@ impl Inner {
                     if let Some(running) = instance.forward.take() {
                         running.forward.cancel.cancel();
                     }
-                    stopped.push((key.clone(), timeout));
+                    stopped.push((
+                        key.clone(),
+                        format!("idle for {}", duration::format(timeout)),
+                    ));
                 }
                 true
             });
@@ -1116,12 +1122,9 @@ impl Inner {
         if running || !stopped.is_empty() {
             self.changed();
         }
-        for (key, timeout) in stopped {
-            self.supervisor.event(
-                EventKind::Stopped,
-                format!("idle for {}", duration::format(timeout)),
-                vec![key.subject()],
-            );
+        for (key, why) in stopped {
+            self.supervisor
+                .event(EventKind::Stopped, why, vec![key.subject()]);
         }
     }
 }
@@ -1313,13 +1316,15 @@ async fn each_namespace(
         .map(|readable| readable.found)
 }
 
-/// When the kubeconfig carte reads by default last changed.
-fn kubeconfig_stamp(project: &KubeProject) -> Option<SystemTime> {
-    let path = match &project.kubeconfig {
-        Some(path) => path.clone(),
-        None => Path::new(&std::env::var_os("HOME")?).join(".kube/config"),
-    };
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+/// When each kubeconfig file of the project last changed.
+fn kubeconfig_stamps(
+    project: &KubeProject,
+    env: &BTreeMap<String, String>,
+) -> Vec<Option<SystemTime>> {
+    cluster::kubeconfig_paths(project, env)
+        .into_iter()
+        .map(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+        .collect()
 }
 
 fn api_page(err: &ApiError) -> ErrorPage {
@@ -1366,6 +1371,47 @@ impl Reporter for InstanceReporter {
                 .supervisor
                 .event(EventKind::Failed, message, vec![self.key.subject()]);
         }
+    }
+}
+
+/// Opens connections to a Service's pod for the proxy.
+struct ForwardDial {
+    forward: Arc<Forward>,
+    inner: Weak<Inner>,
+    key: Key,
+}
+
+impl Dial for ForwardDial {
+    fn dial(&self) -> BoxFuture<'_, std::io::Result<UpstreamStream>> {
+        Box::pin(async move {
+            let stream = self.forward.dial().await?;
+            Ok(Box::new(stream) as UpstreamStream)
+        })
+    }
+
+    /// The page for a request the forward couldn't serve, with what went wrong last.
+    fn failed(&self, error: &UpstreamError) -> ErrorPage {
+        let last_error = self.inner.upgrade().and_then(|inner| {
+            let state = inner.state.lock().expect("kube state");
+            let instance = state.instances.get(&self.key)?;
+            let running = instance.forward.as_ref()?;
+            Arc::ptr_eq(&running.forward, &self.forward).then(|| instance.last_error.clone())
+        });
+        let (title, detail) = match last_error {
+            Some(last_error) => (
+                format!("{} didn't answer", self.key.service),
+                last_error.unwrap_or_else(|| match error {
+                    UpstreamError::Connect(err) => err.to_string(),
+                    UpstreamError::Request(err) | UpstreamError::NotHttp(err) => err.clone(),
+                }),
+            ),
+            None => (
+                "The forward is gone".to_string(),
+                "It stopped while the request was on its way; reload to open it again.".into(),
+            ),
+        };
+        ErrorPage::new(StatusCode::BAD_GATEWAY, title, detail)
+            .with_retry_after(Duration::from_secs(2))
     }
 }
 

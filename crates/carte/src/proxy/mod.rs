@@ -1,6 +1,7 @@
 //! The reverse proxy: accepts HTTP(S) on loopback (HTTP/2 over TLS when the
 //! client offers it), asks a [`Router`] where each request goes, and forwards it
-//! as HTTP/1.1 to an app on `127.0.0.1` or `::1`, including WebSocket upgrades.
+//! as HTTP/1.1 to an app on `127.0.0.1` or `::1`, or over a connection a [`Dialer`]
+//! opens, including WebSocket upgrades.
 
 mod body;
 mod cookies;
@@ -18,7 +19,8 @@ use std::sync::Arc;
 pub use error_page::ErrorPage;
 pub use listener::{Listener, ListenerOptions, is_loopback};
 pub use router::{
-    ActivityGuard, BoxFuture, ListenerKind, Route, RouteRequest, Router, UpstreamError,
+    ActivityGuard, BoxFuture, Dial, Dialer, ListenerKind, Route, RouteRequest, Router,
+    UpstreamError, UpstreamIo, UpstreamStream,
 };
 
 /// A router and a pool of upstream connections, shared by any number of

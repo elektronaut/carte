@@ -1,16 +1,17 @@
 //! Kube projects against a fake cluster whose pods are local HTTP servers.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use carte::kube::{
-    ApiError, Cluster, Connector, ContainerInfo, EndpointInfo, Kube, LogLines, LogOptions,
-    PodStream, PortInfo, Readable, ServiceInfo, SliceInfo, read_each_namespace,
+    ApiError, Cluster, Connector, ContainerInfo, EndpointInfo, Kube, Kubeconfig, LogLines,
+    LogOptions, PodStream, PortInfo, Readable, ServiceInfo, SliceInfo, read_each_namespace,
 };
 use carte::paths::Paths;
 use carte::process::Spawner;
-use carte::proxy::{BoxFuture, Route};
+use carte::proxy::{BoxFuture, Dialer, Route};
 use carte::supervisor::{self, Handle, Options};
 use carte_api::{Event, EventKind};
 use carte_core::discovery;
@@ -39,14 +40,24 @@ struct FakeState {
     /// Each pod's log lines.
     logs: HashMap<String, Vec<String>>,
     log_requests: Vec<LogOptions>,
+    /// The provider env the connector hands out.
+    env: BTreeMap<String, String>,
+    /// How many clients the connector built.
+    clients: usize,
+    /// Which client opened each port-forward stream.
+    connected_by: Vec<usize>,
 }
 
 #[derive(Clone, Default)]
-struct FakeCluster(Arc<Mutex<FakeState>>);
+struct FakeCluster {
+    state: Arc<Mutex<FakeState>>,
+    /// Which client of the connector this is.
+    client: usize,
+}
 
 impl FakeCluster {
     fn state(&self) -> std::sync::MutexGuard<'_, FakeState> {
-        self.0.lock().unwrap()
+        self.state.lock().unwrap()
     }
 
     fn check_auth(&self) -> Result<(), ApiError> {
@@ -59,7 +70,8 @@ impl FakeCluster {
         Ok(())
     }
 
-    /// A Service with one `http` port whose pods serve their own name.
+    /// A Service with one `http` port whose pods serve their own name, or echo what
+    /// they get when it isn't an HTTP request.
     async fn add_service(&self, namespace: &str, name: &str, pods: &[&str]) {
         let mut endpoints = Vec::new();
         for pod in pods {
@@ -74,7 +86,16 @@ impl FakeCluster {
                     let body = body.clone();
                     tokio::spawn(async move {
                         let mut buf = [0u8; 1024];
-                        let _ = stream.read(&mut buf).await;
+                        let Ok(n) = stream.read(&mut buf).await else {
+                            return;
+                        };
+                        if !buf[..n].starts_with(b"GET ") {
+                            let mut n = n;
+                            while n > 0 && stream.write_all(&buf[..n]).await.is_ok() {
+                                n = stream.read(&mut buf).await.unwrap_or(0);
+                            }
+                            return;
+                        }
                         let response = format!(
                             "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                             body.len()
@@ -275,6 +296,7 @@ impl Cluster for FakeCluster {
             let port = {
                 let mut state = self.state();
                 state.connects += 1;
+                state.connected_by.push(self.client);
                 if state.gone.contains(pod) {
                     return Err(ApiError::NotFound(format!("pods \"{pod}\" not found")));
                 }
@@ -289,16 +311,54 @@ impl Cluster for FakeCluster {
 struct FakeConnector(FakeCluster);
 
 impl Connector for FakeConnector {
+    fn env<'a>(&'a self, _project: &'a KubeProject) -> BoxFuture<'a, BTreeMap<String, String>> {
+        Box::pin(async move { self.0.state().env.clone() })
+    }
+
     fn connect<'a>(
         &'a self,
         _project: &'a KubeProject,
+        _kubeconfig: Kubeconfig,
+        _env: &'a BTreeMap<String, String>,
     ) -> BoxFuture<'a, Result<Arc<dyn Cluster>, ApiError>> {
-        Box::pin(async move { Ok(Arc::new(self.0.clone()) as Arc<dyn Cluster>) })
+        Box::pin(async move {
+            let client = {
+                let mut state = self.0.state();
+                state.clients += 1;
+                state.clients
+            };
+            let cluster = FakeCluster {
+                state: self.0.state.clone(),
+                client,
+            };
+            Ok(Arc::new(cluster) as Arc<dyn Cluster>)
+        })
+    }
+}
+
+/// A kubeconfig with the contexts `prod` and `other`.
+fn kubeconfig(current: &str, server: &str, token: &str) -> String {
+    format!(
+        "apiVersion: v1\nkind: Config\ncurrent-context: {current}\nclusters:\n- name: prod\n  cluster:\n    server: {server}\n- name: other\n  cluster:\n    server: https://other.example:6443\ncontexts:\n- name: prod\n  context:\n    cluster: prod\n    user: prod\n- name: other\n  context:\n    cluster: other\n    user: prod\nusers:\n- name: prod\n  user:\n    token: {token}\n"
+    )
+}
+
+const SERVER: &str = "https://prod.example:6443";
+
+/// Writes the file, and makes sure its modification time moves on.
+fn rewrite(path: &Path, text: &str) {
+    let before = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    std::fs::write(path, text).unwrap();
+    if let Some(before) = before {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(before + Duration::from_secs(1)).unwrap();
     }
 }
 
 struct Setup {
     _dir: tempfile::TempDir,
+    /// The kubeconfig in the provider env's home.
+    kubeconfig: PathBuf,
     paths: Paths,
     handle: Handle,
     kube: Kube,
@@ -319,7 +379,15 @@ impl Setup {
             Spawner::new(env!("CARGO_BIN_EXE_carte")),
             Options::new(&paths),
         );
+        let home = dir.path().join("home");
+        let kubeconfig = home.join(".kube/config");
+        std::fs::create_dir_all(kubeconfig.parent().unwrap()).unwrap();
+        std::fs::write(&kubeconfig, self::kubeconfig("prod", SERVER, "one")).unwrap();
         let cluster = FakeCluster::default();
+        cluster
+            .state()
+            .env
+            .insert("HOME".into(), home.to_string_lossy().into_owned());
         let kube = Kube::new(
             handle.clone(),
             Arc::new(FakeConnector(cluster.clone())),
@@ -327,6 +395,7 @@ impl Setup {
         );
         Setup {
             _dir: dir,
+            kubeconfig,
             paths: paths.clone(),
             handle,
             kube,
@@ -348,17 +417,18 @@ fn target(service: &str, namespace: Option<&str>) -> KubeTarget {
     }
 }
 
-/// The local port of a route, or the error page's status and text.
-fn upstream(route: Route) -> Result<u16, (StatusCode, String)> {
+/// The dialer of a route, or the error page's status and text.
+fn upstream(route: Route) -> Result<Dialer, (StatusCode, String)> {
     match route {
-        Route::Upstream { port, .. } => Ok(port),
+        Route::Dialed { dialer, .. } => Ok(dialer),
         Route::Error(page) => Err((page.status, format!("{}\n{}", page.title, page.detail))),
+        Route::Upstream { .. } => panic!("a kube route has no port"),
         Route::File { .. } => panic!("a kube route never serves files"),
     }
 }
 
-async fn get(port: u16) -> String {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+async fn get(dialer: &Dialer) -> String {
+    let mut stream = dialer.dial().await.unwrap();
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: grafana.prod.localhost\r\n\r\n")
         .await
@@ -380,9 +450,9 @@ async fn forwards_a_short_hostname_to_the_one_namespace_with_the_service() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let port = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
-    assert_eq!(get(port).await, "grafana-a");
-    assert_eq!(get(port).await, "grafana-a");
+    let dialer = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
+    assert_eq!(get(&dialer).await, "grafana-a");
+    assert_eq!(get(&dialer).await, "grafana-a");
     let again = upstream(
         setup
             .kube
@@ -390,7 +460,7 @@ async fn forwards_a_short_hostname_to_the_one_namespace_with_the_service() {
             .await,
     )
     .unwrap();
-    assert_eq!(again, port, "one forward per Service");
+    assert_eq!(again, dialer, "one forward per Service");
     assert_eq!(setup.cluster.state().connects, 2, "a stream per connection");
     let events = setup.events().await;
     assert!(
@@ -410,8 +480,8 @@ async fn an_ambiguous_short_hostname_lists_the_namespaces() {
     assert_eq!(status, StatusCode::MULTIPLE_CHOICES);
     assert!(text.contains("https://web.blue.prod.localhost"), "{text}");
     assert!(text.contains("https://web.green.prod.localhost"), "{text}");
-    let port = upstream(setup.kube.route(target("web", Some("green"))).await).unwrap();
-    assert_eq!(get(port).await, "web-b");
+    let dialer = upstream(setup.kube.route(target("web", Some("green"))).await).unwrap();
+    assert_eq!(get(&dialer).await, "web-b");
 }
 
 #[tokio::test]
@@ -421,14 +491,14 @@ async fn a_replaced_pod_is_followed() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a", "grafana-b"])
         .await;
-    let port = upstream(
+    let dialer = upstream(
         setup
             .kube
             .route(target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
-    assert_eq!(get(port).await, "grafana-a");
+    assert_eq!(get(&dialer).await, "grafana-a");
     {
         let mut state = setup.cluster.state();
         state.gone.insert("grafana-a".into());
@@ -438,7 +508,7 @@ async fn a_replaced_pod_is_followed() {
             .unwrap();
         slices[0].endpoints.remove(0);
     }
-    assert_eq!(get(port).await, "grafana-b");
+    assert_eq!(get(&dialer).await, "grafana-b");
     let events = setup.events().await;
     assert!(
         events.iter().any(|e| e.kind == EventKind::Restarted
@@ -499,8 +569,8 @@ async fn idle_forwards_stop() {
         .kube
         .route(target("grafana", Some("monitoring")))
         .await;
-    let port = upstream(route).unwrap();
-    assert_eq!(get(port).await, "grafana-a");
+    let dialer = upstream(route).unwrap();
+    assert_eq!(get(&dialer).await, "grafana-a");
     let mut stopped = false;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -515,8 +585,8 @@ async fn idle_forwards_stop() {
         }
     }
     assert!(stopped, "{:?}", setup.events().await);
-    assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
-    let port = upstream(
+    assert!(dialer.dial().await.is_err());
+    let dialer = upstream(
         setup
             .kube
             .route(target("grafana", Some("monitoring")))
@@ -524,7 +594,7 @@ async fn idle_forwards_stop() {
     )
     .unwrap();
     assert_eq!(
-        get(port).await,
+        get(&dialer).await,
         "grafana-a",
         "the next request opens it again"
     );
@@ -705,8 +775,8 @@ async fn a_short_hostname_skips_namespaces_that_refuse() {
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
     setup.cluster.state().forbidden.insert("logging".into());
-    let port = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
-    assert_eq!(get(port).await, "grafana-a");
+    let dialer = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
+    assert_eq!(get(&dialer).await, "grafana-a");
 }
 
 #[tokio::test]
@@ -930,14 +1000,14 @@ async fn a_connection_left_open_between_requests_doesnt_keep_a_forward() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let port = upstream(
+    let dialer = upstream(
         setup
             .kube
             .route(target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
-    let pooled = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut pooled = dialer.dial().await.unwrap();
     let mut stopped = false;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -952,21 +1022,62 @@ async fn a_connection_left_open_between_requests_doesnt_keep_a_forward() {
         }
     }
     assert!(stopped, "{:?}", setup.events().await);
-    drop(pooled);
+    let mut buf = [0u8; 8];
+    assert_eq!(
+        pooled.read(&mut buf).await.unwrap(),
+        0,
+        "stopping ends the connection"
+    );
+}
+
+/// Sends `text` on the connection and reads it back.
+async fn echo(stream: &mut carte::proxy::UpstreamStream, text: &str) -> String {
+    stream.write_all(text.as_bytes()).await.unwrap();
+    let mut buf = vec![0u8; text.len()];
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    String::from_utf8(buf).unwrap()
 }
 
 #[tokio::test]
-async fn a_changed_project_restarts_its_forwards() {
+async fn a_route_reaches_its_forward_in_process() {
     let setup = Setup::new(PROJECT);
     setup
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let first = setup
+    let route = setup
         .kube
         .route(target("grafana", Some("monitoring")))
         .await;
-    let first = upstream(first).unwrap();
+    assert!(
+        matches!(route, Route::Dialed { .. }),
+        "a forward has no port to send requests to"
+    );
+    let dialer = upstream(route).unwrap();
+    let mut open = dialer.dial().await.unwrap();
+    assert_eq!(echo(&mut open, "ping").await, "ping");
+    assert_eq!(setup.cluster.state().connected_by, vec![1]);
+}
+
+#[tokio::test]
+async fn a_changed_project_keeps_its_forwards_and_connections() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let first = upstream(
+        setup
+            .kube
+            .route(target("grafana", Some("monitoring")))
+            .await,
+    )
+    .unwrap();
+    let mut open = first.dial().await.unwrap();
+    assert_eq!(echo(&mut open, "one").await, "one");
     std::fs::write(
         setup.paths.project_file("prod"),
         "kube = { context = \"other\" }\nidle_timeout = \"1s\"\n",
@@ -975,29 +1086,185 @@ async fn a_changed_project_restarts_its_forwards() {
     setup
         .handle
         .reload(discovery::load_world(&setup.paths.config_dir));
-    let mut second = first;
     for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        second = upstream(
-            setup
-                .kube
-                .route(target("grafana", Some("monitoring")))
-                .await,
-        )
-        .unwrap();
-        if second != first {
+        if setup.handle.world().kube_projects[0].context == "other" {
             break;
         }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_ne!(second, first, "a new forward for the new context");
+    let second = upstream(
+        setup
+            .kube
+            .route(target("grafana", Some("monitoring")))
+            .await,
+    )
+    .unwrap();
+    assert_eq!(second, first, "the same forward");
+    assert_eq!(
+        setup.cluster.state().clients,
+        2,
+        "a client for the new context"
+    );
+    assert_eq!(get(&second).await, "grafana-a");
+    assert_eq!(setup.cluster.state().connected_by, vec![1, 2]);
+    assert_eq!(echo(&mut open, "two").await, "two", "the open one goes on");
     assert!(
         setup
             .events()
             .await
             .iter()
-            .any(|e| e.kind == EventKind::Stopped && e.message == "the project changed")
+            .all(|e| e.kind != EventKind::Stopped)
     );
 }
+
+#[tokio::test]
+async fn another_current_context_keeps_the_client() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let first = upstream(route().await).unwrap();
+    let mut open = first.dial().await.unwrap();
+    assert_eq!(echo(&mut open, "one").await, "one");
+    setup
+        .cluster
+        .state()
+        .env
+        .insert("DIRENV_DIFF".into(), "changes on every fetch".into());
+    rewrite(&setup.kubeconfig, &kubeconfig("other", SERVER, "one"));
+    let second = upstream(route().await).unwrap();
+    assert_eq!(second, first);
+    assert_eq!(
+        setup.cluster.state().clients,
+        1,
+        "nor does the env without a login plugin"
+    );
+    assert_eq!(echo(&mut open, "two").await, "two");
+    assert_eq!(get(&second).await, "grafana-a");
+    assert_eq!(setup.cluster.state().connected_by, vec![1, 1]);
+}
+
+#[tokio::test]
+async fn a_changed_server_or_user_gives_new_connections_a_new_client() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let dialer = upstream(route().await).unwrap();
+    let mut open = dialer.dial().await.unwrap();
+    assert_eq!(echo(&mut open, "one").await, "one");
+
+    rewrite(
+        &setup.kubeconfig,
+        &kubeconfig("prod", "https://new.example:6443", "one"),
+    );
+    assert_eq!(upstream(route().await).unwrap(), dialer);
+    assert_eq!(setup.cluster.state().clients, 2);
+    assert_eq!(get(&dialer).await, "grafana-a");
+    assert_eq!(echo(&mut open, "two").await, "two");
+
+    rewrite(
+        &setup.kubeconfig,
+        &kubeconfig("prod", "https://new.example:6443", "two"),
+    );
+    assert_eq!(upstream(route().await).unwrap(), dialer);
+    assert_eq!(setup.cluster.state().clients, 3);
+    assert_eq!(get(&dialer).await, "grafana-a");
+    assert_eq!(echo(&mut open, "three").await, "three");
+    assert_eq!(setup.cluster.state().connected_by, vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn kubeconfig_files_from_the_provider_env_are_watched() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let dir = setup.kubeconfig.parent().unwrap();
+    let first = dir.join("first");
+    let second = dir.join("second");
+    std::fs::write(&first, "apiVersion: v1\nkind: Config\n").unwrap();
+    std::fs::write(&second, kubeconfig("prod", SERVER, "two")).unwrap();
+    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    upstream(route().await).unwrap();
+    let list = std::env::join_paths([&first, &second]).unwrap();
+    setup
+        .cluster
+        .state()
+        .env
+        .insert("KUBECONFIG".into(), list.to_string_lossy().into_owned());
+    upstream(route().await).unwrap();
+    assert_eq!(
+        setup.cluster.state().clients,
+        1,
+        "the env is fetched again when a kubeconfig file changes"
+    );
+    rewrite(&setup.kubeconfig, &kubeconfig("prod", SERVER, "one"));
+    upstream(route().await).unwrap();
+    assert_eq!(
+        setup.cluster.state().clients,
+        2,
+        "the files the new env names have another user"
+    );
+    rewrite(&setup.kubeconfig, &kubeconfig("prod", SERVER, "ignored"));
+    upstream(route().await).unwrap();
+    assert_eq!(
+        setup.cluster.state().clients,
+        2,
+        "~/.kube/config isn't read"
+    );
+    rewrite(&second, &kubeconfig("prod", SERVER, "three"));
+    upstream(route().await).unwrap();
+    assert_eq!(setup.cluster.state().clients, 3);
+}
+
+#[tokio::test]
+async fn disabling_a_service_stops_its_forward() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let dialer = upstream(
+        setup
+            .kube
+            .route(target("grafana", Some("monitoring")))
+            .await,
+    )
+    .unwrap();
+    let mut open = dialer.dial().await.unwrap();
+    assert_eq!(echo(&mut open, "one").await, "one");
+    std::fs::write(
+        setup.paths.project_file("prod"),
+        format!("{PROJECT}[apps.grafana]\npolicy = \"disabled\"\n"),
+    )
+    .unwrap();
+    setup
+        .handle
+        .reload(discovery::load_world(&setup.paths.config_dir));
+    let mut stopped = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if setup
+            .events()
+            .await
+            .iter()
+            .any(|e| e.kind == EventKind::Stopped && e.message == "disabled")
+        {
+            stopped = true;
+            break;
+        }
+    }
+    assert!(stopped, "{:?}", setup.events().await);
+    let mut buf = [0u8; 8];
+    assert_eq!(open.read(&mut buf).await.unwrap(), 0, "the connection ends");
+}
+
 #[tokio::test]
 async fn failed_lookups_are_forgotten_after_the_idle_timeout() {
     let setup = Setup::new(PROJECT);

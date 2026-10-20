@@ -1,16 +1,14 @@
-//! A loopback listener per Service: every connection to it opens its own port-forward
-//! stream to the pod, so nothing long-lived breaks when the laptop sleeps or a pod is
-//! replaced.
+//! A forward per Service: every connection the proxy opens to it gets its own
+//! port-forward stream to the pod, so nothing long-lived breaks when the laptop sleeps
+//! or a pod is replaced.
 
-use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use carte_api::EventKind;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
-use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::DuplexStream;
 use tokio_util::sync::CancellationToken;
 
 use super::cluster::{ApiError, Cluster, PodStream};
@@ -26,7 +24,7 @@ pub trait Reporter: Send + Sync + 'static {
 
 /// Forwards one Service's connections to a pod behind it.
 pub struct Forward {
-    pub cluster: Arc<dyn Cluster>,
+    pub cluster: Mutex<Arc<dyn Cluster>>,
     pub namespace: String,
     pub service: String,
     pub port: PortInfo,
@@ -40,42 +38,44 @@ impl Forward {
         self.target.lock().expect("target lock").clone()
     }
 
-    /// Binds a loopback port and serves it until cancelled.
-    pub async fn listen(self: Arc<Self>) -> std::io::Result<u16> {
-        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).await?;
-        let port = listener.local_addr()?.port();
-        tokio::spawn(async move {
-            loop {
-                let accepted = tokio::select! {
-                    _ = self.cancel.cancelled() => return,
-                    accepted = listener.accept() => accepted,
-                };
-                let Ok((stream, _)) = accepted else {
-                    continue;
-                };
-                let forward = self.clone();
-                tokio::spawn(async move {
-                    tokio::select! {
-                        _ = forward.cancel.cancelled() => {}
-                        _ = forward.serve(stream) => {}
-                    }
-                });
-            }
-        });
-        Ok(port)
+    /// The client new connections use.
+    pub fn cluster(&self) -> Arc<dyn Cluster> {
+        self.cluster.lock().expect("cluster lock").clone()
     }
 
-    async fn serve(&self, mut local: TcpStream) {
-        let mut pod = match self.open().await {
+    /// Opens new connections with `cluster` from now on; open ones keep theirs.
+    pub fn set_cluster(&self, cluster: Arc<dyn Cluster>) {
+        *self.cluster.lock().expect("cluster lock") = cluster;
+    }
+
+    /// A connection to the pod over a port-forward stream of its own, which ends when
+    /// the forward stops.
+    pub async fn dial(&self) -> std::io::Result<DuplexStream> {
+        let opened = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => {
+                return Err(std::io::Error::other("the forward stopped"));
+            }
+            opened = self.open() => opened,
+        };
+        let mut pod = match opened {
             Ok(pod) => pod,
             Err(err) => {
-                self.reporter.error(Some(err.summary()));
-                let _ = local.shutdown().await;
-                return;
+                let summary = err.summary();
+                self.reporter.error(Some(summary.clone()));
+                return Err(std::io::Error::other(summary));
             }
         };
         self.reporter.error(None);
-        let _ = tokio::io::copy_bidirectional(&mut local, &mut pod).await;
+        let (local, mut remote) = tokio::io::duplex(64 * 1024);
+        let cancel = self.cancel.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = tokio::io::copy_bidirectional(&mut remote, &mut pod) => {}
+            }
+        });
+        Ok(local)
     }
 
     /// A stream to the current pod; when that fails, to another ready pod.
@@ -96,7 +96,7 @@ impl Forward {
     pub async fn refresh(&self) -> Result<PodTarget, ApiError> {
         let current = self.target();
         let slices = self
-            .cluster
+            .cluster()
             .endpoint_slices(&self.namespace, &self.service)
             .await?;
         let next = lookup::choose_pod(&self.port, &slices, Some(&current.pod))
@@ -113,7 +113,7 @@ impl Forward {
 
     async fn connect(&self, target: &PodTarget) -> Result<PodStream, ApiError> {
         let stream = self
-            .cluster
+            .cluster()
             .connect(&self.namespace, &target.pod, target.port)
             .await?;
         if !target.tls {

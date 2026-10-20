@@ -11,6 +11,7 @@ use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::api::{ListParams, LogParams};
 use kube::config::{ExecInteractiveMode, KubeConfigOptions, Kubeconfig};
 use kube::{Api, Client, Config};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::lookup::{ContainerInfo, EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
@@ -257,14 +258,14 @@ pub struct KubeCluster {
 }
 
 impl KubeCluster {
-    /// Builds a client for the project's context. Login plugins run with `env`, the
-    /// project's env provider's environment, since the daemon's own `PATH` rarely
-    /// reaches them.
+    /// Builds a client for the project's context in `kubeconfig`. Login plugins run
+    /// with `env`, the project's env provider's environment, since the daemon's own
+    /// `PATH` rarely reaches them.
     pub async fn connect(
         project: &KubeProject,
+        mut kubeconfig: Kubeconfig,
         env: &BTreeMap<String, String>,
     ) -> Result<Self, ApiError> {
-        let mut kubeconfig = read_kubeconfig(project, env)?;
         let plugins = prepare_plugins(&mut kubeconfig, env);
         let options = KubeConfigOptions {
             context: Some(project.context.clone()),
@@ -293,11 +294,8 @@ impl KubeCluster {
 
 /// The project's kubeconfig, else the files in `KUBECONFIG`, else `~/.kube/config`.
 /// Missing files in `KUBECONFIG` are skipped, as kubectl does, unless all are missing.
-fn read_kubeconfig(
-    project: &KubeProject,
-    env: &BTreeMap<String, String>,
-) -> Result<Kubeconfig, ApiError> {
-    let paths: Vec<PathBuf> = match (&project.kubeconfig, env.get("KUBECONFIG")) {
+pub fn kubeconfig_paths(project: &KubeProject, env: &BTreeMap<String, String>) -> Vec<PathBuf> {
+    match (&project.kubeconfig, env.get("KUBECONFIG")) {
         (Some(path), _) => vec![path.clone()],
         (None, Some(list)) if !list.is_empty() => {
             let listed: Vec<PathBuf> = std::env::split_paths(list)
@@ -314,9 +312,16 @@ fn read_kubeconfig(
                 .unwrap_or_default();
             vec![Path::new(&home).join(".kube/config")]
         }
-    };
+    }
+}
+
+/// The files of [`kubeconfig_paths`], merged.
+pub fn read_kubeconfig(
+    project: &KubeProject,
+    env: &BTreeMap<String, String>,
+) -> Result<Kubeconfig, ApiError> {
     let mut merged: Option<Kubeconfig> = None;
-    for path in paths {
+    for path in kubeconfig_paths(project, env) {
         let config =
             Kubeconfig::read_from(&path).map_err(|err| ApiError::Other(err.to_string()))?;
         merged = Some(match merged {
@@ -327,6 +332,33 @@ fn read_kubeconfig(
         });
     }
     merged.ok_or_else(|| ApiError::Other("no kubeconfig file".into()))
+}
+
+/// A digest of what `context` resolves to: its entry, its cluster's and its user's,
+/// with the env its login plugin runs with. Other contexts, `current-context` and,
+/// without a login plugin, the env leave it be.
+pub fn context_digest(
+    kubeconfig: &Kubeconfig,
+    context: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<[u8; 32], ApiError> {
+    let mut kubeconfig = kubeconfig.clone();
+    prepare_plugins(&mut kubeconfig, env);
+    let missing = || ApiError::Other(format!("the kubeconfig has no context {context:?}"));
+    let named = kubeconfig
+        .contexts
+        .iter()
+        .find(|c| c.name == context)
+        .ok_or_else(missing)?;
+    let entry = named.context.as_ref().ok_or_else(missing)?;
+    let cluster = kubeconfig.clusters.iter().find(|c| c.name == entry.cluster);
+    let user = entry
+        .user
+        .as_ref()
+        .and_then(|user| kubeconfig.auth_infos.iter().find(|a| a.name == *user));
+    let json = serde_json::to_vec(&(named, cluster, user))
+        .map_err(|err| ApiError::Other(err.to_string()))?;
+    Ok(Sha256::digest(json).into())
 }
 
 /// Makes login plugins run without a terminal, so their errors are captured, with the
@@ -668,6 +700,20 @@ users:
             "the kubeconfig's own env comes last and wins"
         );
         assert!(vars.iter().any(|(k, _)| k == "PATH"));
+    }
+
+    #[test]
+    fn the_env_counts_for_a_context_with_a_login_plugin() {
+        let mut kubeconfig = Kubeconfig::from_yaml(KUBECONFIG).unwrap();
+        let env = |value: &str| BTreeMap::from([("DIRENV_DIFF".to_string(), value.to_string())]);
+        let digest = |kubeconfig: &Kubeconfig, value: &str| {
+            context_digest(kubeconfig, "prod", &env(value)).unwrap()
+        };
+        assert_ne!(digest(&kubeconfig, "a"), digest(&kubeconfig, "b"));
+        let user = kubeconfig.auth_infos[0].auth_info.as_mut().unwrap();
+        user.exec = None;
+        user.token = Some("secret".to_string().into());
+        assert_eq!(digest(&kubeconfig, "a"), digest(&kubeconfig, "b"));
     }
 
     #[test]
