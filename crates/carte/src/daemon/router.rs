@@ -81,10 +81,11 @@ impl Router for DaemonRouter {
 
 /// Who sent a request that another site made, as a phrase for the error page; `None`
 /// for opening a page yourself (typed, bookmarked, or a link you followed) and for
-/// requests from local pages.
+/// requests from local pages. A frame on another site is a request that site made.
 fn foreign_origin(world: &World, request: &RouteRequest<'_>) -> Option<String> {
     let navigation = matches!(*request.method, http::Method::GET | http::Method::HEAD)
-        && request.fetch_mode == Some("navigate");
+        && request.fetch_mode == Some("navigate")
+        && request.fetch_dest == Some("document");
     if navigation {
         return None;
     }
@@ -329,7 +330,8 @@ mod tests {
                        referrer: Option<&'static str>,
                        opaque_origin: bool,
                        fetch_site: Option<&'static str>,
-                       fetch_mode: Option<&'static str>| RouteRequest {
+                       fetch_mode: Option<&'static str>,
+                       fetch_dest: Option<&'static str>| RouteRequest {
             host: "grafana.monitoring.prod.test",
             tls: true,
             kind: ListenerKind::Local,
@@ -340,17 +342,19 @@ mod tests {
             opaque_origin,
             fetch_site,
             fetch_mode,
+            fetch_dest,
         };
         let get: &'static http::Method = Box::leak(Box::new(get));
         let post: &'static http::Method = Box::leak(Box::new(post));
         let allowed = [
-            request(get, None, false, None, None),
+            request(get, None, false, None, None, None),
             request(
                 get,
                 Some("app.slack.com"),
                 false,
                 Some("cross-site"),
                 Some("navigate"),
+                Some("document"),
             ),
             request(
                 post,
@@ -358,9 +362,25 @@ mod tests {
                 false,
                 Some("cross-site"),
                 Some("cors"),
+                Some("empty"),
             ),
-            request(get, Some("localhost"), false, None, None),
-            request(post, None, false, Some("same-origin"), Some("cors")),
+            request(
+                get,
+                Some("shop.test"),
+                false,
+                Some("same-site"),
+                Some("navigate"),
+                Some("iframe"),
+            ),
+            request(get, Some("localhost"), false, None, None, None),
+            request(
+                post,
+                None,
+                false,
+                Some("same-origin"),
+                Some("cors"),
+                Some("empty"),
+            ),
         ];
         for r in allowed {
             assert_eq!(
@@ -378,6 +398,7 @@ mod tests {
                 false,
                 Some("cross-site"),
                 Some("navigate"),
+                Some("document"),
             ),
             request(
                 get,
@@ -385,10 +406,41 @@ mod tests {
                 false,
                 Some("cross-site"),
                 Some("no-cors"),
+                Some("image"),
             ),
-            request(post, None, true, Some("cross-site"), Some("navigate")),
-            request(get, None, false, Some("cross-site"), Some("no-cors")),
-            request(get, Some("evil.example"), false, None, None),
+            request(
+                get,
+                Some("evil.example"),
+                false,
+                Some("cross-site"),
+                Some("navigate"),
+                Some("iframe"),
+            ),
+            request(
+                get,
+                None,
+                false,
+                Some("cross-site"),
+                Some("navigate"),
+                Some("iframe"),
+            ),
+            request(
+                post,
+                None,
+                true,
+                Some("cross-site"),
+                Some("navigate"),
+                Some("document"),
+            ),
+            request(
+                get,
+                None,
+                false,
+                Some("cross-site"),
+                Some("no-cors"),
+                Some("script"),
+            ),
+            request(get, Some("evil.example"), false, None, None, None),
         ];
         for r in refused {
             assert!(
