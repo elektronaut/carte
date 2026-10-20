@@ -759,10 +759,11 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
     app.logs_area = area;
     frame.render_widget(block, area);
     app.logs.height = inner.height as usize;
+    app.logs.width = inner.width as usize;
     let logs = &app.logs;
 
-    let window = logs.window_numbered(inner.height as usize);
-    if window.is_empty() {
+    let window = logs.window_rows(inner.height as usize);
+    if window.lines.is_empty() {
         let stopped = app
             .selected_node()
             .is_some_and(|n| matches!(n.status.state, State::Stopped | State::Disabled));
@@ -784,40 +785,71 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
         frame.render_widget(Paragraph::new(message.dark_gray()), inner);
         return;
     }
-    let width = window
-        .iter()
-        .filter_map(|(_, line)| logs.prefix.label(line))
-        .map(|label| label.chars().count())
-        .max()
-        .unwrap_or(0);
-    let lines: Vec<Line> = window
-        .iter()
-        .map(|(seq, line)| {
-            let mut spans = Vec::new();
-            if line.marker {
-                spans.push(
-                    Span::raw(crate::logs::marker_rule(line.at_ms, inner.width as usize)).bold(),
-                );
-            } else if let Some(label) = logs.prefix.label(line) {
-                let color = PREFIX_COLORS[logs.color_index(&label) % PREFIX_COLORS.len()];
-                spans.push(Span::raw(format!("{label:width$} ")).fg(color));
+    let room = (inner.width as usize).saturating_sub(window.indent).max(1);
+    let mut rows: Vec<Line> = Vec::new();
+    for (seq, line) in &window.lines {
+        let selected = app.selection.is_some_and(|s| s.contains(*seq));
+        let mut line_rows = if line.marker {
+            vec![Line::from(
+                Span::raw(crate::logs::marker_rule(line.at_ms, inner.width as usize)).bold(),
+            )]
+        } else {
+            let text = highlight(&line.text, &logs.search, logs.current == Some(*seq));
+            let label = logs.prefix.label(line);
+            wrap_spans(text, room)
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut spans)| {
+                    let lead = match (&label, i) {
+                        (Some(label), 0) => {
+                            let color =
+                                PREFIX_COLORS[logs.color_index(label) % PREFIX_COLORS.len()];
+                            Span::raw(format!("{label:<width$}", width = window.indent)).fg(color)
+                        }
+                        _ => Span::raw(" ".repeat(window.indent)),
+                    };
+                    spans.insert(0, lead);
+                    Line::from(spans)
+                })
+                .collect()
+        };
+        if selected {
+            line_rows = line_rows.into_iter().map(Line::reversed).collect();
+        }
+        rows.extend(line_rows);
+    }
+    let rows: Vec<Line> = rows.into_iter().skip(window.skip).collect();
+    frame.render_widget(Paragraph::new(rows), inner);
+}
+
+/// Splits styled text into rows of at most `room` columns, by character, the way
+/// `Logs::rows` counts them.
+fn wrap_spans(spans: Vec<Span<'static>>, room: usize) -> Vec<Vec<Span<'static>>> {
+    use unicode_width::UnicodeWidthChar;
+    let mut rows = vec![Vec::new()];
+    let mut used = 0;
+    for span in spans {
+        let mut piece = String::new();
+        for c in span.content.chars() {
+            let width = c.width().unwrap_or(0);
+            if used + width > room && used > 0 {
+                if !piece.is_empty() {
+                    let row = rows.last_mut().expect("a row");
+                    row.push(Span::styled(std::mem::take(&mut piece), span.style));
+                }
+                rows.push(Vec::new());
+                used = 0;
             }
-            if !line.marker {
-                spans.extend(highlight(
-                    &line.text,
-                    &logs.search,
-                    logs.current == Some(*seq),
-                ));
-            }
-            let line = Line::from(spans);
-            if app.selection.is_some_and(|s| s.contains(*seq)) {
-                line.reversed()
-            } else {
-                line
-            }
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+            piece.push(c);
+            used += width;
+        }
+        if !piece.is_empty() {
+            rows.last_mut()
+                .expect("a row")
+                .push(Span::styled(piece, span.style));
+        }
+    }
+    rows
 }
 
 /// Marks every match of the search in a line: black on yellow on the current match's
@@ -1828,6 +1860,31 @@ mod tests {
             screen.contains("listing Services failed: The cluster refused"),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn long_log_lines_wrap_under_their_text() {
+        let mut app = busy_app();
+        let now = Instant::now();
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
+        let commands = press(&mut app, now, KeyCode::Down);
+        let generation = commands
+            .iter()
+            .find_map(|c| match c {
+                Command::FollowLogs { generation, .. } => Some(*generation),
+                _ => None,
+            })
+            .unwrap();
+        log(
+            &mut app,
+            generation,
+            "web",
+            "logger=http t=2026-10-20T10:30:45Z level=info msg=\"Request Completed\" path=/api/health status=200",
+        );
+        let screen = draw(&mut app, 110, 24);
+        assert!(screen.contains("status=200"), "{screen}");
+        assert!(screen.contains("logger=http"), "{screen}");
     }
 
     #[test]

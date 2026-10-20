@@ -324,6 +324,7 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "x509-parser",
 ]
 
