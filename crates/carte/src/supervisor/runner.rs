@@ -87,6 +87,15 @@ impl ProcLog {
         self.stripper.pending()
     }
 
+    /// The debugger prompt the unfinished last line starts with, if it's short
+    /// enough to be one.
+    pub fn prompt(&self) -> Option<String> {
+        if self.stripper.pending_len() > 512 {
+            return None;
+        }
+        carte_core::debugger::prompt(&self.stripper.pending()).map(str::to_string)
+    }
+
     pub fn tail(&self, n: usize) -> Vec<String> {
         let skip = self.lines.len().saturating_sub(n);
         self.lines
@@ -170,7 +179,7 @@ pub async fn run(
         let events = events.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; 16 * 1024];
-            let mut paused = None;
+            let mut paused: Option<String> = None;
             loop {
                 match output.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
@@ -180,7 +189,10 @@ pub async fn run(
                             let lines = log.push(&buf[..n]);
                             let prompt = terminal.as_ref().and_then(|terminal| {
                                 terminal.output(&buf[..n]);
-                                carte_core::debugger::prompt(&log.pending()).map(str::to_string)
+                                match &paused {
+                                    Some(prompt) if lines.is_empty() => Some(prompt.clone()),
+                                    _ => log.prompt(),
+                                }
                             });
                             (lines, prompt)
                         };
@@ -335,6 +347,31 @@ mod tests {
         assert_eq!(log.tail(10), vec!["two", "three", "four", "five"]);
         assert_eq!(log.flush().map(|l| l.1), Some("six".into()));
         assert_eq!(log.tail(10), vec!["three", "four", "five", "six"]);
+    }
+
+    #[test]
+    fn a_prompt_redrawn_by_reline_is_still_a_prompt() {
+        let mut log = ProcLog::new(64 * 1024);
+        log.push(b"[3, 12] in app/models/order.rb\r\n=>  12|     binding.break\r\n");
+        log.push(b"\x1b[?2004h\x1b[1G(rdbg) \x1b[8G");
+        assert_eq!(log.prompt().as_deref(), Some("(rdbg)"));
+        log.push(b"\x1b[1G\x1b[K(rdbg) inf\x1b[11G\x1b[1B\x1b[1G\x1b[K info\x1b[1A\x1b[11G");
+        assert_eq!(log.prompt().as_deref(), Some("(rdbg)"));
+        log.push(b"o\r\n\x1b[?2004l");
+        assert_eq!(log.prompt(), None);
+        log.push(b"irb:rdbg(#<Order:0x01>):002> ");
+        assert_eq!(
+            log.prompt().as_deref(),
+            Some("irb:rdbg(#<Order:0x01>):002>")
+        );
+    }
+
+    #[test]
+    fn a_long_unfinished_line_is_never_a_prompt() {
+        let mut log = ProcLog::new(64 * 1024);
+        log.push(b"(rdbg) ");
+        log.push(&[b'x'; 600]);
+        assert_eq!(log.prompt(), None);
     }
 
     #[test]

@@ -168,7 +168,9 @@ const MAX_COLUMN: usize = 4096;
 /// CSI, OSC and other escape sequences are dropped; a carriage return moves
 /// back to the start of the line so later text overwrites it, backspace and
 /// `ESC [ n D` move back, `ESC [ n C` forward and `ESC [ n G` to a column, and
-/// `ESC [ K` erases to the end of the line. Other control
+/// `ESC [ K` erases to the end of the line. Text written after the cursor moved up
+/// or down (`ESC [ A`, `ESC [ B`) is dropped until it is back on the current line;
+/// a newline below it ends the current line as usual. Other control
 /// characters except tab are dropped. Invalid UTF-8 becomes U+FFFD.
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
@@ -177,6 +179,9 @@ pub struct Stripper {
     line: Vec<char>,
     cursor: usize,
     utf8: Vec<u8>,
+    /// Rows the cursor is above (negative) or below the current line. Text written
+    /// there belongs to other lines, and is dropped.
+    row: isize,
 }
 
 impl Stripper {
@@ -192,6 +197,11 @@ impl Stripper {
     /// The current incomplete line.
     pub fn pending(&self) -> String {
         self.line.iter().collect()
+    }
+
+    /// The length of the current incomplete line, in characters.
+    pub fn pending_len(&self) -> usize {
+        self.line.len()
     }
 
     fn byte(&mut self, b: u8, lines: &mut Vec<String>) {
@@ -216,6 +226,9 @@ impl Stripper {
             State::Csi => match b {
                 0x40..=0x7e => {
                     match b {
+                        b'A' => self.row -= self.count() as isize,
+                        b'B' => self.row += self.count() as isize,
+                        _ if self.row != 0 => {}
                         b'K' => self.erase_line(),
                         b'G' => self.cursor = self.count().saturating_sub(1).min(MAX_COLUMN),
                         b'C' => {
@@ -255,11 +268,14 @@ impl Stripper {
         }
         match b {
             0x1b => self.state = State::Escape,
+            b'\n' if self.row < 0 => self.row += 1,
             b'\n' => {
+                self.row = 0;
                 lines.push(self.line.iter().collect());
                 self.line.clear();
                 self.cursor = 0;
             }
+            _ if self.row != 0 && matches!(b, b'\r' | 0x08) => {}
             b'\r' => self.cursor = 0,
             0x08 => self.cursor = self.cursor.saturating_sub(1),
             b'\t' | 0x20..=0x7e => self.put(b as char),
@@ -306,6 +322,9 @@ impl Stripper {
     }
 
     fn put(&mut self, c: char) {
+        if self.row != 0 {
+            return;
+        }
         while self.line.len() < self.cursor {
             self.line.push(' ');
         }
@@ -471,6 +490,24 @@ mod tests {
         assert_eq!(line.len(), 5001, "{}", &line[4090..]);
         assert!(line[..5000].bytes().all(|b| b == b'a'), "never moves back");
         assert!(line.ends_with('x'));
+    }
+
+    #[test]
+    fn text_written_on_other_rows_leaves_the_current_line_alone() {
+        assert_eq!(
+            strip(
+                b"[1] pry(main)> 1\r\n\x1b[1A\x1b[0G[1] pry(main)> \x1b[1m1\x1b[0m\x1b[1B=> 1\r\n"
+            ),
+            "[1] pry(main)> 1\n=> 1\n"
+        );
+        let mut s = Stripper::default();
+        s.feed(b"irb(main):001> Str\x1b[1B\x1b[1G\x1b[KString\x1b[1B\x1b[1G\x1b[KStruct\x1b[2A\x1b[18G");
+        assert_eq!(s.pending(), "irb(main):001> Str");
+        assert_eq!(
+            s.feed(b"\x1b[3Bnext\n"),
+            ["irb(main):001> Str"],
+            "a newline below ends it"
+        );
     }
 
     #[test]

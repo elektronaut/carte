@@ -2,7 +2,9 @@
 
 /// The prompt a line starts with when it is a Ruby debugger waiting for input:
 /// `(rdbg)`, `(byebug)`, `pry(…)>` or `irb(…)>`, with what was typed after it.
-/// Continuation prompts (`pry(main)*`, `irb(main):002*`) count too.
+/// Continuation prompts (`pry(main)*`, `irb(main):002*`), debug's prompts after a
+/// fork (`(rdbg@puma#123)`) and IRB as debug's console (`irb:rdbg(main):002>`)
+/// count too.
 pub fn prompt(line: &str) -> Option<&str> {
     let line = line.trim_start();
     for fixed in ["(rdbg)", "(byebug)"] {
@@ -10,10 +12,14 @@ pub fn prompt(line: &str) -> Option<&str> {
             return Some(fixed);
         }
     }
-    if let Some(rest) = line.strip_prefix("(rdbg:")
-        && let Some(end) = rest.find(')')
-    {
-        return Some(&line[..6 + end + 1]);
+    for open in ["(rdbg:", "(rdbg@"] {
+        if let Some(rest) = line.strip_prefix(open)
+            && let Some(end) = rest
+                .find(") ")
+                .or_else(|| rest.ends_with(')').then(|| rest.len() - 1))
+        {
+            return Some(&line[..open.len() + end + 1]);
+        }
     }
     let start = match line.strip_prefix('[') {
         Some(rest) => {
@@ -26,7 +32,10 @@ pub fn prompt(line: &str) -> Option<&str> {
         None => 0,
     };
     let repl = &line[start..];
-    if !(repl.starts_with("pry(") || repl.starts_with("irb(")) {
+    if !["pry(", "irb(", "irb:rdbg("]
+        .iter()
+        .any(|open| repl.starts_with(open))
+    {
         return None;
     }
     repl.match_indices(')').find_map(|(close, _)| {
@@ -74,6 +83,12 @@ mod tests {
             ),
             ("irb(main):003* ", "irb(main):003*"),
             ("irb(main)>", "irb(main)>"),
+            ("irb:rdbg(#<Foo>):002> ", "irb:rdbg(#<Foo>):002>"),
+            (
+                "(rdbg@puma: cluster worker 0#4711) ",
+                "(rdbg@puma: cluster worker 0#4711)",
+            ),
+            ("(rdbg@bin/rails (x)#12) n", "(rdbg@bin/rails (x)#12)"),
         ] {
             assert_eq!(prompt(line), Some(found), "{line:?}");
         }

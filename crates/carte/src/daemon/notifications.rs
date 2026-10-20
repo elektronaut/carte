@@ -34,11 +34,16 @@ struct Quiet {
     latest: String,
 }
 
+/// After a pause notification, how long further pauses of the instance stay quiet.
+const PAUSE_QUIET_MS: u64 = 60 * 1000;
+
 /// Decides which crashes to tell about: the first one right away, later ones within
-/// the quiet period as one summary when it ends, and every give-up.
+/// the quiet period as one summary when it ends, and every give-up. A pause is told
+/// about unless the instance paused within the last minute.
 #[derive(Default)]
 pub struct Throttle {
     quiet: BTreeMap<InstanceKey, Quiet>,
+    paused: BTreeMap<InstanceKey, u64>,
 }
 
 impl Throttle {
@@ -86,11 +91,18 @@ impl Throttle {
                     });
                 }
             }
-            EventKind::Paused => notices.push(Notice {
-                subtitle: format!("{label} paused in {process}"),
-                message: format!("carte attach {label}"),
-                key,
-            }),
+            EventKind::Paused => {
+                self.paused
+                    .retain(|_, at| now_ms.saturating_sub(*at) < PAUSE_QUIET_MS);
+                if !self.paused.contains_key(&key) {
+                    self.paused.insert(key.clone(), now_ms);
+                    notices.push(Notice {
+                        subtitle: format!("{label} paused in {process}"),
+                        message: format!("carte attach {label}/{process}"),
+                        key,
+                    });
+                }
+            }
             EventKind::GaveUp => {
                 self.quiet.remove(&key);
                 notices.push(Notice {
@@ -466,16 +478,27 @@ mod tests {
     }
 
     #[test]
-    fn tells_about_every_pause_with_the_command_that_answers_it() {
+    fn tells_about_a_pause_with_the_command_that_answers_it() {
         let mut throttle = Throttle::default();
-        for _ in 0..2 {
-            let notices = throttle.event(
-                &event(EventKind::Paused, "feature-x", Some("web"), "at (rdbg)"),
-                0,
-            );
-            assert_eq!(subtitles(&notices), ["acme-web@feature-x paused in web"]);
-            assert_eq!(notices[0].message, "carte attach acme-web@feature-x");
-        }
+        let pause =
+            |stack: &str, process| event(EventKind::Paused, stack, Some(process), "at (rdbg)");
+        let notices = throttle.event(&pause("feature-x", "worker"), 0);
+        assert_eq!(subtitles(&notices), ["acme-web@feature-x paused in worker"]);
+        assert_eq!(notices[0].message, "carte attach acme-web@feature-x/worker");
+        assert!(
+            throttle
+                .event(&pause("feature-x", "web"), 30_000)
+                .is_empty(),
+            "stepping through code doesn't notify at each step"
+        );
+        assert_eq!(
+            subtitles(&throttle.event(&pause("main", "web"), 30_000)),
+            ["acme-web paused in web"]
+        );
+        assert_eq!(
+            subtitles(&throttle.event(&pause("feature-x", "web"), 60_000)),
+            ["acme-web@feature-x paused in web"]
+        );
         assert_eq!(throttle.next_due(), None);
     }
 

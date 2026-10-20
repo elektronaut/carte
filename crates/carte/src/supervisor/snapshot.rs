@@ -369,7 +369,10 @@ fn instance_state(inst: &Instance) -> InstanceState {
     match inst.state {
         Lifecycle::Stopped => InstanceState::Stopped,
         Lifecycle::Starting | Lifecycle::Ready
-            if inst.procs.iter().any(|p| p.spec.http && p.paused.is_some()) =>
+            if inst
+                .procs
+                .iter()
+                .any(|p| (p.spec.http || p.spec.serves_paths()) && p.paused.is_some()) =>
         {
             InstanceState::Paused
         }
