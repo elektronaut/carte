@@ -180,8 +180,31 @@ async fn stop_all(State(api): State<Api>, Json(request): Json<StopAllRequest>) -
 }
 
 async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Response {
-    if let Some(response) = not_for_kube(&api, &request.target, "logs yet") {
-        return response;
+    if let Some(address) = kube_address(&api, &request.target) {
+        let lines = match address {
+            Ok(address) => api.kube.logs(address, &request).await,
+            Err(message) => Err(message),
+        };
+        let mut lines = match lines {
+            Ok(lines) => lines,
+            Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        };
+        let (tx, rx) = mpsc::channel(256);
+        tokio::spawn(async move {
+            loop {
+                let line = tokio::select! {
+                    _ = tx.closed() => return,
+                    line = lines.recv() => line,
+                };
+                let Some(line) = line else {
+                    return;
+                };
+                if tx.send(ndjson(&line)).await.is_err() {
+                    return;
+                }
+            }
+        });
+        return stream(rx);
     }
     if let Some(response) = unresolved(&api, &request.target) {
         return response;
@@ -218,7 +241,7 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
 }
 
 async fn mark(State(api): State<Api>, Json(request): Json<MarkRequest>) -> Response {
-    if let Some(response) = not_for_kube(&api, &request.target, "logs yet") {
+    if let Some(response) = not_for_kube(&api, &request.target, "log markers") {
         return response;
     }
     if let Some(response) = unresolved(&api, &request.target) {
