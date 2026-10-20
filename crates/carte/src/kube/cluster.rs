@@ -120,6 +120,8 @@ pub struct LogOptions {
     pub follow: bool,
     pub tail: Option<i64>,
     pub since_secs: Option<i64>,
+    /// Lines from this second on, in seconds since the Unix epoch.
+    pub since_time: Option<i64>,
 }
 
 /// Log lines, invalid UTF-8 replaced; the stream ends with the log or an error.
@@ -577,6 +579,9 @@ impl Cluster for KubeCluster {
                 follow: options.follow,
                 tail_lines: options.tail,
                 since_seconds: options.since_secs,
+                since_time: options
+                    .since_time
+                    .and_then(|secs| k8s_openapi::jiff::Timestamp::from_second(secs).ok()),
                 timestamps: true,
                 ..LogParams::default()
             };

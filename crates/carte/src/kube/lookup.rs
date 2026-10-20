@@ -213,20 +213,20 @@ pub fn choose_container(containers: &[ContainerInfo], port: u16) -> Option<&Cont
 }
 
 /// Splits the RFC 3339 timestamp the API server puts in front of each log line with
-/// `timestamps=true`: milliseconds since the Unix epoch, and the rest of the line.
+/// `timestamps=true`: nanoseconds since the Unix epoch, and the rest of the line.
 pub fn split_timestamp(line: &str) -> (Option<u64>, &str) {
     let Some((stamp, text)) = line.split_once(' ') else {
         return (None, line);
     };
-    match parse_rfc3339_ms(stamp) {
-        Some(at_ms) => (Some(at_ms), text),
+    match parse_rfc3339_ns(stamp) {
+        Some(at_ns) => (Some(at_ns), text),
         None => (None, line),
     }
 }
 
-/// `2026-10-20T08:15:30.123456789Z` in milliseconds; only UTC, as the API server
+/// `2026-10-20T08:15:30.123456789Z` in nanoseconds; only UTC, as the API server
 /// writes it.
-fn parse_rfc3339_ms(stamp: &str) -> Option<u64> {
+fn parse_rfc3339_ns(stamp: &str) -> Option<u64> {
     let stamp = stamp.strip_suffix('Z')?;
     let (date, time) = stamp.split_once('T')?;
     let mut date = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
@@ -237,7 +237,7 @@ fn parse_rfc3339_ms(stamp: &str) -> Option<u64> {
     }
     let mut clock = clock.splitn(3, ':').map(|p| p.parse::<i64>().ok());
     let (hour, minute, second) = (clock.next()??, clock.next()??, clock.next()??);
-    let millis: i64 = format!("{fraction:0<3}").get(..3)?.parse().ok()?;
+    let nanos: i64 = format!("{fraction:0<9}").get(..9)?.parse().ok()?;
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) || !(0..10_000).contains(&year) {
         return None;
     }
@@ -248,7 +248,7 @@ fn parse_rfc3339_ms(stamp: &str) -> Option<u64> {
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     let days = era * 146_097 + day_of_era - 719_468;
     let secs = days * 86_400 + hour * 3600 + minute * 60 + second;
-    u64::try_from(secs * 1000 + millis).ok()
+    u64::try_from(secs.checked_mul(1_000_000_000)? + nanos).ok()
 }
 
 #[cfg(test)]
@@ -449,11 +449,11 @@ mod tests {
     fn splits_timestamps_off_log_lines() {
         assert_eq!(
             split_timestamp("2026-10-20T08:15:30.123456789Z GET /api/health 200"),
-            (Some(1_792_484_130_123), "GET /api/health 200")
+            (Some(1_792_484_130_123_456_789), "GET /api/health 200")
         );
         assert_eq!(
             split_timestamp("1970-01-01T00:00:01Z started"),
-            (Some(1000), "started")
+            (Some(1_000_000_000), "started")
         );
         assert_eq!(
             split_timestamp("no timestamp here"),
