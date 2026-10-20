@@ -200,7 +200,8 @@ kube = { context = "prod" }
 
 `https://grafana.monitoring.prod.localhost` then reaches the Service
 `grafana` in namespace `monitoring`, and `https://grafana.prod.localhost`
-works while only one namespace has a `grafana`. See
+works while only one namespace has a `grafana`. `carte import kube`
+writes these files for the contexts you pick. See
 [Kube projects](docs/configuration.md#kube-projects).
 
 ## Configuration

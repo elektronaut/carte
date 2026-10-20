@@ -918,7 +918,15 @@ service_port = "http"
 | `grafana-prod.localhost` | An alias of the Service |
 
 A cluster is only reachable when it has a project file, so nothing about
-your kubeconfig is exposed until you add one. Kube projects are never
+your kubeconfig is exposed until you add one. `carte import kube` offers
+a project for each context of your kubeconfig, named after its cluster:
+`arn:aws:eks:…:cluster/production` becomes `production`, and
+`gke_acme-infra_europe-north1_staging` becomes `staging`. It asks for a
+name when that one is taken, and `--folder clusters` puts the files in
+a folder of their own. It reads `--kubeconfig`, else the file in
+`$KUBECONFIG`, else `~/.kube/config`, and names a file other than the
+default in the projects, since the daemon doesn't see your shell's
+`$KUBECONFIG`. Kube projects are never
 reachable through [sharing](sharing.md).
 
 | Key | Default | |

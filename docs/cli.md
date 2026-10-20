@@ -67,6 +67,7 @@ address inside it when given one.
 | `carte project add\|ls\|edit\|rm` | Manage project files |
 | `carte setup [--dry-run\|--check\|--uninstall] [--tld tld] [--share domain]` | Set up the machine |
 | `carte import puma-dev` | Create projects from `~/.puma-dev` |
+| `carte import kube [--folder F] [--kubeconfig FILE]` | Create a [kube project](configuration.md#kube-projects) for each kubeconfig context you pick |
 | `carte tui` | The terminal UI |
 | `carte daemon` | Run the daemon in the foreground |
 | `carte daemon restart` | Restart the daemon launchd runs, after installing a new build or changing `[share]`. Running apps stop and start again on their next request |
