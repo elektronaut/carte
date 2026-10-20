@@ -3695,3 +3695,30 @@ async fn a_web_process_at_a_debugger_prompt_pauses_the_instance() {
     );
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_pause_while_someone_is_attached_adds_no_event() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nworker: while read line; do printf '(rdbg) '; done\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    let (_, terminal) = handle.attach(here("web/worker"), None).await.unwrap();
+    let client = terminal.join(None, false);
+    client.write(b"step\n").await.unwrap();
+    wait_for(&handle, "the worker to pause", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Paused
+    })
+    .await;
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == carte_api::EventKind::Paused),
+        "{events:#?}"
+    );
+    handle.shutdown().await;
+}

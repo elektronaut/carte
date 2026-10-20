@@ -200,18 +200,27 @@ carte attach shop@feature-x/worker
   prompt, otherwise the web process.
 - A process with `pty = false` can't be attached to.
 
-carte watches each process's output for a debugger prompt: `(rdbg)`,
-`pry(…)>`, `irb(…)>` or `(byebug)` as its last, unfinished line. Such a
+carte watches the output of each process on a pty for a debugger
+prompt: `(rdbg)` (also `(rdbg@…)` after a fork), `pry(…)>`, `irb(…)>`
+(also `irb:rdbg(…)>`) or `(byebug)` as its last, unfinished line. Such a
 process shows as `paused at a breakpoint` in `carte status`, as
 `paused: worker (carte attach)` in `carte ls` and with a ◆ in the
 terminal UI. An app whose web process is paused shows as `paused`,
 since its requests wait; a paused worker leaves it `ready`. When nobody
 is attached, a pause sends a [notification](configuration.md#notifications)
-with the `carte attach` command that answers it. The pause ends when the
-prompt is answered or the process exits.
+with the `carte attach` command that answers it, at most once a minute
+per app. The pause ends when the process prints a complete line after
+the prompt, as answering it does, or exits.
+
+The prompt is all carte goes by. A process that is a console, like a
+`rails console` before Rails 7.1 or `pry` run as a carte process, shows
+as paused for as long as it waits for input. Custom prompts, like IRB's
+`>> `, aren't recognized. A pause that starts while someone is attached
+adds no event or notification, since they're watching.
 
 In the terminal UI, `t` types into the selected process, or the
-selected app's paused or web process; the detach keys stop. The
+selected app's paused or web process, from either pane; the detach keys
+stop. The
 [MCP server](mcp.md)'s `type` tool lets an agent do it.
 
 ## JSON output
