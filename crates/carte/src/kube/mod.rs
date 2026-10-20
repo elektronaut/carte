@@ -808,6 +808,16 @@ impl Inner {
             .await
         {
             Ok(found) => found,
+            Err(ApiError::Forbidden(message)) if !project.namespaces.is_empty() => {
+                return Err(ErrorPage::new(
+                    StatusCode::FORBIDDEN,
+                    "Can't read the namespaces",
+                    format!(
+                        "The cluster doesn't let you read Services in {} ({message}).",
+                        project.namespaces.join(", ")
+                    ),
+                ));
+            }
             Err(ApiError::Forbidden(message)) => {
                 return Err(ErrorPage::new(
                     StatusCode::FORBIDDEN,

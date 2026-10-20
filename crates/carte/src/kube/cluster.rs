@@ -32,6 +32,7 @@ pub trait Cluster: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Option<ServiceInfo>, ApiError>>;
 
     /// Services named `name` in `namespaces`, or in every namespace when it's empty.
+    /// Namespaces the cluster won't read are skipped, unless it reads none of them.
     fn services_named<'a>(
         &'a self,
         name: &'a str,
@@ -412,12 +413,22 @@ impl Cluster for KubeCluster {
                 return Ok(list.items.into_iter().map(service_info).collect());
             }
             let mut found = Vec::new();
+            let mut forbidden = None;
+            let mut read = false;
             for namespace in namespaces {
-                if let Some(service) = self.service(namespace, name).await? {
-                    found.push(service);
+                match self.service(namespace, name).await {
+                    Ok(service) => {
+                        read = true;
+                        found.extend(service);
+                    }
+                    Err(ApiError::Forbidden(message)) => forbidden = Some(message),
+                    Err(err) => return Err(err),
                 }
             }
-            Ok(found)
+            match forbidden {
+                Some(message) if !read => Err(ApiError::Forbidden(message)),
+                _ => Ok(found),
+            }
         })
     }
 
