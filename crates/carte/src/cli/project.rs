@@ -477,7 +477,16 @@ fn project_list(paths: &Paths) -> ProjectList {
                 .collect(),
             stacks: state.stacks().into_iter().collect(),
             problems: Vec::new(),
+            kube_context: None,
         })
+        .chain(world.kube_projects.iter().map(|project| ProjectSummary {
+            name: project.name.clone(),
+            config_path: project.config_path.clone(),
+            apps: Vec::new(),
+            stacks: Vec::new(),
+            problems: Vec::new(),
+            kube_context: Some(project.context.clone()),
+        }))
         .collect();
     let mut global = Vec::new();
     for problem in &world.problems {
@@ -494,6 +503,7 @@ fn project_list(paths: &Paths) -> ProjectList {
                     apps: Vec::new(),
                     stacks: Vec::new(),
                     problems: Vec::new(),
+                    kube_context: None,
                 });
                 projects.len() - 1
             }
@@ -525,6 +535,11 @@ fn ls(paths: &Paths, json: bool) -> anyhow::Result<ExitCode> {
             .max("PROJECT".len());
         println!("{:width$}  APPS  STACKS", "PROJECT");
         for project in &list.projects {
+            if let Some(context) = &project.kube_context {
+                println!("{:width$}     -  kube context {context}", project.name);
+                print_problems(project);
+                continue;
+            }
             let stacks = if project.stacks.is_empty() {
                 "-".to_string()
             } else {
@@ -542,19 +557,23 @@ fn ls(paths: &Paths, json: bool) -> anyhow::Result<ExitCode> {
                 project.name,
                 project.apps.len()
             );
-            for problem in &project.problems {
-                let text = match &problem.app {
-                    Some(app) => format!("{app}: {}", problem.message),
-                    None => problem.message.clone(),
-                };
-                println!("  ! {text}");
-            }
+            print_problems(project);
         }
     }
     for problem in &list.problems {
         println!("! {}", problem.message);
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn print_problems(project: &ProjectSummary) {
+    for problem in &project.problems {
+        let text = match &problem.app {
+            Some(app) => format!("{app}: {}", problem.message),
+            None => problem.message.clone(),
+        };
+        println!("  ! {text}");
+    }
 }
 
 /// The project's problems after a parse and discovery, or the parse error.
@@ -598,6 +617,33 @@ fn edit(paths: &Paths, name: &str) -> anyhow::Result<ExitCode> {
         if text == original {
             println!("No changes.");
             return Ok(ExitCode::SUCCESS);
+        }
+        if config::is_kube_project(&text) {
+            match config::parse_kube_project(&path, &text) {
+                Ok((project, problems)) => {
+                    for problem in &problems {
+                        println!("problem: {}", problem_text(problem));
+                    }
+                    println!(
+                        "{} is valid: a kube project for context {}.",
+                        tilde(&path),
+                        project.context
+                    );
+                    return Ok(ExitCode::SUCCESS);
+                }
+                Err(err) => {
+                    println!("error: {err}");
+                    if !interactive {
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    if !prompt::confirm("Reopen the editor?", true)? {
+                        fs::write(&path, &original)?;
+                        println!("Restored the previous version of {}.", tilde(&path));
+                        return Ok(ExitCode::FAILURE);
+                    }
+                    continue;
+                }
+            }
         }
         if let Ok(file) = config::parse_project(&path, &text)
             && !file.projects.is_empty()

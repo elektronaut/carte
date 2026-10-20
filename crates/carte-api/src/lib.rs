@@ -190,6 +190,9 @@ pub struct ProjectSummary {
     /// Stack names other than `main`, sorted.
     pub stacks: Vec<String>,
     pub problems: Vec<Problem>,
+    /// The kubeconfig context of a kube project, whose apps are the cluster's Services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kube_context: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

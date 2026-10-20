@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::kube::KubeProject;
 use crate::procfile::ProcessList;
 
 /// Machine-wide settings from `~/.config/carte/config.toml`.
@@ -512,11 +513,17 @@ pub struct World {
     pub problems: Vec<Problem>,
     /// Directories where templates' new projects can appear.
     pub scan_dirs: BTreeSet<PathBuf>,
+    /// Projects whose apps are a cluster's Services.
+    pub kube_projects: Vec<KubeProject>,
 }
 
 impl World {
     pub fn project(&self, name: &str) -> Option<&ProjectState> {
         self.projects.iter().find(|p| p.project.name == name)
+    }
+
+    pub fn kube_project(&self, name: &str) -> Option<&KubeProject> {
+        self.kube_projects.iter().find(|p| p.name == name)
     }
 }
 

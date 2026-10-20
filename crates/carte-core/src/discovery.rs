@@ -353,7 +353,11 @@ pub fn load_world(config_dir: &Path) -> World {
 
     let mut templates = Vec::new();
     for ProjectFileEntry { name, folder, path } in files {
-        if let Some(other) = world.project(&name) {
+        let other = world
+            .project(&name)
+            .map(|state| &state.project.config_path)
+            .or_else(|| world.kube_project(&name).map(|p| &p.config_path));
+        if let Some(other) = other {
             world.problems.push(Problem {
                 project: Some(name.clone()),
                 app: None,
@@ -361,9 +365,27 @@ pub fn load_world(config_dir: &Path) -> World {
                 message: format!(
                     "{} is skipped: {} already defines a project named {name}, and names are hostnames, so they must be unique across folders",
                     path.display(),
-                    other.project.config_path.display()
+                    other.display()
                 ),
             });
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(&path)
+            && config::is_kube_project(&text)
+        {
+            match config::parse_kube_project(&path, &text) {
+                Ok((mut project, problems)) => {
+                    project.folder = folder;
+                    world.kube_projects.push(project);
+                    world.problems.extend(problems);
+                }
+                Err(err) => world.problems.push(Problem {
+                    project: Some(name),
+                    app: None,
+                    stack: None,
+                    message: err.to_string(),
+                }),
+            }
             continue;
         }
         match config::load_project_file(&path) {
@@ -387,7 +409,61 @@ pub fn load_world(config_dir: &Path) -> World {
         expand_template(&mut world, &mut generated, file, folder);
     }
     resolve_elsewhere(&mut world);
+    drop_taken_kube_aliases(&mut world);
     world
+}
+
+/// Leaves out aliases that would shadow a name: a local alias equal to a kube
+/// project's name, and a kube alias equal to a project's name, a local alias or an
+/// alias of another kube project. Project names win, then local aliases, then the
+/// kube project loaded first.
+fn drop_taken_kube_aliases(world: &mut World) {
+    let kube_names: BTreeSet<String> = world.kube_projects.iter().map(|p| p.name.clone()).collect();
+    let skipped = |project: &str, app: &str, alias: &str| Problem {
+        project: Some(project.to_string()),
+        app: Some(app.to_string()),
+        stack: None,
+        message: format!("alias {alias:?} is skipped: a project or another app already uses it"),
+    };
+    let mut problems = Vec::new();
+    for state in &mut world.projects {
+        let project = state.project.name.clone();
+        for app in &mut state.project.apps {
+            app.settings.aliases.retain(|alias| {
+                let free = !kube_names.contains(alias);
+                if !free {
+                    problems.push(skipped(&project, &app.name, alias));
+                }
+                free
+            });
+        }
+    }
+    let mut taken: BTreeSet<String> = world
+        .projects
+        .iter()
+        .flat_map(|state| {
+            std::iter::once(state.project.name.clone()).chain(
+                state
+                    .project
+                    .apps
+                    .iter()
+                    .flat_map(|app| app.settings.aliases.clone()),
+            )
+        })
+        .chain(kube_names)
+        .collect();
+    for project in &mut world.kube_projects {
+        for (service, settings) in &mut project.services {
+            settings.aliases.retain(|alias| {
+                let free = taken.insert(alias.clone());
+                if !free {
+                    problems.push(skipped(&project.name, service, alias));
+                }
+                free
+            });
+        }
+    }
+    world.problems.extend(problems);
 }
 
 /// Adds a project for each directory a template's `projects` entries match, made from
@@ -431,7 +507,7 @@ fn expand_template(
             ));
             continue;
         }
-        if world.project(&name).is_some() {
+        if world.project(&name).is_some() || world.kube_project(&name).is_some() {
             continue;
         }
         if let Err(err) = slug::validate_project_name(&name) {
@@ -1145,6 +1221,76 @@ prunable gitdir file points to non-existent location
                 .unwrap_err()
                 .contains("no Procfile.dev")
         );
+    }
+
+    #[test]
+    fn loads_kube_projects_beside_local_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_dir = tmp.path().join("config");
+        let projects = config_dir.join("projects");
+        std::fs::create_dir_all(projects.join("clusters")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("shop")).unwrap();
+        std::fs::write(
+            projects.join("shop.toml"),
+            format!(
+                "root = \"{}\"\n[apps.shop]\naliases = [\"store\", \"prod\"]\n",
+                tmp.path().join("shop").display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join("clusters/prod.toml"),
+            "kube = { context = \"prod\" }\n[apps.grafana]\naliases = [\"dash\", \"store\", \"shop\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join("clusters/shop.toml"),
+            "kube = { context = \"other\" }\n",
+        )
+        .unwrap();
+        std::fs::write(projects.join("broken.toml"), "kube = { context = 3 }\n").unwrap();
+        std::fs::write(
+            projects.join("clusters/staging.toml"),
+            "kube = { context = \"staging\" }\n[apps.grafana]\naliases = [\"dash\", \"prod\"]\n",
+        )
+        .unwrap();
+
+        let world = load_world(&config_dir);
+        let shop = world.project("shop").unwrap();
+        assert_eq!(
+            shop.project.apps[0].settings.aliases,
+            vec!["store"],
+            "a kube project's name beats a local alias"
+        );
+        let prod = world.kube_project("prod").unwrap();
+        assert_eq!(prod.folder.as_deref(), Some("clusters"));
+        assert_eq!(prod.services["grafana"].aliases, vec!["dash"]);
+        assert_eq!(world.kube_projects.len(), 2);
+        assert!(
+            world.kube_project("staging").unwrap().services["grafana"]
+                .aliases
+                .is_empty(),
+            "dash is prod's, and prod is a project"
+        );
+        let messages: Vec<_> = world.problems.iter().map(|p| p.message.as_str()).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("broken.toml")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("already defines a project named shop")),
+            "{messages:?}"
+        );
+        for alias in ["store", "shop"] {
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains(&format!("alias \"{alias}\" is skipped"))),
+                "{messages:?}"
+            );
+        }
     }
 
     #[test]

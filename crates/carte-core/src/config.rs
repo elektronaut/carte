@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use thiserror::Error;
 
+use crate::kube::{KubeProject, KubeService, ServicePort};
 use crate::model::{
     App, AppSettings, EnvProviderKind, EnvTemplate, Limits, MachineConfig, MemoryTarget, Policy,
     Problem, ProcessConfig, ProcessKind, ProcessOverride, Project, Readiness, Restart, Scheme,
@@ -468,6 +469,12 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
             message: "`repos` is replaced by `root` and `include`: `repos = \"~/work/acme-*\"` is now `root = \"~/work\"` and `include = \"acme-*\"`, and a single repo is just `root = \"~/work/shop\"`".into(),
         });
     }
+    if is_kube_project(text) {
+        return Err(ConfigError::Invalid {
+            path: path.to_path_buf(),
+            message: "this is a kube project, not one with apps on disk".into(),
+        });
+    }
     let raw: RawProject = from_toml(path, text)?;
     if let Some(name) = raw
         .apps
@@ -504,6 +511,156 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
 
 pub fn load_project_file(path: &Path) -> Result<ProjectFile, ConfigError> {
     parse_project(path, &read(path)?)
+}
+
+// Kube project files
+
+/// Keys of local project files, which a kube project refuses by name.
+const LOCAL_PROJECT_KEYS: &[&str] = &[
+    "root",
+    "include",
+    "projects",
+    "strip_prefix",
+    "env",
+    "requires",
+    "scheme",
+    "teardown_delay",
+    "serve_files",
+    "processes",
+];
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKubeProject {
+    kube: RawKube,
+    #[serde(default)]
+    namespaces: Vec<String>,
+    env_provider: Option<EnvProviderKind>,
+    idle_timeout: Option<DurationValue>,
+    #[serde(default)]
+    apps: BTreeMap<String, RawKubeService>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKube {
+    context: String,
+    kubeconfig: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKubeService {
+    #[serde(default)]
+    aliases: Vec<String>,
+    namespace: Option<String>,
+    service_port: Option<ServicePort>,
+    policy: Option<Policy>,
+}
+
+/// Whether a project file's text declares a kube project.
+pub fn is_kube_project(text: &str) -> bool {
+    text.parse::<toml::Table>()
+        .is_ok_and(|table| table.contains_key("kube"))
+}
+
+/// Parses a kube project file. Invalid aliases are left out and reported; anything
+/// else invalid fails the file.
+pub fn parse_kube_project(
+    path: &Path,
+    text: &str,
+) -> Result<(KubeProject, Vec<Problem>), ConfigError> {
+    let invalid = |message: String| ConfigError::Invalid {
+        path: path.to_path_buf(),
+        message,
+    };
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    slug::validate_project_name(&name).map_err(|err| invalid(err.to_string()))?;
+    if let Ok(table) = text.parse::<toml::Table>()
+        && let Some(key) = LOCAL_PROJECT_KEYS.iter().find(|k| table.contains_key(**k))
+    {
+        return Err(invalid(format!(
+            "`{key}` doesn't apply to a kube project, whose apps are the cluster's Services"
+        )));
+    }
+    let raw: RawKubeProject = from_toml(path, text)?;
+    if raw.kube.context.trim().is_empty() {
+        return Err(invalid(
+            "`kube.context` must name a kubeconfig context".into(),
+        ));
+    }
+    for namespace in &raw.namespaces {
+        check_dns_label(namespace).map_err(|m| invalid(format!("namespace {namespace:?}: {m}")))?;
+    }
+    let mut problems = Vec::new();
+    let mut seen_aliases = BTreeSet::new();
+    let mut services = BTreeMap::new();
+    for (service, table) in raw.apps {
+        check_dns_label(&service).map_err(|m| invalid(format!("[apps.{service}]: {m}")))?;
+        if let Some(namespace) = &table.namespace {
+            check_dns_label(namespace)
+                .map_err(|m| invalid(format!("[apps.{service}] namespace {namespace:?}: {m}")))?;
+            if !raw.namespaces.is_empty() && !raw.namespaces.contains(namespace) {
+                return Err(invalid(format!(
+                    "[apps.{service}] namespace {namespace:?} isn't one of `namespaces`"
+                )));
+            }
+        }
+        if table.policy == Some(Policy::Pinned) {
+            return Err(invalid(format!(
+                "[apps.{service}]: a Service can't be pinned; its policy is \"auto\" or \"disabled\""
+            )));
+        }
+        let mut aliases = Vec::new();
+        for alias in table.aliases {
+            let message = if alias.contains('.') {
+                Some("an alias is one hostname label, like \"shop\"".to_string())
+            } else if let Err(message) = check_dns_label(&alias) {
+                Some(message)
+            } else if !seen_aliases.insert(alias.clone()) {
+                Some("it's used by more than one app".to_string())
+            } else {
+                None
+            };
+            match message {
+                Some(message) => problems.push(Problem {
+                    project: Some(name.clone()),
+                    app: Some(service.clone()),
+                    stack: None,
+                    message: format!("alias {alias:?}: {message}"),
+                }),
+                None => aliases.push(alias),
+            }
+        }
+        services.insert(
+            service,
+            KubeService {
+                aliases,
+                namespace: table.namespace,
+                service_port: table.service_port,
+                policy: table.policy,
+            },
+        );
+    }
+    let project = KubeProject {
+        name,
+        config_path: path.to_path_buf(),
+        folder: None,
+        context: raw.kube.context,
+        kubeconfig: raw
+            .kube
+            .kubeconfig
+            .as_deref()
+            .map(crate::discovery::expand_home),
+        namespaces: raw.namespaces,
+        env_provider: raw.env_provider,
+        idle_timeout: raw.idle_timeout.map(|d| d.0),
+        services,
+    };
+    Ok((project, problems))
 }
 
 /// Parses a repo's `carte.toml`: the shape of one `[apps.X]` table, plus `include`
@@ -1060,6 +1217,144 @@ mod tests {
 
     fn project(text: &str) -> Result<ProjectFile, ConfigError> {
         parse_project(Path::new("/c/projects/nova.toml"), text)
+    }
+
+    fn kube(text: &str) -> Result<(KubeProject, Vec<Problem>), ConfigError> {
+        parse_kube_project(Path::new("/c/projects/prod.toml"), text)
+    }
+
+    fn invalid_message(result: Result<(KubeProject, Vec<Problem>), ConfigError>) -> String {
+        match result {
+            Err(ConfigError::Invalid { message, .. } | ConfigError::Parse { message, .. }) => {
+                message
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_a_kube_project() {
+        let text = r#"
+            kube = { context = "arn:aws:eks:eu-west-1:123456:cluster/production", kubeconfig = "/etc/kube/config" }
+            namespaces = ["monitoring", "logging"]
+            env_provider = "mise"
+            idle_timeout = "2h"
+
+            [apps.grafana]
+            aliases = ["grafana-prod"]
+            namespace = "monitoring"
+
+            [apps.vlogs]
+            service_port = "http"
+            policy = "disabled"
+
+            [apps.alertmanager]
+            service_port = 9093
+        "#;
+        assert!(is_kube_project(text));
+        let (project, problems) = kube(text).unwrap();
+        assert!(problems.is_empty());
+        assert_eq!(project.name, "prod");
+        assert_eq!(
+            project.context,
+            "arn:aws:eks:eu-west-1:123456:cluster/production"
+        );
+        assert_eq!(project.kubeconfig, Some(PathBuf::from("/etc/kube/config")));
+        assert_eq!(project.namespaces, vec!["monitoring", "logging"]);
+        assert_eq!(project.env_provider, Some(EnvProviderKind::Mise));
+        assert_eq!(project.idle_timeout, Some(Duration::from_secs(7200)));
+        assert_eq!(
+            project.services["grafana"],
+            KubeService {
+                aliases: vec!["grafana-prod".into()],
+                namespace: Some("monitoring".into()),
+                service_port: None,
+                policy: None,
+            }
+        );
+        assert_eq!(
+            project.services["vlogs"].service_port,
+            Some(ServicePort::Name("http".into()))
+        );
+        assert_eq!(project.policy("vlogs"), Policy::Disabled);
+        assert_eq!(
+            project.services["alertmanager"].service_port,
+            Some(ServicePort::Number(9093))
+        );
+    }
+
+    #[test]
+    fn a_kube_project_needs_only_its_context() {
+        let (project, _) = kube("kube = { context = \"kind-nova\" }\n").unwrap();
+        assert_eq!(project.context, "kind-nova");
+        assert!(project.namespaces.is_empty());
+        assert!(project.services.is_empty());
+        assert!(project.allows_namespace("anything"));
+    }
+
+    #[test]
+    fn kube_projects_refuse_local_keys() {
+        let message = invalid_message(kube(
+            "root = \"~/work\"\nkube = { context = \"kind-nova\" }\n",
+        ));
+        assert!(
+            message.contains("`root` doesn't apply to a kube project"),
+            "{message}"
+        );
+        let message = invalid_message(kube(
+            "kube = { context = \"kind-nova\" }\n[apps.grafana]\nport = 3000\n",
+        ));
+        assert!(message.contains("unknown field `port`"), "{message}");
+        let message = invalid_message(kube(
+            "kube = { context = \"kind-nova\" }\n[apps.grafana]\npolicy = \"pinned\"\n",
+        ));
+        assert!(message.contains("can't be pinned"), "{message}");
+        let message = invalid_message(kube("kube = { context = \" \" }\n"));
+        assert!(message.contains("kube.context"), "{message}");
+        let message = invalid_message(kube(
+            "kube = { context = \"kind-nova\" }\nnamespaces = [\"Bad_NS\"]\n",
+        ));
+        assert!(message.contains("namespace \"Bad_NS\""), "{message}");
+        let message = invalid_message(kube(
+            "kube = { context = \"kind-nova\" }\nnamespaces = [\"monitoring\"]\n[apps.grafana]\nnamespace = \"kube-system\"\n",
+        ));
+        assert!(message.contains("isn't one of `namespaces`"), "{message}");
+        for (value, wanted) in [
+            ("\"8080\"", "a number in quotes"),
+            ("0", "from 1 to 65535"),
+            ("70000", "from 1 to 65535"),
+        ] {
+            let message = invalid_message(kube(&format!(
+                "kube = {{ context = \"kind-nova\" }}\n[apps.grafana]\nservice_port = {value}\n"
+            )));
+            assert!(message.contains(wanted), "{value}: {message}");
+        }
+    }
+
+    #[test]
+    fn invalid_kube_aliases_are_reported() {
+        let (project, problems) = kube(
+            "kube = { context = \"kind-nova\" }\n[apps.grafana]\naliases = [\"dash\", \"a.b\"]\n[apps.vlogs]\naliases = [\"dash\"]\n",
+        )
+        .unwrap();
+        assert_eq!(project.services["grafana"].aliases, vec!["dash"]);
+        assert!(project.services["vlogs"].aliases.is_empty());
+        let messages: Vec<_> = problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            vec![
+                "alias \"a.b\": an alias is one hostname label, like \"shop\"",
+                "alias \"dash\": it's used by more than one app",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_local_project_parser_refuses_kube_projects() {
+        assert!(matches!(
+            project("kube = { context = \"kind-nova\" }\n"),
+            Err(ConfigError::Invalid { message, .. }) if message.contains("kube project")
+        ));
     }
 
     fn discovered(name: &str) -> DiscoveredApp {
