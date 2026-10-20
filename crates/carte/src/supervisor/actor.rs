@@ -1302,6 +1302,7 @@ impl Actor {
                         vec![events::process(key, &name)],
                     );
                 }
+                self.active(key);
             }
             runner::Event::SpawnFailed(message) => {
                 proc.state = ProcessState::Exited {
@@ -1310,12 +1311,16 @@ impl Actor {
                 };
                 proc.stop = None;
                 proc.terminal = None;
-                proc.paused = None;
+                let was_paused = proc.paused.take().is_some();
+                proc.held.send_replace(false);
                 let name = proc.spec.name.clone();
                 proc.log
                     .lock()
                     .unwrap()
                     .push(format!("carte: {message}\n").as_bytes());
+                if was_paused {
+                    self.active(key);
+                }
                 self.after_exit(
                     key,
                     idx,
@@ -1330,7 +1335,8 @@ impl Actor {
                 }
                 proc.stop = None;
                 proc.terminal = None;
-                proc.paused = None;
+                let was_paused = proc.paused.take().is_some();
+                proc.held.send_replace(false);
                 let manual = proc.manual_stop || inst.state == Lifecycle::Stopping;
                 proc.state = if manual {
                     ProcessState::Stopped
@@ -1353,6 +1359,9 @@ impl Actor {
                         None => checkout.path().clone(),
                     };
                     forget_vite_dev_server(&dir, proc.port);
+                }
+                if was_paused {
+                    self.active(key);
                 }
                 self.after_exit(key, idx, manual, code, message);
             }
@@ -1808,6 +1817,13 @@ impl Actor {
             Activity::ConnectionClosed => inst.connections = inst.connections.saturating_sub(1),
         }
         inst.last_activity = Instant::now();
+    }
+
+    /// Starts the idle timer over, as when a hold like a pause ends.
+    fn active(&mut self, key: &InstanceKey) {
+        if let Some(inst) = self.instances.get_mut(key) {
+            inst.last_activity = Instant::now();
+        }
     }
 
     fn hold(&mut self, target: &Address) -> Result<(InstanceKey, u64), String> {

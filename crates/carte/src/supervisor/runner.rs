@@ -904,18 +904,18 @@ mod tests {
         assert_eq!(log.tail(1), vec!["green"]);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_held_sleep_stands_still_while_paused() {
         let (paused, rx) = watch::channel(false);
         let started = tokio::time::Instant::now();
-        let sleeping = tokio::spawn(held_sleep(Duration::from_millis(400), rx));
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let sleeping = tokio::spawn(held_sleep(Duration::from_secs(10), rx));
+        tokio::time::sleep(Duration::from_secs(4)).await;
         paused.send_replace(true);
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
         assert!(!sleeping.is_finished(), "time doesn't count while paused");
         paused.send_replace(false);
         sleeping.await.unwrap();
-        assert!(started.elapsed() >= Duration::from_millis(1000));
+        assert_eq!(started.elapsed().as_secs(), 70);
     }
 
     #[tokio::test]

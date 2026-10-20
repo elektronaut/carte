@@ -216,25 +216,29 @@ pry, which leaves its cursor below the answered prompt. If the output stalls
 for a second while irb makes room below its prompt at the bottom of the
 terminal, the pause ends and starts again at the same prompt.
 
+While a process is paused, carte leaves its app alone: it doesn't stop
+for idleness, to meet a [limit](configuration.md#limits) or for
+`carte stop-all --idle`, and `carte status` shows it as
+`held by worker at a breakpoint`. The idle timeout starts over once the
+pause ends. A process paused before it's ready, at the start or after a
+restart, isn't failed by the boot timeout, and a task isn't failed by
+its time limit: the time at the prompt doesn't count, and the readiness
+check waits until the prompt is answered. A request that waits too long
+for a paused web process gets a page that says so, with the
+`carte attach` command.
+
 The prompt is all carte goes by. A process that is a console, like a
 `rails console` before Rails 7.1 or `pry` run as a carte process, shows
-as paused for as long as it waits for input. Custom prompts, like IRB's
-`>> `, aren't recognized, and neither is a prompt wider than the pty,
-which wraps it, as it can be with a narrow terminal attached. A pause
-that starts while someone is attached adds no event or notification,
-since they're watching.
-
-While a process is paused, carte leaves its app alone: it doesn't stop
-for idleness or to meet a [limit](configuration.md#limits), and
-`carte status` shows it as `held by worker at a breakpoint`. A process
-paused before it's ready, at the start or after a restart, isn't failed
-by the boot timeout: the time at the prompt doesn't count, and the
-readiness check waits until the prompt is answered.
+as paused for as long as it waits for input, so it keeps its app
+running until you stop it. Custom prompts, like IRB's `>> `, aren't
+recognized, and neither is a prompt wider than the pty, which wraps it,
+as it can be with a narrow terminal attached. A pause that starts while
+someone is attached adds no event or notification, since they're
+watching.
 
 In the terminal UI, `t` types into the selected process, or the
 selected app's paused or web process, from either pane; the detach keys
-stop. The
-[MCP server](mcp.md)'s `type` tool lets an agent do it.
+stop. The [MCP server](mcp.md)'s `type` tool lets an agent do it.
 
 ## JSON output
 
