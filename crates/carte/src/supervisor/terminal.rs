@@ -82,6 +82,10 @@ impl Terminal {
             if pending == 0 {
                 return;
             }
+            if !self.pty.reads_keys() {
+                self.clients.lock().unwrap().answers.stop();
+                return;
+            }
             if self.write(&CURSOR_ANSWER.repeat(pending)).await.is_err() {
                 self.clients.lock().unwrap().answers.stop();
                 return;
@@ -95,20 +99,19 @@ impl Terminal {
     }
 
     /// Attaches a client. `size` takes part in sizing the pty; with `replay` the
-    /// client gets the last screen of output, as many lines as its terminal has rows,
-    /// without the cursor-position queries in it, which were answered or given up on.
+    /// client gets the last screen of output, as many lines as its terminal has rows;
+    /// see [`replayable`].
     pub fn join(self: &Arc<Self>, size: Option<TermSize>, replay: bool) -> Client {
         let size = size.filter(|s| s.cols > 0 && s.rows > 0);
         let (output, replay, id) = {
             let log = self.log.lock().unwrap();
             let output = self.output.subscribe();
             let rows = size.unwrap_or(self.configured).rows;
-            let mut screen = if replay {
-                without_cursor_queries(&log.raw.last_lines(usize::from(rows)))
+            let screen = if replay {
+                replayable(&log.raw.last_lines(usize::from(rows)))
             } else {
                 Vec::new()
             };
-            screen.drain(..screen.len().saturating_sub(1024 * 1024));
             let mut clients = self.clients.lock().unwrap();
             clients.next += 1;
             let id = clients.next;
@@ -256,19 +259,111 @@ impl Answers {
     }
 }
 
-/// `data` without its complete cursor-position queries.
-fn without_cursor_queries(data: &[u8]) -> Vec<u8> {
+/// The last screen of output as a terminal can be shown it again: from the first
+/// line that starts within its last MiB, so it never starts inside an escape
+/// sequence, and without the queries in it, which were answered or given up on and
+/// whose answers would now arrive as typed input.
+fn replayable(data: &[u8]) -> Vec<u8> {
+    let over = data.len().saturating_sub(1024 * 1024);
+    let data = if over == 0 {
+        data
+    } else {
+        match data[over - 1..].iter().position(|&b| b == b'\n') {
+            Some(at) => &data[over + at..],
+            None => &[],
+        }
+    };
+    without_queries(data)
+}
+
+/// `data` without ENQ and the complete escape sequences a terminal answers, and
+/// without APC, PM and SOS strings, as kitty answers its graphics commands.
+fn without_queries(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
-    let mut rest = data;
-    while let Some(at) = rest
-        .windows(CURSOR_QUERY.len())
-        .position(|w| w == CURSOR_QUERY)
-    {
-        out.extend_from_slice(&rest[..at]);
-        rest = &rest[at + CURSOR_QUERY.len()..];
+    let mut at = 0;
+    while at < data.len() {
+        match data[at] {
+            0x05 => at += 1,
+            0x1b => match escape(&data[at..]) {
+                Some((len, query)) => {
+                    if !query {
+                        out.extend_from_slice(&data[at..at + len]);
+                    }
+                    at += len;
+                }
+                None => {
+                    out.push(0x1b);
+                    at += 1;
+                }
+            },
+            b => {
+                out.push(b);
+                at += 1;
+            }
+        }
     }
-    out.extend_from_slice(rest);
     out
+}
+
+/// The length of the CSI sequence or string `data` starts with, and whether a
+/// terminal answers it; `None` when it doesn't start with a complete one.
+fn escape(data: &[u8]) -> Option<(usize, bool)> {
+    match *data.get(1)? {
+        b'[' => {
+            let params = data[2..]
+                .iter()
+                .take_while(|b| (0x30..=0x3f).contains(*b))
+                .count();
+            let between = data[2 + params..]
+                .iter()
+                .take_while(|b| (0x20..=0x2f).contains(*b))
+                .count();
+            let end = 2 + params + between;
+            let last = *data.get(end).filter(|b| (0x40..=0x7e).contains(*b))?;
+            let query = csi_query(&data[2..2 + params], &data[2 + params..end], last);
+            Some((end + 1, query))
+        }
+        kind @ (b']' | b'P' | b'_' | b'^' | b'X') => {
+            let body = &data[2..];
+            let (len, end) = body.iter().enumerate().find_map(|(i, &b)| match b {
+                0x07 | 0x18 | 0x1a => Some((i, i + 1)),
+                0x1b if body.get(i + 1) == Some(&b'\\') => Some((i, i + 2)),
+                _ => None,
+            })?;
+            let body = &body[..len];
+            let query = match kind {
+                b']' => body
+                    .split(|&b| b == b';')
+                    .skip(1)
+                    .any(|part| part == b"?" || part.ends_with(b"=?")),
+                b'P' => body.starts_with(b"$q") || body.starts_with(b"+q"),
+                _ => true,
+            };
+            Some((2 + end, query))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a terminal answers the CSI sequence with these parameter and
+/// intermediate bytes and final byte: device status and attributes, modes, its
+/// version, keyboard modes, sizes and other reports.
+fn csi_query(params: &[u8], between: &[u8], last: u8) -> bool {
+    let private = params.first().copied();
+    match (last, between) {
+        (b'n' | b'c' | b'x', b"") => true,
+        (b'p' | b'w', b"$") | (b'y', b"*") | (b'|', b"#") => true,
+        (b'q', b"") => private == Some(b'>'),
+        (b'u' | b'm' | b'S', b"") => private == Some(b'?'),
+        (b't', b"") => {
+            let first = params.split(|&b| b == b';').next().unwrap_or_default();
+            matches!(
+                first,
+                b"11" | b"13" | b"14" | b"15" | b"16" | b"18" | b"19" | b"20" | b"21"
+            )
+        }
+        _ => false,
+    }
 }
 
 /// One attached client; dropping it detaches.
@@ -395,9 +490,86 @@ mod tests {
     #[test]
     fn replays_leave_out_whole_queries() {
         assert_eq!(
-            without_cursor_queries(OUTPUT),
+            replayable(OUTPUT),
             b"\x1b[1G\xe2\x96\xbd\x1b[1G\x1b[K\x1b[?25l\x1b[0m>> \x1b[4G"
         );
-        assert_eq!(without_cursor_queries(b">> \x1b[6"), b">> \x1b[6");
+        assert_eq!(replayable(b">> \x1b[6"), b">> \x1b[6");
+        assert_eq!(replayable(b">> \x1b]11;"), b">> \x1b]11;");
+    }
+
+    #[test]
+    fn replays_leave_out_every_query_a_terminal_answers() {
+        assert_eq!(replayable(b"a\x1b[c\x1b]11;?\x07b"), b"ab");
+        let queries: &[&[u8]] = &[
+            b"\x1b[5n",
+            b"\x1b[?6n",
+            b"\x1b[>c",
+            b"\x1b[=0c",
+            b"\x1b[?2004$p",
+            b"\x1b[4$p",
+            b"\x1b[>0q",
+            b"\x1b[?u",
+            b"\x1b[?4m",
+            b"\x1b[14t",
+            b"\x1b[18;0t",
+            b"\x1b[?1;1S",
+            b"\x1b]10;?\x1b\\",
+            b"\x1b]4;1;?\x07",
+            b"\x1b]52;c;?\x07",
+            b"\x1bP$qm\x1b\\",
+            b"\x1bP+q544e\x1b\\",
+            b"\x1b_Gi=1,a=q;AAAA\x1b\\",
+            b"\x05",
+        ];
+        for query in queries {
+            let data = [b"a".as_slice(), query, b"b"].concat();
+            assert_eq!(
+                replayable(&data),
+                b"ab",
+                "{:?}",
+                String::from_utf8_lossy(query)
+            );
+        }
+    }
+
+    #[test]
+    fn replays_keep_what_isnt_a_query() {
+        let kept: &[&[u8]] = &[
+            b"\x1b[31m",
+            b"\x1b[?1049h",
+            b"\x1b[2 q",
+            b"\x1b[22;0t",
+            b"\x1b[>4;1m",
+            b"\x1b[>1u",
+            b"\x1b]0;title\x07",
+            b"\x1b]8;;http://x\x1b\\",
+            b"\x1b]52;c;aGk=\x07",
+            b"\x1b(B",
+            b"\x1b7",
+        ];
+        for seq in kept {
+            let data = [b"a".as_slice(), seq, b"b"].concat();
+            assert_eq!(
+                replayable(&data),
+                data,
+                "{:?}",
+                String::from_utf8_lossy(seq)
+            );
+        }
+    }
+
+    #[test]
+    fn a_long_replay_starts_at_a_line() {
+        let mut data = b"\x1b]0;".to_vec();
+        data.extend(b"x".repeat(1024 * 1024));
+        data.extend(b"\x07line\nnext\n");
+        assert_eq!(replayable(&data), b"next\n");
+        let mut data = b"a".repeat(1024 * 1024 - 4);
+        data.extend(b"\nb\nc\n");
+        assert_eq!(replayable(&data), b"b\nc\n");
+        let mut data = b"a\n".to_vec();
+        data.extend(b"b".repeat(1024 * 1024));
+        assert_eq!(replayable(&data).len(), 1024 * 1024, "at a line already");
+        assert!(replayable(&b"a".repeat(2 * 1024 * 1024)).is_empty());
     }
 }

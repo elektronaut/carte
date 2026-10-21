@@ -3989,6 +3989,29 @@ async fn cursor_position_queries_are_answered_while_no_terminal_is_attached() {
 }
 
 #[tokio::test]
+async fn a_cursor_query_printed_in_cooked_mode_gets_no_answer() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "ask: while read line; do printf 'query \\033[6n\\n'; read reply; echo \"got [$reply]\"; done\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    let (_, terminal) = handle.attach(here("web"), None).await.unwrap();
+    let mut watcher = terminal.join(None, false);
+
+    watcher.write(b"go\n").await.unwrap();
+    let mut seen = read_until(&mut watcher, "\x1b[6n").await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    watcher.write(b"x\n").await.unwrap();
+    seen.push_str(&read_until(&mut watcher, "]").await);
+    assert!(seen.contains("got [x]"), "{seen:?}");
+    assert!(!seen.contains("1;1R"), "{seen:?}");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_process_that_asks_for_the_cursor_without_reading_still_stops() {
     let setup = Setup::new();
     setup.app(
@@ -4222,6 +4245,42 @@ async fn a_worker_at_a_debugger_prompt_shows_as_paused_until_answered() {
         process(s, "acme-web", "worker").state == ProcessState::Running
     })
     .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_move_from_one_debugger_prompt_to_another_is_reported() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: exec {fixture}\nworker: stty -echo; printf '(rdbg) '; read line; sleep 0.5; printf '%s\\r\\nirb:rdbg(main):001> ' \"$line\"; while read line; do :; done\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the worker to pause", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Paused
+    })
+    .await;
+    let (_, terminal) = handle.attach(here("web/worker"), None).await.unwrap();
+    terminal.join(None, false).write(b"irb\n").await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (events, _) = handle.events(None, 100).await.unwrap();
+        let prompts: Vec<&str> = events
+            .iter()
+            .filter(|e| e.kind == carte_api::EventKind::Paused)
+            .map(|e| e.message.as_str())
+            .collect();
+        if prompts.contains(&"at irb:rdbg(main):001>") {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no pause at the new prompt: {prompts:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     handle.shutdown().await;
 }
 

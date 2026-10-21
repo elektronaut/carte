@@ -179,10 +179,15 @@ carte attach shop@feature-x/worker
 
 - It prints the last screen of output, then everything the process
   prints. What you type goes to the process, `ctrl-c` and `ctrl-d`
-  included, and the process follows your terminal's size.
+  included, and the process follows your terminal's size. The last
+  screen leaves out queries your terminal would answer, like a cursor
+  position or colour query, since the answers would arrive as typing.
 - `ctrl-q d` detaches; `ctrl-q ctrl-q` sends a `ctrl-q`. `--detach-keys`
   or [`attach.detach_key`](configuration.md#attach) picks other keys,
-  like `"ctrl-] d"`. Detaching leaves the process running.
+  like `"ctrl-] d"`. Detaching leaves the process running, and puts
+  your terminal back: off the alternate screen if a pager left it
+  there, with the keyboard, mouse and other modes the process changed
+  reset.
 - Several terminals can attach to a process at once, and all of them can
   type, like a shared tmux session. The pty takes the smallest one's
   size, so wider terminals show it narrower; it gets its own size back
@@ -190,7 +195,9 @@ carte attach shop@feature-x/worker
 - Reline (irb, rdbg, pry) asks the terminal where its cursor is before
   each prompt, and waits half a second for the answer. While no terminal
   is attached, carte answers for it with the top left corner, so prompts
-  come at once. The terminal UI, `attach` without a terminal and the MCP
+  come at once. It only answers a process that reads keys without echo,
+  as Reline does, so a query printed by an ordinary program doesn't
+  leave an answer in its input. The terminal UI, `attach` without a terminal and the MCP
   `type` tool don't count as terminals.
 - When the process exits, `attach` says how and ends. It also ends, and
   puts your terminal back, on `SIGTERM`, `SIGHUP` or `SIGINT`.

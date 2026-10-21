@@ -323,6 +323,17 @@ impl Pty {
         Ok(())
     }
 
+    /// Whether the process reads its input a key at a time without echo, as a line
+    /// editor does, rather than a line at a time or echoed.
+    pub fn reads_keys(&self) -> bool {
+        nix::sys::termios::tcgetattr(self.master.get_ref()).is_ok_and(|mode| {
+            use nix::sys::termios::LocalFlags;
+            !mode
+                .local_flags
+                .intersects(LocalFlags::ICANON | LocalFlags::ECHO)
+        })
+    }
+
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         let size = libc::winsize {
             ws_row: rows,
