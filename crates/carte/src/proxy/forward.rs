@@ -149,10 +149,12 @@ pub(crate) async fn handle(
             forward(&shared, &inbound, route_request, upstream, guard, request).await
         }
         Route::File { path, guard } => {
-            let closed = guard.closed();
-            let response =
-                super::files::respond(&path, request.method(), request.headers(), guard).await;
-            closing(response, closed)
+            let (closed, body_closed) = (guard.closed(), guard.closed());
+            let respond = super::files::respond(&path, request.method(), request.headers(), guard);
+            match until_closed(closed, respond).await {
+                Ok(response) => closing(response, body_closed),
+                Err(page) => render(&page, inbound.kind, request.headers()),
+            }
         }
     })
 }
@@ -198,17 +200,7 @@ async fn forward(
         }
     };
 
-    let closed = guard.closed();
-    let sent = async {
-        match closed {
-            Some(closed) => tokio::select! {
-                sent = sent => Ok(sent),
-                page = closed => Err(page),
-            },
-            None => Ok(sent.await),
-        }
-    };
-    let sent = match sent.await {
+    let sent = match until_closed(guard.closed(), sent).await {
         Ok(sent) => sent,
         Err(page) => return render(&page, inbound.kind, &request_headers),
     };
@@ -289,11 +281,12 @@ async fn forward(
         .is_some_and(|length| length <= 8192);
     if response.status() == StatusCode::FORBIDDEN && small {
         let (parts, body) = response.into_parts();
-        let bytes = body
-            .collect()
-            .await
-            .map(|collected| collected.to_bytes())
-            .unwrap_or_default();
+        let bytes = match until_closed(guard.closed(), body.collect()).await {
+            Ok(collected) => collected
+                .map(|collected| collected.to_bytes())
+                .unwrap_or_default(),
+            Err(page) => return render(&page, inbound.kind, &request_headers),
+        };
         if let Some(page) = host_check_page(&bytes, route_request.host) {
             return render(&page, inbound.kind, &request_headers);
         }
@@ -304,6 +297,21 @@ async fn forward(
         response.map(|body| boxed(GuardedBody::new(body, guard))),
         closed,
     )
+}
+
+/// Runs `work` unless `closed` resolves first, which gives the page to answer with.
+async fn until_closed<T>(
+    closed: Option<BoxFuture<'static, ErrorPage>>,
+    work: impl Future<Output = T>,
+) -> Result<T, ErrorPage> {
+    match closed {
+        Some(closed) => tokio::select! {
+            biased;
+            page = closed => Err(page),
+            done = work => Ok(done),
+        },
+        None => Ok(work.await),
+    }
 }
 
 /// Ends the response's body with an error once `closed` resolves.
