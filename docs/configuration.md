@@ -936,7 +936,10 @@ Each process's environment is built in layers, later ones winning:
    When that shell's `PATH` has mise's shims, carte adds `mise env` on
    top, since a shim would otherwise apply mise's `[env]` over carte's
    values inside every process. `direnv` uses `direnv export json`; `none` uses only the daemon's own
-   environment.
+   environment. The provider has 30 seconds to finish. After that carte
+   stops it and every process it started, and the app fails to start, so
+   let a slow first run, such as `use flake` in `.envrc`, finish in a
+   shell in the checkout first.
 2. **Env files** from `env_files`.
 3. **Templates:** the project's `[env]`, then the app's, then the
    process's.

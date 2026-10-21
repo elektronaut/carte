@@ -342,6 +342,7 @@ name = "carte-core"
 version = "0.5.0"
 dependencies = [
  "glob",
+ "nix",
  "serde",
  "serde_json",
  "sha2",
