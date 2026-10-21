@@ -82,8 +82,9 @@ impl Router for DaemonRouter {
 
 /// Who sent a request that another site made, as a phrase for the error page; `None`
 /// for opening a page yourself (typed, bookmarked, or a link you followed) and for
-/// requests from local pages. A frame on another site, or a page it has the browser
-/// prefetch or prerender, is a request that site made.
+/// requests from local pages, by their `Origin`, or their `Referer` when the `Origin`
+/// is hidden. A frame on another site, or a page it has the browser prefetch or
+/// prerender, is a request that site made.
 fn foreign_origin(world: &World, request: &RouteRequest<'_>) -> Option<String> {
     let navigation = matches!(*request.method, http::Method::GET | http::Method::HEAD)
         && request.fetch_mode == Some("navigate")
@@ -92,12 +93,10 @@ fn foreign_origin(world: &World, request: &RouteRequest<'_>) -> Option<String> {
     if navigation {
         return None;
     }
-    if request.opaque_origin {
-        return Some("A page that hides its origin".into());
-    }
     match request.referrer {
         Some(host) if is_local_host(world, host) => None,
         Some(host) => Some(format!("A page on {host}")),
+        None if request.opaque_origin => Some("A page that hides its origin".into()),
         None if request.fetch_site == Some("cross-site") => Some("Another site".into()),
         None => None,
     }
@@ -528,6 +527,14 @@ mod tests {
             request(get, Some("localhost"), false, None, None, None),
             request(
                 post,
+                Some("shop.test"),
+                true,
+                Some("cross-site"),
+                Some("navigate"),
+                Some("document"),
+            ),
+            request(
+                post,
                 None,
                 false,
                 Some("same-origin"),
@@ -616,6 +623,14 @@ mod tests {
                 Some("script"),
             ),
             request(get, Some("evil.example"), false, None, None, None),
+            request(
+                post,
+                Some("evil.example"),
+                true,
+                Some("cross-site"),
+                Some("navigate"),
+                Some("document"),
+            ),
             RouteRequest {
                 purpose: Some("prefetch"),
                 ..request(

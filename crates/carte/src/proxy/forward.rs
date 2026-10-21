@@ -666,6 +666,11 @@ mod tests {
             referrer_host(&referer).as_deref(),
             Some("web.shop.localhost")
         );
+        let origin = headers(&[("origin", "https://web.nova.localhost")]);
+        assert_eq!(
+            referrer_host(&origin).as_deref(),
+            Some("web.nova.localhost")
+        );
         assert_eq!(referrer_host(&headers(&[])), None);
     }
 

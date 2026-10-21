@@ -3950,6 +3950,72 @@ async fn apps_that_usually_open_next_are_warmed() {
 }
 
 #[tokio::test]
+async fn requests_from_other_sites_dont_warm_apps() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: FIXTURE_NAME=web exec {fixture}\n");
+    setup.app("acme-billing", "web: FIXTURE_NAME=billing exec {fixture}\n");
+    setup.project("");
+    let handle = setup.start();
+
+    for _ in 0..3 {
+        open_in_turn(&handle, "acme-web", "acme-billing").await;
+    }
+    handle
+        .control(waiting("acme-web", Action::Up))
+        .await
+        .unwrap();
+    handle
+        .request_running(key("acme-web", Stack::Main), "/")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-billing", "main").state,
+        InstanceState::Stopped
+    );
+
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    wait_for(&handle, "billing warmed", |s| {
+        status(s, "acme-billing", "main").state == InstanceState::Ready
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn requests_from_other_sites_wait_for_a_starting_app() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "web: FIXTURE_BOOT_DELAY_MS=1000 exec {fixture}\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+
+    let refused = handle
+        .request_running(key("acme-web", Stack::Main), "/")
+        .await
+        .unwrap_err();
+    assert!(refused.is_not_running(), "{}", refused.title);
+
+    handle.control(control("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "starting", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Starting
+    })
+    .await;
+    let upstream = handle
+        .request_running(key("acme-web", Stack::Main), "/")
+        .await
+        .unwrap();
+    let body = http_get(upstream.port, "/");
+    assert!(body.contains("\"name\""), "{body}");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn apps_with_warm_off_are_never_warmed() {
     let setup = Setup::new();
     setup.app("acme-web", "web: FIXTURE_NAME=web exec {fixture}\n");
