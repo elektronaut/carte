@@ -1128,8 +1128,10 @@ impl Actor {
             Ok(specs) => specs,
             Err(message) => {
                 match build {
-                    Some(build) => self.build_failed(key, build, message),
-                    None => self.crash(key, None, None, message),
+                    Some(build) if inst.state == Lifecycle::Ready => {
+                        self.build_failed(key, build, message)
+                    }
+                    _ => self.crash(key, None, None, message),
                 }
                 return;
             }
@@ -1149,8 +1151,8 @@ impl Actor {
         self.advance(key);
     }
 
-    /// A process's own env build failed: it shows as exited with the error, and
-    /// restarts as after a crash while the rest of the instance runs on.
+    /// A process's own env build failed on a ready instance: it shows as exited with
+    /// the error, and restarts as after a crash while the rest of the instance runs on.
     fn build_failed(&mut self, key: &InstanceKey, build: u64, message: String) {
         let Some(inst) = self.instances.get_mut(key) else {
             return;
@@ -1158,10 +1160,9 @@ impl Actor {
         let Some(idx) = inst.procs.iter().position(|p| p.building == Some(build)) else {
             return;
         };
-        let ready = inst.state == Lifecycle::Ready;
         let proc = &mut inst.procs[idx];
         proc.building = None;
-        if proc.queued || proc.is_running() || proc.off {
+        if proc.is_running() || proc.off {
             return;
         }
         proc.state = ProcessState::Exited {
@@ -1182,7 +1183,7 @@ impl Actor {
             message,
             vec![events::process(key, &name)],
         );
-        if restarts && ready {
+        if restarts {
             self.schedule_restart(key, idx);
         }
     }
