@@ -38,12 +38,13 @@ pub fn parse(input: &str) -> Result<Duration, DurationError> {
     Ok(Duration::from_millis(millis))
 }
 
-/// Formats a duration the way `parse` reads it, using the largest units; less
-/// than a second shows in milliseconds.
+/// Formats a duration the way `parse` reads it, using the largest units, with
+/// milliseconds when there are some.
 pub fn format(duration: Duration) -> String {
     let mut secs = duration.as_secs();
-    if secs == 0 {
-        return format!("{}ms", duration.subsec_millis());
+    let millis = duration.subsec_millis();
+    if secs == 0 && millis == 0 {
+        return "0s".into();
     }
     let mut out = String::new();
     for (unit, size) in [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)] {
@@ -51,6 +52,9 @@ pub fn format(duration: Duration) -> String {
             out.push_str(&format!("{}{unit}", secs / size));
             secs %= size;
         }
+    }
+    if millis > 0 {
+        out.push_str(&format!("{millis}ms"));
     }
     out
 }
@@ -91,6 +95,9 @@ mod tests {
             parse(&format(Duration::from_millis(500))),
             Ok(Duration::from_millis(500))
         );
-        assert_eq!(format(Duration::ZERO), "0ms");
+        assert_eq!(format(Duration::ZERO), "0s");
+        assert_eq!(format(Duration::from_millis(1500)), "1s500ms");
+        assert_eq!(format(Duration::from_millis(61_250)), "1m1s250ms");
+        assert_eq!(parse("1s500ms"), Ok(Duration::from_millis(1500)));
     }
 }
