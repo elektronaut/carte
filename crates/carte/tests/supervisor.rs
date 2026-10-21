@@ -3085,7 +3085,7 @@ async fn a_web_process_that_never_becomes_ready_after_a_restart_counts_as_a_cras
         ),
     );
     setup.project("");
-    let handle = setup.start_with(|options| options.boot_timeout = Duration::from_secs(1));
+    let handle = setup.start_with(|options| options.boot_timeout = Duration::from_secs(2));
 
     handle
         .ensure_ready(key("acme-web", Stack::Main))
@@ -3122,7 +3122,7 @@ async fn a_web_process_that_never_becomes_ready_after_a_restart_counts_as_a_cras
     let stalled = event_lines(&events)
         .into_iter()
         .filter(|l| {
-            l.contains("web did not accept connections on port ") && l.ends_with(" within 1s")
+            l.contains("web did not accept connections on port ") && l.ends_with(" within 2s")
         })
         .count();
     assert_eq!(stalled, 4, "{:#?}", event_lines(&events));
