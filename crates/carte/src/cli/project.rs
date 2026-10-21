@@ -375,6 +375,8 @@ pub(super) fn discover(
 ) -> anyhow::Result<(ProjectState, Vec<Problem>)> {
     let file = config::parse_project(path, text)?;
     let (state, mut problems) = discovery::discover_project(file);
+    problems.extend(naming::long_tld_label(tld));
+    problems.extend(naming::long_hosts(tld, &state));
     problems.extend(naming::collisions(tld, &state));
     Ok((state, problems))
 }

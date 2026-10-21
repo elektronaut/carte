@@ -1910,22 +1910,14 @@ prunable gitdir file points to non-existent location
         .unwrap();
 
         let world = load_world(&config_dir);
-        let found: Vec<_> = world
-            .problems
-            .iter()
-            .map(|p| {
-                (
-                    p.stack.as_deref(),
-                    p.message.contains("room for subdomains"),
-                )
-            })
-            .collect();
-        assert_eq!(
-            found,
-            [(Some("main"), true), (Some(stack.as_str()), true)],
-            "{:?}",
-            world.problems
-        );
+        let found: Vec<_> = world.problems.iter().map(|p| p.message.as_str()).collect();
+        let short_room = |stack: &str, room: usize| {
+            format!(
+                "{app} in stack {stack} leaves room for subdomains of only {room} characters \
+                 before its hostname passes 253; longer ones can't be reached"
+            )
+        };
+        assert_eq!(found, [short_room("main", 54), short_room(&stack, 45)]);
 
         let label = naming::stack_label(&tld, &world.projects[0].project, &stack).into_owned();
         git(
