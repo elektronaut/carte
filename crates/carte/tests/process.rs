@@ -481,3 +481,72 @@ async fn sigkilled_daemon_takes_its_groups_down() {
         wait_dead(pid).await;
     }
 }
+
+fn dump(pgid: u32, label: &str) {
+    let mut out = format!("--- {label}\n");
+    for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let rest = &stat[stat.rfind(')').unwrap() + 2..];
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        if f[2].parse::<u32>().ok() != Some(pgid) {
+            continue;
+        }
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        let keep: Vec<&str> = status
+            .lines()
+            .filter(|l| {
+                ["Name", "State", "SigPnd", "ShdPnd", "SigBlk", "SigIgn", "SigCgt"]
+                    .iter()
+                    .any(|k| l.starts_with(k))
+            })
+            .collect();
+        let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_default();
+        out += &format!("{pid} ppid={} {} wchan={wchan}\n", f[1], keep.join(" | "));
+    }
+    eprintln!("{out}");
+}
+
+#[tokio::test]
+async fn debug_trap_without_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("terminated");
+    let mut handle = spawner().spawn(&trapping_term(&marker)).await.unwrap();
+    let mut output = handle.take_output().unwrap();
+    read_until(&mut output, &mut Vec::new(), "ready").await;
+    drain(output);
+    dump(handle.pid(), "before");
+    let started = Instant::now();
+    let status = handle.stop(Duration::from_secs(5)).await.unwrap();
+    eprintln!("no stop: {status:?} {:?} marker={}", started.elapsed(), marker.exists());
+}
+
+#[tokio::test]
+async fn debug_trap_with_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("terminated");
+    let mut handle = spawner().spawn(&trapping_term(&marker)).await.unwrap();
+    let mut output = handle.take_output().unwrap();
+    read_until(&mut output, &mut Vec::new(), "ready").await;
+    drain(output);
+    let pgid = handle.pid();
+    dump(pgid, "before");
+    handle.signal_group(Signal::SIGSTOP).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    dump(pgid, "stopped");
+    handle.signal_group(Signal::SIGTERM).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    dump(pgid, "after term");
+    let _ = handle.signal_group(Signal::SIGCONT);
+    for i in 0..10 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        dump(pgid, &format!("after cont {i}"));
+    }
+    eprintln!("marker={}", marker.exists());
+    let status = handle.stop(Duration::from_secs(1)).await.unwrap();
+    eprintln!("status {status:?}");
+}
