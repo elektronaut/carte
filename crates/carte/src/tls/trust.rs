@@ -111,20 +111,32 @@ fn parse_listing(listing: &str) -> Vec<KeychainCa> {
     cas
 }
 
-/// The keychain CAs this install created: those whose hashes `created` lists, or, when
-/// the state dir has no record yet, those named exactly `common_name`.
+impl KeychainCa {
+    /// Its label, or its hash when the keychain gave none.
+    pub fn name(&self) -> String {
+        if self.label.is_empty() {
+            format!("the carte CA with SHA-256 {}", self.hash)
+        } else {
+            self.label.clone()
+        }
+    }
+}
+
+/// The keychain CAs this install created, by the hashes in `created`, and the others
+/// named `common_name`, which may be another install's.
 pub fn own_cas(
     listed: Vec<KeychainCa>,
-    created: Option<&[String]>,
+    created: &[String],
     common_name: &str,
-) -> Vec<KeychainCa> {
-    listed
+) -> (Vec<KeychainCa>, Vec<KeychainCa>) {
+    let (own, others): (Vec<_>, Vec<_>) = listed
         .into_iter()
-        .filter(|ca| match created {
-            Some(hashes) => hashes.contains(&ca.hash),
-            None => ca.label == common_name,
-        })
-        .collect()
+        .partition(|ca| created.contains(&ca.hash));
+    let same_name = others
+        .into_iter()
+        .filter(|ca| ca.label == common_name)
+        .collect();
+    (own, same_name)
 }
 
 /// Whether macOS trusts a leaf issued by the CA, checked read-only with `security verify-cert`.
@@ -239,18 +251,44 @@ mod tests {
 
     #[test]
     fn keeps_only_the_cas_this_install_created() {
-        let listed = parse_listing(LISTING);
+        let mut listed = parse_listing(LISTING);
+        listed.push(ca("7E7E", "alice"));
         let alice = "carte local CA (alice@Mac)";
-        let created = ["1D2D".to_string(), "9F00".to_string()];
-        assert_eq!(
-            own_cas(listed.clone(), Some(&created), alice),
-            [ca("1D2D", "alice")]
-        );
-        assert_eq!(
-            own_cas(listed.clone(), Some(&["C544".to_string()]), alice),
-            [ca("C544", "bob")]
-        );
-        assert_eq!(own_cas(listed.clone(), None, alice), [ca("1D2D", "alice")]);
-        assert!(own_cas(listed, None, "carte local CA (alice@Ma").is_empty());
+        let hashes = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+
+        let (own, same_name) = own_cas(listed.clone(), &hashes(&["1D2D", "9F00"]), alice);
+        assert_eq!(own, [ca("1D2D", "alice")]);
+        assert_eq!(same_name, [ca("7E7E", "alice")]);
+
+        let (own, same_name) = own_cas(listed.clone(), &hashes(&["C544"]), alice);
+        assert_eq!(own, [ca("C544", "bob")]);
+        assert_eq!(same_name, [ca("1D2D", "alice"), ca("7E7E", "alice")]);
+    }
+
+    #[test]
+    fn without_a_record_takes_only_the_state_dirs_ca() {
+        let mut listed = parse_listing(LISTING);
+        listed.push(ca("7E7E", "alice"));
+        let current = ["7E7E".to_string()];
+
+        let (own, same_name) = own_cas(listed.clone(), &current, "carte local CA (alice@Mac)");
+        assert_eq!(own, [ca("7E7E", "alice")]);
+        assert_eq!(same_name, [ca("1D2D", "alice")]);
+
+        let renamed = "carte local CA (alice@NewMac)";
+        let (own, same_name) = own_cas(listed.clone(), &current, renamed);
+        assert_eq!(own, [ca("7E7E", "alice")]);
+        assert!(same_name.is_empty());
+
+        let (own, same_name) = own_cas(listed, &[], "carte local CA (alice@Mac)");
+        assert!(own.is_empty());
+        assert_eq!(same_name, [ca("1D2D", "alice"), ca("7E7E", "alice")]);
+    }
+
+    #[test]
+    fn names_a_ca_without_a_label_by_its_hash() {
+        let listed = parse_listing("SHA-256 hash: 1D2D\nSHA-1 hash: 34FB\n");
+        assert_eq!(listed[0].name(), "the carte CA with SHA-256 1D2D");
+        assert_eq!(ca("C544", "bob").name(), "carte local CA (bob@Mac)");
     }
 }

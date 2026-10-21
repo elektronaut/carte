@@ -53,7 +53,8 @@ Setup does this once per machine, asking for your password where needed:
 
 Apps are served under `.localhost`, which needs no DNS setup;
 `carte setup --tld test` adds `.test`. `carte setup --check` reports
-what's in place, and `carte setup --uninstall` undoes it all.
+what's in place, and `carte setup --uninstall` undoes it, removing only
+the CAs this install created from the keychain.
 
 ### Coming from puma-dev
 

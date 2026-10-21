@@ -87,6 +87,7 @@ lists it as left behind.
 
 `carte setup --uninstall` removes carte's LaunchAgent, resolver files and
 certificate authority. It removes only the CAs this install created, so
-other users' carte CAs stay trusted. It then prints the commands that bring puma-dev
-back: re-enabling its LaunchAgent, and `sudo puma-dev -setup` for its
-resolver files. Your carte projects stay in `~/.config/carte`.
+other users' carte CAs stay trusted. It then prints the commands that
+bring puma-dev back: re-enabling its LaunchAgent, and `sudo puma-dev
+-setup` for its resolver files. Your carte projects stay in
+`~/.config/carte`.
