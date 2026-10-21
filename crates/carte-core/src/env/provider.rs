@@ -235,31 +235,53 @@ pub fn detect_provider(
     }
 }
 
-/// Whether mise has config for `dir`: in it or a directory above it, up to its
-/// repo's root.
+/// Whether mise has config for `dir`: in it, or in a directory above it up to its
+/// repo's root. Outside a repo only `dir` itself counts, and `$HOME`, which holds
+/// mise's global config, counts only as the app's own directory.
 fn has_mise_config(dir: &Path) -> bool {
-    let mut done = false;
-    dir.ancestors()
-        .take_while(|d| {
-            let take = !done;
-            done = done || d.join(".git").exists();
-            take
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    has_mise_config_below(dir, home.as_deref())
+}
+
+fn has_mise_config_below(dir: &Path, home: Option<&Path>) -> bool {
+    let below_home: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|d| *d == dir || home != Some(*d))
+        .collect();
+    let dirs = match below_home.iter().position(|d| d.join(".git").exists()) {
+        Some(repo) => &below_home[..=repo],
+        None => &below_home[..1],
+    };
+    dirs.iter().any(|d| dir_has_mise_config(d))
+}
+
+/// Whether one directory has a mise config file of its own.
+fn dir_has_mise_config(dir: &Path) -> bool {
+    let any_file = |sub: &str, matches: fn(&str) -> bool| {
+        std::fs::read_dir(dir.join(sub)).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                entry.file_name().to_str().is_some_and(matches) && entry.path().is_file()
+            })
         })
-        .any(|d| {
-            [
-                "mise.toml",
-                "mise.local.toml",
-                ".mise.toml",
-                ".mise.local.toml",
-                ".tool-versions",
-                ".config/mise.toml",
-                ".config/mise/config.toml",
-                "mise/config.toml",
-                ".mise/config.toml",
-            ]
-            .iter()
-            .any(|name| d.join(name).is_file())
+    };
+    let toml = |name: &str| name.ends_with(".toml");
+    any_file("", is_mise_config_name)
+        || any_file(".config", |name| {
+            name.starts_with("mise.") && name.ends_with(".toml")
         })
+        || any_file(".config/mise", toml)
+        || any_file(".config/mise/conf.d", toml)
+        || any_file("mise", toml)
+        || any_file(".mise", toml)
+        || any_file(".mise/conf.d", toml)
+}
+
+/// Whether a file name is one mise reads config from in a project directory itself:
+/// `.tool-versions`, `mise.toml` and `.mise.toml`, and their `local` and per-env
+/// variants such as `mise.local.toml` or `mise.dev.toml`.
+pub fn is_mise_config_name(name: &str) -> bool {
+    name == ".tool-versions"
+        || ((name.starts_with("mise.") || name.starts_with(".mise.")) && name.ends_with(".toml"))
 }
 
 pub fn provider_name(kind: EnvProviderKind) -> &'static str {
@@ -574,6 +596,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn detects_more_of_mises_config_names() {
+        let runner = FakeRunner {
+            programs: vec!["mise"],
+            ..Default::default()
+        };
+        for file in [
+            "mise.dev.toml",
+            ".mise.local.toml",
+            ".config/mise/mise.toml",
+            ".config/mise/config.local.toml",
+            ".config/mise.local.toml",
+            ".config/mise/conf.d/node.toml",
+            ".mise/config.local.toml",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+            assert_eq!(
+                detect_provider(None, dir.path(), &runner),
+                EnvProviderKind::Mise,
+                "{file}"
+            );
+        }
+        assert!(!is_mise_config_name("misery.txt"));
+        assert!(!is_mise_config_name("mise.json"));
+    }
+
+    #[test]
     fn detects_mise_from_the_repo_above_the_app() {
         let runner = FakeRunner {
             programs: vec!["mise"],
@@ -594,6 +645,36 @@ pub(crate) mod tests {
         );
         std::fs::write(mono.join("mise.toml"), "").unwrap();
         assert_eq!(detect_provider(None, &web, &runner), EnvProviderKind::Mise);
+    }
+
+    #[test]
+    fn global_mise_config_doesnt_count_for_apps_outside_a_repo() {
+        let runner = FakeRunner {
+            programs: vec!["mise"],
+            ..Default::default()
+        };
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let app = home.join("sites/blog");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(home.join(".tool-versions"), "").unwrap();
+        std::fs::create_dir_all(home.join(".config/mise")).unwrap();
+        std::fs::write(home.join(".config/mise/config.toml"), "").unwrap();
+        assert!(!has_mise_config_below(&app, Some(home)));
+        assert!(
+            !has_mise_config_below(&app, None),
+            "no repo: only the app counts"
+        );
+        assert_eq!(detect_provider(None, &app, &runner), EnvProviderKind::Shell);
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        assert!(
+            !has_mise_config_below(&app, Some(home)),
+            "never above or at home"
+        );
+        assert!(
+            has_mise_config_below(home, Some(home)),
+            "home as the app itself"
+        );
     }
 
     #[test]

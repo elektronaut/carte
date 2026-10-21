@@ -602,9 +602,14 @@ impl Actor {
                 self.dirty = true;
             }
             Msg::EnvChanged(path) => {
-                self.providers.remove(&path);
+                self.providers
+                    .retain(|checkout, _| !checkout.starts_with(&path));
                 for inst in self.instances.values_mut() {
-                    if inst.is_active() && inst.checkout.as_ref().is_some_and(|c| *c.path() == path)
+                    if inst.is_active()
+                        && inst
+                            .checkout
+                            .as_ref()
+                            .is_some_and(|c| c.path().starts_with(&path))
                     {
                         inst.env_changed = true;
                         self.dirty = true;
