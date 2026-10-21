@@ -10,9 +10,9 @@ use carte_api::{
     PruneCandidate, PruneKept, PruneKind, PruneList, PruneResult, PruneSkip, PruneStack,
 };
 use carte_core::dirs::{self, DirRoots};
-use carte_core::discovery;
 use carte_core::model::{InstanceKey, ProjectState, Stack, World};
 use carte_core::prune::{self, Known, KnownProject, Listing, Orphan, OrphanKind, Plan, Skip};
+use carte_core::{config, discovery};
 
 use crate::paths::Paths;
 
@@ -378,12 +378,27 @@ fn known(paths: &Paths, world: &World, in_use: InUse) -> (Known, Vec<Skip>) {
         Ok(files) => {
             known.complete = true;
             for file in files {
-                if !known.projects.contains_key(&file.name) {
-                    known
-                        .skipped
-                        .entry(file.name)
-                        .or_insert_with(|| "its project file didn't load".into());
+                if known.projects.contains_key(&file.name) {
+                    continue;
                 }
+                if may_be_template(&file.path)
+                    && (known.skipped.contains_key(&file.name)
+                        || config::load_project_file(&file.path).is_err())
+                {
+                    known.complete = false;
+                    global.push(Skip {
+                        project: None,
+                        stack: None,
+                        reason: format!(
+                            "the template {} has a problem, so no project counts as gone: the projects it makes may be missing",
+                            file.path.display()
+                        ),
+                    });
+                }
+                known
+                    .skipped
+                    .entry(file.name)
+                    .or_insert_with(|| "its project file didn't load".into());
             }
         }
         Err(err) => global.push(Skip {
@@ -401,6 +416,14 @@ fn known(paths: &Paths, world: &World, in_use: InUse) -> (Known, Vec<Skip>) {
 /// Projects whose configuration or discovery has a problem, with the first one: their
 /// worktrees aren't known for sure, so nothing of theirs counts as gone. A problem
 /// with a single stack, such as a worktree named main, leaves the others known.
+/// Whether a project file is a template, or can't be read well enough to tell.
+fn may_be_template(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
+        .is_none_or(|doc| doc.contains_key("projects"))
+}
+
 pub fn troubled(world: &World) -> BTreeMap<String, String> {
     let mut troubled = BTreeMap::new();
     for problem in &world.problems {
@@ -524,6 +547,44 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn a_template_with_a_problem_keeps_every_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path());
+        fs::create_dir_all(paths.projects_dir()).unwrap();
+        let data = paths.dir_roots().data;
+        for project in ["acme", "nova"] {
+            fs::create_dir_all(data.join(project).join("main/web")).unwrap();
+        }
+        fs::write(paths.projects_dir().join("shop.toml"), "root = 3\n").unwrap();
+        let plan = super::plan(&paths, BTreeSet::new());
+        let gone: Vec<_> = plan
+            .orphans
+            .iter()
+            .filter_map(|o| o.project.as_deref())
+            .collect();
+        assert_eq!(
+            gone,
+            ["acme", "nova"],
+            "a broken project file isn't a template"
+        );
+
+        for text in [
+            "projects = \"*\"\nroot = 3\n",
+            "projects = [\n",
+            "root = \"/x\"\nprojects = \"*\"\n",
+        ] {
+            fs::write(paths.projects_dir().join("sites.toml"), text).unwrap();
+            let plan = super::plan(&paths, BTreeSet::new());
+            assert!(plan.orphans.is_empty(), "{text}: {:?}", plan.orphans);
+            assert!(
+                plan.skipped[0].reason.contains("sites.toml has a problem"),
+                "{text}: {:?}",
+                plan.skipped
+            );
+        }
     }
 
     #[test]
