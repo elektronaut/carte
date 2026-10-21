@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::process::ExitStatusExt;
@@ -503,17 +504,18 @@ async fn sigkilled_daemon_takes_its_groups_down() {
     }
 }
 
-/// The descriptors above stderr that `pid` has open.
-fn open_fds(pid: u32) -> Vec<String> {
+/// The descriptors above stderr that `pid` has open, by number.
+fn open_fds(pid: u32) -> BTreeMap<u32, String> {
     if cfg!(target_os = "linux") {
         return std::fs::read_dir(format!("/proc/{pid}/fd"))
             .map(|dir| {
                 dir.flatten()
-                    .filter(|e| e.file_name().to_string_lossy().parse::<u32>().unwrap_or(0) > 2)
-                    .map(|e| {
-                        std::fs::read_link(e.path())
+                    .filter_map(|e| {
+                        let fd = e.file_name().to_string_lossy().parse::<u32>().ok()?;
+                        let name = std::fs::read_link(e.path())
                             .map(|p| p.display().to_string())
-                            .unwrap_or_default()
+                            .unwrap_or_default();
+                        (fd > 2).then_some((fd, name))
                     })
                     .collect()
             })
@@ -524,18 +526,28 @@ fn open_fds(pid: u32) -> Vec<String> {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&lsof.stdout).into_owned();
-    let mut fds = Vec::new();
-    let mut open = false;
+    let mut fds = BTreeMap::new();
+    let mut open = None;
     for line in text.lines() {
         if let Some(fd) = line.strip_prefix('f') {
-            open = fd.parse::<u32>().is_ok_and(|fd| fd > 2);
+            open = fd.parse::<u32>().ok().filter(|&fd| fd > 2);
         } else if let Some(name) = line.strip_prefix('n')
-            && open
+            && let Some(fd) = open
         {
-            fds.push(name.to_string());
+            fds.insert(fd, name.to_string());
         }
     }
     fds
+}
+
+/// Starts a background `sleep 5` through a plain `sh` and returns its pid.
+fn start_sleep() -> Option<u32> {
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", "sleep 5 </dev/null >/dev/null 2>&1 & echo $!"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -543,22 +555,17 @@ async fn spawn_descriptors_dont_leak_into_other_children() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    let first = start_sleep().unwrap();
+    let inherited = open_fds(first);
+    let _ = kill(Pid::from_raw(first as i32), Signal::SIGKILL);
+
     let done = Arc::new(AtomicBool::new(false));
     let children = std::thread::spawn({
         let done = done.clone();
         move || {
             let mut pids = Vec::new();
             while !done.load(Ordering::Relaxed) {
-                let output = std::process::Command::new("/bin/sh")
-                    .args(["-c", "sleep 5 </dev/null >/dev/null 2>&1 & echo $!"])
-                    .stdin(std::process::Stdio::null())
-                    .output()
-                    .unwrap();
-                pids.extend(
-                    String::from_utf8_lossy(&output.stdout)
-                        .trim()
-                        .parse::<u32>(),
-                );
+                pids.extend(start_sleep());
             }
             pids
         }
@@ -572,9 +579,13 @@ async fn spawn_descriptors_dont_leak_into_other_children() {
     }
     done.store(true, Ordering::Relaxed);
     let pids = children.join().unwrap();
-    let leaked: Vec<(u32, Vec<String>)> = pids
+    let leaked: Vec<(u32, BTreeMap<u32, String>)> = pids
         .iter()
-        .map(|&pid| (pid, open_fds(pid)))
+        .map(|&pid| {
+            let mut fds = open_fds(pid);
+            fds.retain(|fd, _| !inherited.contains_key(fd));
+            (pid, fds)
+        })
         .filter(|(_, fds)| !fds.is_empty())
         .collect();
     for &pid in &pids {
@@ -583,7 +594,7 @@ async fn spawn_descriptors_dont_leak_into_other_children() {
     assert!(!pids.is_empty());
     assert!(
         leaked.is_empty(),
-        "{} of {}: {leaked:?}",
+        "{} of {}: {leaked:?}, besides the test's own {inherited:?}",
         leaked.len(),
         pids.len()
     );
