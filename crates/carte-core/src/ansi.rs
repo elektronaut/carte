@@ -23,10 +23,16 @@ enum State {
     Escape,
     EscapeIntermediate,
     Csi,
-    /// OSC, DCS, SOS, PM and APC: dropped up to BEL, ST, CAN, SUB,
-    /// another escape or a newline.
-    String,
+    /// OSC, DCS, SOS, PM and APC, `osc` for OSC: dropped up to BEL, ST, CAN, SUB
+    /// or another escape, and an OSC up to a newline or carriage return too.
+    String {
+        osc: bool,
+    },
     StringEscape,
+    /// The first byte of U+009C, ST, inside a string.
+    StringC2 {
+        osc: bool,
+    },
 }
 
 /// The farthest right a cursor movement takes the cursor.
@@ -63,7 +69,8 @@ const MAX_CSI: usize = 32;
 ///
 /// An escape sequence cut short by a control character or by text it can't hold
 /// ends there, so a stray ESC loses nothing after it. An OSC, DCS, SOS, PM or APC
-/// string also ends at CAN, SUB, any other escape sequence, or a newline.
+/// string also ends at CAN, SUB, U+009C or any other escape sequence, and an OSC
+/// at a newline or carriage return.
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
     state: State,
@@ -202,7 +209,8 @@ impl Stripper {
                         self.csi.clear();
                         State::Csi
                     }
-                    b']' | b'P' | b'X' | b'^' | b'_' => State::String,
+                    b']' => State::String { osc: true },
+                    b'P' | b'X' | b'^' | b'_' => State::String { osc: false },
                     0x20..=0x2f => State::EscapeIntermediate,
                     0x30..=0x7e => State::Ground,
                     _ => return self.interrupt(b, lines),
@@ -239,12 +247,21 @@ impl Stripper {
                 }
                 _ => self.interrupt(b, lines),
             },
-            State::String => match b {
+            State::String { osc } => match b {
                 0x07 | 0x18 | 0x1a => self.state = State::Ground,
                 0x1b => self.state = State::StringEscape,
-                b'\n' => self.interrupt(b, lines),
+                0xc2 => self.state = State::StringC2 { osc },
+                b'\n' | b'\r' if osc => self.interrupt(b, lines),
                 _ => {}
             },
+            State::StringC2 { osc } => {
+                self.state = State::String { osc };
+                if b == 0x9c {
+                    self.state = State::Ground;
+                } else {
+                    self.byte(b, lines);
+                }
+            }
             State::StringEscape => {
                 if b == b'\\' {
                     self.state = State::Ground;
@@ -539,9 +556,34 @@ mod tests {
     }
 
     #[test]
-    fn a_newline_ends_an_unterminated_string() {
+    fn a_newline_ends_an_unterminated_osc() {
         assert_eq!(strip(b"\x1b]0;cut off\nnext\n"), "\nnext\n");
         assert_eq!(strip(b"(rdbg) \x1b]c\r\nnext\n"), "(rdbg) \nnext\n");
+    }
+
+    #[test]
+    fn a_carriage_return_ends_an_unterminated_osc() {
+        assert_eq!(
+            strip(b"\x1b]0;cut off\rprogress 10%\rprogress 20%"),
+            "progress 20%"
+        );
+    }
+
+    #[test]
+    fn st_as_utf8_ends_a_string() {
+        assert_eq!(strip("\x1b]0;title\u{9c}after\n".as_bytes()), "after\n");
+        assert_eq!(strip("\x1bPq#0\u{9c}after\n".as_bytes()), "after\n");
+        assert_eq!(strip("\x1b]0;©\x07after\n".as_bytes()), "after\n");
+        let mut s = Stripper::default();
+        s.feed(b"\x1b]0;title\xc2");
+        s.feed(b"\x9cafter");
+        assert_eq!(s.pending(), "after");
+    }
+
+    #[test]
+    fn newlines_stay_inside_dcs_and_other_strings() {
+        assert_eq!(strip(b"a\x1bPq#0;2;0;0;0\n#0~~@@\n-\x1b\\b\n"), "ab\n");
+        assert_eq!(strip(b"a\x1b_Gf=100;AAAA\r\nBBBB\x1b\\b\n"), "ab\n");
     }
 
     #[test]
