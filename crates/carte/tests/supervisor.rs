@@ -307,6 +307,48 @@ async fn waiting_up_reports_a_crash_without_starting_the_app_again() {
 }
 
 #[tokio::test]
+async fn waiting_up_reports_a_crash_even_when_a_request_started_the_app_again() {
+    let setup = Setup::new();
+    let marker = setup.root.join("crashed");
+    setup.app(
+        "acme-api",
+        "web: FIXTURE_BOOT_DELAY_MS=2500 exec {fixture}\n",
+    );
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: if [ -e {marker} ]; then exec {{fixture}}; fi; touch {marker}; sleep 0.5; exit 1\n",
+            marker = marker.display()
+        ),
+    );
+    setup.project("[apps.acme-api.processes.web]\nready = \"/up\"\n");
+    let handle = setup.start();
+
+    let mut up = waiting("@main", Action::Up);
+    up.target.project = Some("acme".into());
+    let waiting_up = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.control(up).await })
+    };
+    wait_for(&handle, "acme-web to crash", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Crashed
+    })
+    .await;
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let response = waiting_up.await.unwrap().unwrap();
+    let failed: Vec<&str> = response
+        .failures
+        .iter()
+        .map(|f| f.instance.as_str())
+        .collect();
+    assert_eq!(failed, ["acme-web@main"], "{response:?}");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn waiting_restart_answers_with_the_new_process_ready() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);

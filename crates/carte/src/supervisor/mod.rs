@@ -132,12 +132,6 @@ pub(crate) enum Msg {
         /// the reply is [`BootFailure::is_not_running`].
         start: bool,
     },
-    /// Answers once the start of an instance that a control began is ready, or with
-    /// why it isn't; starts nothing.
-    AwaitStart {
-        key: InstanceKey,
-        reply: oneshot::Sender<Result<Upstream, BootFailure>>,
-    },
     Activity(InstanceKey, Option<u64>, Activity),
     /// Keeps a running instance from idling out; answers with the instance and the
     /// hold's id for `Release`.
@@ -155,7 +149,7 @@ pub(crate) enum Msg {
     /// Answers with the instances the action applied to.
     Control {
         request: ControlRequest,
-        reply: oneshot::Sender<Result<(ControlResponse, Vec<InstanceKey>), String>>,
+        reply: oneshot::Sender<Result<(ControlResponse, Vec<Started>), String>>,
     },
     StopAll {
         idle_only: bool,
@@ -217,6 +211,13 @@ pub(crate) enum Msg {
     },
     Internal(actor::Internal),
 }
+
+/// An instance a control applied to, and, for an `up` or `restart` that waits, the
+/// outcome of the start it began.
+pub(crate) type Started = (
+    InstanceKey,
+    oneshot::Receiver<Result<Upstream, BootFailure>>,
+);
 
 /// Why there is nothing to attach to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,13 +331,6 @@ impl Handle {
 
     /// Counts a request or connection for the start `boot` of an instance, from its
     /// [`Upstream`], or for whichever start runs; one for an earlier start is ignored.
-    async fn await_start(&self, key: InstanceKey) -> Result<Upstream, BootFailure> {
-        let (reply, rx) = oneshot::channel();
-        self.send(Msg::AwaitStart { key, reply });
-        rx.await
-            .unwrap_or_else(|_| Err(BootFailure::new("carte is shutting down", "")))
-    }
-
     pub fn activity(&self, key: InstanceKey, boot: Option<u64>, activity: Activity) {
         self.send(Msg::Activity(key, boot, activity));
     }
@@ -377,12 +371,15 @@ impl Handle {
         let wait = request.wait && matches!(request.action, Action::Up | Action::Restart);
         let (reply, rx) = oneshot::channel();
         self.send(Msg::Control { request, reply });
-        let (mut response, keys) = rx
+        let (mut response, started) = rx
             .await
             .unwrap_or_else(|_| Err("carte is shutting down".into()))?;
         if wait {
-            for key in keys {
-                if let Err(failure) = self.await_start(key.clone()).await
+            for (key, outcome) in started {
+                let outcome = outcome
+                    .await
+                    .unwrap_or_else(|_| Err(BootFailure::new("carte is shutting down", "")));
+                if let Err(failure) = outcome
                     && !failure.is_no_web_process()
                 {
                     response.failures.push(StartFailure {
