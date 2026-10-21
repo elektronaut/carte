@@ -803,7 +803,7 @@ fn slow_to_stop(setup: &Setup) -> PathBuf {
     setup.app(
         "acme-web",
         &format!(
-            "web: echo web >> {starts}; exec {{fixture}}\nworker: trap 'sleep 0.5; exit 0' TERM; touch {trapped}; while :; do sleep 0.05; done\n",
+            "web: echo web >> {starts}; exec {{fixture}}\nworker: trap 'sleep 3; exit 0' TERM; touch {trapped}; while :; do sleep 0.05; done\n",
             starts = starts.display(),
             trapped = trapped.display()
         ),
@@ -863,7 +863,7 @@ async fn down_during_a_restart_fails_the_request_waiting_for_it() {
             let handle = handle.clone();
             tokio::spawn(async move { handle.ensure_ready(key("acme-web", Stack::Main)).await })
         };
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
         handle.control(control("web", Action::Down)).await.unwrap();
         let failure = tokio::time::timeout(Duration::from_secs(5), waiter)
             .await
@@ -2936,12 +2936,21 @@ async fn a_config_change_lets_the_next_request_start_an_instance_carte_gave_up_o
     let setup = Setup::new();
     let marker = setup.root.join("started");
     crashing_web(&setup, &marker);
+    setup.app("acme-api", "web: exec {fixture}\n");
     setup.project("");
     let handle = setup.start();
 
     give_up_on_web(&handle).await;
     std::fs::remove_file(&marker).unwrap();
-    setup.project("[apps.acme-web.env]\nFIXED = \"1\"\n");
+    setup.project("[apps.acme-api.env]\nOTHER = \"1\"\n");
+    handle.reload(discovery::load_world(&setup.paths.config_dir));
+    let failure = handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap_err();
+    assert_eq!(failure.title, "acme-web@main crashed");
+
+    setup.project("[apps.acme-api.env]\nOTHER = \"1\"\n\n[apps.acme-web.env]\nFIXED = \"1\"\n");
     handle.reload(discovery::load_world(&setup.paths.config_dir));
     handle
         .request(key("acme-web", Stack::Main), "/", None)
