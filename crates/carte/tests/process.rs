@@ -403,6 +403,38 @@ async fn a_group_stopped_with_sigstop_stays_stopped() {
 }
 
 #[tokio::test]
+async fn the_shim_marks_its_command_as_the_group_record_does() {
+    let mut handle = spawner()
+        .spawn(&SpawnSpec::new(
+            "echo \"marker=$CARTE_SHIM.\"; read line",
+            std::env::temp_dir(),
+        ))
+        .await
+        .unwrap();
+    let mut output = handle.take_output().unwrap();
+    let mut seen = Vec::new();
+    read_until(&mut output, &mut seen, ".\r\n").await;
+    drain(output);
+    let text = String::from_utf8_lossy(&seen).into_owned();
+    let marker = text
+        .split("marker=")
+        .nth(1)
+        .and_then(|rest| rest.split(".\r\n").next())
+        .unwrap()
+        .to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("groups");
+    let mut record = carte::supervisor::groups::GroupRecord::new(path.clone());
+    record.add(handle.pgid());
+    let recorded = std::fs::read_to_string(&path).unwrap();
+    stop(handle).await;
+    let entry: Vec<&str> = recorded.lines().nth(1).unwrap().split(' ').collect();
+    assert!(marker.starts_with(&format!("{}.", entry[2])), "{marker}");
+    assert_eq!(entry[3], marker, "{recorded}");
+}
+
+#[tokio::test]
 async fn sigint_is_delivered_to_the_group() {
     let mut handle = spawner().spawn(&spec()).await.unwrap();
     let mut output = handle.take_output().unwrap();

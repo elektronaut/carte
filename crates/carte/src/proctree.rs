@@ -52,9 +52,137 @@ fn groups_of(root: u32, procs: &[Proc]) -> Vec<u32> {
     groups
 }
 
-/// Whether a living member of process group `pgid` is in session `sid`.
-pub fn group_in_session(pgid: u32, sid: u32) -> bool {
-    processes().iter().any(|p| p.pgid == pgid && p.sid == sid)
+/// The variable the shim puts in its command's environment, naming the shim.
+pub const SHIM_MARKER: &str = "CARTE_SHIM";
+
+/// Whether a living member of process group `pgid` is in session `sid`, and a
+/// member's environment has `SHIM_MARKER` set to `marker`.
+pub fn group_in_session(pgid: u32, sid: u32, marker: &str) -> bool {
+    let procs = processes();
+    procs.iter().any(|p| p.pgid == pgid && p.sid == sid) && marked(&procs, pgid, marker)
+}
+
+/// The process groups with a living member in session `sid` and a member whose
+/// environment has `SHIM_MARKER` set to `marker`.
+pub fn session_groups(sid: u32, marker: &str) -> Vec<u32> {
+    let procs = processes();
+    let mut groups = Vec::new();
+    for proc in procs.iter().filter(|p| p.sid == sid) {
+        if !groups.contains(&proc.pgid) && marked(&procs, proc.pgid, marker) {
+            groups.push(proc.pgid);
+        }
+    }
+    groups
+}
+
+fn marked(procs: &[Proc], pgid: u32, marker: &str) -> bool {
+    procs
+        .iter()
+        .filter(|p| p.pgid == pgid)
+        .any(|p| environ_var(p.pid, SHIM_MARKER).as_deref() == Some(marker))
+}
+
+/// Whether process `pid` may exist: only a definite "no such process" counts
+/// as gone, and a pid at or below 1 always counts as existing.
+pub fn exists(pid: u32) -> bool {
+    if pid <= 1 {
+        return true;
+    }
+    let found = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    found || nix::errno::Errno::last() != nix::errno::Errno::ESRCH
+}
+
+/// The value of `name` in the environment process `pid` started with; `None`
+/// when it isn't set or can't be read.
+pub fn environ_var(pid: u32, name: &str) -> Option<String> {
+    let environ = environ(pid)?;
+    let prefix = format!("{name}=");
+    environ
+        .split(|&b| b == 0)
+        .find_map(|entry| entry.strip_prefix(prefix.as_bytes()))
+        .map(|value| String::from_utf8_lossy(value).into_owned())
+}
+
+/// The NUL-separated environment process `pid` started with.
+#[cfg(target_os = "linux")]
+fn environ(pid: u32) -> Option<Vec<u8>> {
+    std::fs::read(format!("/proc/{pid}/environ")).ok()
+}
+
+/// The NUL-separated environment process `pid` started with, from
+/// `KERN_PROCARGS2`: argc, the executable's path, padding, the arguments, then
+/// the environment.
+#[cfg(target_os = "macos")]
+fn environ(pid: u32) -> Option<Vec<u8>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size: libc::size_t = 0;
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size < 4 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    let rc = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size < 4 {
+        return None;
+    }
+    buf.truncate(size);
+    let argc = i32::from_ne_bytes(buf[..4].try_into().ok()?).max(0) as usize;
+    let mut rest = &buf[4..];
+    let path_end = rest.iter().position(|&b| b == 0)?;
+    rest = &rest[path_end..];
+    let start = rest.iter().position(|&b| b != 0)?;
+    rest = &rest[start..];
+    for _ in 0..argc {
+        let end = rest.iter().position(|&b| b == 0)?;
+        rest = &rest[end + 1..];
+    }
+    Some(rest.to_vec())
+}
+
+/// What identifies the current boot: `kern.boottime` on macOS, the kernel's
+/// boot id on Linux.
+#[cfg(target_os = "macos")]
+pub fn boot_id() -> Option<String> {
+    let mut time = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut size = std::mem::size_of::<libc::timeval>();
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            (&mut time as *mut libc::timeval).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0 && time.tv_sec > 0).then(|| format!("{}.{}", time.tv_sec, time.tv_usec))
+}
+
+#[cfg(target_os = "linux")]
+pub fn boot_id() -> Option<String> {
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -119,6 +247,18 @@ fn processes() -> Vec<Proc> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn reads_its_own_environment() {
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(environ_var(std::process::id(), "PATH"), Some(path));
+        assert_eq!(
+            environ_var(std::process::id(), "CARTE_NOT_SET_ANYWHERE"),
+            None
+        );
+        assert_eq!(boot_id(), boot_id());
+        assert!(boot_id().is_some());
+    }
 
     #[test]
     fn finds_the_groups_of_children_and_grandchildren() {
