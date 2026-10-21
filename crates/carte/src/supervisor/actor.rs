@@ -768,6 +768,12 @@ impl Actor {
         force: Option<&str>,
         why: Why,
     ) -> Result<(), BootFailure> {
+        if self.shutdown.is_some() {
+            return Err(BootFailure::new(
+                "carte is stopping",
+                "carte is shutting down and starts nothing new.",
+            ));
+        }
         if let Some(inst) = self.instances.get_mut(key) {
             if matches!(why, Why::Manual | Why::Restart) {
                 inst.gave_up = None;
