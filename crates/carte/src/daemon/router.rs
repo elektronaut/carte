@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use carte_api::{ExternalRequest, InstanceState, ProcessState, ProcessStatus, Snapshot};
+use carte_api::{ExternalRequest, ProcessState, ProcessStatus, Snapshot};
 use carte_core::kube::{self, KubeTarget};
 use carte_core::model::{InstanceKey, World, path_match};
 use carte_core::naming;
@@ -199,8 +199,9 @@ impl Router for SupervisorRouter {
 /// The page for a request that waited too long for its instance: why it isn't
 /// ready, and how to answer a debugger prompt that holds it up.
 /// Once the instance is ready, the process a request waits for is the one serving
-/// its path, unless that one is off, else the HTTP process. While it starts, the
-/// request waits for the whole instance, so any paused process holds it up.
+/// its path, unless that one is off, else the HTTP process. While it starts (it
+/// has boot progress), the request waits for the whole instance, so any paused
+/// process holds it up.
 fn still_starting(snapshot: &Snapshot, key: &InstanceKey, path: &str) -> ErrorPage {
     let label = format!("{}@{}", key.app, key.stack.slug());
     let instance = snapshot
@@ -221,8 +222,7 @@ fn still_starting(snapshot: &Snapshot, key: &InstanceKey, path: &str) -> ErrorPa
         .map(|(_, p)| p)
         .or_else(|| processes.iter().copied().find(|p| p.http));
     let is_paused = |p: &&ProcessStatus| p.state == ProcessState::Paused;
-    let starting = instance
-        .is_some_and(|i| matches!(i.state, InstanceState::Starting | InstanceState::Paused));
+    let starting = instance.is_some_and(|i| i.boot.is_some());
     let paused = waited_for.filter(is_paused).or_else(|| {
         starting
             .then(|| processes.iter().copied().find(is_paused))
@@ -580,64 +580,80 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_paused_web_process_explains_the_wait() {
+    /// An instance of the sample with a web process and a `cable` process serving
+    /// `/cable`, in `state`, booting or not.
+    fn cable_app(state: carte_api::InstanceState, booting: bool) -> (Snapshot, InstanceKey) {
         let mut snapshot = crate::tui::fixtures::sample();
+        let instance = &mut snapshot.projects[0].stacks[0].instances[0];
+        instance.state = state;
+        instance.boot = booting.then(|| carte_api::BootProgress {
+            elapsed_ms: 1000,
+            waiting_for: "cable to listen on port 51234".into(),
+        });
+        let cable = &mut instance.processes[1];
+        cable.name = "cable".into();
+        cable.paths = vec!["/cable".into()];
         let key = InstanceKey {
             project: "nova".into(),
             app: "nova-billing".into(),
             stack: carte_core::model::Stack::Main,
         };
+        (snapshot, key)
+    }
+
+    fn set(snapshot: &mut Snapshot, web: ProcessState, cable: ProcessState) {
+        let processes = &mut snapshot.projects[0].stacks[0].instances[0].processes;
+        processes[0].state = web;
+        processes[1].state = cable;
+    }
+
+    #[test]
+    fn the_waiting_page_names_the_paused_process_the_request_waits_for() {
+        use carte_api::InstanceState;
+        let attach = |page: &ErrorPage| {
+            assert_eq!(page.title, "nova-billing@main is paused at a breakpoint");
+            page.detail
+                .split('`')
+                .nth(1)
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        let (snapshot, key) = cable_app(InstanceState::Ready, false);
         let page = still_starting(&snapshot, &key, "/");
         assert_eq!(page.title, "nova-billing@main is still starting");
-        let web = &mut snapshot.projects[0].stacks[0].instances[0].processes[0];
-        web.state = ProcessState::Paused;
-        let name = web.name.clone();
+
+        let (mut snapshot, key) = cable_app(InstanceState::Paused, false);
+        set(&mut snapshot, ProcessState::Paused, ProcessState::Running);
         let page = still_starting(&snapshot, &key, "/");
-        assert_eq!(page.title, "nova-billing@main is paused at a breakpoint");
-        assert!(
-            page.detail
-                .contains(&format!("carte attach nova-billing@main/{name}")),
-            "{}",
-            page.detail
+        assert_eq!(attach(&page), "carte attach nova-billing@main/web");
+
+        let (mut snapshot, key) = cable_app(InstanceState::Paused, false);
+        set(&mut snapshot, ProcessState::Starting, ProcessState::Paused);
+        let page = still_starting(&snapshot, &key, "/cable");
+        assert_eq!(attach(&page), "carte attach nova-billing@main/cable");
+        let page = still_starting(&snapshot, &key, "/");
+        assert_eq!(
+            page.title, "nova-billing@main is still starting",
+            "once ready, a request for / waits for web, which is restarting"
         );
 
-        let instance = &mut snapshot.projects[0].stacks[0].instances[0];
-        instance.processes[0].state = ProcessState::Running;
-        let assets = &mut instance.processes[1];
-        assets.paths = vec!["/assets/".into()];
-        assets.state = ProcessState::Paused;
-        let assets = assets.name.clone();
-        let page = still_starting(&snapshot, &key, "/assets/app.js");
-        assert!(
-            page.detail
-                .contains(&format!("carte attach nova-billing@main/{assets}")),
-            "the process serving the path: {}",
-            page.detail
-        );
-        let page = still_starting(&snapshot, &key, "/orders");
-        assert_eq!(page.title, "nova-billing@main is still starting");
-
-        let instance = &mut snapshot.projects[0].stacks[0].instances[0];
-        instance.state = InstanceState::Starting;
-        let page = still_starting(&snapshot, &key, "/orders");
-        assert!(
-            page.detail
-                .contains(&format!("carte attach nova-billing@main/{assets}")),
-            "while starting, any paused process holds the request up: {}",
-            page.detail
+        let (mut snapshot, key) = cable_app(InstanceState::Paused, true);
+        set(&mut snapshot, ProcessState::Running, ProcessState::Paused);
+        let page = still_starting(&snapshot, &key, "/");
+        assert_eq!(
+            attach(&page),
+            "carte attach nova-billing@main/cable",
+            "while booting, a request for / waits for cable too"
         );
 
-        let instance = &mut snapshot.projects[0].stacks[0].instances[0];
-        instance.state = InstanceState::Ready;
-        instance.processes[0].state = ProcessState::Paused;
-        instance.processes[1].state = ProcessState::Stopped;
-        let page = still_starting(&snapshot, &key, "/assets/app.js");
-        assert!(
-            page.detail
-                .contains(&format!("carte attach nova-billing@main/{name}")),
-            "an off path process leaves its paths to web: {}",
-            page.detail
+        let (mut snapshot, key) = cable_app(InstanceState::Paused, false);
+        set(&mut snapshot, ProcessState::Paused, ProcessState::Stopped);
+        let page = still_starting(&snapshot, &key, "/cable");
+        assert_eq!(
+            attach(&page),
+            "carte attach nova-billing@main/web",
+            "an off path process leaves its paths to web"
         );
     }
 }
