@@ -129,11 +129,12 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     .with_context(|| bind_hint(machine.https_port))?;
     let mut share_listener = Vec::new();
     if let Some(share) = &machine.share {
+        let mut options = ListenerOptions::share(share.domain.clone());
+        if share.provider == "cloudflare" {
+            options = options.cloudflare();
+        }
         let listener = proxy
-            .bind(
-                loopback(share.port),
-                ListenerOptions::share(share.domain.clone()),
-            )
+            .bind(loopback(share.port), options)
             .await
             .with_context(|| format!("binding the share listener on {}", loopback(share.port)))?;
         share_listener.push(listener);

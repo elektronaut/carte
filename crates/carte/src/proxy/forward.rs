@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::error::Error as _;
 use std::io;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -61,6 +61,8 @@ pub(crate) struct Inbound {
     pub(crate) tls: bool,
     pub(crate) kind: ListenerKind,
     pub(crate) share_domain: Option<Arc<str>>,
+    /// `CF-Connecting-IP` comes from the tunnel.
+    pub(crate) cloudflare: bool,
     pub(crate) shutdown: CancellationToken,
     pub(crate) tracker: TaskTracker,
 }
@@ -432,7 +434,7 @@ fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) {
 }
 
 /// Forwarding headers that carte doesn't set, removed from requests through a share.
-const VISITOR_FORWARDING: [&str; 7] = [
+const VISITOR_FORWARDING: [&str; 12] = [
     "forwarded",
     "x-forwarded-port",
     "x-forwarded-prefix",
@@ -440,6 +442,11 @@ const VISITOR_FORWARDING: [&str; 7] = [
     "x-forwarded-ssl",
     "x-real-ip",
     "client-ip",
+    "true-client-ip",
+    "x-cluster-client-ip",
+    "fastly-client-ip",
+    "x-original-host",
+    "x-host",
 ];
 
 fn add_forwarded_headers(headers: &mut HeaderMap, inbound: &Inbound, request: RouteRequest<'_>) {
@@ -458,6 +465,9 @@ fn add_forwarded_headers(headers: &mut HeaderMap, inbound: &Inbound, request: Ro
             for name in VISITOR_FORWARDING {
                 headers.remove(name);
             }
+            if !inbound.cloudflare {
+                headers.remove("cf-connecting-ip");
+            }
             visitor_chain(headers)
         }
     };
@@ -474,9 +484,8 @@ fn add_forwarded_headers(headers: &mut HeaderMap, inbound: &Inbound, request: Ro
     }
 }
 
-/// The `X-Forwarded-For` addresses a tunnel sent, without loopback, unspecified or
-/// malformed ones; `192.0.2.1` (TEST-NET-1) stands in for the visitor when none are
-/// left.
+/// The `X-Forwarded-For` addresses a tunnel sent, without local or malformed ones;
+/// `192.0.2.1` (TEST-NET-1) stands in for the visitor when none are left.
 fn visitor_chain(headers: &HeaderMap) -> String {
     let addresses: Vec<String> = headers
         .get_all("x-forwarded-for")
@@ -484,7 +493,7 @@ fn visitor_chain(headers: &HeaderMap) -> String {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
         .filter_map(|address| address.trim().parse::<IpAddr>().ok())
-        .filter(|ip| !ip.to_canonical().is_loopback() && !ip.is_unspecified())
+        .filter(|ip| !is_local_address(*ip))
         .map(|ip| ip.to_string())
         .collect();
     if addresses.is_empty() {
@@ -492,6 +501,27 @@ fn visitor_chain(headers: &HeaderMap) -> String {
     } else {
         addresses.join(", ")
     }
+}
+
+/// Whether `ip` is loopback or unspecified, also as the IPv4 address inside an
+/// IPv4-mapped, IPv4-compatible, IPv4-translated or NAT64 (`64:ff9b::/96`) one.
+fn is_local_address(ip: IpAddr) -> bool {
+    let local = |ip: IpAddr| ip.is_loopback() || ip.is_unspecified();
+    let ip = ip.to_canonical();
+    local(ip)
+        || matches!(ip, IpAddr::V6(v6) if embedded_ipv4(v6).is_some_and(|v4| local(v4.into())))
+}
+
+fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    let segments = ip.segments();
+    let embeds = matches!(
+        segments[..6],
+        [0, 0, 0, 0, 0, 0] | [0, 0, 0, 0, 0xffff, 0] | [0x64, 0xff9b, 0, 0, 0, 0]
+    );
+    embeds.then(|| {
+        let [.., a, b, c, d] = ip.octets();
+        Ipv4Addr::new(a, b, c, d)
+    })
 }
 
 fn connect_error(error: &hyper_util::client::legacy::Error) -> io::Error {
@@ -733,8 +763,19 @@ mod tests {
         let chain = |pairs: &[(&'static str, &'static str)]| visitor_chain(&headers(pairs));
         assert_eq!(chain(&[]), "192.0.2.1");
         assert_eq!(
-            chain(&[("x-forwarded-for", "127.0.0.1, ::1, localhost, 0.0.0.0")]),
+            chain(&[("x-forwarded-for", "127.0.0.1, ::1, localhost, 0.0.0.0, ::")]),
             "192.0.2.1"
+        );
+        assert_eq!(
+            chain(&[(
+                "x-forwarded-for",
+                "::ffff:0.0.0.0, ::127.0.0.1, ::ffff:0:127.0.0.1, 64:ff9b::7f00:1"
+            )]),
+            "192.0.2.1"
+        );
+        assert_eq!(
+            chain(&[("x-forwarded-for", "64:ff9b::cb00:7109, ::ffff:0:a00:7")]),
+            "64:ff9b::cb00:7109, ::ffff:0:a00:7"
         );
         assert_eq!(
             chain(&[("x-forwarded-for", "::ffff:127.0.0.2, 10.0.0.7")]),

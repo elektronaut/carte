@@ -1003,17 +1003,6 @@ fn echoed<'a>(headers: &'a [(String, String)], name: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// Whether any address in an `X-Forwarded-For` chain is local, or the chain names no
-/// address at all, as a framework that trusts loopback proxies would read it.
-fn looks_local(chain: &[&str]) -> bool {
-    let addresses: Vec<std::net::IpAddr> = chain
-        .iter()
-        .flat_map(|value| value.split(','))
-        .filter_map(|address| address.trim().parse().ok())
-        .collect();
-    addresses.is_empty() || addresses.iter().any(|ip| ip.to_canonical().is_loopback())
-}
-
 #[test]
 fn shared_requests_carry_the_visitor_address_and_not_the_visitors_forwarding_headers() {
     let daemon = Daemon::start_sharing();
@@ -1022,17 +1011,17 @@ fn shared_requests_carry_the_visitor_address_and_not_the_visitors_forwarding_hea
 
     let plain =
         echoed_headers(&daemon.public_raw(&format!("GET /headers HTTP/1.1\r\nHost: {host}\r\n")));
-    assert!(
-        !looks_local(&echoed(&plain, "x-forwarded-for")),
-        "{plain:?}"
-    );
+    assert_eq!(echoed(&plain, "x-forwarded-for"), ["192.0.2.1"]);
 
     let sent = format!(
         "GET /headers HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-For: 127.0.0.1, localhost\r\n\
          Forwarded: for=127.0.0.1;proto=http;host=nova.example\r\nX-Forwarded-Port: 80\r\n\
          X-Forwarded-Prefix: /nova\r\nX-Forwarded-Scheme: http\r\nX-Forwarded-Ssl: off\r\n\
          X-Real-IP: 127.0.0.1\r\nClient-IP: 127.0.0.1\r\nX-Forwarded-Proto: http\r\n\
-         X-Forwarded-Host: nova.example\r\n"
+         X-Forwarded-Host: nova.example\r\nTrue-Client-IP: 127.0.0.1\r\n\
+         X-Cluster-Client-IP: 127.0.0.1\r\nFastly-Client-IP: 127.0.0.1\r\n\
+         X-Original-Host: nova.example\r\nX-Host: nova.example\r\n\
+         CF-Connecting-IP: 127.0.0.1\r\nAuthorization: Bearer boot-marker\r\n"
     );
     let headers = echoed_headers(&daemon.public_raw(&sent));
     for name in [
@@ -1043,13 +1032,17 @@ fn shared_requests_carry_the_visitor_address_and_not_the_visitors_forwarding_hea
         "x-forwarded-ssl",
         "x-real-ip",
         "client-ip",
+        "true-client-ip",
+        "x-cluster-client-ip",
+        "fastly-client-ip",
+        "x-original-host",
+        "x-host",
+        "cf-connecting-ip",
     ] {
         assert_eq!(echoed(&headers, name), [] as [&str; 0], "{name}");
     }
-    assert!(
-        !looks_local(&echoed(&headers, "x-forwarded-for")),
-        "{headers:?}"
-    );
+    assert_eq!(echoed(&headers, "authorization"), ["Bearer boot-marker"]);
+    assert_eq!(echoed(&headers, "x-forwarded-for"), ["192.0.2.1"]);
     assert_eq!(echoed(&headers, "x-forwarded-proto"), ["https"]);
     assert_eq!(echoed(&headers, "x-forwarded-host"), [host]);
 
