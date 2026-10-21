@@ -10,6 +10,8 @@ pub struct GroupUsage {
     pub memory_bytes: u64,
     /// CPU time the members have used so far.
     pub cpu_time: Duration,
+    /// A member other than the group's leader is stopped by a signal.
+    pub member_stopped: bool,
 }
 
 /// CPU use between two samples of the same group, in percent of one core.
@@ -53,6 +55,9 @@ pub fn group_usage(pgid: u32) -> Option<GroupUsage> {
         let ticks = info.ri_user_time + info.ri_system_time;
         usage.cpu_time +=
             Duration::from_nanos(ticks * u64::from(timebase.0) / u64::from(timebase.1));
+        if pid as u32 != pgid && crate::proctree::is_stopped(pid as u32) == Some(true) {
+            usage.member_stopped = true;
+        }
     }
     Some(usage)
 }
@@ -100,6 +105,9 @@ pub fn group_usage(pgid: u32) -> Option<GroupUsage> {
             continue;
         }
         found = true;
+        if pid != pgid && matches!(fields.first(), Some(&"T" | &"t")) {
+            usage.member_stopped = true;
+        }
         let ticks: u64 = [11, 12]
             .iter()
             .filter_map(|&i| fields.get(i)?.parse::<u64>().ok())

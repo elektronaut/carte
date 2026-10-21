@@ -200,8 +200,8 @@ carte attach shop@feature-x/worker
   reaches the process as a plain character. Programs that handle
   `ctrl-z` themselves, like vim, irb or a debugger prompt, python or
   node, suspend themselves, and carte resumes them at once when they
-  are the command itself; one run under a wrapper, such as node under
-  `npm run`, can still stay stopped. The last
+  are the command itself. One run under a wrapper, such as node under
+  `npm run`, stays stopped and shows as suspended (see below). The last
   screen leaves out queries your terminal would answer, like a cursor
   position or colour query, since the answers would arrive as typing.
 - `ctrl-q d` detaches; `ctrl-q ctrl-q` sends a `ctrl-q`. `--detach-keys`
@@ -280,8 +280,12 @@ stop. The [MCP server](mcp.md)'s `type` tool lets an agent do it.
 A process stopped by a signal carte doesn't resume, like `SIGSTOP` from
 `kill -STOP`, shows as `suspended by a signal` in
 `carte status`, as `suspended: worker` in `carte ls` and with a yellow
-◆ in the terminal UI. carte sees this only for the command itself, not
-for a program it runs. An app whose web process is suspended shows as
+◆ in the terminal UI. A process also shows as suspended while another
+program in its process group is stopped, like node stopped on `ctrl-z`
+under `npm run`. carte notices this within a few seconds. It reports
+such a program but doesn't resume it: carte isn't its parent, and on
+Linux it can't tell whether `ctrl-z` or a `SIGSTOP` stopped it. An app
+whose web process is suspended shows as
 `suspended`, and its requests wait until the process continues; a
 request that waits too long gets a page that says so. As with a pause,
 the app doesn't stop for idleness or limits (`held by worker

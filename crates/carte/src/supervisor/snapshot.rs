@@ -215,7 +215,7 @@ fn stack_status(
                     process: proc.spec.name.clone(),
                 });
             }
-            for proc in inst.procs.iter().filter(|p| p.suspended) {
+            for proc in inst.procs.iter().filter(|p| p.is_suspended()) {
                 holds.push(Hold::Suspended {
                     process: proc.spec.name.clone(),
                 });
@@ -245,7 +245,9 @@ fn stack_status(
                         ProcessStatus {
                             name: p.spec.name.clone(),
                             state: match p.state {
-                                ProcessState::Running if p.suspended => ProcessState::Suspended,
+                                ProcessState::Running if p.is_suspended() => {
+                                    ProcessState::Suspended
+                                }
                                 ProcessState::Running if p.paused.is_some() => ProcessState::Paused,
                                 state => state,
                             },
@@ -387,7 +389,7 @@ fn instance_state(inst: &Instance) -> InstanceState {
     match inst.state {
         Lifecycle::Stopped => InstanceState::Stopped,
         Lifecycle::Starting | Lifecycle::Ready
-            if inst.procs.iter().filter(serves).any(|p| p.suspended) =>
+            if inst.procs.iter().filter(serves).any(|p| p.is_suspended()) =>
         {
             InstanceState::Suspended
         }
