@@ -47,6 +47,7 @@ pub struct BootFailure {
 }
 
 const NO_WEB_PROCESS: &str = "No web process";
+const NOT_RUNNING: &str = "Not running";
 
 impl BootFailure {
     fn new(title: impl Into<String>, detail: impl Into<String>) -> Self {
@@ -65,6 +66,15 @@ impl BootFailure {
 
     pub fn is_no_web_process(&self) -> bool {
         self.title == NO_WEB_PROCESS
+    }
+
+    /// A request that may not start the instance found it stopped.
+    fn not_running(app: &str) -> Self {
+        BootFailure::new(NOT_RUNNING, format!("{app} isn't running"))
+    }
+
+    pub fn is_not_running(&self) -> bool {
+        self.title == NOT_RUNNING
     }
 }
 
@@ -116,6 +126,9 @@ pub(crate) enum Msg {
         /// The start is for a proxied request, which came from a page of this
         /// instance when `Some(Some(_))`.
         request: Option<Option<InstanceKey>>,
+        /// When false, an instance that isn't starting or ready is left alone and
+        /// the reply is [`BootFailure::is_not_running`].
+        start: bool,
     },
     Activity(InstanceKey, Activity),
     /// Keeps a running instance from idling out; answers with the instance and the
@@ -253,7 +266,7 @@ impl Handle {
     /// Starts the instance if needed and waits until it serves HTTP. The boot goes
     /// on if this future is dropped.
     pub async fn ensure_ready(&self, key: InstanceKey) -> Result<Upstream, BootFailure> {
-        self.ready(key, None, None).await
+        self.ready(key, None, None, true).await
     }
 
     /// Like [`Handle::ensure_ready`], for a proxied request for `path`, which goes to
@@ -265,8 +278,19 @@ impl Handle {
         path: &str,
         referrer: Option<InstanceKey>,
     ) -> Result<Upstream, BootFailure> {
-        self.ready(key, Some(path.to_string()), Some(referrer))
+        self.ready(key, Some(path.to_string()), Some(referrer), true)
             .await
+    }
+
+    /// Like [`Handle::request`], for a request that may only reach an instance that
+    /// is starting or ready. It neither starts nor opens the instance; one that
+    /// isn't running answers with [`BootFailure::is_not_running`].
+    pub async fn request_running(
+        &self,
+        key: InstanceKey,
+        path: &str,
+    ) -> Result<Upstream, BootFailure> {
+        self.ready(key, Some(path.to_string()), None, false).await
     }
 
     async fn ready(
@@ -274,6 +298,7 @@ impl Handle {
         key: InstanceKey,
         path: Option<String>,
         request: Option<Option<InstanceKey>>,
+        start: bool,
     ) -> Result<Upstream, BootFailure> {
         let (reply, rx) = oneshot::channel();
         self.send(Msg::EnsureReady {
@@ -281,6 +306,7 @@ impl Handle {
             path,
             reply,
             request,
+            start,
         });
         rx.await
             .unwrap_or_else(|_| Err(BootFailure::new("carte is shutting down", "")))

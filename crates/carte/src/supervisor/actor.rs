@@ -515,7 +515,12 @@ impl Actor {
                 path,
                 reply,
                 request,
+                start,
             } => {
+                if !start && !self.instances.get(&key).is_some_and(|i| i.is_active()) {
+                    let _ = reply.send(Err(BootFailure::not_running(&key.app)));
+                    return;
+                }
                 self.ensure_ready(key.clone(), path, reply);
                 if let Some(referrer) = request {
                     self.requested(&key, referrer.as_ref());

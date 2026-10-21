@@ -404,6 +404,20 @@ Nothing fades while you don't use an app.
 kept in `warming.json` in the state directory. `warm = false` keeps an
 app from being warmed.
 
+### Requests from other sites
+
+A page on another site can't start an app. A request it makes for an
+app that isn't running, such as an image, a `fetch` or a frame, gets a
+403 page and leaves the app stopped. It doesn't open the app or warm
+others. A request counts as another site's when its `Origin` or
+`Referer` is a page outside carte's TLDs and loopback, its `Origin` is
+hidden (`null`), or the browser marks it cross-site.
+
+Opening the app yourself starts it, including by a link from another
+site. So do requests from local pages and from clients like `curl`
+that send no `Sec-Fetch-*` headers. Once the app runs, requests from
+other sites reach it as usual; its own CORS and CSRF checks apply.
+
 ## Processes
 
 An app's processes come from the first of these that exists in its

@@ -255,13 +255,21 @@ impl Daemon {
     }
 
     fn request_on(&self, ip: &str, host: &str, path: &str) -> String {
+        self.request_with(ip, host, path, &[])
+    }
+
+    fn request_with(&self, ip: &str, host: &str, path: &str, headers: &[(&str, &str)]) -> String {
         let mut stream = TcpStream::connect((ip, self.http_port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(30)))
             .unwrap();
+        let headers: String = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
         write!(
             stream,
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: {host}\r\n{headers}Connection: close\r\n\r\n"
         )
         .unwrap();
         let mut response = String::new();
@@ -459,6 +467,40 @@ fn status_reports_an_app_before_and_after_it_starts() {
     let text = stdout(&daemon.run(&["status", "web"]));
     assert!(text.starts_with("acme-web  ready\n"), "{text}");
     assert!(text.contains("processes"), "{text}");
+}
+
+#[test]
+fn other_sites_reach_running_apps_but_dont_start_them() {
+    let daemon = Daemon::start();
+    let state = || -> carte_api::InstanceState {
+        let status: carte_api::StatusResponse =
+            serde_json::from_slice(&daemon.run(&["status", "--json", "web"]).stdout).unwrap();
+        status.instances[0].state
+    };
+    let image = [
+        ("Sec-Fetch-Site", "cross-site"),
+        ("Sec-Fetch-Mode", "no-cors"),
+        ("Sec-Fetch-Dest", "image"),
+        ("Referer", "https://evil.example/"),
+    ];
+    let refused = daemon.request_with("127.0.0.1", "web.acme.test", "/", &image);
+    assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
+    assert!(refused.contains("evil.example"), "{refused}");
+    assert!(refused.contains("Open the app yourself"), "{refused}");
+    assert_eq!(state(), carte_api::InstanceState::Stopped);
+
+    let navigation = [
+        ("Sec-Fetch-Site", "cross-site"),
+        ("Sec-Fetch-Mode", "navigate"),
+        ("Sec-Fetch-Dest", "document"),
+        ("Referer", "https://evil.example/"),
+    ];
+    let opened = daemon.request_with("127.0.0.1", "web.acme.test", "/", &navigation);
+    assert!(opened.starts_with("HTTP/1.1 200"), "{opened}");
+    assert_eq!(state(), carte_api::InstanceState::Ready);
+
+    let forwarded = daemon.request_with("127.0.0.1", "web.acme.test", "/", &image);
+    assert!(forwarded.starts_with("HTTP/1.1 200"), "{forwarded}");
 }
 
 #[test]
