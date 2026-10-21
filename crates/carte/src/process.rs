@@ -301,12 +301,23 @@ pub struct Pty {
 
 impl Pty {
     /// Writes all of `data`, as if typed.
+    ///
+    /// A process that doesn't read fills the pty, and on Linux the master keeps
+    /// reporting itself writable while each write fails with `EAGAIN`, so a refused
+    /// write waits a moment, longer each time, before it tries again.
     pub async fn write(&self, mut data: &[u8]) -> io::Result<()> {
+        let mut backoff = Duration::from_millis(1);
         while !data.is_empty() {
             let mut guard = self.master.writable().await?;
             match guard.try_io(|fd| write_fd(fd.as_raw_fd(), data)) {
-                Ok(n) => data = &data[n?..],
-                Err(_would_block) => continue,
+                Ok(Ok(0)) | Err(_) => {
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_millis(100));
+                }
+                Ok(n) => {
+                    data = &data[n?..];
+                    backoff = Duration::from_millis(1);
+                }
             }
         }
         Ok(())

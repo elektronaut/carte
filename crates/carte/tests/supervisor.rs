@@ -3574,47 +3574,52 @@ async fn input_a_process_doesnt_read_is_dropped_with_a_note() {
     use carte_api::attach::{Frame, FrameReader};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let setup = Setup::new();
-    setup.app(
-        "acme-web",
-        "stuck: stty raw -echo; echo raw; exec sleep 600\n",
-    );
-    setup.project("");
-    let handle = setup.start();
-    handle.control(waiting("web", Action::Up)).await.unwrap();
-    let (attached, terminal) = handle.attach(here("web"), None).await.unwrap();
-    let mut watcher = terminal.join(None, true);
-    if !String::from_utf8_lossy(&watcher.replay).contains("raw") {
-        read_until(&mut watcher, "raw").await;
-    }
-    drop(watcher);
-    let (theirs, mut ours) = tokio::io::duplex(1024 * 1024);
-    tokio::spawn(carte::daemon::attach::session(
-        theirs,
-        attached,
-        terminal.join(None, false),
-    ));
-    let mut frames = Vec::new();
-    frames.extend(Frame::Input(vec![b'x'; 64 * 1024]).encode());
-    for _ in 0..300 {
-        frames.extend(Frame::Input(b"y".to_vec()).encode());
-    }
-    ours.write_all(&frames).await.unwrap();
-    let mut reader = FrameReader::default();
-    let mut seen = String::new();
-    let mut buf = vec![0u8; 16 * 1024];
-    let found = tokio::time::timeout(Duration::from_secs(10), async {
-        while !seen.contains("[carte: input dropped") {
-            let n = ours.read(&mut buf).await.unwrap();
-            assert!(n > 0, "the session ended: {seen:?}");
-            reader.feed(&buf[..n]);
-            while let Some(frame) = reader.next_frame().unwrap() {
-                if let Frame::Output(data) = frame {
-                    seen.push_str(&String::from_utf8_lossy(&data));
+    let test = async {
+        setup.app(
+            "acme-web",
+            "stuck: stty raw -echo; echo raw; exec sleep 600\n",
+        );
+        setup.project("");
+        let handle = setup.start();
+        handle.control(waiting("web", Action::Up)).await.unwrap();
+        let (attached, terminal) = handle.attach(here("web"), None).await.unwrap();
+        let mut watcher = terminal.join(None, true);
+        if !String::from_utf8_lossy(&watcher.replay).contains("raw") {
+            read_until(&mut watcher, "raw").await;
+        }
+        drop(watcher);
+        let (theirs, mut ours) = tokio::io::duplex(1024 * 1024);
+        tokio::spawn(carte::daemon::attach::session(
+            theirs,
+            attached,
+            terminal.join(None, false),
+        ));
+        let mut frames = Vec::new();
+        frames.extend(Frame::Input(vec![b'x'; 64 * 1024]).encode());
+        for _ in 0..300 {
+            frames.extend(Frame::Input(b"y".to_vec()).encode());
+        }
+        ours.write_all(&frames).await.unwrap();
+        let mut reader = FrameReader::default();
+        let mut seen = String::new();
+        let mut buf = vec![0u8; 16 * 1024];
+        let found = tokio::time::timeout(Duration::from_secs(10), async {
+            while !seen.contains("[carte: input dropped") {
+                let n = ours.read(&mut buf).await.unwrap();
+                assert!(n > 0, "the session ended: {seen:?}");
+                reader.feed(&buf[..n]);
+                while let Some(frame) = reader.next_frame().unwrap() {
+                    if let Frame::Output(data) = frame {
+                        seen.push_str(&String::from_utf8_lossy(&data));
+                    }
                 }
             }
-        }
-    })
-    .await;
-    assert!(found.is_ok(), "no note about dropped input: {seen:?}");
-    handle.shutdown().await;
+        })
+        .await;
+        assert!(found.is_ok(), "no note about dropped input: {seen:?}");
+        handle.shutdown().await;
+    };
+    tokio::time::timeout(Duration::from_secs(60), test)
+        .await
+        .expect("the test finishes, with its processes stopped");
 }
