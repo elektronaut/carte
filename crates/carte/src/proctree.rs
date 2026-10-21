@@ -194,12 +194,14 @@ pub fn boot_id() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn processes() -> Vec<Proc> {
+    // SAFETY: a null buffer of size 0 only asks for the count.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
     if count <= 0 {
         return Vec::new();
     }
     let mut pids = vec![0 as libc::pid_t; count as usize + 64];
     let size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+    // SAFETY: `size` is the byte length of `pids`.
     let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
     pids.truncate(count.max(0) as usize);
 
@@ -207,7 +209,9 @@ fn processes() -> Vec<Proc> {
     pids.into_iter()
         .filter(|&pid| pid > 0)
         .filter_map(|pid| {
+            // SAFETY: proc_bsdinfo is plain data, valid when zeroed.
             let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            // SAFETY: `size` is the size of `info`.
             let n = unsafe {
                 libc::proc_pidinfo(
                     pid,
@@ -221,6 +225,7 @@ fn processes() -> Vec<Proc> {
                 pid: pid as u32,
                 ppid: info.pbi_ppid,
                 pgid: info.pbi_pgid,
+                // SAFETY: getsid takes no pointers.
                 sid: unsafe { libc::getsid(pid) }.max(0) as u32,
             })
         })
@@ -279,8 +284,10 @@ mod tests {
 
     #[test]
     fn finds_the_groups_of_children_and_grandchildren() {
+        // SAFETY: the child makes only async-signal-safe calls.
         let child = unsafe { libc::fork() };
         if child == 0 {
+            // SAFETY: setpgid, fork, sleep and _exit take no pointers.
             unsafe {
                 libc::setpgid(0, 0);
                 if libc::fork() == 0 {
@@ -303,8 +310,10 @@ mod tests {
         };
         let outer = descendant_groups(std::process::id());
         for &group in inner.iter().chain([&child]) {
+            // SAFETY: killpg takes no pointers.
             unsafe { libc::killpg(group as i32, libc::SIGKILL) };
         }
+        // SAFETY: a null status pointer is allowed.
         unsafe { libc::waitpid(child as i32, std::ptr::null_mut(), 0) };
 
         assert_eq!(inner.len(), 1, "{inner:?}");

@@ -3672,6 +3672,7 @@ fn total_ram() -> u64 {
     let mut size: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
     let name = c"hw.memsize";
+    // SAFETY: the name is NUL-terminated, and `len` is the size of `size`.
     let rc = unsafe {
         libc::sysctlbyname(
             name.as_ptr(),
@@ -3686,7 +3687,9 @@ fn total_ram() -> u64 {
 
 #[cfg(not(target_os = "macos"))]
 fn total_ram() -> u64 {
+    // SAFETY: sysconf takes no pointers.
     let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    // SAFETY: as above.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     if pages > 0 && page > 0 {
         pages as u64 * page as u64

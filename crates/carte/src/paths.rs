@@ -122,6 +122,7 @@ impl Paths {
 #[cfg(target_os = "macos")]
 fn platform_run_root(_var: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
     let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: confstr writes at most `buf.len()` bytes into `buf`.
     let len = unsafe {
         libc::confstr(
             libc::_CS_DARWIN_USER_TEMP_DIR,
@@ -141,6 +142,7 @@ fn platform_run_root(_var: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
 fn platform_run_root(var: &dyn Fn(&str) -> Option<OsString>) -> PathBuf {
     match var("XDG_RUNTIME_DIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("carte"),
+        // SAFETY: getuid has no preconditions and cannot fail.
         _ => PathBuf::from(format!("/tmp/carte-{}", unsafe { libc::getuid() })),
     }
 }

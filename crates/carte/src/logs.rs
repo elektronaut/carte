@@ -120,8 +120,9 @@ impl LogBuffer {
 /// `HH:MM:SS`.
 pub fn clock(at_ms: u64) -> String {
     let secs = (at_ms / 1000) as libc::time_t;
-    // SAFETY: an all-zero `tm` is a valid value, and both pointers point at live locals.
+    // SAFETY: an all-zero `tm` is a valid value.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers point at live locals.
     if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
         return "--:--:--".into();
     }

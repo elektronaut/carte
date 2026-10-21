@@ -29,6 +29,7 @@ pub fn capacity() -> io::Result<PtyCapacity> {
 pub fn max() -> io::Result<usize> {
     let mut value: libc::c_int = 0;
     let mut len = size_of::<libc::c_int>();
+    // SAFETY: the name is NUL-terminated, and `len` is the size of `value`.
     let ret = unsafe {
         libc::sysctlbyname(
             c"kern.tty.ptmx_max".as_ptr(),

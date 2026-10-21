@@ -69,6 +69,7 @@ fn private_dir(path: &Path) -> io::Result<fs::Metadata> {
             format!("{} isn't a directory", path.display()),
         ));
     }
+    // SAFETY: getuid has no preconditions and cannot fail.
     if meta.uid() != unsafe { libc::getuid() } {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

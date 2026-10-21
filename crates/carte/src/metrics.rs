@@ -25,6 +25,7 @@ pub fn group_usage(pgid: u32) -> Option<GroupUsage> {
     const PROC_PGRP_ONLY: u32 = 2;
     let mut pids = vec![0 as libc::c_int; 256];
     let size = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
+    // SAFETY: `size` is the byte length of `pids`.
     let bytes =
         unsafe { libc::proc_listpids(PROC_PGRP_ONLY, pgid, pids.as_mut_ptr().cast(), size) };
     if bytes <= 0 {
@@ -35,7 +36,9 @@ pub fn group_usage(pgid: u32) -> Option<GroupUsage> {
     let timebase = timebase();
     let mut usage = GroupUsage::default();
     for pid in pids.into_iter().filter(|&pid| pid > 0) {
+        // SAFETY: rusage_info_v2 is plain data, valid when zeroed.
         let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
+        // SAFETY: RUSAGE_INFO_V2 writes one rusage_info_v2 into `info`.
         let rc = unsafe {
             libc::proc_pid_rusage(
                 pid,
@@ -67,6 +70,7 @@ fn timebase() -> (u32, u32) {
         fn mach_timebase_info(info: *mut MachTimebaseInfo) -> libc::c_int;
     }
     let mut info = MachTimebaseInfo { numer: 0, denom: 0 };
+    // SAFETY: `info` matches mach_timebase_info_data_t and outlives the call.
     if unsafe { mach_timebase_info(&mut info) } != 0 || info.denom == 0 {
         return (1, 1);
     }
@@ -75,7 +79,9 @@ fn timebase() -> (u32, u32) {
 
 #[cfg(target_os = "linux")]
 pub fn group_usage(pgid: u32) -> Option<GroupUsage> {
+    // SAFETY: sysconf takes no pointers.
     let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) }.max(1) as u64;
+    // SAFETY: as above.
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) }.max(1) as u64;
     let mut usage = GroupUsage::default();
     let mut found = false;
@@ -133,13 +139,18 @@ mod tests {
         {
             std::thread::sleep(Duration::from_millis(50));
         }
+        // SAFETY: kill takes no pointers.
         unsafe { libc::kill(pid, libc::SIGSTOP) };
         let mut status = 0;
+        // SAFETY: `status` outlives the call.
         unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
         let measured = group_usage(id).unwrap().cpu_time.as_secs_f64();
 
+        // SAFETY: kill takes no pointers.
         unsafe { libc::kill(pid, libc::SIGKILL) };
+        // SAFETY: rusage is plain data, valid when zeroed.
         let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: `status` and `rusage` outlive the call.
         unsafe { libc::wait4(pid, &mut status, 0, &mut rusage) };
         let seconds = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 / 1e6;
         let actual = seconds(rusage.ru_utime) + seconds(rusage.ru_stime);
