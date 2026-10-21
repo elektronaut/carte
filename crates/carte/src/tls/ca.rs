@@ -649,32 +649,44 @@ mod tests {
         );
     }
 
+    fn creator_dirs(root: &Path) -> Vec<PathBuf> {
+        (0..40).map(|i| root.join(i.to_string())).collect()
+    }
+
+    /// Plays one creator for `concurrent_creators_leave_a_usable_ca`, in a
+    /// process of its own; a no-op otherwise.
+    #[test]
+    fn create_cas() {
+        let Some(root) = std::env::var_os("CARTE_TEST_CREATE_CAS") else {
+            return;
+        };
+        for dir in creator_dirs(Path::new(&root)) {
+            CertificateAuthority::load_or_create(&dir, "x", &["test"]).unwrap();
+        }
+    }
+
     #[test]
     fn concurrent_creators_leave_a_usable_ca() {
-        use nix::sys::wait::{WaitStatus, waitpid};
-        use nix::unistd::{ForkResult, fork};
-
         let tmp = tempfile::tempdir().unwrap();
-        let dirs: Vec<PathBuf> = (0..40).map(|i| tmp.path().join(i.to_string())).collect();
         let children: Vec<_> = (0..2)
-            // SAFETY: the child only creates CAs in temp dirs and exits; it
-            // never returns into the test harness.
-            .map(|_| match unsafe { fork() }.unwrap() {
-                ForkResult::Child => {
-                    let failed = dirs.iter().any(|dir| {
-                        CertificateAuthority::load_or_create(dir, "x", &["test"]).is_err()
-                    });
-                    // SAFETY: _exit takes no pointers and skips the parent's
-                    // destructors.
-                    unsafe { libc::_exit(i32::from(failed)) }
-                }
-                ForkResult::Parent { child } => child,
+            .map(|_| {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "tls::ca::tests::create_cas"])
+                    .env("CARTE_TEST_CREATE_CAS", tmp.path())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
             })
             .collect();
         for child in children {
-            assert_eq!(waitpid(child, None).unwrap(), WaitStatus::Exited(child, 0));
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}{stderr}");
+            assert!(stdout.contains("1 passed"), "{stdout}");
         }
-        for dir in &dirs {
+        for dir in &creator_dirs(tmp.path()) {
             let loaded = CertificateAuthority::load_existing(dir, &["test"]);
             assert!(loaded.is_ok(), "{}: {:?}", dir.display(), loaded.err());
             let record = fs::read_to_string(CertificateAuthority::created_path_in(dir)).unwrap();
