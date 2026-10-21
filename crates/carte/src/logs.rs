@@ -160,6 +160,9 @@ enum State {
     StringEscape,
 }
 
+/// The farthest right a cursor movement takes the cursor.
+const MAX_COLUMN: usize = 4096;
+
 /// Turns raw terminal output into plain lines, incrementally.
 ///
 /// CSI, OSC and other escape sequences are dropped; a carriage return moves
@@ -214,8 +217,10 @@ impl Stripper {
                 0x40..=0x7e => {
                     match b {
                         b'K' => self.erase_line(),
-                        b'G' => self.cursor = self.count().saturating_sub(1),
-                        b'C' => self.cursor += self.count(),
+                        b'G' => self.cursor = self.count().saturating_sub(1).min(MAX_COLUMN),
+                        b'C' => {
+                            self.cursor = self.cursor.saturating_add(self.count()).min(MAX_COLUMN)
+                        }
                         b'D' => self.cursor = self.cursor.saturating_sub(self.count()),
                         _ => {}
                     }
@@ -440,6 +445,15 @@ mod tests {
         assert_eq!(strip(b"(rdbg) \x1b[8Gc\x1b[G(\n"), "(rdbg) c\n");
         assert_eq!(strip(b"ab\x1b[3Cc\n"), "ab   c\n");
         assert_eq!(strip(b"abc\x1b[D\x1b[KX\n"), "abX\n");
+    }
+
+    #[test]
+    fn cursor_movements_stop_at_a_column_limit() {
+        assert_eq!(strip(b"\x1b[999999999Gx").len(), MAX_COLUMN + 1);
+        assert_eq!(strip(b"\x1b[99999999999999999999999Cx"), " x");
+        let mut s = Stripper::default();
+        s.feed(b"\x1b[4000C\x1b[4000C\x1b[4000Cx");
+        assert_eq!(s.pending().len(), MAX_COLUMN + 1);
     }
 
     #[test]
