@@ -1012,7 +1012,9 @@ When a stack's worktrees are gone, its [teardown](#teardown) deletes
 its directories. carte doesn't delete them when an app or project goes
 away, when a teardown fails, or when the worktree went away while the
 daemon wasn't running; [`carte prune`](cli.md#prune) removes those
-leftovers.
+leftovers. It removes a run directory only when its `.owner` file names
+this carte, and deletes the `.carte-prune-*` folders an interrupted
+prune left.
 
 ### Env templates
 
