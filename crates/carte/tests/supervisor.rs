@@ -811,6 +811,34 @@ async fn down_during_a_restart_cancels_it() {
 }
 
 #[tokio::test]
+async fn down_during_a_restart_fails_the_request_waiting_for_it() {
+    let setup = Setup::new();
+    slow_to_stop(&setup);
+    let handle = setup.start_with(|options| options.grace = Duration::from_secs(5));
+
+    restart_then(&handle, &setup, async |handle| {
+        let waiter = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.ensure_ready(key("acme-web", Stack::Main)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        handle.control(control("web", Action::Down)).await.unwrap();
+        let failure = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("the request is answered")
+            .unwrap()
+            .unwrap_err();
+        assert!(failure.transient, "{failure:?}");
+        assert_eq!(
+            failure.detail,
+            "It was stopped before it could start again."
+        );
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn stop_all_during_a_restart_cancels_it() {
     let setup = Setup::new();
     let starts = slow_to_stop(&setup);
