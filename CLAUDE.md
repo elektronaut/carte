@@ -10,7 +10,7 @@ A local daemon that runs each app's process group on demand, routes `*.localhost
 ## Conventions
 
 - Conventional Commits, scoped by area: `feat(core): …`, `fix(daemon): …`, `test(shim): …`. Before 1.0.0 a `feat:` bumps the minor version (0.x.0); fixes bump the patch.
-- `cargo test --workspace` and `cargo clippy --workspace --all-targets` must be clean before committing; run `cargo fmt --all`.
+- `cargo test --workspace` and `cargo clippy --workspace --all-targets` must be clean before committing; run `cargo fmt --all`. CI runs the tests with `cargo nextest run --workspace --profile ci`: each test in its own process, failed after three minutes.
 - Tests must not change the machine: no resolver files, keychain, LaunchAgents or privileged ports. Use a test TLD and high ports.
 - Tests run in parallel and spawn children, and a child forked while a test holds a socket or lock keeps a copy until it execs. A test that needs something closed or released at once should create it in a forked helper, or retry for a moment.
 - A killed test run must leave nothing running. Processes started through a shim die with the test, as the shim's lifeline closes. Pass any other long-lived child, such as a `carte daemon`, to `common::guard`, and give fixture apps `FIXTURE_LIFELINE_PID` from `common::lifeline()` where the env allows.
