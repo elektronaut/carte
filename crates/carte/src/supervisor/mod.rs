@@ -132,6 +132,12 @@ pub(crate) enum Msg {
         /// the reply is [`BootFailure::is_not_running`].
         start: bool,
     },
+    /// Answers once the start of an instance that a control began is ready, or with
+    /// why it isn't; starts nothing.
+    AwaitStart {
+        key: InstanceKey,
+        reply: oneshot::Sender<Result<Upstream, BootFailure>>,
+    },
     Activity(InstanceKey, Option<u64>, Activity),
     /// Keeps a running instance from idling out; answers with the instance and the
     /// hold's id for `Release`.
@@ -324,6 +330,13 @@ impl Handle {
 
     /// Counts a request or connection for the start `boot` of an instance, from its
     /// [`Upstream`], or for whichever start runs; one for an earlier start is ignored.
+    async fn await_start(&self, key: InstanceKey) -> Result<Upstream, BootFailure> {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::AwaitStart { key, reply });
+        rx.await
+            .unwrap_or_else(|_| Err(BootFailure::new("carte is shutting down", "")))
+    }
+
     pub fn activity(&self, key: InstanceKey, boot: Option<u64>, activity: Activity) {
         self.send(Msg::Activity(key, boot, activity));
     }
@@ -369,7 +382,7 @@ impl Handle {
             .unwrap_or_else(|_| Err("carte is shutting down".into()))?;
         if wait {
             for key in keys {
-                if let Err(failure) = self.ensure_ready(key.clone()).await
+                if let Err(failure) = self.await_start(key.clone()).await
                     && !failure.is_no_web_process()
                 {
                     response.failures.push(StartFailure {
