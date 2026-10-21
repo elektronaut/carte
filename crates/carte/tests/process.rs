@@ -417,7 +417,43 @@ async fn closing_the_lifeline_alone_kills_the_group() {
 }
 
 #[tokio::test]
-async fn self_daemonising_child_escapes_the_group() {
+async fn stop_reaches_groups_the_command_makes() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("child.pid");
+    let mut handle = spawner()
+        .spawn(&spec().env("FIXTURE_GROUP_CHILD_PIDFILE", &pidfile))
+        .await
+        .unwrap();
+    drain(handle.take_output().unwrap());
+    let child = read_pidfile(&pidfile).await;
+    assert!(alive(child));
+    stop(handle).await;
+    wait_dead(child).await;
+}
+
+#[tokio::test]
+async fn closing_the_lifeline_reaches_groups_the_command_makes() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("child.pid");
+    let handle = spawner()
+        .spawn(
+            &spec()
+                .env("FIXTURE_GROUP_CHILD_PIDFILE", &pidfile)
+                .env("FIXTURE_IGNORE_TERM", "1"),
+        )
+        .await
+        .unwrap();
+    let pid = handle.pid();
+    let child = read_pidfile(&pidfile).await;
+    assert!(alive(child));
+    drop(handle);
+    wait_dead(child).await;
+    wait_dead(pid).await;
+}
+
+/// On Linux the shim adopts the orphaned grandchild; macOS has no way to.
+#[tokio::test]
+async fn self_daemonising_child_is_stopped_on_linux() {
     let dir = tempfile::tempdir().unwrap();
     let pidfile = dir.path().join("daemon.pid");
     let handle = spawner()
@@ -428,12 +464,16 @@ async fn self_daemonising_child_escapes_the_group() {
     let daemon = read_pidfile(&pidfile).await;
     drop(handle);
     wait_dead(pid).await;
-    let escaped = alive(daemon);
-    let _ = kill(Pid::from_raw(daemon as i32), Signal::SIGKILL);
-    assert!(
-        escaped,
-        "expected the setsid grandchild to survive the group kill"
-    );
+    if cfg!(target_os = "linux") {
+        wait_dead(daemon).await;
+    } else {
+        let escaped = alive(daemon);
+        let _ = kill(Pid::from_raw(daemon as i32), Signal::SIGKILL);
+        assert!(
+            escaped,
+            "expected the setsid grandchild to survive on macOS"
+        );
+    }
 }
 
 #[tokio::test]

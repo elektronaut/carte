@@ -12,6 +12,7 @@
 //! | `FIXTURE_LINES` | Print this many numbered lines on start |
 //! | `FIXTURE_PARTIAL` | Print this text without a trailing newline on start |
 //! | `FIXTURE_CHILD_PIDFILE` | Spawn a child that stays in the process group, write its pid here |
+//! | `FIXTURE_GROUP_CHILD_PIDFILE` | Spawn a child in a process group of its own, write its pid here |
 //! | `FIXTURE_DAEMON_PIDFILE` | Spawn a self-daemonising grandchild (double fork + setsid), write its pid here |
 //! | `FIXTURE_ECHO_STDIN` | `1` echoes each stdin line to stdout as `echo: <line>` |
 //! | `FIXTURE_LIFELINE_PID` | Exit when this process exits; passed on to spawned children |
@@ -27,6 +28,7 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::process::CommandExt;
 use std::process::{self, Command};
 use std::thread;
 use std::time::Duration;
@@ -69,7 +71,10 @@ fn main() {
     }
 
     if let Ok(path) = env::var("FIXTURE_CHILD_PIDFILE") {
-        spawn_child(&path);
+        spawn_child(&path, false);
+    }
+    if let Ok(path) = env::var("FIXTURE_GROUP_CHILD_PIDFILE") {
+        spawn_child(&path, true);
     }
     if let Ok(path) = env::var("FIXTURE_DAEMON_PIDFILE") {
         spawn_daemon(&path);
@@ -147,10 +152,13 @@ fn echo_stdin() {
     }
 }
 
-fn spawn_child(pidfile: &str) {
+fn spawn_child(pidfile: &str, own_group: bool) {
     let exe = env::current_exe().expect("current_exe");
     let mut command = Command::new(exe);
     command.env_clear().env("FIXTURE_SLEEPER", "1");
+    if own_group {
+        command.process_group(0);
+    }
     if let Some(lifeline) = env::var_os("FIXTURE_LIFELINE_PID") {
         command.env("FIXTURE_LIFELINE_PID", lifeline);
     }

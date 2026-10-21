@@ -470,6 +470,13 @@ Every process gets its own `PORT`. A fixed port in the command of the
 HTTP process or a process with `paths` (`-p 3000`, `--port=3000`) is
 replaced with `$PORT`, with a notice.
 
+Stopping a process stops everything it started, including children it
+moved to process groups of their own, as overmind or a job supervisor
+does: each gets SIGTERM, then SIGKILL if it's still running after the
+grace. On macOS, a child that detaches itself by forking twice and
+calling `setsid`, as a daemon does, is out of reach once its parent has
+exited, and keeps running.
+
 Processes that look like file watchers default to `scope = "checkout"`:
 names containing `watch`, `css` and `js`, and commands with `-w`,
 `--watch` or a `:watch` task. A process with `provides` always defaults

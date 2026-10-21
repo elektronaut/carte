@@ -50,7 +50,9 @@ impl GroupRecord {
 }
 
 /// Kills the groups recorded by a previous run whose leaders are still the same
-/// processes, and returns how many it killed.
+/// processes, or have exited while other members remain, and returns how many
+/// it killed. A pid isn't reused while a group of that id exists, so a group
+/// without its leader is still the recorded one.
 pub fn kill_leftovers(path: &Path) -> io::Result<usize> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -66,7 +68,7 @@ pub fn kill_leftovers(path: &Path) -> io::Result<usize> {
         ) else {
             continue;
         };
-        if start_time(pgid) == Some(started)
+        if start_time(pgid).is_none_or(|leader| leader == started)
             && killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL).is_ok()
         {
             killed += 1;
@@ -120,6 +122,46 @@ mod tests {
         fs::write(&path, format!("{me} 1\nnot a line\n")).unwrap();
         assert_eq!(kill_leftovers(&path).unwrap(), 0);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn groups_whose_leader_exited_are_killed() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let leader = unsafe { libc::fork() };
+        if leader == 0 {
+            unsafe {
+                libc::setpgid(0, 0);
+                let member = libc::fork();
+                if member == 0 {
+                    libc::sleep(5);
+                    libc::_exit(0);
+                }
+                libc::write(fds[1], (&raw const member).cast(), 4);
+                libc::_exit(0);
+            }
+        }
+        unsafe { libc::close(fds[1]) };
+        let mut member: libc::pid_t = 0;
+        let n = unsafe { libc::read(fds[0], (&raw mut member).cast(), 4) };
+        unsafe {
+            libc::close(fds[0]);
+            libc::waitpid(leader, std::ptr::null_mut(), 0);
+        }
+        assert_eq!(n, 4);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("groups");
+        fs::write(&path, format!("{leader} 1\n")).unwrap();
+        assert_eq!(kill_leftovers(&path).unwrap(), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while start_time(member as u32).is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "member {member} alive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]
