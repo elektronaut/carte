@@ -472,37 +472,71 @@ pub fn free_port() -> std::io::Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-static TEST_PORTS: OnceLock<Mutex<TestPorts>> = OnceLock::new();
+static TEST_PORTS: OnceLock<Mutex<PortBlocks>> = OnceLock::new();
 
-/// Makes [`free_port`] hand out ports from blocks of 50 between 10000 and 19999,
-/// below the ephemeral range, each locked by this process until it exits.
-/// Parallel test processes then never pick the same port, and none hands out a
-/// port twice, so no app can lose its port between the pick and its bind. Falls
-/// back to port 0 once every block is taken.
+/// Makes [`free_port`] hand out ports from [`PortBlocks`] between 10000 and
+/// 19999, below the ephemeral range, so no app can lose its port to a parallel
+/// test between the pick and its bind. Falls back to port 0 once every block is
+/// taken.
 pub fn use_test_ports() {
     TEST_PORTS.get_or_init(|| {
-        Mutex::new(TestPorts {
-            dir: std::env::temp_dir().join("carte-test-port-blocks"),
-            blocks: Vec::new(),
-            next_block: 0,
-            next: 0,
-            end: 0,
-        })
+        Mutex::new(PortBlocks::new(
+            std::env::temp_dir().join("carte-test-port-blocks"),
+            10_000,
+        ))
     });
 }
 
-struct TestPorts {
+/// Ports for tests from 200 blocks of 50 starting at `first`, each locked by this
+/// process through a file in `dir` until it exits. Parallel test processes then
+/// never get the same port, and none is handed out twice.
+pub struct PortBlocks {
     dir: std::path::PathBuf,
+    first: u16,
     blocks: Vec<std::fs::File>,
     next_block: u16,
     next: u16,
     end: u16,
 }
 
-impl TestPorts {
+impl PortBlocks {
+    pub fn new(dir: std::path::PathBuf, first: u16) -> Self {
+        PortBlocks {
+            dir,
+            first,
+            blocks: Vec::new(),
+            next_block: 0,
+            next: 0,
+            end: 0,
+        }
+    }
+
+    fn lease(&mut self) -> Option<()> {
+        std::fs::create_dir_all(&self.dir).ok()?;
+        while self.next_block < 200 {
+            let block = self.next_block;
+            self.next_block += 1;
+            let Ok(lock) = std::fs::File::create(self.dir.join(block.to_string())) else {
+                continue;
+            };
+            if lock.try_lock().is_ok() {
+                self.blocks.push(lock);
+                self.next = self.first + block * 50;
+                self.end = self.next + 50;
+                return Some(());
+            }
+        }
+        None
+    }
+}
+
+impl Iterator for PortBlocks {
+    type Item = u16;
+
     /// The next port that nothing listens on, checked by connecting: macOS
     /// sockets aren't created close-on-exec, so a probe listener could leak into
-    /// a process spawned meanwhile and hold the port.
+    /// a process spawned meanwhile and hold the port. `None` once every block is
+    /// taken.
     fn next(&mut self) -> Option<u16> {
         loop {
             while self.next < self.end {
@@ -516,22 +550,6 @@ impl TestPorts {
             }
             self.lease()?;
         }
-    }
-
-    fn lease(&mut self) -> Option<()> {
-        std::fs::create_dir_all(&self.dir).ok()?;
-        while self.next_block < 200 {
-            let block = self.next_block;
-            self.next_block += 1;
-            let lock = std::fs::File::create(self.dir.join(block.to_string())).ok()?;
-            if lock.try_lock().is_ok() {
-                self.blocks.push(lock);
-                self.next = 10_000 + block * 50;
-                self.end = self.next + 50;
-                return Some(());
-            }
-        }
-        None
     }
 }
 
@@ -549,6 +567,15 @@ mod tests {
         );
         let unique: std::collections::HashSet<_> = ports.iter().collect();
         assert_eq!(unique.len(), ports.len());
+    }
+
+    #[test]
+    fn a_block_whose_lock_file_cant_be_made_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("0")).unwrap();
+        let mut blocks = PortBlocks::new(dir.path().to_path_buf(), 10_000);
+        let port = blocks.next().unwrap();
+        assert!((10_050..10_100).contains(&port), "{port}");
     }
 
     #[test]
