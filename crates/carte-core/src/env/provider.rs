@@ -1111,7 +1111,7 @@ pub(crate) mod tests {
                 args: vec![
                     "-c".into(),
                     format!(
-                        "echo $$ > {}; (while echo more; do sleep 0.05; done) & echo {{}}",
+                        "echo $$ > {}; (while kill -0 $$ 2>/dev/null; do sleep 0.01; done; while echo more; do sleep 0.05; done) & echo {{}}",
                         pid_file.display()
                     ),
                 ],
