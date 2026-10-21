@@ -32,8 +32,9 @@ pub enum Change {
 }
 
 /// What to watch for a world: the config directory recursively, each repo's git
-/// directory (new worktrees), the directories new apps appear in, and per app each
-/// checkout's root (tool and process files, removal) and its `tmp` (restart.txt).
+/// directory and each worktree's folder in it (worktrees being added or removed),
+/// the directories new apps appear in, and per app each checkout's root (tool and
+/// process files, removal) and its `tmp` (restart.txt).
 pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> {
     let mut set = BTreeSet::from([(config_dir.to_path_buf(), true)]);
     for dir in &world.scan_dirs {
@@ -43,8 +44,13 @@ pub fn watch_set(config_dir: &Path, world: &World) -> BTreeSet<(PathBuf, bool)> 
         for (repo, worktrees) in &state.repo_worktrees {
             let git = repo.join(".git");
             set.insert((git.clone(), false));
-            if git.join("worktrees").is_dir() {
+            if let Ok(entries) = std::fs::read_dir(git.join("worktrees")) {
                 set.insert((git.join("worktrees"), false));
+                for entry in entries.flatten() {
+                    if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                        set.insert((entry.path(), false));
+                    }
+                }
             }
             set.insert((repo.clone(), false));
             for path in worktrees.values() {
@@ -280,19 +286,25 @@ pub fn run(
                     Change::EnvChanged(path) => supervisor.env_changed(path.clone()),
                 }
             }
-            if changes.contains(&Change::Reload) {
+            // Scans again after adding watches, so a change made before a new
+            // watch took effect is still seen.
+            let mut reload = changes.contains(&Change::Reload);
+            while reload {
                 let dir = config_dir.clone();
                 let Ok(fresh) =
                     tokio::task::spawn_blocking(move || discovery::load_world(&dir)).await
                 else {
-                    continue;
+                    break;
                 };
-                if fresh != *world {
+                let changed = fresh != *world;
+                if changed {
                     world = std::sync::Arc::new(fresh.clone());
                     supervisor.reload(fresh);
                     known = checkouts(&world);
                     scans = scan_dirs(&world);
-                    update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
+                }
+                reload = update_watches(&mut watcher, &mut watched, watch_set(&config_dir, &world));
+                if changed || reload {
                     restart_files.arm(known.values());
                 }
             }
@@ -300,11 +312,12 @@ pub fn run(
     })
 }
 
+/// Returns whether it watches anything new.
 fn update_watches(
     watcher: &mut RecommendedWatcher,
     watched: &mut BTreeSet<(PathBuf, bool)>,
     wanted: BTreeSet<(PathBuf, bool)>,
-) {
+) -> bool {
     for (path, _) in watched.difference(&wanted) {
         let _ = watcher.unwatch(path);
     }
@@ -318,7 +331,9 @@ fn update_watches(
             debug!("not watching {}: {err}", path.display());
         }
     }
+    let added = !wanted.is_subset(watched);
     *watched = wanted;
+    added
 }
 
 #[cfg(test)]
