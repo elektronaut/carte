@@ -1705,7 +1705,7 @@ impl Actor {
         }
         let inst = self.instances.get_mut(key).expect("instance");
         let detail = match inst.state {
-            Lifecycle::Starting => Some("It was stopped while starting."),
+            Lifecycle::Starting if !inst.restart_pending => Some("It was stopped while starting."),
             Lifecycle::Ready if !inst.restart_pending => {
                 Some("It was stopped while one of its processes restarted.")
             }
@@ -1722,6 +1722,25 @@ impl Actor {
             self.finish_stop(key);
         }
         self.dirty = true;
+    }
+
+    /// Drops the restart pending once an instance has stopped, failing the requests
+    /// that wait for it, so a stop by hand keeps it stopped.
+    fn cancel_restart(&mut self, key: &InstanceKey) {
+        let Some(inst) = self.instances.get_mut(key) else {
+            return;
+        };
+        if !std::mem::take(&mut inst.restart_pending) {
+            return;
+        }
+        inst.restart_why = None;
+        inst.restart_forced.clear();
+        let mut failure = BootFailure::new(
+            format!("{} was stopped", inst.label()),
+            "It was stopped while restarting.",
+        );
+        failure.transient = true;
+        inst.fail_waiters(failure);
     }
 
     /// Stops one process; `why` as for [`Actor::stop`].
@@ -2511,6 +2530,7 @@ impl Actor {
                 });
                 if http {
                     self.forget_give_up(key, "by hand");
+                    self.cancel_restart(key);
                 }
                 match process {
                     Some(name) => self.stop_process(key, name, by_hand).map(|_| None),
@@ -2565,6 +2585,13 @@ impl Actor {
             Action::Disable { save } => {
                 self.set_override(key, process, Policy::Disabled);
                 self.policy_event(key, process, "disabled", save);
+                let http = process.is_none_or(|name| {
+                    self.specs(key)
+                        .is_some_and(|specs| specs.iter().any(|s| s.http && s.name == name))
+                });
+                if http {
+                    self.cancel_restart(key);
+                }
                 match process {
                     Some(name) if active => {
                         let _ = self.stop_process(key, name, Some("disabled"));
@@ -2977,7 +3004,11 @@ impl Actor {
             .instances
             .values()
             .filter(|i| {
-                (i.is_active() || (!idle_only && i.gave_up.is_some())) && !busy.contains(&i.key)
+                (i.is_active()
+                    || (!idle_only
+                        && (i.gave_up.is_some()
+                            || (i.state == Lifecycle::Stopping && i.restart_pending))))
+                    && !busy.contains(&i.key)
             })
             .map(|i| i.key.clone())
             .collect();
@@ -2989,6 +3020,7 @@ impl Actor {
         for key in &keys {
             if !idle_only {
                 self.forget_give_up(key, why);
+                self.cancel_restart(key);
             }
             self.stop(key, Some(why));
         }
