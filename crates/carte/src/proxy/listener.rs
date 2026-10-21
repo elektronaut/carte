@@ -37,7 +37,7 @@ impl ListenerOptions {
     }
 
     /// A listener for tunnel traffic: requests are forwarded as `https`, and
-    /// `Domain=<share_domain>` is stripped from `Set-Cookie`.
+    /// `Domain=<share_domain>` or a parent of it is stripped from `Set-Cookie`.
     pub fn share(share_domain: impl Into<String>) -> Self {
         Self {
             kind: ListenerKind::Share,
