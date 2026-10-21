@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -12,8 +12,8 @@ homepage = "https://github.com/elektronaut/carte"
 keywords = ["dev-server", "localhost", "procfile", "puma-dev", "reverse-proxy"]
 
 [workspace.dependencies]
-carte-core = { path = "crates/carte-core", version = "0.3.0" }
-carte-api = { path = "crates/carte-api", version = "0.3.0" }
+carte-core = { path = "crates/carte-core", version = "0.4.0" }
+carte-api = { path = "crates/carte-api", version = "0.4.0" }
 anyhow = "1"
 base64 = "0.23"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
