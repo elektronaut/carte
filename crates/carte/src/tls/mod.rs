@@ -66,7 +66,10 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), TlsError> {
 }
 
 pub(crate) fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), TlsError> {
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     let mut file = tempfile::Builder::new()
         .prefix(&format!(".{file_name}."))
@@ -77,8 +80,10 @@ pub(crate) fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<()
         .and_then(|()| file.as_file().sync_all())
         .map_err(TlsError::io("write", file.path()))?;
     file.persist(path)
-        .map(drop)
-        .map_err(|e| TlsError::io("replace", path)(e.error))
+        .map_err(|e| TlsError::io("replace", path)(e.error))?;
+    fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(TlsError::io("sync", dir))
 }
 
 /// Takes `ca.lock` in the state dir until the file is dropped, so one process at a time

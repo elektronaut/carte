@@ -50,6 +50,9 @@ pub enum CreateReason {
     /// It isn't limited to server authentication, as CAs made before carte trusted them
     /// for TLS only. Only setup replaces such a CA.
     NotTlsOnly,
+    /// Not a reason to create one: `ca.pem` doesn't hold the certificate paired with the
+    /// key, after a crash between the writes, and loading the CA rewrites it.
+    CertFileStale,
 }
 
 pub(crate) struct IssuedLeaf {
@@ -89,7 +92,12 @@ impl CertificateAuthority {
         ensure_private_dir(state_dir)?;
         let _lock = lock_ca(state_dir)?;
         let reason = match Self::load(state_dir, &tlds, exact) {
-            Ok(ca) => return Ok(ca),
+            Ok((ca, cert_file_current)) => {
+                if !cert_file_current {
+                    write_atomic(&ca.cert_path, ca.cert_pem.as_bytes(), 0o644)?;
+                }
+                return Ok(ca);
+            }
             Err(reason) => reason,
         };
         Self::create(state_dir, common_name, tlds, reason)
@@ -102,7 +110,10 @@ impl CertificateAuthority {
         tlds: &[S],
     ) -> Result<Self, CreateReason> {
         let tlds = normalize_tlds(tlds).map_err(|e| CreateReason::Invalid(e.to_string()))?;
-        Self::load(state_dir, &tlds, true)
+        match Self::load(state_dir, &tlds, true)? {
+            (ca, true) => Ok(ca),
+            (_, false) => Err(CreateReason::CertFileStale),
+        }
     }
 
     pub fn cert_path_in(state_dir: &Path) -> PathBuf {
@@ -156,22 +167,29 @@ impl CertificateAuthority {
         self.tlds.iter().any(|tld| is_within(host, tld))
     }
 
-    fn load(state_dir: &Path, tlds: &[String], exact: bool) -> Result<Self, CreateReason> {
+    /// The CA, and whether `ca.pem` holds its certificate. `ca-key.pem` holds the key and,
+    /// since carte wrote both in one file, the certificate too, which then wins over a
+    /// `ca.pem` left behind by a crash.
+    fn load(state_dir: &Path, tlds: &[String], exact: bool) -> Result<(Self, bool), CreateReason> {
         let cert_path = Self::cert_path_in(state_dir);
         let key_path = Self::key_path_in(state_dir);
-        let (cert_pem, key_pem) = match (
-            fs::read_to_string(&cert_path),
-            fs::read_to_string(&key_path),
-        ) {
-            (Ok(cert), Ok(key)) => (cert, key),
-            (Err(e), _) | (_, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CreateReason::Missing);
-            }
-            (Err(e), _) | (_, Err(e)) => return Err(CreateReason::Invalid(e.to_string())),
+        let read = |path: &Path| match fs::read_to_string(path) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CreateReason::Invalid(e.to_string())),
         };
+        let key_text = read(&key_path)?.ok_or(CreateReason::Missing)?;
+        let cert_file = read(&cert_path)?;
+        let cert_pem = match pem_block(&key_text, "CERTIFICATE") {
+            Some(paired) => format!("{paired}\n"),
+            None => cert_file.clone().ok_or(CreateReason::Missing)?,
+        };
+        let cert_file_current = cert_file.as_deref().map(str::trim) == Some(cert_pem.trim());
         let invalid = |what: &str| CreateReason::Invalid(what.to_owned());
 
-        let key = KeyPair::from_pem(&key_pem).map_err(|_| invalid("unreadable key"))?;
+        let key_pem =
+            pem_block(&key_text, "PRIVATE KEY").ok_or_else(|| invalid("unreadable key"))?;
+        let key = KeyPair::from_pem(key_pem).map_err(|_| invalid("unreadable key"))?;
         let cert_der = CertificateDer::from_pem_slice(cert_pem.as_bytes())
             .map_err(|_| invalid("unreadable certificate"))?;
         let (_, x509) =
@@ -213,14 +231,15 @@ impl CertificateAuthority {
 
         let issuer = Issuer::from_ca_cert_der(&cert_der, key)
             .map_err(|_| invalid("unusable certificate"))?;
-        Ok(Self {
+        let ca = Self {
             cert_pem,
             cert_der,
             cert_path,
             issuer,
             tlds: tlds.to_vec(),
             origin,
-        })
+        };
+        Ok((ca, cert_file_current))
     }
 
     fn create(
@@ -285,11 +304,8 @@ impl CertificateAuthority {
             .open(&created)
             .and_then(|mut file| file.write_all(record.as_bytes()))
             .map_err(TlsError::io("write", &created))?;
-        write_atomic(
-            &Self::key_path_in(state_dir),
-            key.serialize_pem().as_bytes(),
-            0o600,
-        )?;
+        let pair = format!("{}{}", cert.pem(), key.serialize_pem());
+        write_atomic(&Self::key_path_in(state_dir), pair.as_bytes(), 0o600)?;
         write_atomic(&cert_path, cert.pem().as_bytes(), 0o644)?;
 
         Ok(Self {
@@ -378,11 +394,27 @@ fn recorded_hashes(record: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-/// The SHA-256 hash of the CA certificate in `state_dir`, when it can be read.
+/// The SHA-256 hash of the CA certificate in `state_dir`, when it can be read: the one
+/// paired with the key, or for an older state dir the one in `ca.pem`.
 pub fn current_hash(state_dir: &Path) -> Option<String> {
-    let pem = fs::read(CertificateAuthority::cert_path_in(state_dir)).ok()?;
-    let der = CertificateDer::from_pem_slice(&pem).ok()?;
+    let paired = fs::read_to_string(CertificateAuthority::key_path_in(state_dir))
+        .ok()
+        .and_then(|text| pem_block(&text, "CERTIFICATE").map(str::to_owned));
+    let pem = match paired {
+        Some(pem) => pem,
+        None => fs::read_to_string(CertificateAuthority::cert_path_in(state_dir)).ok()?,
+    };
+    let der = CertificateDer::from_pem_slice(pem.as_bytes()).ok()?;
     Some(sha256_hex(&der))
+}
+
+/// The first PEM block labelled `label`, from its BEGIN line to its END line.
+fn pem_block<'a>(text: &'a str, label: &str) -> Option<&'a str> {
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let start = text.find(&begin)?;
+    let stop = start + text[start..].find(&end)? + end.len();
+    Some(&text[start..stop])
 }
 
 /// Whether the certificate's extended key usage is server authentication alone.
@@ -490,7 +522,7 @@ mod tests {
         assert_eq!(second.origin(), &CaOrigin::Created(CreateReason::Missing));
         assert_ne!(second.cert_der(), first.cert_der());
 
-        fs::write(tmp.path().join("ca.pem"), "garbage").unwrap();
+        fs::write(tmp.path().join("ca-key.pem"), "garbage").unwrap();
         let third = create(tmp.path());
         assert!(matches!(
             third.origin(),
@@ -499,11 +531,9 @@ mod tests {
 
         let other = tempfile::tempdir().unwrap();
         create(other.path());
-        fs::copy(
-            other.path().join("ca-key.pem"),
-            tmp.path().join("ca-key.pem"),
-        )
-        .unwrap();
+        let other_key = fs::read_to_string(other.path().join("ca-key.pem")).unwrap();
+        let other_key = pem_block(&other_key, "PRIVATE KEY").unwrap();
+        fs::write(tmp.path().join("ca-key.pem"), other_key).unwrap();
         let fourth = create(tmp.path());
         assert_eq!(
             fourth.origin(),
@@ -512,6 +542,47 @@ mod tests {
             ))
         );
         assert_eq!(create(tmp.path()).origin(), &CaOrigin::Loaded);
+    }
+
+    #[test]
+    fn a_crash_between_the_writes_keeps_the_new_ca_whole() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = create(tmp.path());
+        let other = tempfile::tempdir().unwrap();
+        let new = create(other.path());
+        fs::copy(
+            other.path().join("ca-key.pem"),
+            tmp.path().join("ca-key.pem"),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(old.cert_path()).unwrap(), old.cert_pem());
+
+        assert_eq!(
+            CertificateAuthority::load_existing(tmp.path(), &["test"]).unwrap_err(),
+            CreateReason::CertFileStale
+        );
+        assert_eq!(current_hash(tmp.path()), Some(sha256_hex(new.cert_der())));
+        let loaded = create(tmp.path());
+        assert_eq!(loaded.origin(), &CaOrigin::Loaded);
+        assert_eq!(loaded.cert_der(), new.cert_der());
+        assert_eq!(
+            fs::read_to_string(loaded.cert_path()).unwrap(),
+            new.cert_pem()
+        );
+        assert!(CertificateAuthority::load_existing(tmp.path(), &["test"]).is_ok());
+    }
+
+    #[test]
+    fn loads_a_ca_from_before_the_key_file_held_the_certificate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ca = create(tmp.path());
+        let pair = fs::read_to_string(tmp.path().join("ca-key.pem")).unwrap();
+        let key = pem_block(&pair, "PRIVATE KEY").unwrap();
+        fs::write(tmp.path().join("ca-key.pem"), format!("{key}\n")).unwrap();
+        let loaded = create(tmp.path());
+        assert_eq!(loaded.origin(), &CaOrigin::Loaded);
+        assert_eq!(loaded.cert_der(), ca.cert_der());
+        assert_eq!(current_hash(tmp.path()), Some(sha256_hex(ca.cert_der())));
     }
 
     #[test]

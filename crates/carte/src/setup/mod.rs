@@ -170,6 +170,8 @@ pub enum CaState {
     Missing,
     /// It exists but setup replaces it.
     Replace(String),
+    /// `ca.pem` doesn't hold the certificate paired with the key, after a crash.
+    Restore,
     Untrusted,
     Trusted,
     /// The trust check itself failed.
@@ -240,6 +242,7 @@ impl Facts {
             &env.machine.served_tlds(),
         ) {
             Err(CreateReason::Missing) => CaState::Missing,
+            Err(CreateReason::CertFileStale) => CaState::Restore,
             Err(CreateReason::Invalid(why)) => CaState::Replace(why),
             Err(CreateReason::Expiring) => CaState::Replace("it is about to expire".into()),
             Err(CreateReason::NotTlsOnly) => {
@@ -713,12 +716,19 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
             });
             steps.push(trust_step());
         }
+        CaState::Restore => {
+            steps.push(Step {
+                description: "Restore ca.pem from the certificate kept with its key".into(),
+                action: Action::CreateCa,
+            });
+            steps.push(trust_step());
+        }
         CaState::Untrusted | CaState::Unknown(_) => steps.push(trust_step()),
         CaState::Trusted => {}
     }
     if facts.ca != CaState::Trusted {
         let kept = match facts.ca {
-            CaState::Untrusted | CaState::Unknown(_) => facts.ca_hash.as_deref(),
+            CaState::Restore | CaState::Untrusted | CaState::Unknown(_) => facts.ca_hash.as_deref(),
             _ => None,
         };
         for ca in facts
@@ -1319,6 +1329,41 @@ mod tests {
                 "verify".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn restores_ca_pem_and_keeps_the_ca_it_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        let facts = Facts {
+            ca: CaState::Restore,
+            ca_hash: Some("C544".into()),
+            keychain_cas: vec![
+                KeychainCa {
+                    hash: "1D2D".into(),
+                    label: "carte local CA (alice@mac)".into(),
+                },
+                KeychainCa {
+                    hash: "C544".into(),
+                    label: "carte local CA (alice@mac)".into(),
+                },
+            ],
+            ..fresh()
+        };
+        let planned = commands(&plan_install(&env, &facts));
+        let root = dir.path().display();
+        assert_eq!(
+            planned[..3],
+            [
+                "create ca".to_string(),
+                format!(
+                    "sudo security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain {root}/state/ca.pem"
+                ),
+                "sudo security delete-certificate -Z 1D2D /Library/Keychains/System.keychain"
+                    .to_string(),
+            ]
+        );
+        assert!(!planned.iter().any(|c| c.contains("-Z C544")));
     }
 
     #[test]
