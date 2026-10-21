@@ -47,7 +47,7 @@ impl fmt::Display for CommandLine {
     }
 }
 
-/// Adds the CA to the macOS system keychain as a trusted root. Needs root.
+/// Adds the CA to the macOS system keychain as a root trusted for TLS only. Needs root.
 pub fn trust_command(ca_cert: &Path) -> CommandLine {
     let ca_cert = ca_cert.to_string_lossy();
     CommandLine::new(
@@ -57,6 +57,8 @@ pub fn trust_command(ca_cert: &Path) -> CommandLine {
             "-d",
             "-r",
             "trustRoot",
+            "-p",
+            "ssl",
             "-k",
             SYSTEM_KEYCHAIN,
             &ca_cert,
@@ -197,7 +199,7 @@ mod tests {
         let command = trust_command(&PathBuf::from("/Users/me/.local/state/carte/ca.pem"));
         assert_eq!(
             command.to_string(),
-            "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /Users/me/.local/state/carte/ca.pem"
+            "security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain /Users/me/.local/state/carte/ca.pem"
         );
         let spaced = trust_command(&PathBuf::from("/Users/O'Brien/My State/ca.pem"));
         assert!(
