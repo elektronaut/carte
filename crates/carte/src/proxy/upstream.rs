@@ -29,6 +29,15 @@ impl LoopbackConnector {
         let mut first_error = None;
         for ip in [first, second] {
             match TcpStream::connect(SocketAddr::new(ip, port)).await {
+                Ok(stream)
+                    if crate::loopback::connected_to_itself(
+                        &stream,
+                        stream.local_addr(),
+                        stream.peer_addr(),
+                    ) =>
+                {
+                    first_error.get_or_insert(io::ErrorKind::ConnectionRefused.into());
+                }
                 Ok(stream) => {
                     stream.set_nodelay(true)?;
                     if ip != first {
