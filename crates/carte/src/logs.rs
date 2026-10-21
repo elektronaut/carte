@@ -219,7 +219,10 @@ impl Stripper {
                         b'K' => self.erase_line(),
                         b'G' => self.cursor = self.count().saturating_sub(1).min(MAX_COLUMN),
                         b'C' => {
-                            self.cursor = self.cursor.saturating_add(self.count()).min(MAX_COLUMN)
+                            self.cursor = self
+                                .cursor
+                                .saturating_add(self.count())
+                                .min(MAX_COLUMN.max(self.line.len()))
                         }
                         b'D' => self.cursor = self.cursor.saturating_sub(self.count()),
                         _ => {}
@@ -289,13 +292,17 @@ impl Stripper {
         self.put(c);
     }
 
-    /// A cursor movement's count: its parameter, 1 when there is none.
+    /// A cursor movement's count: its parameter, 1 when there is none, and as
+    /// large as it gets when it's too large to read.
     fn count(&self) -> usize {
-        std::str::from_utf8(&self.csi)
-            .ok()
-            .and_then(|n| n.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(1)
+        if !self.csi.is_empty() && self.csi.iter().all(u8::is_ascii_digit) {
+            let n = std::str::from_utf8(&self.csi)
+                .ok()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(usize::MAX);
+            return n.max(1);
+        }
+        1
     }
 
     fn put(&mut self, c: char) {
@@ -450,10 +457,20 @@ mod tests {
     #[test]
     fn cursor_movements_stop_at_a_column_limit() {
         assert_eq!(strip(b"\x1b[999999999Gx").len(), MAX_COLUMN + 1);
-        assert_eq!(strip(b"\x1b[99999999999999999999999Cx"), " x");
+        assert_eq!(
+            strip(b"\x1b[99999999999999999999999Cx").len(),
+            MAX_COLUMN + 1
+        );
         let mut s = Stripper::default();
         s.feed(b"\x1b[4000C\x1b[4000C\x1b[4000Cx");
         assert_eq!(s.pending().len(), MAX_COLUMN + 1);
+        let mut s = Stripper::default();
+        s.feed(&b"a".repeat(5000));
+        s.feed(b"\x1b[Cx");
+        let line = s.pending();
+        assert_eq!(line.len(), 5001, "{}", &line[4090..]);
+        assert!(line[..5000].bytes().all(|b| b == b'a'), "never moves back");
+        assert!(line.ends_with('x'));
     }
 
     #[test]
