@@ -316,7 +316,7 @@ async fn idle_instances_stop() {
 }
 
 #[tokio::test]
-async fn an_instance_over_the_instance_target_isnt_evicted_while_it_starts() {
+async fn an_instance_over_the_instance_target_isnt_evicted_while_it_starts_or_just_after() {
     let setup = Setup::new();
     std::fs::write(
         setup.paths.machine_config(),
@@ -343,6 +343,11 @@ async fn an_instance_over_the_instance_target_isnt_evicted_while_it_starts() {
         .ensure_ready(key("acme-api", Stack::Main))
         .await
         .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-api", "main").state,
+        InstanceState::Ready
+    );
     handle.shutdown().await;
 }
 

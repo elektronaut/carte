@@ -11,6 +11,8 @@ pub struct Usage {
     pub pinned: bool,
     /// Still starting, for a request or for what started it.
     pub starting: bool,
+    /// Became ready moments ago: it may idle out, but isn't evicted.
+    pub just_ready: bool,
     pub requests_in_flight: u32,
     /// Requests waiting for it to start or for a process to restart.
     pub waiting: u32,
@@ -83,7 +85,10 @@ pub fn evictions(
     let mut count = usages.len() as u32;
     let mut ptys = capacity.ptys_in_use;
 
-    let mut candidates: Vec<&Usage> = usages.iter().filter(|u| !u.is_busy()).collect();
+    let mut candidates: Vec<&Usage> = usages
+        .iter()
+        .filter(|u| !u.is_busy() && !u.just_ready)
+        .collect();
     candidates.sort_by_key(|u| u.last_activity);
 
     let mut out = Vec::new();
@@ -217,6 +222,7 @@ mod tests {
             key: key(app),
             pinned: false,
             starting: false,
+            just_ready: false,
             requests_in_flight: 0,
             waiting: 0,
             connections: 0,
@@ -336,17 +342,19 @@ mod tests {
     }
 
     #[test]
-    fn starting_instances_and_waiting_requests_are_never_evicted() {
+    fn starting_and_just_ready_instances_and_waiting_requests_are_never_evicted() {
         let now = Instant::now();
         let mut starting = usage("nova-a", 500, 500, now);
         starting.starting = true;
         let mut waited_on = usage("nova-b", 400, 500, now);
         waited_on.waiting = 1;
+        let mut just_ready = usage("nova-c", 300, 500, now);
+        just_ready.just_ready = true;
         let targets = Targets {
             instances: Some(1),
             ..targets()
         };
-        assert!(evictions(&[starting, waited_on], targets, capacity()).is_empty());
+        assert!(evictions(&[starting, waited_on, just_ready], targets, capacity()).is_empty());
     }
 
     #[test]
