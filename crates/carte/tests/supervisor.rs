@@ -1858,7 +1858,7 @@ kind = "service"
 "#,
         fixture = fixture().display()
     ));
-    let handle = setup.start();
+    let handle = setup.start_with(|options| options.grace = Duration::from_secs(5));
 
     handle
         .ensure_ready(key("acme-web", Stack::Main))
