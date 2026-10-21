@@ -447,10 +447,50 @@ pub fn read_kubeconfig(
     merged.ok_or_else(|| ApiError::Other("no kubeconfig file".into()))
 }
 
+/// The files `context`'s cluster and user name by path and kube reads when it
+/// connects: the certificate authority, client certificate and client key, where the
+/// kubeconfig doesn't give their data inline.
+pub fn referenced_files(kubeconfig: &Kubeconfig, context: &str) -> Vec<PathBuf> {
+    let Some(entry) = kubeconfig
+        .contexts
+        .iter()
+        .find(|c| c.name == context)
+        .and_then(|c| c.context.as_ref())
+    else {
+        return Vec::new();
+    };
+    let cluster = kubeconfig
+        .clusters
+        .iter()
+        .find(|c| c.name == entry.cluster)
+        .and_then(|c| c.cluster.as_ref());
+    let user = entry
+        .user
+        .as_ref()
+        .and_then(|user| kubeconfig.auth_infos.iter().find(|a| a.name == *user))
+        .and_then(|a| a.auth_info.as_ref());
+    let mut files = Vec::new();
+    if let Some(cluster) = cluster
+        && cluster.certificate_authority_data.is_none()
+    {
+        files.extend(cluster.certificate_authority.clone());
+    }
+    if let Some(user) = user {
+        if user.client_certificate_data.is_none() {
+            files.extend(user.client_certificate.clone());
+        }
+        if user.client_key_data.is_none() {
+            files.extend(user.client_key.clone());
+        }
+    }
+    files.into_iter().map(PathBuf::from).collect()
+}
+
 /// A digest of what `context` resolves to: its entry, its cluster's and its user's,
-/// with the env its login plugin runs with. Other contexts, `current-context` and,
-/// without a login plugin, the env leave it be. Fails when the context, its cluster
-/// or its named user is missing, as in a file cut off mid-rewrite.
+/// the contents of their [`referenced_files`], and the env its login plugin runs
+/// with. Other contexts, `current-context` and, without a login plugin, the env leave
+/// it be. Fails when the context, its cluster or its named user is missing, as in a
+/// file cut off mid-rewrite, or when a referenced file can't be read.
 pub fn context_digest(
     kubeconfig: &Kubeconfig,
     context: &str,
@@ -485,7 +525,15 @@ pub fn context_digest(
         .transpose()?;
     let json = serde_json::to_vec(&(named, cluster, user))
         .map_err(|err| ApiError::Other(err.to_string()))?;
-    Ok(Sha256::digest(json).into())
+    let mut digest = Sha256::new();
+    digest.update(json);
+    for path in referenced_files(&kubeconfig, context) {
+        let contents = std::fs::read(&path)
+            .map_err(|err| ApiError::Other(format!("can't read {}: {err}", path.display())))?;
+        digest.update((contents.len() as u64).to_le_bytes());
+        digest.update(contents);
+    }
+    Ok(digest.finalize().into())
 }
 
 /// Makes login plugins run without a terminal, so their errors are captured, with the
@@ -1003,6 +1051,52 @@ users:
         let mut without_user = kubeconfig.clone();
         without_user.auth_infos.clear();
         assert!(context_digest(&without_user, "prod", &env).is_err());
+    }
+
+    #[test]
+    fn the_files_a_context_names_count_by_their_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config");
+        std::fs::write(
+            &path,
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\n  cluster:\n    server: https://prod.example:6443\n    certificate-authority: ca.crt\n- name: other\n  cluster:\n    server: https://other.example:6443\n    certificate-authority: other.crt\ncontexts:\n- name: prod\n  context:\n    cluster: prod\n    user: prod\n- name: other\n  context:\n    cluster: other\n    user: other\nusers:\n- name: prod\n  user:\n    client-certificate: certs/client.crt\n    client-key: certs/client.key\n- name: other\n  user:\n    client-certificate: other.crt\n    client-key-data: a2V5\n",
+        )
+        .unwrap();
+        std::fs::create_dir(tmp.path().join("certs")).unwrap();
+        for name in ["ca.crt", "certs/client.crt", "certs/client.key"] {
+            std::fs::write(tmp.path().join(name), "one").unwrap();
+        }
+        let kubeconfig = Kubeconfig::read_from(&path).unwrap();
+        assert_eq!(
+            referenced_files(&kubeconfig, "prod"),
+            ["ca.crt", "certs/client.crt", "certs/client.key"].map(|name| tmp.path().join(name))
+        );
+        assert_eq!(
+            referenced_files(&kubeconfig, "other"),
+            [tmp.path().join("other.crt"), tmp.path().join("other.crt")],
+            "inline data replaces the file"
+        );
+        assert_eq!(
+            referenced_files(&kubeconfig, "missing"),
+            Vec::<PathBuf>::new()
+        );
+
+        let digest = || context_digest(&kubeconfig, "prod", &BTreeMap::new());
+        let before = digest().unwrap();
+        assert_eq!(digest().unwrap(), before);
+        for name in ["ca.crt", "certs/client.crt", "certs/client.key"] {
+            let file = tmp.path().join(name);
+            std::fs::write(&file, "two").unwrap();
+            let after = digest().unwrap();
+            assert_ne!(after, before, "{name}");
+            std::fs::write(&file, "one").unwrap();
+            assert_eq!(digest().unwrap(), before, "{name}");
+        }
+        std::fs::remove_file(tmp.path().join("certs/client.key")).unwrap();
+        let ApiError::Other(message) = digest().unwrap_err() else {
+            panic!("not Other")
+        };
+        assert!(message.contains("client.key"), "{message}");
     }
 
     #[test]

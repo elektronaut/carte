@@ -1642,6 +1642,51 @@ async fn a_kubeconfig_caught_mid_rewrite_keeps_the_client() {
 }
 
 #[tokio::test]
+async fn a_certificate_rotated_in_place_gives_new_connections_a_new_client() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let dir = setup.kubeconfig.parent().unwrap();
+    let certificate = dir.join("client.crt");
+    let key = dir.join("client.key");
+    std::fs::write(&certificate, "one").unwrap();
+    std::fs::write(&key, "one").unwrap();
+    rewrite(
+        &setup.kubeconfig,
+        &kubeconfig("prod", SERVER, "one").replace(
+            "    token: one\n",
+            "    client-certificate: client.crt\n    client-key: client.key\n",
+        ),
+    );
+    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let dialer = upstream(route().await).unwrap();
+    upstream(route().await).unwrap();
+    assert_eq!(setup.cluster.state().clients, 1);
+
+    rewrite(&certificate, "two");
+    rewrite(&key, "two");
+    assert_eq!(upstream(route().await).unwrap(), dialer);
+    assert_eq!(setup.cluster.state().clients, 2);
+    assert_eq!(get(&dialer).await, "grafana-a");
+
+    std::fs::remove_file(&key).unwrap();
+    assert_eq!(upstream(route().await).unwrap(), dialer);
+    assert_eq!(
+        setup.cluster.state().clients,
+        2,
+        "a missing file keeps the client"
+    );
+    std::fs::write(&key, "two").unwrap();
+    upstream(route().await).unwrap();
+    assert_eq!(setup.cluster.state().clients, 2, "nor did it change");
+    rewrite(&key, "three");
+    upstream(route().await).unwrap();
+    assert_eq!(setup.cluster.state().clients, 3);
+}
+
+#[tokio::test]
 async fn kubeconfig_files_from_the_provider_env_are_watched() {
     let setup = Setup::new(PROJECT);
     setup
