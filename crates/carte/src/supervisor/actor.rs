@@ -3485,21 +3485,29 @@ impl Actor {
     }
 }
 
-/// What an instance starts from: its project's configuration, its checkout and the
-/// process list read there.
+/// What an instance starts from: its app's configuration in its stack, the
+/// project-wide env, `requires` and env provider, its checkout and the process list
+/// read there.
 type StartInputs<'a> = (
-    &'a carte_core::model::Project,
+    &'a App,
+    (
+        &'a [carte_core::model::EnvTemplate],
+        &'a [String],
+        Option<carte_core::model::EnvProviderKind>,
+    ),
     Option<Checkout>,
     Option<&'a Result<procfile::ProcessList, String>>,
 );
 
 fn start_inputs<'a>(world: &'a World, key: &InstanceKey) -> Option<StartInputs<'a>> {
     let state = world.project(&key.project)?;
-    let app = state.project.app(&key.app);
+    let app = state.project.app(&key.app)?;
+    let project = &state.project;
     Some((
-        &state.project,
-        app.and_then(|app| state.checkout(app, &key.stack)),
-        app.and_then(|app| state.process_list(app, &key.stack)),
+        state.app_at(app, &key.stack),
+        (&project.env, &project.requires, project.env_provider),
+        state.checkout(app, &key.stack),
+        state.process_list(app, &key.stack),
     ))
 }
 
