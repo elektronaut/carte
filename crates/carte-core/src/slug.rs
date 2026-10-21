@@ -1,5 +1,6 @@
 use std::fmt;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Turns a name into a DNS label: lowercase, every character outside `[a-z0-9-]`
@@ -21,6 +22,21 @@ pub fn slugify(name: &str) -> String {
         slug.pop();
     }
     slug
+}
+
+/// Fits a slug into `max` characters: a longer one is cut and gets a dash and a
+/// hash of the whole slug. `None` when `max` leaves no room before the hash.
+pub fn shorten(slug: &str, max: usize) -> Option<String> {
+    if slug.len() <= max {
+        return Some(slug.to_string());
+    }
+    let hash = Sha256::digest(slug.as_bytes());
+    let suffix: String = hash[..3].iter().map(|b| format!("{b:02x}")).collect();
+    let keep = max.saturating_sub(suffix.len() + 1);
+    if keep == 0 {
+        return None;
+    }
+    Some(format!("{}-{suffix}", slug[..keep].trim_end_matches('-')))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

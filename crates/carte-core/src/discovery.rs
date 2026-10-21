@@ -134,8 +134,9 @@ pub fn linked_worktrees(entries: &[WorktreeEntry]) -> Vec<Worktree> {
 }
 
 /// The stack name of each of a repo's linked worktrees: its slugged folder name, or
-/// the nearest ancestor's while the folder is named like the repo itself. Worktrees
-/// that end up with the same name keep it; discovery reports them.
+/// the nearest ancestor's while the folder is named like the repo itself, shortened
+/// with a hash to fit a DNS label. Worktrees that end up with the same name keep it;
+/// discovery reports them.
 pub fn stack_names(repo: &str, paths: &[&Path]) -> Vec<String> {
     let repo = slugify(repo);
     paths
@@ -150,6 +151,7 @@ pub fn stack_names(repo: &str, paths: &[&Path]) -> Vec<String> {
                 .find(|name| !name.is_empty() && *name != repo)
                 .unwrap_or_else(|| repo.clone())
         })
+        .map(|name| slug::shorten(&name, 63).expect("63 leaves room for the hash"))
         .collect()
 }
 
@@ -861,6 +863,23 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
+    fn long_folders_give_stack_names_that_fit_a_label() {
+        let folder = "implement-the-entire-newsletter-subscription-flow-with-tests-v2-ok";
+        assert_eq!(folder.len(), 66);
+        let short = names("nova", &[&format!("/w/{folder}")]).remove(0);
+        assert_eq!(short.len(), 63);
+        assert!(short.starts_with("implement-the-entire-newsletter-subscription-flow-with-t-"));
+        assert_eq!(short, slug::shorten(folder, 63).unwrap());
+        assert_ne!(
+            short,
+            names("nova", &[&format!("/w/{folder}-again")])[0],
+            "the hash keeps similar folders apart"
+        );
+        let exact = "x".repeat(63);
+        assert_eq!(names("nova", &[&format!("/w/{exact}")]), [exact]);
+    }
+
+    #[test]
     fn folders_named_like_the_repo_take_the_parents_name() {
         assert_eq!(
             names(
@@ -1157,6 +1176,43 @@ prunable gitdir file points to non-existent location
                 .iter()
                 .any(|(p, m)| *p == Some("xy") && m.contains("project name \"xy\""))
         );
+    }
+
+    #[test]
+    fn worktrees_in_long_folders_resolve_under_the_shortened_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let shop = root.join("shop");
+        repo(&shop);
+        std::fs::write(shop.join("Procfile"), "web: x\n").unwrap();
+        let folder = format!("{}-{}", "newsletter-subscription-flow", "x".repeat(41));
+        assert_eq!(folder.len(), 70);
+        git(
+            &shop,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "long",
+                &format!("../{folder}"),
+            ],
+        );
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(config_dir.join("projects")).unwrap();
+        std::fs::write(
+            config_dir.join("projects/shop.toml"),
+            format!("root = \"{}\"\n", shop.display()),
+        )
+        .unwrap();
+
+        let world = load_world(&config_dir);
+        assert!(world.problems.is_empty(), "{:?}", world.problems);
+        let stack = slug::shorten(&folder, 63).unwrap();
+        assert_eq!(stack.len(), 63);
+        let resolved =
+            crate::naming::resolve_host(&world, &format!("{stack}.shop.localhost")).unwrap();
+        assert_eq!(resolved.key.stack, Stack::Branch(stack));
     }
 
     #[test]

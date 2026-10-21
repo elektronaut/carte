@@ -1,5 +1,4 @@
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::model::{
@@ -101,14 +100,10 @@ pub fn public_label(state: &ProjectState, app: &App, stack: &Stack) -> Result<St
             stack: slug.clone(),
         });
     }
-    let hash = Sha256::digest(slug.as_bytes());
-    let suffix: String = hash[..3].iter().map(|b| format!("{b:02x}")).collect();
     let budget = 63usize.saturating_sub(full.len() - slug.len());
-    let keep = budget.saturating_sub(suffix.len() + 1);
-    if keep == 0 {
+    let Some(short_slug) = crate::slug::shorten(slug, budget) else {
         return Err(NamingError::PublicLabelTooLong { label: full });
-    }
-    let short_slug = format!("{}-{suffix}", slug[..keep].trim_end_matches('-'));
+    };
     let mut labels = Vec::with_capacity(3);
     labels.extend(app_label(project, app));
     labels.push(short_slug.as_str());
@@ -426,6 +421,7 @@ pub fn collisions(state: &ProjectState) -> Vec<Problem> {
 mod tests {
     use super::*;
     use crate::test_support::{self, app, project, state, worktree, world};
+    use sha2::{Digest, Sha256};
 
     fn branch(slug: &str) -> Stack {
         Stack::Branch(slug.into())

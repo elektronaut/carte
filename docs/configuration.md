@@ -295,6 +295,8 @@ branches:
 
 - The folder name is lowercased, with anything outside `a-z`, `0-9` and
   `-` turned into a dash.
+- A name longer than 63 characters, the most a hostname label holds, is
+  cut and ends in a short hash of the full name.
 - A folder with the repo's own name gives way to the folder above it.
 - Worktrees of different repos with the same name form one stack.
 - Worktrees with a detached HEAD count like any other.
