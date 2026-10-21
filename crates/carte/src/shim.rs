@@ -217,9 +217,12 @@ fn group_alive(pgid: libc::pid_t) -> bool {
     unsafe { libc::killpg(pgid, 0) == 0 }
 }
 
-/// TERM to the group, a short grace, then KILL; reaps the leader on the way.
+/// TERM and CONT to the group, a short grace, then KILL; reaps the leader on the way.
 fn terminate_group(pgid: libc::pid_t, reaped: &mut Option<libc::c_int>) {
-    unsafe { libc::killpg(pgid, libc::SIGTERM) };
+    unsafe {
+        libc::killpg(pgid, libc::SIGTERM);
+        libc::killpg(pgid, libc::SIGCONT);
+    }
     let deadline = Instant::now() + GROUP_GRACE;
     loop {
         if reaped.is_none() {

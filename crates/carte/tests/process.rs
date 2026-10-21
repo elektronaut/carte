@@ -247,6 +247,89 @@ async fn stop_escalates_to_kill() {
 }
 
 #[tokio::test]
+async fn suspend_character_on_the_pty_does_not_stop_the_app() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut handle = spawner()
+        .spawn(&spec().env("PORT", port.to_string()))
+        .await
+        .unwrap();
+    let mut output = handle.take_output().unwrap();
+    read_until(&mut output, &mut Vec::new(), "ready").await;
+    drain(output);
+    handle.write_input(b"\x1a").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let host = format!("127.0.0.1:{port}");
+    let response = tokio::task::spawn_blocking(move || {
+        let mut stream = TcpStream::connect(host).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        write!(stream, "GET /up HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).map(|_| response)
+    })
+    .await
+    .unwrap();
+    assert!(
+        response.as_ref().is_ok_and(|r| r.ends_with("\r\n\r\nok")),
+        "{response:?}"
+    );
+    stop(handle).await;
+}
+
+/// A command that leaves `marker` behind when SIGTERM reaches its handler.
+fn trapping_term(marker: &Path) -> SpawnSpec {
+    SpawnSpec::new(
+        format!(
+            "trap 'touch {}; exit 3' TERM; echo ready; while :; do sleep 0.1; done",
+            marker.display()
+        ),
+        std::env::temp_dir(),
+    )
+}
+
+#[tokio::test]
+async fn stop_resumes_a_stopped_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("terminated");
+    let mut handle = spawner().spawn(&trapping_term(&marker)).await.unwrap();
+    let mut output = handle.take_output().unwrap();
+    read_until(&mut output, &mut Vec::new(), "ready").await;
+    drain(output);
+    handle.signal_group(Signal::SIGSTOP).unwrap();
+    let started = Instant::now();
+    let status = handle.stop(Duration::from_secs(5)).await.unwrap();
+    assert_eq!(status.code(), Some(3));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(marker.exists());
+}
+
+#[tokio::test]
+async fn closing_the_lifeline_resumes_a_stopped_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("terminated");
+    let mut handle = spawner().spawn(&trapping_term(&marker)).await.unwrap();
+    let mut output = handle.take_output().unwrap();
+    read_until(&mut output, &mut Vec::new(), "ready").await;
+    drain(output);
+    handle.signal_group(Signal::SIGSTOP).unwrap();
+    handle.close_lifeline();
+    tokio::time::timeout(Duration::from_secs(10), handle.wait())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(marker.exists());
+}
+
+#[tokio::test]
 async fn sigint_is_delivered_to_the_group() {
     let mut handle = spawner().spawn(&spec()).await.unwrap();
     let mut output = handle.take_output().unwrap();

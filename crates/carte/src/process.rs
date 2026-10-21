@@ -15,7 +15,7 @@ use std::time::Duration;
 use nix::errno::Errno;
 use nix::pty::{Winsize, openpty};
 use nix::sys::signal::{Signal, killpg};
-use nix::sys::termios::{self, InputFlags, SetArg};
+use nix::sys::termios::{self, InputFlags, SetArg, SpecialCharacterIndices};
 use nix::unistd::Pid;
 use tokio::io::unix::AsyncFd;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
@@ -26,7 +26,8 @@ use tokio::process::{Child, Command};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoMode {
     /// A pty of the given size; stdin, stdout and stderr all go through it. Flow
-    /// control is off, so ctrl-s and ctrl-q reach the process.
+    /// control and the suspend characters are off, so ctrl-s, ctrl-q and ctrl-z
+    /// reach the process instead of pausing or stopping it.
     Pty { cols: u16, rows: u16 },
     /// stdin from `/dev/null`, stdout and stderr merged into one pipe.
     Pipes,
@@ -106,6 +107,13 @@ impl Spawner {
                 let pty = openpty(Some(&size), None).map_err(io::Error::from)?;
                 let mut modes = termios::tcgetattr(&pty.slave).map_err(io::Error::from)?;
                 modes.input_flags.remove(InputFlags::IXON);
+                modes.control_chars[SpecialCharacterIndices::VSUSP as usize] =
+                    libc::_POSIX_VDISABLE;
+                #[cfg(target_os = "macos")]
+                {
+                    modes.control_chars[SpecialCharacterIndices::VDSUSP as usize] =
+                        libc::_POSIX_VDISABLE;
+                }
                 termios::tcsetattr(&pty.slave, SetArg::TCSANOW, &modes).map_err(io::Error::from)?;
                 set_cloexec(pty.master.as_raw_fd(), true)?;
                 set_cloexec(pty.slave.as_raw_fd(), true)?;
@@ -252,11 +260,13 @@ impl ProcessHandle {
     }
 
     /// SIGTERM to the group, then SIGKILL if it hasn't exited after `grace`.
+    /// SIGCONT follows the SIGTERM, so a stopped group handles it.
     pub async fn stop(&mut self, grace: Duration) -> io::Result<ExitStatus> {
         if self.status.is_some() {
             return self.wait().await;
         }
         ignore_esrch(self.signal_group(Signal::SIGTERM))?;
+        let _ = self.signal_group(Signal::SIGCONT);
         if let Ok(status) = tokio::time::timeout(grace, self.wait()).await {
             return status;
         }
