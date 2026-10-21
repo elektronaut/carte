@@ -1085,8 +1085,9 @@ every app a variable pointing at every other:
 A key template that uses `public_url:app` or `public_host:app`, in its
 key or its value, skips apps that aren't shared.
 
-Variable names are letters, digits and underscores, not starting with a
-digit; a name that isn't, written or rendered, is an error. For a literal
+Variable names are letters, digits, underscores and dots (for Spring's
+`server.port` style), not starting with a digit or dot; a name that
+isn't, written or rendered, is an error. For a literal
 `{{`, write `{{"{{"}}`, in a single-quoted TOML string: `DOCKER_FORMAT = '{{"{{"}}.Names}}'` gives
 `{{.Names}}`.
 

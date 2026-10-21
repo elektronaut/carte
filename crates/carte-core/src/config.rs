@@ -1241,7 +1241,7 @@ impl<'de> Deserialize<'de> for EnvTable {
                 while let Some((key, EnvValue(value))) = map.next_entry::<String, EnvValue>()? {
                     if !key.contains("{{") && !crate::env::is_valid_key(&key) {
                         return Err(serde::de::Error::custom(format!(
-                            "invalid variable name {key:?}: use letters, digits and underscores"
+                            "invalid variable name {key:?}: use letters, digits, underscores and dots"
                         )));
                     }
                     entries.retain(|e| e.key != key);

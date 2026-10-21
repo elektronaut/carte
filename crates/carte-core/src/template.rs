@@ -80,6 +80,8 @@ pub enum TemplateErrorKind {
     UnknownApp(String),
     #[error("{0} has no public URL because it is not shared")]
     NotShared(String),
+    #[error("filters don't apply to quoted text")]
+    FilteredText,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,11 +190,10 @@ impl Template {
             if text.is_empty() {
                 return Err(err(position, TemplateErrorKind::EmptyExpression));
             }
-            if let Some(literal) = text
-                .strip_prefix('"')
-                .and_then(|t| t.strip_suffix('"'))
-                .filter(|_| segments.len() == 0)
-            {
+            if let Some(literal) = text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+                if let Some((position, _)) = segments.next() {
+                    return Err(err(position, TemplateErrorKind::FilteredText));
+                }
                 parts.push(Part::Text(literal.to_string()));
                 rest = close + 2;
                 continue;
@@ -476,6 +477,14 @@ pub(crate) mod tests {
         assert_eq!(
             ok("unix://{{ run_dir }}/redis.sock"),
             "unix:///run/abcdefgh/redis.sock"
+        );
+    }
+
+    #[test]
+    fn filters_dont_apply_to_quoted_text() {
+        assert_eq!(
+            fail("{{\"x\" | upper}}").kind,
+            TemplateErrorKind::FilteredText
         );
     }
 

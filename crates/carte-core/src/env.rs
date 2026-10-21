@@ -257,7 +257,7 @@ pub enum EnvError {
     #[error("{origin} template {key:?} rendered an empty variable name")]
     EmptyKey { origin: TemplateOrigin, key: String },
     #[error(
-        "{origin} template {key:?} rendered the variable name {name:?}: use letters, digits and underscores"
+        "{origin} template {key:?} rendered the variable name {name:?}: use letters, digits, underscores and dots"
     )]
     InvalidKey {
         origin: TemplateOrigin,

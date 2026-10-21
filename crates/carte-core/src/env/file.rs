@@ -74,7 +74,7 @@ pub fn parse_env_file(path: &Path, content: &str) -> Result<Vec<EnvFileEntry>, E
         let key = key.trim_end();
         if !is_valid_key(key) {
             return Err(err(&format!(
-                "invalid variable name {key:?}: use letters, digits and underscores"
+                "invalid variable name {key:?}: use letters, digits, underscores and dots"
             )));
         }
         let mut input = value.trim_start().to_string();
