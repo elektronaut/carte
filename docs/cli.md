@@ -96,7 +96,9 @@ It leaves alone anything of a running instance or of a stack whose
 teardown is pending or running or whose missing worktree git still lists,
 and every project whose
 configuration or discovery has a problem (an `include` entry that matches
-nothing, a failing `git worktree list`), and says so. Several cartes
+nothing, a failing `git worktree list`), and says so. While a template
+has a problem or doesn't load, no project counts as gone, since the
+projects it makes may be missing only for that. Several cartes
 (with different state directories) can share the run root, and give
 the same instance the same run directory, so a run directory is only
 removed when the `.owner` file beside it names this carte.
