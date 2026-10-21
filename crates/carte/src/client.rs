@@ -100,7 +100,7 @@ impl Client {
 fn unreachable(socket: &Path, err: &std::io::Error) -> Failure {
     let message = if err.kind() == std::io::ErrorKind::ConnectionRefused && socket.exists() {
         format!(
-            "the carte daemon is starting or stopping ({}: {err}); try again in a moment",
+            "the carte daemon is starting or stopping ({}: {err}); try again in a moment, and if this persists it may have crashed: start it with `carte daemon`",
             socket.display()
         )
     } else {
