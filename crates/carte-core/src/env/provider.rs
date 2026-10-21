@@ -2,11 +2,14 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use nix::sys::signal::{Signal, killpg};
+use nix::unistd::Pid;
 use thiserror::Error;
 
 use super::{Env, Source};
@@ -29,6 +32,8 @@ pub struct CommandOutput {
     pub success: bool,
     pub stdout: Vec<u8>,
     pub stderr: String,
+    /// Something the command started still had stdout open when it exited.
+    pub stdout_held_open: bool,
 }
 
 /// Runs the provider commands; tests substitute a fake.
@@ -80,15 +85,20 @@ impl CommandRunner for SystemRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .process_group(0)
             .spawn()?;
+        let group = Pid::from_raw(child.id() as i32);
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let stderr = Arc::new(Mutex::new(Vec::new()));
         let (tx, rx) = mpsc::channel();
-        for (is_stdout, mut pipe) in [
+        for (is_stdout, mut pipe, buf) in [
             (
                 true,
                 child
                     .stdout
                     .take()
                     .map(|p| Box::new(p) as Box<dyn Read + Send>),
+                stdout.clone(),
             ),
             (
                 false,
@@ -96,16 +106,24 @@ impl CommandRunner for SystemRunner {
                     .stderr
                     .take()
                     .map(|p| Box::new(p) as Box<dyn Read + Send>),
+                stderr.clone(),
             ),
         ]
         .into_iter()
-        .filter_map(|(o, p)| p.map(|p| (o, p)))
+        .filter_map(|(o, p, b)| p.map(|p| (o, p, b)))
         {
             let tx = tx.clone();
             std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                let _ = pipe.read_to_end(&mut buf);
-                let _ = tx.send((is_stdout, buf));
+                let mut chunk = [0; 8192];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.lock().unwrap().extend_from_slice(&chunk[..n]),
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+                let _ = tx.send(is_stdout);
             });
         }
         drop(tx);
@@ -116,7 +134,7 @@ impl CommandRunner for SystemRunner {
                 break status;
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
+                let _ = killpg(group, Signal::SIGKILL);
                 let _ = child.wait();
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -128,22 +146,23 @@ impl CommandRunner for SystemRunner {
 
         // A background process started by a shell profile can keep the pipes
         // open after the shell exits, so don't wait for EOF forever.
-        let mut output = CommandOutput {
-            success: status.success(),
-            ..Default::default()
-        };
-        let grace = Instant::now() + Duration::from_secs(1);
+        let grace = deadline.min(Instant::now() + Duration::from_secs(1));
+        let mut stdout_held_open = true;
         for _ in 0..2 {
-            let wait = deadline
-                .max(grace)
-                .saturating_duration_since(Instant::now());
-            match rx.recv_timeout(wait) {
-                Ok((true, buf)) => output.stdout = buf,
-                Ok((false, buf)) => output.stderr = String::from_utf8_lossy(&buf).into_owned(),
+            match rx.recv_timeout(grace.saturating_duration_since(Instant::now())) {
+                Ok(true) => stdout_held_open = false,
+                Ok(false) => {}
                 Err(_) => break,
             }
         }
-        Ok(output)
+        let stdout = std::mem::take(&mut *stdout.lock().unwrap());
+        let stderr = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
+        Ok(CommandOutput {
+            success: status.success(),
+            stdout,
+            stderr,
+            stdout_held_open,
+        })
     }
 }
 
@@ -232,7 +251,7 @@ pub fn load_provider(
         EnvProviderKind::None => {}
         EnvProviderKind::Mise => {
             let output = run(runner, kind, "mise", &["env", "--json"], checkout)?;
-            for (key, value) in parse_json(kind, checkout, &output.stdout)? {
+            for (key, value) in parse_json(kind, checkout, &output)? {
                 if let Some(value) = value {
                     env.set(key, value, source.clone());
                 }
@@ -240,7 +259,7 @@ pub fn load_provider(
         }
         EnvProviderKind::Direnv => {
             let output = run(runner, kind, "direnv", &["export", "json"], checkout)?;
-            for (key, value) in parse_json(kind, checkout, &output.stdout)? {
+            for (key, value) in parse_json(kind, checkout, &output)? {
                 match value {
                     Some(value) => env.set(key, value, source.clone()),
                     None => {
@@ -317,7 +336,7 @@ fn apply_mise_over_shims(
         timeout: PROVIDER_TIMEOUT,
     };
     let output = execute(runner, kind, checkout, &spec)?;
-    for (key, value) in parse_json(kind, checkout, &output.stdout)? {
+    for (key, value) in parse_json(kind, checkout, &output)? {
         if let Some(value) = value
             && env.value(&key) != Some(value.as_str())
         {
@@ -394,16 +413,26 @@ fn execute(
 fn parse_json(
     kind: EnvProviderKind,
     checkout: &Path,
-    stdout: &[u8],
+    output: &CommandOutput,
 ) -> Result<BTreeMap<String, Option<String>>, ProviderError> {
-    if stdout.iter().all(u8::is_ascii_whitespace) {
-        return Ok(BTreeMap::new());
-    }
-    serde_json::from_slice(stdout).map_err(|e| ProviderError::BadOutput {
+    let bad_output = |detail: String| ProviderError::BadOutput {
         provider: provider_name(kind).into(),
         checkout: checkout.to_path_buf(),
-        detail: e.to_string(),
-    })
+        detail,
+    };
+    if output.stdout.iter().all(u8::is_ascii_whitespace) {
+        if kind == EnvProviderKind::Mise {
+            return Err(bad_output("mise printed nothing".into()));
+        }
+        if output.stdout_held_open {
+            return Err(bad_output(format!(
+                "{} printed nothing, and a process it started kept its output open",
+                provider_name(kind)
+            )));
+        }
+        return Ok(BTreeMap::new());
+    }
+    serde_json::from_slice(&output.stdout).map_err(|e| bad_output(e.to_string()))
 }
 
 #[cfg(test)]
@@ -430,15 +459,15 @@ pub(crate) mod tests {
         Ok(CommandOutput {
             success: true,
             stdout: stdout.as_bytes().to_vec(),
-            stderr: String::new(),
+            ..Default::default()
         })
     }
 
     fn failed(stderr: &str) -> io::Result<CommandOutput> {
         Ok(CommandOutput {
             success: false,
-            stdout: Vec::new(),
             stderr: stderr.into(),
+            ..Default::default()
         })
     }
 
@@ -695,6 +724,47 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(env.len(), 3);
+    }
+
+    #[test]
+    fn direnv_printing_nothing_with_its_output_held_open_is_bad_output() {
+        let runner = FakeRunner {
+            programs: vec!["direnv"],
+            ..Default::default()
+        }
+        .with(
+            "direnv",
+            Ok(CommandOutput {
+                success: true,
+                stdout_held_open: true,
+                ..Default::default()
+            }),
+        );
+        let err = load_provider(
+            EnvProviderKind::Direnv,
+            Path::new("/w/x"),
+            &daemon_env(),
+            &runner,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProviderError::BadOutput { .. }), "{err}");
+    }
+
+    #[test]
+    fn mise_printing_nothing_is_bad_output() {
+        let runner = FakeRunner {
+            programs: vec!["mise"],
+            ..Default::default()
+        }
+        .with("mise", ok(""));
+        let err = load_provider(
+            EnvProviderKind::Mise,
+            Path::new("/w/x"),
+            &daemon_env(),
+            &runner,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("mise printed nothing"), "{err}");
     }
 
     #[test]
@@ -973,5 +1043,62 @@ pub(crate) mod tests {
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn system_runner_keeps_output_when_a_background_process_holds_stdout() {
+        let runner = SystemRunner {
+            search_path: vec!["/bin".into()],
+        };
+        let started = Instant::now();
+        let output = runner
+            .run(&CommandSpec {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "sleep 5 & echo {}".into()],
+                cwd: "/".into(),
+                env: None,
+                timeout: Duration::from_secs(30),
+            })
+            .unwrap();
+        assert!(output.success);
+        assert_eq!(output.stdout, b"{}\n");
+        assert!(output.stdout_held_open);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn system_runner_kills_the_process_group_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let runner = SystemRunner {
+            search_path: vec!["/bin".into()],
+        };
+        let err = runner
+            .run(&CommandSpec {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    format!("sleep 30 & echo $! > {}; sleep 30", pid_file.display()),
+                ],
+                cwd: "/".into(),
+                env: None,
+                timeout: Duration::from_millis(500),
+            })
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let pid = nix::unistd::Pid::from_raw(pid);
+        let gone = Instant::now() + Duration::from_secs(5);
+        while nix::sys::signal::kill(pid, None).is_ok() {
+            if Instant::now() >= gone {
+                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                panic!("the background sleep outlived the timeout");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
