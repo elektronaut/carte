@@ -239,12 +239,25 @@ async fn probe(port: u16, readiness: &Readiness) -> bool {
         else {
             continue;
         };
+        if connected_to_itself(&stream) {
+            continue;
+        }
         return match readiness {
             Readiness::Port => true,
             Readiness::Http(path) => http_ok(stream, port, path).await,
         };
     }
     false
+}
+
+/// On Linux, a connection to a loopback port nobody listens on can succeed when
+/// the kernel picks that same port as its source port: the socket opens a
+/// connection to itself. That isn't the process listening.
+fn connected_to_itself(stream: &TcpStream) -> bool {
+    matches!(
+        (stream.local_addr(), stream.peer_addr()),
+        (Ok(local), Ok(peer)) if local == peer
+    )
 }
 
 async fn http_ok(mut stream: TcpStream, port: u16, path: &str) -> bool {
@@ -274,6 +287,19 @@ pub fn free_port() -> std::io::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_connection_to_itself_isnt_a_listener() {
+        let port = free_port().unwrap();
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind(addr).unwrap();
+        let stream = socket.connect(addr).await;
+        if cfg!(not(target_os = "linux")) && stream.is_err() {
+            return;
+        }
+        assert!(connected_to_itself(&stream.unwrap()));
+    }
 
     #[test]
     fn log_keeps_lines_within_the_cap() {
