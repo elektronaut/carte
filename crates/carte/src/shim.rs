@@ -8,10 +8,14 @@
 //!    that group the terminal's foreground group;
 //! 2. writes the command's pid (= pgid) to the lifeline as 4 little-endian bytes;
 //! 3. forwards SIGTERM, SIGINT and SIGHUP to the group;
-//! 4. on EOF from the lifeline, sends TERM to the group, waits a short grace,
-//!    sends KILL and exits;
-//! 5. when the command exits, cleans up what is left of the group the same way
-//!    and exits with the command's status (re-raising its signal if it was killed).
+//! 4. on EOF from the lifeline, sends TERM to the group and to the groups its
+//!    descendants made, waits a short grace, sends KILL and exits;
+//! 5. when the command exits, cleans up what is left of those groups the same
+//!    way and exits with the command's status (re-raising its signal if it was
+//!    killed).
+//!
+//! On Linux the shim is a child subreaper, so descendants that daemonise stay
+//! its descendants.
 
 use std::ffi::{CStr, CString};
 use std::io;
@@ -55,6 +59,10 @@ pub fn run(lifeline: RawFd, command: &str) -> i32 {
 fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
     close_stray_fds(lifeline);
     set_cloexec(lifeline)?;
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
+    }
 
     let mut fds = [0; 2];
     cvt(unsafe { libc::pipe(fds.as_mut_ptr()) })?;
@@ -92,50 +100,10 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
     }
     let _ = write_all(lifeline, &(pid as u32).to_le_bytes());
 
-    let mut status = None;
-    while status.is_none() {
-        let mut pfds = [
-            libc::pollfd {
-                fd: lifeline,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-            libc::pollfd {
-                fd: sig_read,
-                events: libc::POLLIN,
-                revents: 0,
-            },
-        ];
-        if unsafe { libc::poll(pfds.as_mut_ptr(), 2, -1) } < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Err(err);
-        }
-
-        if pfds[1].revents != 0 {
-            let mut sigs = [0u8; 64];
-            let n = unsafe { libc::read(sig_read, sigs.as_mut_ptr().cast(), sigs.len()) };
-            for &sig in &sigs[..n.max(0) as usize] {
-                if FORWARDED.contains(&libc::c_int::from(sig)) {
-                    unsafe { libc::killpg(pid, sig.into()) };
-                }
-            }
-        }
-
-        if pfds[0].revents != 0 && lifeline_closed(lifeline) {
-            terminate_group(pid, &mut status);
-            return Ok(1);
-        }
-
-        if status.is_none() {
-            status = try_reap(pid);
-        }
-    }
-
-    let status = status.unwrap_or(0);
-    if group_alive(pid) {
+    let Some(status) = supervise(pid, lifeline, sig_read, poll)? else {
+        return Ok(1);
+    };
+    if group_alive(pid) || !descendant_groups().is_empty() {
         let mut reaped = Some(status);
         terminate_group(pid, &mut reaped);
     }
@@ -153,6 +121,62 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
         return Ok(128 + sig);
     }
     Ok(libc::WEXITSTATUS(status))
+}
+
+fn poll(fds: &mut [libc::pollfd]) -> libc::c_int {
+    unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) }
+}
+
+/// Forwards signals to the group until the command exits, and returns its
+/// status. Takes the group down and returns `None` when the lifeline closes,
+/// and takes it down before returning an error.
+fn supervise(
+    pid: libc::pid_t,
+    lifeline: RawFd,
+    sig_read: RawFd,
+    poll: fn(&mut [libc::pollfd]) -> libc::c_int,
+) -> io::Result<Option<libc::c_int>> {
+    let mut status = None;
+    while status.is_none() {
+        let mut pfds = [
+            libc::pollfd {
+                fd: lifeline,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: sig_read,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        if poll(&mut pfds) < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            terminate_group(pid, &mut status);
+            return Err(err);
+        }
+
+        if pfds[1].revents != 0 {
+            let mut sigs = [0u8; 64];
+            let n = unsafe { libc::read(sig_read, sigs.as_mut_ptr().cast(), sigs.len()) };
+            for &sig in &sigs[..n.max(0) as usize] {
+                if FORWARDED.contains(&libc::c_int::from(sig)) {
+                    unsafe { libc::killpg(pid, sig.into()) };
+                }
+            }
+        }
+
+        if pfds[0].revents != 0 && lifeline_closed(lifeline) {
+            terminate_group(pid, &mut status);
+            return Ok(None);
+        }
+
+        reap(pid, &mut status);
+    }
+    Ok(status)
 }
 
 /// Runs in the forked child; only async-signal-safe calls.
@@ -204,12 +228,20 @@ fn lifeline_closed(fd: RawFd) -> bool {
     !(n < 0 && matches!(Errno::last(), Errno::EINTR | Errno::EAGAIN))
 }
 
-fn try_reap(pid: libc::pid_t) -> Option<libc::c_int> {
-    let mut status = 0;
-    match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
-        p if p == pid => Some(status),
-        -1 if Errno::last() == Errno::ECHILD => Some(0),
-        _ => None,
+/// Reaps every exited child, the leader's status going to `leader`; on Linux
+/// the shim also adopts the command's orphaned descendants.
+fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
+    loop {
+        let mut status = 0;
+        match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } {
+            p if p == pid => *leader = Some(status),
+            p if p > 0 => {}
+            -1 if Errno::last() == Errno::ECHILD => {
+                leader.get_or_insert(0);
+                return;
+            }
+            _ => return,
+        }
     }
 }
 
@@ -217,18 +249,33 @@ fn group_alive(pgid: libc::pid_t) -> bool {
     unsafe { libc::killpg(pgid, 0) == 0 }
 }
 
-/// TERM and CONT to the group, a short grace, then KILL; reaps the leader on the way.
-fn terminate_group(pgid: libc::pid_t, reaped: &mut Option<libc::c_int>) {
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
-        libc::killpg(pgid, libc::SIGCONT);
+/// The groups of the shim's descendants other than its own.
+fn descendant_groups() -> Vec<libc::pid_t> {
+    crate::proctree::descendant_groups(std::process::id())
+        .into_iter()
+        .map(|pgid| pgid as libc::pid_t)
+        .collect()
+}
+
+fn signal_groups(groups: &[libc::pid_t], sig: libc::c_int) {
+    for &pgid in groups {
+        unsafe { libc::killpg(pgid, sig) };
     }
+}
+
+/// TERM and CONT to the group and to every group the shim's descendants are
+/// in, a short grace, then KILL; reaps the leader on the way.
+fn terminate_group(pgid: libc::pid_t, reaped: &mut Option<libc::c_int>) {
+    let mut groups = descendant_groups();
+    if !groups.contains(&pgid) {
+        groups.push(pgid);
+    }
+    signal_groups(&groups, libc::SIGTERM);
+    signal_groups(&groups, libc::SIGCONT);
     let deadline = Instant::now() + GROUP_GRACE;
     loop {
-        if reaped.is_none() {
-            *reaped = try_reap(pgid);
-        }
-        if reaped.is_some() && !group_alive(pgid) {
+        reap(pgid, reaped);
+        if reaped.is_some() && !groups.iter().any(|&g| group_alive(g)) {
             return;
         }
         if Instant::now() >= deadline {
@@ -236,7 +283,12 @@ fn terminate_group(pgid: libc::pid_t, reaped: &mut Option<libc::c_int>) {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    for group in descendant_groups() {
+        if !groups.contains(&group) {
+            groups.push(group);
+        }
+    }
+    signal_groups(&groups, libc::SIGKILL);
     if reaped.is_none() {
         let mut status = 0;
         unsafe { libc::waitpid(pgid, &mut status, 0) };
@@ -299,5 +351,59 @@ fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
         Err(io::Error::last_os_error())
     } else {
         Ok(ret)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    fn failing_poll(_: &mut [libc::pollfd]) -> libc::c_int {
+        Errno::set_raw(libc::EINVAL);
+        -1
+    }
+
+    /// Plays the shim for `a_failing_poll_takes_the_group_down`, in a process of
+    /// its own as it reaps any child; a no-op otherwise.
+    #[test]
+    fn supervise_with_a_failing_poll() {
+        if std::env::var_os("CARTE_TEST_FAILING_POLL").is_none() {
+            return;
+        }
+        let mut child = Command::new("sleep")
+            .arg("20")
+            .process_group(0)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        let (lifeline, _daemon_end) = UnixStream::pair().unwrap();
+        let (sig_read, _sig_write) = std::io::pipe().unwrap();
+        let err = supervise(
+            pid,
+            lifeline.as_raw_fd(),
+            sig_read.as_raw_fd(),
+            failing_poll,
+        )
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EINVAL));
+        assert!(!group_alive(pid));
+        assert!(child.try_wait().is_err());
+    }
+
+    #[test]
+    fn a_failing_poll_takes_the_group_down() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "shim::tests::supervise_with_a_failing_poll"])
+            .env("CARTE_TEST_FAILING_POLL", "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}");
+        assert!(stdout.contains("1 passed"), "{stdout}");
     }
 }

@@ -22,6 +22,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
+use crate::proctree::descendant_groups;
+
 /// How a process's stdio is connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoMode {
@@ -192,6 +194,7 @@ impl Spawner {
                 )))
             }
             Err(_) => {
+                signal_groups(&descendant_groups(handle.shim_pid), Signal::SIGKILL);
                 handle.shim.start_kill().ok();
                 Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -260,16 +263,27 @@ impl ProcessHandle {
     }
 
     /// SIGTERM to the group, then SIGKILL if it hasn't exited after `grace`.
-    /// SIGCONT follows the SIGTERM, so a stopped group handles it.
+    /// SIGCONT follows the SIGTERM, so a stopped group handles it. Groups the
+    /// command's descendants run in get the same signals.
     pub async fn stop(&mut self, grace: Duration) -> io::Result<ExitStatus> {
         if self.status.is_some() {
             return self.wait().await;
         }
+        let mut others = descendant_groups(self.shim_pid);
+        others.retain(|&pgid| pgid != self.pid);
+        signal_groups(&others, Signal::SIGTERM);
         ignore_esrch(self.signal_group(Signal::SIGTERM))?;
+        signal_groups(&others, Signal::SIGCONT);
         let _ = self.signal_group(Signal::SIGCONT);
         if let Ok(status) = tokio::time::timeout(grace, self.wait()).await {
             return status;
         }
+        for pgid in descendant_groups(self.shim_pid) {
+            if pgid != self.pid && !others.contains(&pgid) {
+                others.push(pgid);
+            }
+        }
+        signal_groups(&others, Signal::SIGKILL);
         ignore_esrch(self.signal_group(Signal::SIGKILL))?;
         if let Ok(status) = tokio::time::timeout(Duration::from_secs(5), self.wait()).await {
             return status;
@@ -402,6 +416,12 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
         Err(io::Error::last_os_error())
     } else {
         Ok(n as usize)
+    }
+}
+
+fn signal_groups(groups: &[u32], signal: Signal) {
+    for &pgid in groups {
+        let _ = killpg(Pid::from_raw(pgid as i32), signal);
     }
 }
 
