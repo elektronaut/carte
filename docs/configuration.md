@@ -1050,7 +1050,8 @@ creates them before its processes start, and creates nothing inside them.
   symlink or another user's folder, and closes the folder to other
   users. Beside each run directory, a `<hash>.owner` file names the
   carte that made it, by its state directory's `data` folder. carte
-  writes it only when it's missing, and never changes another carte's.
+  writes it only when it's missing, and refuses a run directory whose
+  file names another carte.
 
 Commands aren't templated, so they use the variables like `$PORT`. A
 process that wants a subdirectory creates it:

@@ -75,6 +75,39 @@ pub fn owner_marker(run_dir: &Path) -> PathBuf {
     run_dir.with_extension("owner")
 }
 
+/// The second line of an owner marker written since each carte hashes its own data
+/// root into its run directories. Older markers have only the first line.
+const OWNER_MARKER_VERSION: &str = "carte run dir 2";
+
+/// What an owner marker holds: the data root, then the format's version.
+pub fn owner_marker_text(data: &Path) -> String {
+    format!("{}\n{OWNER_MARKER_VERSION}\n", data.display())
+}
+
+/// Who an owner marker names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    /// The data root of the carte that made the run directory.
+    pub data: String,
+    /// Written in the current format, so no other carte has used the directory.
+    pub current: bool,
+}
+
+impl Owner {
+    pub fn parse(text: &str) -> Self {
+        let mut lines = text.lines();
+        Owner {
+            data: lines.next().unwrap_or_default().trim_end().to_string(),
+            current: lines.next() == Some(OWNER_MARKER_VERSION),
+        }
+    }
+
+    /// Whether it names the carte whose data root is `data`.
+    pub fn is(&self, data: &Path) -> bool {
+        self.data == data.display().to_string()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceDirs {
     /// `{{state_dir}}`, `CARTE_STATE_DIR`.
@@ -158,6 +191,16 @@ mod tests {
                 "{hash}"
             );
         }
+    }
+
+    #[test]
+    fn owner_markers_tell_their_format() {
+        let data = Path::new("/state/data");
+        let owner = Owner::parse(&owner_marker_text(data));
+        assert!(owner.is(data) && owner.current, "{owner:?}");
+        let old = Owner::parse("/state/data");
+        assert!(old.is(data) && !old.current, "{old:?}");
+        assert!(!Owner::parse("/other/data\ncarte run dir 2\n").is(data));
     }
 
     #[test]
