@@ -73,8 +73,9 @@ after three minutes (`.config/nextest.toml`). Either runner works locally.
 
 CI also checks dependencies with [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
 against `deny.toml`: licenses, sources and duplicate versions, and security
-advisories. A new advisory shows up in the run without failing it. Run
-`cargo deny check` to see the same locally.
+advisories. A new advisory shows up in a pull request's run without failing
+it; a weekly run on main fails on one. To check locally, install it with
+`cargo install --locked cargo-deny` and run `cargo deny check`.
 
 Property tests in carte-core use proptest and run with the rest of the
 suite. When one fails, proptest saves the case under

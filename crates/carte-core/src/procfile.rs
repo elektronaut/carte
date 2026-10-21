@@ -750,6 +750,10 @@ mod tests {
             rewrite_port("unset PORT; bin/rails server -p 3000").as_deref(),
             Some("bin/rails server -p $PORT")
         );
+        assert_eq!(
+            rewrite_port("unset PORT && unset PORT; bin/rails server").as_deref(),
+            Some("bin/rails server")
+        );
     }
 
     #[test]
