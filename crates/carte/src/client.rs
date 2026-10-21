@@ -135,7 +135,7 @@ mod tests {
     async fn a_socket_nobody_listens_on_means_starting_or_stopping() {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("carte.sock");
-        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        leave_a_socket_nobody_listens_on(&socket);
 
         let err = Client::new(&socket)
             .get::<serde_json::Value>("/")
@@ -151,6 +151,31 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("isn't running"), "{err}");
+    }
+
+    /// Leaves a socket file at `path` that nothing listens on, bound by a forked
+    /// child that exits, so no process another test spawns can inherit it.
+    fn leave_a_socket_nobody_listens_on(path: &Path) {
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, bind, socket};
+        use nix::sys::wait::{WaitStatus, waitpid};
+        use nix::unistd::{ForkResult, fork};
+
+        let addr = UnixAddr::new(path).unwrap();
+        match unsafe { fork() }.unwrap() {
+            ForkResult::Child => {
+                let bound = socket(
+                    AddressFamily::Unix,
+                    SockType::Stream,
+                    SockFlag::empty(),
+                    None,
+                )
+                .and_then(|fd| bind(std::os::fd::AsRawFd::as_raw_fd(&fd), &addr));
+                unsafe { libc::_exit(i32::from(bound.is_err())) }
+            }
+            ForkResult::Parent { child } => {
+                assert_eq!(waitpid(child, None).unwrap(), WaitStatus::Exited(child, 0));
+            }
+        }
     }
 
     #[tokio::test]
