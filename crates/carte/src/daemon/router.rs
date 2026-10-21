@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
-use carte_api::{ExternalRequest, ProcessState, Snapshot};
+use carte_api::{ExternalRequest, ProcessState, ProcessStatus, Snapshot};
 use carte_core::kube::{self, KubeTarget};
-use carte_core::model::{InstanceKey, World};
+use carte_core::model::{InstanceKey, World, path_match};
 use carte_core::naming;
 use carte_core::procfile::ProcessSource;
 use http::StatusCode;
@@ -186,7 +186,11 @@ impl Router for SupervisorRouter {
                     }
                     Route::Error(page)
                 }
-                Err(_) => Route::Error(still_starting(&self.supervisor.snapshot(), &key)),
+                Err(_) => Route::Error(still_starting(
+                    &self.supervisor.snapshot(),
+                    &key,
+                    request.path,
+                )),
             }
         })
     }
@@ -194,9 +198,11 @@ impl Router for SupervisorRouter {
 
 /// The page for a request that waited too long for its instance: why it isn't
 /// ready, and how to answer a debugger prompt that holds it up.
-fn still_starting(snapshot: &Snapshot, key: &InstanceKey) -> ErrorPage {
+/// The process the request waits for is the one serving its path, else the HTTP
+/// process.
+fn still_starting(snapshot: &Snapshot, key: &InstanceKey, path: &str) -> ErrorPage {
     let label = format!("{}@{}", key.app, key.stack.slug());
-    let paused = snapshot
+    let processes: Vec<&ProcessStatus> = snapshot
         .projects
         .iter()
         .filter(|p| p.name == key.project)
@@ -205,7 +211,14 @@ fn still_starting(snapshot: &Snapshot, key: &InstanceKey) -> ErrorPage {
         .flat_map(|s| &s.instances)
         .filter(|i| i.app == key.app)
         .flat_map(|i| &i.processes)
-        .find(|p| p.state == ProcessState::Paused && (p.http || !p.paths.is_empty()));
+        .collect();
+    let waited_for = processes
+        .iter()
+        .filter_map(|p| path_match(&p.paths, path).map(|len| (len, *p)))
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, p)| p)
+        .or_else(|| processes.iter().copied().find(|p| p.http));
+    let paused = waited_for.filter(|p| p.state == ProcessState::Paused);
     let page = match paused {
         Some(process) => ErrorPage::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -566,12 +579,12 @@ mod tests {
             app: "nova-billing".into(),
             stack: carte_core::model::Stack::Main,
         };
-        let page = still_starting(&snapshot, &key);
+        let page = still_starting(&snapshot, &key, "/");
         assert_eq!(page.title, "nova-billing@main is still starting");
         let web = &mut snapshot.projects[0].stacks[0].instances[0].processes[0];
         web.state = ProcessState::Paused;
         let name = web.name.clone();
-        let page = still_starting(&snapshot, &key);
+        let page = still_starting(&snapshot, &key, "/");
         assert_eq!(page.title, "nova-billing@main is paused at a breakpoint");
         assert!(
             page.detail
@@ -579,5 +592,21 @@ mod tests {
             "{}",
             page.detail
         );
+
+        let instance = &mut snapshot.projects[0].stacks[0].instances[0];
+        instance.processes[0].state = ProcessState::Running;
+        let assets = &mut instance.processes[1];
+        assets.paths = vec!["/assets/".into()];
+        assets.state = ProcessState::Paused;
+        let assets = assets.name.clone();
+        let page = still_starting(&snapshot, &key, "/assets/app.js");
+        assert!(
+            page.detail
+                .contains(&format!("carte attach nova-billing@main/{assets}")),
+            "the process serving the path: {}",
+            page.detail
+        );
+        let page = still_starting(&snapshot, &key, "/orders");
+        assert_eq!(page.title, "nova-billing@main is still starting");
     }
 }
