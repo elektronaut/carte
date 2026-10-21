@@ -1214,6 +1214,11 @@ impl<'de> Deserialize<'de> for EnvTable {
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<EnvTable, A::Error> {
                 let mut entries: Vec<EnvTemplate> = Vec::new();
                 while let Some((key, EnvValue(value))) = map.next_entry::<String, EnvValue>()? {
+                    if !key.contains("{{") && !crate::env::is_valid_key(&key) {
+                        return Err(serde::de::Error::custom(format!(
+                            "invalid variable name {key:?}: use letters, digits and underscores"
+                        )));
+                    }
                     entries.retain(|e| e.key != key);
                     entries.push(EnvTemplate { key, value });
                 }
@@ -1624,6 +1629,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("only applies"), "{err}");
+    }
+
+    #[test]
+    fn env_names_must_be_valid() {
+        for key in ["A=B", "A\\u0000B", "1A", ""] {
+            let err = project(&format!("root = \"/x\"\n[env]\n\"{key}\" = \"1\"\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("invalid variable name"), "{key}: {err}");
+        }
+        let file =
+            project("root = \"/x\"\n[env]\n\"{{app.short | upper}}_URL\" = \"1\"\n").unwrap();
+        assert_eq!(file.env[0].key, "{{app.short | upper}}_URL");
     }
 
     #[test]

@@ -339,7 +339,7 @@ TZ = "Europe/Oslo"
 | --- | --- | --- |
 | `path` | none | Project files only: the app's directory, which names it after the table. See [Finding apps](#finding-apps) |
 | `env` | none | Env templates for this app, over the project's |
-| `env_files` | none | Files of `KEY=VALUE` lines, relative to the checkout, read in order |
+| `env_files` | none | Files of `KEY=VALUE` lines, relative to the checkout, read in order. See [Env files](#env-files) |
 | `depends_on` | none | Apps this app calls. See below |
 | `aliases` | none | Extra hostnames routed to the app on main. An alias is one label without the TLD: `shop` serves `shop.localhost`. An alias equal to a project's name, or to an alias of a project loaded earlier, is skipped and reported, so an alias in a template applies to only one of its projects. `carte import puma-dev` sets the old puma-dev names. Rails apps: see `CARTE_TLD_LENGTH` under [Environment](#environment) |
 | `subdomains` | `false` | Pass extra labels on the left (`oslo.events.acme.localhost`) through to the app instead of returning 404 |
@@ -1067,8 +1067,25 @@ every app a variable pointing at every other:
 # BILLING_URL, FRONTEND_URL, ACCOUNTS_URL, …
 ```
 
-A key template that uses `public_url:app` or `public_host:app` skips apps
-that aren't shared.
+A key template that uses `public_url:app` or `public_host:app`, in its
+key or its value, skips apps that aren't shared.
+
+Variable names are letters, digits and underscores, not starting with a
+digit; a name that isn't, written or rendered, is an error. For a literal
+`{{`, write `{{"{{"}}`, in a single-quoted TOML string: `DOCKER_FORMAT = '{{"{{"}}.Names}}'` gives
+`{{.Names}}`.
+
+### Env files
+
+Each line of an env file is `KEY=VALUE`, optionally after `export `.
+Blank lines and lines starting with `#` are skipped.
+
+- An unquoted value runs to the end of the line, or to ` #`, which starts
+  a comment. Surrounding spaces are dropped.
+- A single-quoted value is taken as is.
+- A double-quoted value can span lines, and understands `\n`, `\t`,
+  `\r`, `\"`, `\\` and `\$`.
+- `${VAR}` and `$VAR` are kept as written, not expanded.
 
 ## Kube projects
 

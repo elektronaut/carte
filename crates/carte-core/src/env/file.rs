@@ -48,17 +48,19 @@ pub fn read_env_files(checkout: &Path, names: &[String]) -> Result<Vec<EnvFile>,
 }
 
 /// Parses `KEY=VALUE` lines with `#` comments, an optional `export ` prefix
-/// and single- or double-quoted values. `path` is only used in errors.
+/// and single- or double-quoted values; a double-quoted value can span lines.
+/// `path` is only used in errors.
 pub fn parse_env_file(path: &Path, content: &str) -> Result<Vec<EnvFileEntry>, EnvFileError> {
     let mut entries = Vec::new();
-    for (index, raw) in content.lines().enumerate() {
+    let mut lines = content.lines().enumerate();
+    while let Some((index, raw)) = lines.next() {
         let line = index + 1;
         let err = |message: &str| EnvFileError::Parse {
             path: path.to_path_buf(),
             line,
             message: message.to_string(),
         };
-        let text = raw.trim();
+        let text = raw.trim_start();
         if text.is_empty() || text.starts_with('#') {
             continue;
         }
@@ -75,7 +77,20 @@ pub fn parse_env_file(path: &Path, content: &str) -> Result<Vec<EnvFileEntry>, E
                 "invalid variable name {key:?}: use letters, digits and underscores"
             )));
         }
-        let value = parse_value(value.trim_start()).map_err(|m| err(&m))?;
+        let mut input = value.trim_start().to_string();
+        let value = loop {
+            match parse_value(&input) {
+                Err(m) if m == UNTERMINATED_DOUBLE => match lines.next() {
+                    Some((_, more)) => {
+                        input.push('\n');
+                        input.push_str(more);
+                    }
+                    None => break Err(m),
+                },
+                other => break other,
+            }
+        }
+        .map_err(|m| err(&m))?;
         entries.push(EnvFileEntry {
             key: key.to_string(),
             value,
@@ -85,7 +100,9 @@ pub fn parse_env_file(path: &Path, content: &str) -> Result<Vec<EnvFileEntry>, E
     Ok(entries)
 }
 
-fn is_valid_key(key: &str) -> bool {
+const UNTERMINATED_DOUBLE: &str = "unterminated double-quoted value";
+
+pub(crate) fn is_valid_key(key: &str) -> bool {
     let mut chars = key.chars();
     chars
         .next()
@@ -125,7 +142,7 @@ fn parse_value(input: &str) -> Result<String, String> {
                     c => value.push(c),
                 }
             }
-            let end = end.ok_or("unterminated double-quoted value")?;
+            let end = end.ok_or(UNTERMINATED_DOUBLE)?;
             (value, &input[end..])
         }
         _ => {
@@ -216,6 +233,28 @@ mod tests {
         assert_eq!(one(r#"A="back\\slash \d""#), r"back\slash \d");
         assert_eq!(one(r#"A="""#), "");
         assert_eq!(one(r#"A="x y" # comment"#), "x y");
+    }
+
+    #[test]
+    fn double_quoted_values_can_span_lines() {
+        let entries = parse(
+            "PRIVATE_KEY=\"-----BEGIN KEY-----\n  abc\\\"def  \n-----END KEY-----\" # pem\nNEXT=1\n",
+        );
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "PRIVATE_KEY".into(),
+                    "-----BEGIN KEY-----\n  abc\"def  \n-----END KEY-----".into(),
+                    1
+                ),
+                ("NEXT".into(), "1".into(), 4),
+            ]
+        );
+        assert_eq!(
+            error("A=1\nB=\"open\nstill open\n"),
+            "/w/nova-billing/.env:2: unterminated double-quoted value"
+        );
     }
 
     #[test]
