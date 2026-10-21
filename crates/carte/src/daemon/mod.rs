@@ -77,6 +77,8 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
 
     let options = Options::new(&paths);
     let hold = options.boot_timeout + Duration::from_secs(10);
+    let http_sockets = launchd::activate_socket("http")?;
+    let https_sockets = launchd::activate_socket("https")?;
     let supervisor = supervisor::start(world, paths.clone(), Spawner::current()?, options);
 
     let loopback = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -114,6 +116,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let http = launchd::proxy_listeners(
         &proxy,
         "http",
+        http_sockets,
         &loopbacks(machine.http_port),
         ListenerOptions::local(),
     )
@@ -122,6 +125,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let https = launchd::proxy_listeners(
         &proxy,
         "https",
+        https_sockets,
         &loopbacks(machine.https_port),
         ListenerOptions::local().tls(tls_config),
     )
