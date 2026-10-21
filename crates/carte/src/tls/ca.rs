@@ -657,11 +657,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dirs: Vec<PathBuf> = (0..40).map(|i| tmp.path().join(i.to_string())).collect();
         let children: Vec<_> = (0..2)
+            // SAFETY: the child only creates CAs in temp dirs and exits; it
+            // never returns into the test harness.
             .map(|_| match unsafe { fork() }.unwrap() {
                 ForkResult::Child => {
                     let failed = dirs.iter().any(|dir| {
                         CertificateAuthority::load_or_create(dir, "x", &["test"]).is_err()
                     });
+                    // SAFETY: _exit takes no pointers and skips the parent's
+                    // destructors.
                     unsafe { libc::_exit(i32::from(failed)) }
                 }
                 ForkResult::Parent { child } => child,
