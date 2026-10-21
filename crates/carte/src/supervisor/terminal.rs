@@ -34,6 +34,7 @@ struct Clients {
     sizes: BTreeMap<u64, Option<TermSize>>,
     current: TermSize,
     queries: CursorQueries,
+    answers: Answers,
 }
 
 impl Terminal {
@@ -48,6 +49,7 @@ impl Terminal {
                 sizes: BTreeMap::new(),
                 current: size,
                 queries: CursorQueries::default(),
+                answers: Answers::default(),
             }),
             writing: tokio::sync::Mutex::new(()),
             ended: watch::channel(None).0,
@@ -61,16 +63,29 @@ impl Terminal {
         if self.output.receiver_count() > 0 {
             let _ = self.output.send(Bytes::copy_from_slice(data));
         }
-        let unanswered = {
+        let start_writer = {
             let mut clients = self.clients.lock().unwrap();
             let terminals = clients.terminals();
-            clients.queries.feed(data, &terminals)
+            let unanswered = clients.queries.feed(data, &terminals);
+            clients.answers.add(unanswered)
         };
-        if unanswered > 0 {
+        if start_writer {
             let terminal = self.clone();
-            tokio::spawn(async move {
-                let _ = terminal.write(&CURSOR_ANSWER.repeat(unanswered)).await;
-            });
+            tokio::spawn(async move { terminal.write_answers().await });
+        }
+    }
+
+    /// Writes the pending answers until none are left; the one writer of them.
+    async fn write_answers(&self) {
+        loop {
+            let pending = self.clients.lock().unwrap().answers.take();
+            if pending == 0 {
+                return;
+            }
+            if self.write(&CURSOR_ANSWER.repeat(pending)).await.is_err() {
+                self.clients.lock().unwrap().answers.stop();
+                return;
+            }
         }
     }
 
@@ -210,6 +225,37 @@ impl CursorQueries {
     }
 }
 
+/// Answers waiting to be written, by at most one writer at a time. A process that
+/// asks without reading gets a few; more would be stale by the time it reads them.
+#[derive(Debug, Default)]
+struct Answers {
+    pending: usize,
+    writing: bool,
+}
+
+impl Answers {
+    /// Adds `n` answers, and returns whether a writer has to start for them.
+    fn add(&mut self, n: usize) -> bool {
+        if n == 0 {
+            return false;
+        }
+        self.pending = (self.pending + n).min(4);
+        !std::mem::replace(&mut self.writing, true)
+    }
+
+    /// Hands the writer the pending answers; with none, it stops.
+    fn take(&mut self) -> usize {
+        let pending = std::mem::take(&mut self.pending);
+        self.writing = pending > 0;
+        pending
+    }
+
+    /// The writer gave up.
+    fn stop(&mut self) {
+        *self = Answers::default();
+    }
+}
+
 /// `data` without its complete cursor-position queries.
 fn without_cursor_queries(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
@@ -327,6 +373,23 @@ mod tests {
         assert_eq!(queries.feed(b"\x1b[", &[]), 0);
         queries.replayed_to(1);
         assert_eq!(queries.feed(b"6n", &[1]), 0);
+    }
+
+    #[test]
+    fn one_writer_writes_a_few_answers_at_most() {
+        let mut answers = Answers::default();
+        assert!(!answers.add(0), "nothing to write");
+        assert!(answers.add(1), "the first answer starts a writer");
+        for _ in 0..100 {
+            assert!(!answers.add(1), "the writer is still at it");
+        }
+        assert_eq!(answers.take(), 4);
+        assert!(!answers.add(2), "the writer comes back for more");
+        assert_eq!(answers.take(), 2);
+        assert_eq!(answers.take(), 0);
+        assert!(answers.add(1), "a writer that ran out has stopped");
+        answers.stop();
+        assert!(answers.add(1), "so has one that gave up");
     }
 
     #[test]
