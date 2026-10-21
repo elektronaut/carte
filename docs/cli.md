@@ -184,6 +184,11 @@ carte attach shop@feature-x/worker
   type, like a shared tmux session. The pty takes the smallest one's
   size, so wider terminals show it narrower; it gets its own size back
   when the last one detaches.
+- Reline (irb, rdbg, pry) asks the terminal where its cursor is before
+  each prompt, and waits half a second for the answer. While no terminal
+  is attached, carte answers for it with the top left corner, so prompts
+  come at once. The terminal UI, `attach` without a terminal and the MCP
+  `type` tool don't count as terminals.
 - When the process exits, `attach` says how and ends. It also ends, and
   puts your terminal back, on `SIGTERM`, `SIGHUP` or `SIGINT`.
 - Without a terminal, `attach` types its input into the process as it
