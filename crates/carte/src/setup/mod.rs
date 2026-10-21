@@ -706,6 +706,13 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
                 action: Action::CreateCa,
             });
             steps.push(trust_step());
+            for ca in &facts.keychain_cas {
+                steps.push(Step::sudo(
+                    format!("Remove the old {} from the system keychain", ca.label),
+                    "security",
+                    &["delete-certificate", "-Z", &ca.hash, trust::SYSTEM_KEYCHAIN],
+                ));
+            }
         }
         CaState::Untrusted | CaState::Unknown(_) => steps.push(trust_step()),
         CaState::Trusted => {}
@@ -1294,6 +1301,46 @@ mod tests {
                 "launchctl kickstart -k gui/501/no.elektronaut.carte".to_string(),
                 "verify".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn removes_the_cas_a_new_one_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        let old = KeychainCa {
+            hash: "1D2D".into(),
+            label: "carte local CA (alice@mac)".into(),
+        };
+        let facts = Facts {
+            ca: CaState::Replace("it is about to expire".into()),
+            keychain_cas: vec![old],
+            ..fresh()
+        };
+        let plan = plan_install(&env, &facts);
+        let planned = commands(&plan);
+        let trust = planned
+            .iter()
+            .position(|c| c.contains("add-trusted-cert"))
+            .unwrap();
+        assert_eq!(planned[trust - 1], "create ca");
+        assert_eq!(
+            planned[trust + 1],
+            "sudo security delete-certificate -Z 1D2D /Library/Keychains/System.keychain"
+        );
+        assert_eq!(
+            plan.steps[trust + 1].description,
+            "Remove the old carte local CA (alice@mac) from the system keychain"
+        );
+
+        let trusted = Facts {
+            ca: CaState::Untrusted,
+            ..facts
+        };
+        assert!(
+            !commands(&plan_install(&env, &trusted))
+                .iter()
+                .any(|c| c.contains("delete-certificate"))
         );
     }
 
