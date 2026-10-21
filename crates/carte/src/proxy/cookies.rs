@@ -6,8 +6,8 @@ use http::header::{HeaderMap, SET_COOKIE};
 pub(crate) fn strip_cookie_domains(headers: &mut HeaderMap, domain: &str) {
     if let http::header::Entry::Occupied(mut entry) = headers.entry(SET_COOKIE) {
         for value in entry.iter_mut() {
-            if let Some(stripped) = value.to_str().ok().and_then(|v| strip_domain(v, domain))
-                && let Ok(stripped) = HeaderValue::from_str(&stripped)
+            if let Some(stripped) = strip_domain(value.as_bytes(), domain)
+                && let Ok(stripped) = HeaderValue::from_bytes(&stripped)
             {
                 *value = stripped;
             }
@@ -17,32 +17,45 @@ pub(crate) fn strip_cookie_domains(headers: &mut HeaderMap, domain: &str) {
 
 /// The cookie without a `Domain` attribute for `domain` or a parent of it, or `None`
 /// if it had none.
-fn strip_domain(cookie: &str, domain: &str) -> Option<String> {
+fn strip_domain(cookie: &[u8], domain: &str) -> Option<Vec<u8>> {
     let domain = domain.trim_start_matches('.').to_ascii_lowercase();
-    let mut parts = cookie.split(';');
+    let mut parts = cookie.split(|&byte| byte == b';');
     let mut kept = vec![parts.next()?];
     let mut stripped = false;
     for attribute in parts {
-        let (name, value) = attribute.split_once('=').unwrap_or((attribute, ""));
-        let value = value.trim().trim_start_matches('.').to_ascii_lowercase();
-        let matches = name.trim().eq_ignore_ascii_case("domain")
-            && !value.is_empty()
-            && (domain == value || domain.ends_with(&format!(".{value}")));
-        if matches {
+        if is_domain_for(attribute, &domain) {
             stripped = true;
         } else {
             kept.push(attribute);
         }
     }
-    stripped.then(|| kept.join(";"))
+    stripped.then(|| kept.join(&b';'))
+}
+
+/// Whether `attribute` is `Domain=` naming `domain` or a parent of it.
+fn is_domain_for(attribute: &[u8], domain: &str) -> bool {
+    let Ok(attribute) = std::str::from_utf8(attribute) else {
+        return false;
+    };
+    let Some((name, value)) = attribute.split_once('=') else {
+        return false;
+    };
+    let value = value.trim().trim_start_matches('.').to_ascii_lowercase();
+    name.trim().eq_ignore_ascii_case("domain")
+        && !value.is_empty()
+        && (domain == value || domain.ends_with(&format!(".{value}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn stripped(cookie: &str, domain: &str) -> Option<String> {
+        strip_domain(cookie.as_bytes(), domain).map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
     fn strip(cookie: &str) -> String {
-        strip_domain(cookie, "share.example").unwrap_or_else(|| cookie.to_string())
+        stripped(cookie, "share.example").unwrap_or_else(|| cookie.to_string())
     }
 
     #[test]
@@ -87,7 +100,7 @@ mod tests {
     #[test]
     fn strips_parents_of_the_share_domain() {
         assert_eq!(
-            strip_domain("session=abc; Domain=example.com; Path=/", "dev.example.com").as_deref(),
+            stripped("session=abc; Domain=example.com; Path=/", "dev.example.com").as_deref(),
             Some("session=abc; Path=/")
         );
         assert_eq!(strip("a=1; Domain=.Example"), "a=1");
@@ -104,7 +117,7 @@ mod tests {
             "a=1; Domain=share.example.evil",
             "a=1",
         ] {
-            assert_eq!(strip_domain(cookie, "share.example"), None, "{cookie}");
+            assert_eq!(stripped(cookie, "share.example"), None, "{cookie}");
         }
     }
 
@@ -127,9 +140,20 @@ mod tests {
     #[test]
     fn accepts_a_configured_domain_with_a_leading_dot() {
         assert_eq!(
-            strip_domain("a=1; Domain=share.example", ".share.example").as_deref(),
+            stripped("a=1; Domain=share.example", ".share.example").as_deref(),
             Some("a=1")
         );
+    }
+
+    #[test]
+    fn strips_from_cookies_with_bytes_outside_ascii() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_bytes(b"a=\xc3\xa6; Domain=example; Path=/").unwrap(),
+        );
+        strip_cookie_domains(&mut headers, "share.example");
+        assert_eq!(headers[SET_COOKIE].as_bytes(), b"a=\xc3\xa6; Path=/");
     }
 
     #[test]
