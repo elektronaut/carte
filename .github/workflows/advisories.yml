@@ -1,0 +1,19 @@
+name: Advisories
+# Pull requests report new advisories without failing, so this run checks
+# main once a week and fails when one affects a dependency.
+on:
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  advisories:
+    name: Advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check advisories
