@@ -500,9 +500,11 @@ fn dump(pgid: u32, label: &str) {
         let keep: Vec<&str> = status
             .lines()
             .filter(|l| {
-                ["Name", "State", "SigPnd", "ShdPnd", "SigBlk", "SigIgn", "SigCgt"]
-                    .iter()
-                    .any(|k| l.starts_with(k))
+                [
+                    "Name", "State", "SigPnd", "ShdPnd", "SigBlk", "SigIgn", "SigCgt",
+                ]
+                .iter()
+                .any(|k| l.starts_with(k))
             })
             .collect();
         let wchan = std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap_or_default();
@@ -522,7 +524,11 @@ async fn debug_trap_without_stop() {
     dump(handle.pid(), "before");
     let started = Instant::now();
     let status = handle.stop(Duration::from_secs(5)).await.unwrap();
-    eprintln!("no stop: {status:?} {:?} marker={}", started.elapsed(), marker.exists());
+    eprintln!(
+        "no stop: {status:?} {:?} marker={}",
+        started.elapsed(),
+        marker.exists()
+    );
 }
 
 #[tokio::test]
@@ -549,4 +555,50 @@ async fn debug_trap_with_stop() {
     eprintln!("marker={}", marker.exists());
     let status = handle.stop(Duration::from_secs(1)).await.unwrap();
     eprintln!("status {status:?}");
+}
+
+async fn timed(stop_wait: u64, term_wait: u64) {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("terminated");
+    let mut handle = spawner().spawn(&trapping_term(&marker)).await.unwrap();
+    let mut output = handle.take_output().unwrap();
+    read_until(&mut output, &mut Vec::new(), "ready").await;
+    drain(output);
+    let pgid = handle.pid();
+    handle.signal_group(Signal::SIGSTOP).unwrap();
+    if stop_wait > 0 {
+        std::thread::sleep(Duration::from_millis(stop_wait));
+    }
+    handle.signal_group(Signal::SIGTERM).unwrap();
+    if term_wait > 0 {
+        std::thread::sleep(Duration::from_millis(term_wait));
+    }
+    let _ = handle.signal_group(Signal::SIGCONT);
+    for i in 0..8 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        dump(pgid, &format!("{stop_wait}/{term_wait} after cont {i}"));
+    }
+    eprintln!("{stop_wait}/{term_wait} marker={}", marker.exists());
+    let status = handle.stop(Duration::from_secs(1)).await.unwrap();
+    eprintln!("{stop_wait}/{term_wait} status {status:?}");
+}
+
+#[tokio::test]
+async fn debug_trap_timing_0_0() {
+    timed(0, 0).await;
+}
+
+#[tokio::test]
+async fn debug_trap_timing_200_0() {
+    timed(200, 0).await;
+}
+
+#[tokio::test]
+async fn debug_trap_timing_0_100() {
+    timed(0, 100).await;
+}
+
+#[tokio::test]
+async fn debug_trap_timing_200_5() {
+    timed(200, 5).await;
 }
