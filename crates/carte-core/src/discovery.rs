@@ -435,6 +435,12 @@ pub fn load_world(config_dir: &Path) -> World {
     }
     resolve_elsewhere(&mut world);
     drop_taken_aliases(&mut world);
+    let long_hosts: Vec<Problem> = world
+        .projects
+        .iter()
+        .flat_map(|state| naming::long_hosts(&world.machine.tld, state))
+        .collect();
+    world.problems.extend(long_hosts);
     world
 }
 

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use serde::Serialize;
 use thiserror::Error;
 
@@ -40,9 +42,46 @@ pub fn local_labels<'a>(project: &'a Project, app: &'a App, stack: &'a Stack) ->
     labels
 }
 
+/// The characters a project's longest hostname takes besides the stack label and
+/// its dot: an app label, the project, the longest served TLD, and a full label in
+/// front for an app that takes subdomains.
+fn longest_host_without_stack(tld: &str, project: &Project) -> usize {
+    let app = project
+        .apps
+        .iter()
+        .map(|app| {
+            app_label(project, app).map_or(0, |label| label.len() + 1)
+                + if app.settings.subdomains { 64 } else { 0 }
+        })
+        .max()
+        .unwrap_or(0);
+    app + project.name.len() + 1 + tld.len().max("localhost".len())
+}
+
+/// A stack's label in local hostnames: its name, cut and given a hash of the whole
+/// name when the project's longest hostname would pass 253 characters.
+pub fn stack_label<'a>(tld: &str, project: &Project, slug: &'a str) -> Cow<'a, str> {
+    let budget = 253usize.saturating_sub(longest_host_without_stack(tld, project) + 1);
+    match crate::slug::shorten(slug, budget) {
+        Some(label) if label.len() < slug.len() => Cow::Owned(label),
+        _ => Cow::Borrowed(slug),
+    }
+}
+
+/// `app.stack.project`, the local hostname without the tld.
+pub fn local_name(tld: &str, project: &Project, app: &App, stack: &Stack) -> String {
+    let mut labels: Vec<Cow<str>> = Vec::with_capacity(3);
+    labels.extend(app_label(project, app).map(Cow::Borrowed));
+    if let Stack::Branch(slug) = stack {
+        labels.push(stack_label(tld, project, slug));
+    }
+    labels.push(Cow::Borrowed(project.name.as_str()));
+    labels.join(".")
+}
+
 /// `app.stack.project.<tld>`, with the stack omitted on main and the app omitted when collapsed.
 pub fn local_host(tld: &str, project: &Project, app: &App, stack: &Stack) -> String {
-    let mut host = local_labels(project, app, stack).join(".");
+    let mut host = local_name(tld, project, app, stack);
     host.push('.');
     host.push_str(tld);
     host
@@ -229,7 +268,7 @@ pub fn resolve_host(world: &World, host: &str) -> Result<Resolved, NotFound> {
     let (top, left) = rest.split_last().expect("at least one label under the tld");
 
     if let Some(state) = world.project(top) {
-        return resolve_in_project(state, left);
+        return resolve_in_project(&world.machine.tld, state, left);
     }
     let alias = world.projects.iter().find_map(|state| {
         state
@@ -273,15 +312,19 @@ pub(crate) fn labels_under_tld(world: &World, host: &str) -> Result<Vec<String>,
     Ok(labels)
 }
 
-fn resolve_in_project(state: &ProjectState, labels: &[String]) -> Result<Resolved, NotFound> {
+fn resolve_in_project(
+    tld: &str,
+    state: &ProjectState,
+    labels: &[String],
+) -> Result<Resolved, NotFound> {
     let project = &state.project;
     let mut labels = labels;
     let mut stack = Stack::Main;
     if let Some((label, left)) = labels.split_last()
         && labelled_app(project, label).is_none()
-        && state.has_stack(label)
+        && let Some(slug) = stack_of_label(tld, state, label)
     {
-        stack = Stack::Branch(label.clone());
+        stack = Stack::Branch(slug);
         labels = left;
     }
     let stack_name = match &stack {
@@ -331,6 +374,17 @@ fn resolve_in_project(state: &ProjectState, labels: &[String]) -> Result<Resolve
         stack,
     };
     with_subdomains(app, key, subdomains, false)
+}
+
+/// The stack whose hostname label is `label`.
+fn stack_of_label(tld: &str, state: &ProjectState, label: &str) -> Option<String> {
+    if state.has_stack(label) {
+        return Some(label.to_string());
+    }
+    state
+        .stacks()
+        .into_iter()
+        .find(|slug| stack_label(tld, &state.project, slug) == label)
 }
 
 fn with_subdomains(
@@ -393,6 +447,27 @@ pub fn resolve_public_label(world: &World, label: &str) -> Option<InstanceKey> {
             })
         })
     })
+}
+
+/// Stacks whose hostnames pass 253 characters even with the stack label shortened.
+pub fn long_hosts(tld: &str, state: &ProjectState) -> Vec<Problem> {
+    let project = &state.project;
+    let longest = longest_host_without_stack(tld, project);
+    state
+        .stacks()
+        .into_iter()
+        .filter(|slug| longest + 1 + stack_label(tld, project, slug).len() > 253)
+        .map(|slug| Problem {
+            project: Some(project.name.clone()),
+            app: None,
+            stack: Some(slug.clone()),
+            message: format!(
+                "hostnames in stack {slug} of project {} pass 253 characters, \
+                 so browsers can't reach them; shorten the project, app or tld names",
+                project.name
+            ),
+        })
+        .collect()
 }
 
 /// Stacks whose slug equals an app's label: the app wins, so the stack is unreachable there.
@@ -652,6 +727,73 @@ mod tests {
                 stack: slug
             })
         );
+    }
+
+    /// A project and an app with 63-character names and a stack with a 63-character
+    /// name, under `tld`.
+    fn long_world(tld: &str, subdomains: bool) -> World {
+        let name = "p".repeat(63);
+        let short = "a".repeat(63);
+        let mut long_app = app("shop", &short, "/x");
+        long_app.settings.subdomains = subdomains;
+        let mut world = World::default();
+        world.machine.tld = tld.into();
+        world.projects = vec![state(
+            project(&name, None, vec![long_app]),
+            vec![("shop", vec![worktree(&"s".repeat(63), "/y")])],
+        )];
+        world
+    }
+
+    #[test]
+    fn long_hosts_leave_room_for_a_subdomain_label() {
+        let world = long_world("test", true);
+        let state = &world.projects[0];
+        let stack = branch(&"s".repeat(63));
+        let host = local_host("localhost", &state.project, &state.project.apps[0], &stack);
+        assert_eq!(
+            host.replace(".localhost", ".test"),
+            local_host("test", &state.project, &state.project.apps[0], &stack)
+        );
+        let sub = "b".repeat(63);
+        let full = format!("{sub}.{host}");
+        assert_eq!(full.len(), 253, "{full}");
+        let label = stack_label("test", &state.project, &"s".repeat(63)).into_owned();
+        assert_eq!(label, crate::slug::shorten(&"s".repeat(63), 51).unwrap());
+        assert_eq!(
+            resolve_host(&world, &full),
+            Ok(Resolved {
+                key: key(&state.project.name, "shop", stack.clone()),
+                subdomains: vec![sub],
+                via_alias: false,
+            })
+        );
+        assert!(long_hosts("test", state).is_empty());
+
+        let world = long_world("test", false);
+        let state = &world.projects[0];
+        let host = local_host("test", &state.project, &state.project.apps[0], &stack);
+        assert!(host.contains(&"s".repeat(63)), "{host}");
+    }
+
+    #[test]
+    fn long_tlds_shorten_the_stack_label() {
+        let tld = "t".repeat(70);
+        let world = long_world(&tld, false);
+        let state = &world.projects[0];
+        let stack = branch(&"s".repeat(63));
+        let host = local_host(&tld, &state.project, &state.project.apps[0], &stack);
+        assert_eq!(host.len(), 253, "{host}");
+        assert_eq!(
+            resolve_host(&world, &host),
+            Ok(resolved(&state.project.name, "shop", stack, &[]))
+        );
+
+        let tld = "t".repeat(120);
+        let world = long_world(&tld, false);
+        let problems = long_hosts(&tld, &world.projects[0]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].stack.as_deref(), Some("s".repeat(63).as_str()));
     }
 
     #[test]

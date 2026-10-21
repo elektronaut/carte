@@ -472,10 +472,16 @@ fn rails_hosts(req: &EnvRequest) -> Vec<String> {
     let tlds = served_tlds(req.tld);
     let mut domains = vec![req.project.name.clone()];
     if let Stack::Branch(slug) = req.stack {
-        domains.push(format!("{slug}.{}", req.project.name));
+        let label = crate::naming::stack_label(req.tld, req.project, slug);
+        domains.push(format!("{label}.{}", req.project.name));
     }
     if req.app.settings.subdomains {
-        domains.push(crate::naming::local_labels(req.project, req.app, req.stack).join("."));
+        domains.push(crate::naming::local_name(
+            req.tld,
+            req.project,
+            req.app,
+            req.stack,
+        ));
     }
     if *req.stack == Stack::Main {
         domains.extend(req.app.settings.aliases.iter().cloned());
@@ -839,6 +845,19 @@ mod tests {
                 "www.postcard-frontend.feature-x.nova.localhost",
             ],
         );
+    }
+
+    #[test]
+    fn hosts_for_a_shortened_stack_label() {
+        let mut fx = Fixture::new();
+        fx.project.name = "p".repeat(63);
+        fx.project.apps[0].short = "a".repeat(63);
+        fx.project.apps[0].settings.subdomains = true;
+        let slug = "s".repeat(63);
+        fx.stack = Stack::Branch(slug.clone());
+        let host = crate::naming::local_host("test", &fx.project, &fx.project.apps[0], &fx.stack);
+        assert!(!host.contains(&slug), "{host}");
+        assert_allowed(&fx, &[&host, &format!("www.{host}")]);
     }
 
     #[test]
