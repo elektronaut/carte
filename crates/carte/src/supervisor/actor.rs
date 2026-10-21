@@ -1872,6 +1872,13 @@ impl Actor {
         inst.fail_waiters(failure);
     }
 
+    /// Forgets that a pending restart starts a disabled process once.
+    fn drop_forced_start(&mut self, key: &InstanceKey, name: &str) {
+        if let Some(inst) = self.instances.get_mut(key) {
+            inst.restart_forced.remove(name);
+        }
+    }
+
     /// Stops one process; `why` as for [`Actor::stop`].
     fn stop_process(
         &mut self,
@@ -2678,6 +2685,9 @@ impl Actor {
                     self.forget_give_up(key, "by hand");
                     self.cancel_restart(key);
                 }
+                if let Some(name) = process {
+                    self.drop_forced_start(key, name);
+                }
                 match process {
                     Some(name) => self.stop_process(key, name, by_hand).map(|_| None),
                     None => {
@@ -2737,6 +2747,9 @@ impl Actor {
                 });
                 if http {
                     self.cancel_restart(key);
+                }
+                if let Some(name) = process {
+                    self.drop_forced_start(key, name);
                 }
                 match process {
                     Some(name) if active => {

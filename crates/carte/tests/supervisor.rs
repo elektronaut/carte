@@ -2269,6 +2269,47 @@ async fn a_disabled_process_started_while_stopping_starts_with_the_restart() {
 }
 
 #[tokio::test]
+async fn disabling_a_process_started_for_a_pending_restart_keeps_it_down() {
+    for action in [Action::Disable { save: false }, Action::Down] {
+        let setup = Setup::new();
+        let trapped = setup.root.join("trapped");
+        setup.app(
+            "acme-web",
+            &format!(
+                "web: exec {{fixture}}\nworker: exec sleep 60\nslow: trap 'sleep 0.5; exit 0' TERM; touch {}; while :; do sleep 0.05; done\n",
+                trapped.display()
+            ),
+        );
+        setup.project("[apps.acme-web.processes.worker]\npolicy = \"disabled\"\n");
+        let handle = setup.start_with(|options| options.grace = Duration::from_secs(5));
+
+        handle
+            .ensure_ready(key("acme-web", Stack::Main))
+            .await
+            .unwrap();
+        wait_for_file(&trapped).await;
+        handle
+            .control(control("web", Action::Restart))
+            .await
+            .unwrap();
+        handle
+            .control(control("web/worker", Action::Up))
+            .await
+            .unwrap();
+        handle.control(control("web/worker", action)).await.unwrap();
+        wait_for(&handle, "the restart", |s| {
+            let inst = status(s, "acme-web", "main");
+            inst.state == InstanceState::Ready && process(s, "acme-web", "slow").pid.is_some()
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let worker = process(&handle.snapshot(), "acme-web", "worker").clone();
+        assert!(worker.pid.is_none(), "{action:?}: {worker:?}");
+        handle.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn restarting_a_task_while_starting_keeps_later_tiers_waiting() {
     let setup = Setup::new();
     let path = setup.root.join("order.log");
