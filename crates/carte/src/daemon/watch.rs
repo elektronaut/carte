@@ -311,27 +311,36 @@ pub fn run(
     })
 }
 
-/// Returns whether it watches anything new.
+/// Returns whether it watches anything new. A path whose watch fails, such as a
+/// checkout that isn't cloned yet, isn't recorded, so the next update tries it again.
 fn update_watches(
     watcher: &mut RecommendedWatcher,
     watched: &mut BTreeSet<(PathBuf, bool)>,
     wanted: BTreeSet<(PathBuf, bool)>,
 ) -> bool {
-    for (path, _) in watched.difference(&wanted) {
-        let _ = watcher.unwatch(path);
+    let gone: Vec<_> = watched.difference(&wanted).cloned().collect();
+    for entry in gone {
+        let _ = watcher.unwatch(&entry.0);
+        watched.remove(&entry);
     }
-    for (path, recursive) in wanted.difference(watched) {
-        let mode = if *recursive {
+    let mut added = false;
+    for (path, recursive) in wanted {
+        if watched.contains(&(path.clone(), recursive)) {
+            continue;
+        }
+        let mode = if recursive {
             RecursiveMode::Recursive
         } else {
             RecursiveMode::NonRecursive
         };
-        if let Err(err) = watcher.watch(path, mode) {
-            debug!("not watching {}: {err}", path.display());
+        match watcher.watch(&path, mode) {
+            Ok(()) => {
+                watched.insert((path, recursive));
+                added = true;
+            }
+            Err(err) => debug!("not watching {}: {err}", path.display()),
         }
     }
-    let added = !wanted.is_subset(watched);
-    *watched = wanted;
     added
 }
 
@@ -510,6 +519,43 @@ mod tests {
                 "{}",
                 event.display()
             );
+        }
+    }
+
+    #[test]
+    fn a_directory_that_appears_later_is_watched_on_the_next_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().canonicalize().unwrap().join("acme-api");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut watcher = RecommendedWatcher::new(
+            move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event {
+                    for path in event.paths {
+                        let _ = tx.send(path);
+                    }
+                }
+            },
+            notify::Config::default(),
+        )
+        .unwrap();
+        let mut watched = BTreeSet::new();
+        let wanted = BTreeSet::from([(app.clone(), false)]);
+        assert!(!update_watches(&mut watcher, &mut watched, wanted.clone()));
+
+        std::fs::create_dir(&app).unwrap();
+        assert!(update_watches(&mut watcher, &mut watched, wanted.clone()));
+        assert!(!update_watches(&mut watcher, &mut watched, wanted));
+
+        let file = app.join(".ruby-version");
+        std::fs::write(&file, "3.4.1\n").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(path) if canonical(&path) == file => break,
+                Ok(_) => {}
+                Err(err) => panic!("no event for {}: {err}", file.display()),
+            }
         }
     }
 
