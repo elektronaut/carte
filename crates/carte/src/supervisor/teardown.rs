@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use carte_api::{EventKind, EventSubject, LogLine};
 use carte_core::dirs::{DirRoots, StackRecord};
 use carte_core::model::{App, Checkout, InstanceKey, MachineConfig, ProjectState, Stack, World};
-use carte_core::{discovery, duration, procfile, teardown};
+use carte_core::{duration, procfile, teardown};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -108,17 +108,10 @@ pub(super) fn check(candidates: Vec<Candidate>) -> Vec<(StackId, Status)> {
             if let Some(reason) = candidate.troubled {
                 return (candidate.id, Status::Unknown(reason));
             }
-            let mut prunable = BTreeSet::new();
-            for repo in &candidate.repos {
-                if !repo.is_dir() {
-                    let reason = format!("its repo {} is missing", repo.display());
-                    return (candidate.id, Status::Unknown(reason));
-                }
-                match discovery::prunable_worktrees(repo) {
-                    Ok(paths) => prunable.extend(paths),
-                    Err(err) => return (candidate.id, Status::Unknown(err.to_string())),
-                }
-            }
+            let prunable = match prune::missing_worktrees(&candidate.repos) {
+                Ok(prunable) => prunable,
+                Err(reason) => return (candidate.id, Status::Unknown(reason)),
+            };
             if let Some(path) = record.paths().find(|path| prunable.contains(*path)) {
                 return (
                     candidate.id,

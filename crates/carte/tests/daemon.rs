@@ -1961,6 +1961,23 @@ fn a_worktree_git_still_lists_keeps_its_stack_until_pruned() {
     assert!(!marker.exists(), "the teardown ran");
     assert!(teardown_event(&daemon, EventKind::TeardownScheduled, false).is_none());
     assert!(stack_dir.is_dir());
+    let json = stdout(&daemon.run(&["prune", "--dry-run", "--json"]));
+    let output: carte_api::PruneOutput = serde_json::from_str(&json).unwrap();
+    assert!(
+        output
+            .list
+            .candidates
+            .iter()
+            .all(|c| !c.path.starts_with(&stack_dir)),
+        "{output:?}"
+    );
+    assert!(
+        output.list.skipped.iter().any(|s| {
+            s.stack.as_deref() == Some("feature-x")
+                && s.reason == "worktree missing, git still lists it"
+        }),
+        "{output:?}"
+    );
 
     daemon.stop();
     daemon.launch();
@@ -1975,6 +1992,42 @@ fn a_worktree_git_still_lists_keeps_its_stack_until_pruned() {
     });
     assert!(marker.exists());
     daemon.stop();
+}
+
+#[test]
+fn an_app_outside_git_leaves_the_teardown_of_the_others_alone() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let daemon = Daemon::start_prepared(
+        &format!(
+            "teardown_delay = \"1s\"\n\n[apps.acme-web.processes.drop]\nkind = \"teardown\"\ncommand = 'touch {}'\n",
+            marker.display()
+        ),
+        |work| {
+            std::fs::create_dir_all(work.join("acme-static")).unwrap();
+            std::fs::write(
+                work.join("acme-static/Procfile.dev"),
+                "web: exec sleep 60\n",
+            )
+            .unwrap();
+        },
+    );
+    assert!(
+        snapshot(&daemon).projects[0]
+            .stacks
+            .iter()
+            .flat_map(|s| &s.instances)
+            .any(|i| i.app == "acme-static"),
+        "the app outside git isn't loaded"
+    );
+    run_in_feature_x(&daemon);
+
+    remove_feature_x(&daemon);
+    eventually("the teardown", || {
+        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
+    });
+    assert!(marker.exists());
 }
 
 #[test]

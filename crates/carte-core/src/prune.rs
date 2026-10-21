@@ -35,9 +35,9 @@ pub struct Known {
     pub complete: bool,
     /// Instances that are starting, running or stopping.
     pub running: BTreeSet<InstanceKey>,
-    /// Stacks whose teardown is pending or running, as (project, stack), with the
-    /// reason to leave them alone.
-    pub tearing_down: BTreeMap<(String, String), String>,
+    /// Stacks to leave alone, as (project, stack), with the reason: their teardown is
+    /// pending or running, or git still lists their missing worktree.
+    pub held: BTreeMap<(String, String), String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -282,7 +282,7 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
     let mut torn_down = BTreeMap::new();
     for orphan in candidates {
         if let (Some(project), Some(stack)) = (&orphan.project, &orphan.stack)
-            && let Some(reason) = known.tearing_down.get(&(project.clone(), stack.clone()))
+            && let Some(reason) = known.held.get(&(project.clone(), stack.clone()))
         {
             torn_down.insert((project.clone(), stack.clone()), reason.clone());
             continue;
@@ -638,7 +638,7 @@ mod tests {
             .pidfiles
             .insert("nova".into(), ["nova-web@feature-x.pid".to_string()].into());
         let mut known = known(&[("nova", &["nova-web"], &[])]);
-        known.tearing_down.insert(
+        known.held.insert(
             ("nova".into(), "feature-x".into()),
             "its teardown is pending".into(),
         );
