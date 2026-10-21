@@ -535,6 +535,61 @@ fn a_second_daemon_refuses_to_start() {
     assert!(stderr.contains("already running"), "{stderr}");
 }
 
+#[test]
+fn a_second_daemon_leaves_a_stopping_daemon_s_processes_alone() {
+    let marker = tempfile::tempdir().unwrap();
+    let trapped = marker.path().join("trapped");
+    let mut daemon = Daemon::start_with_project(&format!(
+        "\n[apps.acme-web.processes.slow]\ncommand = \"trap 'sleep 3; exit 0' TERM; touch {}; while :; do sleep 0.05; done\"\n",
+        trapped.display()
+    ));
+    assert!(
+        daemon
+            .request("web.acme.test", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+    eventually("the trap", || trapped.exists());
+    let slow = snapshot(&daemon).projects[0].stacks[0].instances[0]
+        .processes
+        .iter()
+        .find(|p| p.name == "slow")
+        .and_then(|p| p.pid)
+        .unwrap();
+
+    let socket = carte::paths::Paths::under(&daemon.root).socket();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(daemon.child.as_ref().unwrap().id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    eventually("the socket to go", || !socket.exists());
+
+    let mut second = daemon
+        .command(&["daemon"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    while second.try_wait().unwrap().is_none() {
+        if started.elapsed() > Duration::from_secs(15) {
+            let _ = second.kill();
+            let _ = second.wait();
+            panic!("the second daemon started");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = second.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("still stopping"), "{stderr}");
+    assert!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(slow as i32), None).is_ok(),
+        "the second daemon killed {slow}"
+    );
+    daemon.stop();
+}
+
 fn snapshot(daemon: &Daemon) -> carte_api::Snapshot {
     serde_json::from_str(&stdout(&daemon.run(&["ls", "--json"]))).unwrap()
 }

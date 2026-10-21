@@ -51,6 +51,7 @@ pub fn daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
         )
         .with_target(false)
         .init();
+    let _lock = crate::daemon::lock(&paths.state_dir)?;
     runtime()?.block_on(crate::daemon::run(paths.clone()))?;
     Ok(ExitCode::SUCCESS)
 }
