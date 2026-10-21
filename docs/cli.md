@@ -110,7 +110,8 @@ middle of a checkout. Several cartes
 its instances run directories of their own, and a run directory is only
 removed, by prune or a stack's teardown, when the `.owner` file beside
 it names this carte. Run directories from older versions, when cartes
-shared them, go only when no socket in them takes a connection.
+shared them, are never removed: prune lists them as skipped, and you
+remove them by hand once no older carte uses them.
 
 prune moves what it removes into a `.carte-prune-*` folder beside it,
 then deletes that, making read-only directories in it writable if it
