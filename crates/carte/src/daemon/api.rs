@@ -144,6 +144,7 @@ async fn watch(State(api): State<Api>) -> Response {
                 break;
             }
             let changed = tokio::select! {
+                _ = tx.closed() => false,
                 changed = watch.changed() => changed.is_ok(),
                 changed = kube.changed() => changed.is_ok(),
             };
@@ -229,17 +230,7 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
         let Some(follow) = follow.as_mut() else {
             return;
         };
-        loop {
-            match follow.recv().await {
-                Ok(line) if filter.matches(&line) => {
-                    if tx.send(ndjson(&line)).await.is_err() {
-                        return;
-                    }
-                }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return,
-            }
-        }
+        forward(&tx, follow, |line| filter.matches(line)).await;
     });
     stream(rx)
 }
@@ -292,17 +283,10 @@ async fn events(State(api): State<Api>, Json(request): Json<EventsRequest>) -> R
         let Some(follow) = follow.as_mut() else {
             return;
         };
-        loop {
-            match follow.recv().await {
-                Ok(event) if event.seq > last && filter.matches(&event) => {
-                    if tx.send(ndjson(&event)).await.is_err() {
-                        return;
-                    }
-                }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return,
-            }
-        }
+        forward(&tx, follow, |event| {
+            event.seq > last && filter.matches(event)
+        })
+        .await;
     });
     stream(rx)
 }
@@ -336,17 +320,10 @@ async fn kube_events(
         let Some(follow) = follow.as_mut() else {
             return;
         };
-        loop {
-            match follow.recv().await {
-                Ok(event) if event.seq > last && kube_event_matches(&address, &event) => {
-                    if tx.send(ndjson(&event)).await.is_err() {
-                        return;
-                    }
-                }
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => return,
-            }
-        }
+        forward(&tx, follow, |event| {
+            event.seq > last && kube_event_matches(&address, event)
+        })
+        .await;
     });
     stream(rx)
 }
@@ -545,6 +522,30 @@ async fn reload(State(api): State<Api>) -> Response {
     }
 }
 
+/// Sends what `follow` brings that `keep` lets through, until the client goes away or
+/// nothing more can come.
+async fn forward<T: Clone + Serialize>(
+    tx: &mpsc::Sender<Bytes>,
+    follow: &mut broadcast::Receiver<T>,
+    keep: impl Fn(&T) -> bool,
+) {
+    loop {
+        let item = tokio::select! {
+            _ = tx.closed() => return,
+            item = follow.recv() => item,
+        };
+        match item {
+            Ok(item) if keep(&item) => {
+                if tx.send(ndjson(&item)).await.is_err() {
+                    return;
+                }
+            }
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
 fn ndjson(value: &impl Serialize) -> Bytes {
     let mut line = serde_json::to_vec(value).unwrap_or_default();
     line.push(b'\n');
@@ -557,4 +558,55 @@ fn stream(rx: mpsc::Receiver<Bytes>) -> Response {
         .header("content-type", "application/x-ndjson")
         .body(Body::from_stream(stream))
         .expect("valid response")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_quiet_follow_ends_when_its_client_goes_away() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("test.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (lines, _) = broadcast::channel::<String>(16);
+        let sender = lines.clone();
+        let app = Router::new().route(
+            "/follow",
+            post(move || {
+                let mut follow = sender.subscribe();
+                async move {
+                    let (tx, rx) = mpsc::channel(4);
+                    tokio::spawn(async move {
+                        forward(&tx, &mut follow, |line: &String| line == "wanted").await;
+                    });
+                    stream(rx)
+                }
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let client = crate::client::Client::new(&socket);
+        let followed = tokio::time::timeout(
+            Duration::from_millis(300),
+            client.stream(
+                axum::http::Method::POST,
+                "/follow",
+                Some(&()),
+                |_: serde_json::Value| {},
+            ),
+        )
+        .await;
+        assert!(followed.is_err(), "the follow ended on its own");
+        assert_eq!(lines.receiver_count(), 1);
+        lines.send("unwanted".into()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while lines.receiver_count() > 0 {
+            assert!(Instant::now() < deadline, "the follow outlived its client");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
