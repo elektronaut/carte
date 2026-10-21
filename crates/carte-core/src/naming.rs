@@ -449,25 +449,104 @@ pub fn resolve_public_label(world: &World, label: &str) -> Option<InstanceKey> {
     })
 }
 
-/// Stacks whose hostnames pass 253 characters even with the stack label shortened.
+/// Stacks, main included, with a hostname over 253 characters under the longest
+/// served TLD even with the stack label shortened, or that leaves an app with
+/// `subdomains = true` no room for a 63-character subdomain.
 pub fn long_hosts(tld: &str, state: &ProjectState) -> Vec<Problem> {
     let project = &state.project;
-    let longest = longest_host_without_stack(tld, project);
+    let tld_len = tld.len().max("localhost".len());
+    let stacks = std::iter::once(Stack::Main).chain(state.stacks().into_iter().map(Stack::Branch));
+    stacks
+        .filter_map(|stack| {
+            let lengths: Vec<(&App, usize)> = project
+                .apps
+                .iter()
+                .map(|app| {
+                    (
+                        app,
+                        local_name(tld, project, app, &stack).len() + 1 + tld_len,
+                    )
+                })
+                .collect();
+            let name = stack.slug();
+            let problem = |app: Option<&App>, message: String| Problem {
+                project: Some(project.name.clone()),
+                app: app.map(|a| a.name.clone()),
+                stack: Some(name.to_string()),
+                message,
+            };
+            if lengths.iter().any(|(_, len)| *len > 253) {
+                return Some(problem(
+                    None,
+                    format!(
+                        "hostnames in stack {name} of project {} pass 253 characters, \
+                         so browsers can't reach them; shorten the project, app or tld names",
+                        project.name
+                    ),
+                ));
+            }
+            let (app, len) = lengths
+                .into_iter()
+                .filter(|(app, len)| app.settings.subdomains && len + 64 > 253)
+                .max_by_key(|(_, len)| *len)?;
+            Some(problem(
+                Some(app),
+                format!(
+                    "{} in stack {name} leaves room for subdomains of only {} characters \
+                     before its hostname passes 253; longer ones can't be reached",
+                    app.name,
+                    253usize.saturating_sub(len + 1)
+                ),
+            ))
+        })
+        .collect()
+}
+
+/// Stacks whose shortened hostname label is the name of another stack or an app's
+/// label: the other wins, so the stack is unreachable by hostname.
+pub fn label_collisions(tld: &str, state: &ProjectState) -> Vec<Problem> {
+    let project = &state.project;
     state
         .stacks()
         .into_iter()
-        .filter(|slug| longest + 1 + stack_label(tld, project, slug).len() > 253)
-        .map(|slug| Problem {
-            project: Some(project.name.clone()),
-            app: None,
-            stack: Some(slug.clone()),
-            message: format!(
-                "hostnames in stack {slug} of project {} pass 253 characters, \
-                 so browsers can't reach them; shorten the project, app or tld names",
-                project.name
-            ),
+        .filter_map(|slug| {
+            let label = stack_label(tld, project, &slug);
+            if *label == *slug {
+                return None;
+            }
+            let other = if state.has_stack(&label) {
+                format!("stack {label}")
+            } else {
+                format!("app {}", labelled_app(project, &label)?.name)
+            };
+            Some(Problem {
+                project: Some(project.name.clone()),
+                app: None,
+                stack: Some(slug.clone()),
+                message: format!(
+                    "stack {slug} is shortened to {label} in hostnames, the name of {other}: \
+                     {label}.{} goes to {other}, so the stack is unreachable by hostname; \
+                     rename its worktree folders",
+                    project.name
+                ),
+            })
         })
         .collect()
+}
+
+/// A TLD label over 63 characters, which no hostname can hold.
+pub fn long_tld_label(tld: &str) -> Option<Problem> {
+    let label = tld.split('.').find(|label| label.len() > 63)?;
+    Some(Problem {
+        project: None,
+        app: None,
+        stack: None,
+        message: format!(
+            "tld {tld} has a label of {} characters, more than the 63 a hostname label holds, \
+             so browsers can't reach anything under it",
+            label.len()
+        ),
+    })
 }
 
 /// Stacks whose slug equals an app's label: the app wins, so the stack is unreachable there.
@@ -776,9 +855,23 @@ mod tests {
         assert!(host.contains(&"s".repeat(63)), "{host}");
     }
 
+    /// A TLD of `len` characters, in labels of at most 63.
+    fn long_tld(len: usize) -> String {
+        let mut labels = Vec::new();
+        let mut left = len;
+        while left > 0 {
+            let label = left.min(63);
+            labels.push("t".repeat(label));
+            left = left.saturating_sub(label + 1);
+        }
+        let tld = labels.join(".");
+        assert_eq!(tld.len(), len);
+        tld
+    }
+
     #[test]
     fn long_tlds_shorten_the_stack_label() {
-        let tld = "t".repeat(70);
+        let tld = long_tld(70);
         let world = long_world(&tld, false);
         let state = &world.projects[0];
         let stack = branch(&"s".repeat(63));
@@ -788,12 +881,67 @@ mod tests {
             resolve_host(&world, &host),
             Ok(resolved(&state.project.name, "shop", stack, &[]))
         );
+        assert!(long_hosts(&tld, state).is_empty());
 
-        let tld = "t".repeat(120);
+        let tld = long_tld(120);
         let world = long_world(&tld, false);
         let problems = long_hosts(&tld, &world.projects[0]);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].stack.as_deref(), Some("s".repeat(63).as_str()));
+        assert!(problems[0].message.contains("can't reach"), "{problems:?}");
+
+        let tld = long_tld(130);
+        let world = long_world(&tld, false);
+        let stacks: Vec<_> = long_hosts(&tld, &world.projects[0])
+            .into_iter()
+            .map(|p| p.stack.unwrap())
+            .collect();
+        assert_eq!(stacks, ["main".to_string(), "s".repeat(63)]);
+    }
+
+    #[test]
+    fn hosts_that_only_leave_short_subdomains_say_so() {
+        let tld = long_tld(70);
+        let world = long_world(&tld, true);
+        let problems = long_hosts(&tld, &world.projects[0]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert_eq!(problems[0].stack.as_deref(), Some("main"));
+        assert_eq!(problems[0].app.as_deref(), Some("shop"));
+        assert!(
+            problems[0]
+                .message
+                .contains("room for subdomains of only 54 characters"),
+            "{problems:?}"
+        );
+        assert!(problems[1].message.contains("can't reach"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_shortened_label_taken_by_another_stack_is_a_problem() {
+        let mut world = long_world("test", true);
+        let long = "s".repeat(63);
+        let label = stack_label("test", &world.projects[0].project, &long).into_owned();
+        assert!(label_collisions("test", &world.projects[0]).is_empty());
+        world.projects[0]
+            .worktrees
+            .get_mut("shop")
+            .unwrap()
+            .push(worktree(&label, "/z"));
+        let problems = label_collisions("test", &world.projects[0]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].stack.as_deref(), Some(long.as_str()));
+        assert!(
+            problems[0].message.contains(&format!("stack {label}")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn tld_labels_over_63_characters_are_a_problem() {
+        assert!(long_tld_label("test").is_none());
+        assert!(long_tld_label(&long_tld(130)).is_none());
+        let problem = long_tld_label(&format!("{}.test", "t".repeat(64))).unwrap();
+        assert!(problem.message.contains("64 characters"), "{problem:?}");
     }
 
     #[test]
