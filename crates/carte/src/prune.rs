@@ -211,10 +211,13 @@ pub fn finish(
             }
             Detached::Failed(message) => Some(message),
             Detached::Done(None) => None,
-            Detached::Done(Some(trash)) => fs::remove_dir_all(&trash)
+            Detached::Done(Some(trash)) => remove_trash(&trash)
                 .err()
                 .filter(|err| err.kind() != io::ErrorKind::NotFound)
-                .map(|err| format!("moved to {} but couldn't delete it: {err}", trash.display())),
+                .map(|err| match orphan.kind {
+                    OrphanKind::Trash => format!("couldn't delete it: {err}"),
+                    _ => format!("moved to {} but couldn't delete it: {err}", trash.display()),
+                }),
         };
         match failure {
             Some(reason) => errors.push(PruneKept {
@@ -232,6 +235,36 @@ pub fn finish(
         removed,
         kept,
         errors,
+    }
+}
+
+/// Deletes a folder prune moved leftovers into, making the directories in it
+/// writable when a read-only one is in the way.
+fn remove_trash(trash: &Path) -> io::Result<()> {
+    match fs::remove_dir_all(trash) {
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            make_writable(trash);
+            fs::remove_dir_all(trash)
+        }
+        result => result,
+    }
+}
+
+/// Gives the owner full access to `dir` and every directory below it, never
+/// through a symlink.
+fn make_writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let mode = meta.permissions().mode() | 0o700;
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(mode));
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        make_writable(&entry.path());
     }
 }
 
@@ -555,6 +588,41 @@ mod tests {
         assert_eq!(result.removed.len(), 1, "{result:?}");
         assert_eq!(result.removed[0].kind, PruneKind::Trash);
         assert_eq!(fs::read_dir(&roots.run).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn trash_with_a_read_only_directory_is_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = DirRoots {
+            data: tmp.path().join("data"),
+            run: tmp.path().join("run"),
+        };
+        let locked = roots.run.join(".carte-prune-abc/x/locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("file"), "12345").unwrap();
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o500)).unwrap();
+        symlink(&outside, roots.run.join(".carte-prune-abc/x/link")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+        fs::set_permissions(locked.parent().unwrap(), fs::Permissions::from_mode(0o500)).unwrap();
+        let orphan = Orphan {
+            project: None,
+            stack: None,
+            kind: OrphanKind::Trash,
+            app: None,
+            path: roots.run.join(".carte-prune-abc"),
+        };
+
+        let detached = detach(vec![orphan], &BTreeSet::new(), &roots);
+        let result = finish(detached, &BTreeMap::new(), Vec::new());
+        assert_eq!(result.removed.len(), 1, "{result:?}");
+        assert_eq!(fs::read_dir(&roots.run).unwrap().count(), 0);
+        let mode = fs::metadata(&outside).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o500);
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[test]

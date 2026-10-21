@@ -100,8 +100,9 @@ the same instance the same run directory, so a run directory is only
 removed when the `.owner` file beside it names this carte.
 
 prune moves what it removes into a `.carte-prune-*` folder beside it,
-then deletes that. If the delete fails, the next prune lists the folder
-as an unfinished prune and tries again.
+then deletes that, making read-only directories in it writable if it
+has to. If the delete fails, the next prune lists the folder as an
+unfinished prune and tries again.
 
 | Option | |
 | --- | --- |
