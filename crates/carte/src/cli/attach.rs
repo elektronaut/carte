@@ -97,10 +97,63 @@ enum Step {
     TimeUp,
 }
 
-/// What a process may have left on that the terminal shouldn't keep after a detach:
-/// colours, a hidden cursor, bracketed paste and mouse reporting.
-const RESET_MODES: &[u8] =
-    b"\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
+/// What a process may have left on that the terminal shouldn't keep after a detach,
+/// after a CAN that ends any escape sequence its output stopped in the middle of:
+/// colours, a hidden cursor, bracketed paste, mouse and focus reporting, application
+/// cursor keys and keypad, the kitty keyboard protocol, modifyOtherKeys, the
+/// line-drawing charset and a scroll region, which is reset without moving the
+/// cursor.
+const RESET_MODES: &[u8] = b"\x18\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1l\x1b>\x1b[<u\x1b[>4;0m\x1b(B\x1b7\x1b[r\x1b8";
+
+/// What to write on detach: [`RESET_MODES`], leaving the alternate screen first if
+/// the session's output left the terminal on it.
+fn reset(screen: &Screen) -> Vec<u8> {
+    let mut out = RESET_MODES.to_vec();
+    if screen.alternate {
+        out.splice(1..1, b"\x1b[?1049l".iter().copied());
+    }
+    out
+}
+
+/// Follows output to tell whether it left the terminal on the alternate screen.
+#[derive(Debug, Default)]
+struct Screen {
+    alternate: bool,
+    /// The bytes after the ESC of a private mode sequence in progress.
+    sequence: Option<Vec<u8>>,
+}
+
+impl Screen {
+    fn feed(&mut self, data: &[u8]) {
+        for &b in data {
+            if b == 0x1b {
+                self.sequence = Some(Vec::new());
+                continue;
+            }
+            let Some(sequence) = &mut self.sequence else {
+                continue;
+            };
+            sequence.push(b);
+            let done = match (sequence.as_slice(), b) {
+                ([b'['] | [b'[', b'?'], _) => false,
+                ([b'[', b'?', .., _], b'0'..=b'9' | b';') => sequence.len() > 32,
+                ([b'[', b'?', params @ .., _], b'h' | b'l') => {
+                    let alternate = params
+                        .split(|&b| b == b';')
+                        .any(|mode| matches!(mode, b"47" | b"1047" | b"1049"));
+                    if alternate {
+                        self.alternate = b == b'h';
+                    }
+                    true
+                }
+                _ => true,
+            };
+            if done {
+                self.sequence = None;
+            }
+        }
+    }
+}
 
 pub fn run(paths: &Paths, args: AttachArgs) -> anyhow::Result<ExitCode> {
     let keys = match &args.detach_keys {
@@ -139,10 +192,19 @@ pub fn run(paths: &Paths, args: AttachArgs) -> anyhow::Result<ExitCode> {
             quiet: args.quiet,
             wait: args.wait,
         };
-        let end = session(&mut connection, &keys, tty, timing, &mut signals).await;
+        let mut screen = Screen::default();
+        let end = session(
+            &mut connection,
+            &keys,
+            tty,
+            timing,
+            &mut signals,
+            &mut screen,
+        )
+        .await;
         if tty {
             let mut stdout = std::io::stdout();
-            let _ = stdout.write_all(RESET_MODES);
+            let _ = stdout.write_all(&reset(&screen));
             let _ = stdout.flush();
         }
         drop(raw);
@@ -213,6 +275,7 @@ async fn session(
     tty: bool,
     timing: Timing,
     signals: &mut Signals,
+    screen: &mut Screen,
 ) -> anyhow::Result<End> {
     let (typed_tx, mut typed) = mpsc::channel::<Vec<u8>>(16);
     std::thread::spawn(move || {
@@ -268,6 +331,7 @@ async fn session(
             }
             Step::Frame(frame) => match frame? {
                 Some(Frame::Output(data)) => {
+                    screen.feed(&data);
                     stdout.write_all(&data)?;
                     stdout.flush()?;
                 }
@@ -371,5 +435,58 @@ impl RawMode {
 impl Drop for RawMode {
     fn drop(&mut self) {
         let _ = termios::tcsetattr(std::io::stdin(), SetArg::TCSANOW, &self.saved);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detach_after(output: &[&[u8]]) -> Vec<u8> {
+        let mut screen = Screen::default();
+        for data in output {
+            screen.feed(data);
+        }
+        reset(&screen)
+    }
+
+    #[test]
+    fn a_detach_ends_an_unfinished_string_first() {
+        let reset = detach_after(&[b"\x1b]0;x"]);
+        assert_eq!(reset[0], 0x18, "CAN ends the title string");
+        assert_eq!(reset, RESET_MODES);
+    }
+
+    #[test]
+    fn a_detach_leaves_the_alternate_screen_the_session_entered() {
+        let reset = detach_after(&[b"\x1b[?1049h\x1b[?1h\x1b="]);
+        assert!(reset.starts_with(b"\x18\x1b[?1049l"), "{reset:?}");
+        for mode in [
+            b"\x1b[?1l".as_slice(),
+            b"\x1b>",
+            b"\x1b[?1004l",
+            b"\x1b[<u",
+            b"\x1b[>4;0m",
+            b"\x1b(B",
+            b"\x1b7\x1b[r\x1b8",
+        ] {
+            assert!(
+                reset.windows(mode.len()).any(|w| w == mode),
+                "{:?}",
+                String::from_utf8_lossy(mode)
+            );
+        }
+    }
+
+    #[test]
+    fn the_alternate_screen_is_followed_across_reads() {
+        assert!(detach_after(&[b"\x1b[?10", b"49h"]).starts_with(b"\x18\x1b[?1049l"));
+        assert!(detach_after(&[b"\x1b[?25;47h"]).starts_with(b"\x18\x1b[?1049l"));
+        assert_eq!(
+            detach_after(&[b"\x1b[?1049h less \x1b[?1049l"]),
+            RESET_MODES,
+            "left already"
+        );
+        assert_eq!(detach_after(&[b"\x1b[1049h \x1b[?10049h"]), RESET_MODES);
     }
 }

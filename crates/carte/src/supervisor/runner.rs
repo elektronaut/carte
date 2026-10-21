@@ -293,7 +293,7 @@ pub async fn run(
                     (lines, prompt)
                 };
                 broadcast_lines(&log_tx, &label, lines);
-                if prompt.is_some() != paused.is_some() {
+                if prompt != paused {
                     paused = prompt.clone();
                     let _ = events.send(Event::Paused(prompt));
                 }
