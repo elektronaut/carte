@@ -7,7 +7,8 @@
 //! 1. forks `sh -c <command>` into a new process group and, on a tty, makes
 //!    that group the terminal's foreground group;
 //! 2. writes the command's pid (= pgid) to the lifeline as 4 little-endian bytes;
-//! 3. forwards SIGTERM, SIGINT and SIGHUP to the group;
+//! 3. forwards SIGTERM, SIGINT and SIGHUP to the group, and continues it when
+//!    it stops itself with a job-control signal, as programs do on ctrl-z;
 //! 4. on EOF from the lifeline, sends TERM to the group and to the groups its
 //!    descendants made, waits a short grace, sends KILL and exits;
 //! 5. when the command exits, cleans up what is left of those groups the same
@@ -229,11 +230,20 @@ fn lifeline_closed(fd: RawFd) -> bool {
 }
 
 /// Reaps every exited child, the leader's status going to `leader`; on Linux
-/// the shim also adopts the command's orphaned descendants.
+/// the shim also adopts the command's orphaned descendants. A leader stopped by
+/// SIGTSTP, SIGTTIN or SIGTTOU has its group continued.
 fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
     loop {
         let mut status = 0;
-        match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) } {
+        match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::WUNTRACED) } {
+            p if p == pid && libc::WIFSTOPPED(status) => {
+                if matches!(
+                    libc::WSTOPSIG(status),
+                    libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU
+                ) {
+                    unsafe { libc::killpg(pid, libc::SIGCONT) };
+                }
+            }
             p if p == pid => *leader = Some(status),
             p if p > 0 => {}
             -1 if Errno::last() == Errno::ECHILD => {
@@ -300,12 +310,7 @@ fn install_handler(sig: libc::c_int) -> io::Result<()> {
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
-        action.sa_flags = libc::SA_RESTART
-            | if sig == libc::SIGCHLD {
-                libc::SA_NOCLDSTOP
-            } else {
-                0
-            };
+        action.sa_flags = libc::SA_RESTART;
         libc::sigemptyset(&mut action.sa_mask);
         cvt(libc::sigaction(sig, &action, std::ptr::null_mut())).map(drop)
     }
