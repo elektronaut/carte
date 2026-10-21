@@ -59,6 +59,9 @@ pub enum Notice {
         preset: Preset,
         setting: &'static str,
     },
+    /// The `dev` script runs more than one command, so the flags its dev server
+    /// needs can't be passed to it.
+    DevScriptFlags { flags: &'static str },
 }
 
 impl fmt::Display for Notice {
@@ -83,6 +86,10 @@ impl fmt::Display for Notice {
                 f,
                 "{process}: looks like {preset}'s dev server, but `{setting}` keeps carte from routing its paths; remove it and set preset = \"{preset}\" to have carte route them",
                 preset = preset.name()
+            ),
+            Notice::DevScriptFlags { flags } => write!(
+                f,
+                "web: the dev script runs more than one command, so carte can't pass `{flags}` to its dev server; add them to the script, or run it from a Procfile.dev"
             ),
         }
     }
@@ -253,6 +260,12 @@ fn load_any(checkout: &Path, settings: &AppSettings) -> Result<ProcessList, Proc
             vec![("web".to_string(), "bundle exec puma -p $PORT".to_string())],
         )
     } else if let Some(command) = crate::node::dev_command(checkout) {
+        if let Some(flags) = crate::node::dev_script(checkout)
+            .as_deref()
+            .and_then(crate::node::missing_dev_server_flags)
+        {
+            notices.push(Notice::DevScriptFlags { flags });
+        }
         (
             ProcessSource::PackageJson,
             vec![("web".to_string(), command)],
@@ -934,6 +947,25 @@ mod tests {
         let list = load(dir.path(), &route_only).unwrap();
         assert_eq!(list.source, ProcessSource::RouteOnly);
         assert!(list.processes.is_empty());
+    }
+
+    #[test]
+    fn compound_dev_scripts_run_without_flags_and_say_so() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts": {"dev": "vite & tsc --watch"}}"#,
+        )
+        .unwrap();
+        let list = load(dir.path(), &AppSettings::default()).unwrap();
+        assert_eq!(list.source, ProcessSource::PackageJson);
+        assert_eq!(list.processes[0].command, "npm run dev");
+        assert_eq!(
+            list.notices,
+            [Notice::DevScriptFlags {
+                flags: "--port $PORT --strictPort"
+            }]
+        );
     }
 
     #[test]

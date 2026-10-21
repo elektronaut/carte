@@ -893,6 +893,10 @@ carte adds the flags they need, unless the script sets a port itself:
 | `next dev` | `-H 127.0.0.1`: it reads `PORT`, but otherwise listens on every network interface |
 | Anything else (Nuxt reads `PORT`) | Nothing |
 
+A script that runs more than one command, like `vite & tsc --watch` or
+`vite && echo done`, gets nothing, since the flags would go to the last
+command; carte says so. Put the flags in the script, or use a Procfile.
+
 In a Procfile, pass the flags yourself (`web: pnpm exec vite --port
 $PORT --strictPort`). A fixed port in the web command (`--port 5173`,
 `-p 3000`) is replaced with `$PORT` automatically.
@@ -940,7 +944,9 @@ file of its own first.
 Each process's environment is built in layers, later ones winning:
 
 1. **The provider.** The default is `mise` when mise is installed and
-   the checkout has `mise.toml`, `.mise.toml` or `.tool-versions`;
+   mise has config for the app: `mise.toml`, `.tool-versions` or another
+   of mise's config files, such as `.config/mise.toml`, in the app's
+   directory or one above it up to the repo's root;
    otherwise `shell`, the environment of a login shell in the checkout.
    When that shell's `PATH` has mise's shims, carte adds `mise env` on
    top, since a shim would otherwise apply mise's `[env]` over carte's
