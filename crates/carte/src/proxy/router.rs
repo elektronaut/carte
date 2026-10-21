@@ -42,6 +42,9 @@ pub struct RouteRequest<'a> {
     pub fetch_site: Option<&'a str>,
     pub fetch_mode: Option<&'a str>,
     pub fetch_dest: Option<&'a str>,
+    /// `Sec-Purpose`, or the older `Purpose`, lowercased: `prefetch` for a page the
+    /// browser loads before you open it.
+    pub purpose: Option<&'a str>,
 }
 
 pub enum Route {

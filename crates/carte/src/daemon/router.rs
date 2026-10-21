@@ -78,11 +78,13 @@ impl Router for DaemonRouter {
 
 /// Who sent a request that another site made, as a phrase for the error page; `None`
 /// for opening a page yourself (typed, bookmarked, or a link you followed) and for
-/// requests from local pages. A frame on another site is a request that site made.
+/// requests from local pages. A frame on another site, or a page it has the browser
+/// prefetch or prerender, is a request that site made.
 fn foreign_origin(world: &World, request: &RouteRequest<'_>) -> Option<String> {
     let navigation = matches!(*request.method, http::Method::GET | http::Method::HEAD)
         && request.fetch_mode == Some("navigate")
-        && request.fetch_dest == Some("document");
+        && request.fetch_dest == Some("document")
+        && !request.purpose.is_some_and(|p| p.contains("prefetch"));
     if navigation {
         return None;
     }
@@ -347,6 +349,7 @@ mod tests {
             fetch_site,
             fetch_mode,
             fetch_dest,
+            purpose: None,
         };
         let get: &'static http::Method = Box::leak(Box::new(get));
         let post: &'static http::Method = Box::leak(Box::new(post));
@@ -385,6 +388,28 @@ mod tests {
                 Some("cors"),
                 Some("empty"),
             ),
+            RouteRequest {
+                purpose: Some("prefetch"),
+                ..request(
+                    get,
+                    Some("shop.test"),
+                    false,
+                    Some("same-site"),
+                    Some("navigate"),
+                    Some("document"),
+                )
+            },
+            RouteRequest {
+                purpose: Some("prefetch;prerender"),
+                ..request(
+                    get,
+                    None,
+                    false,
+                    Some("none"),
+                    Some("navigate"),
+                    Some("document"),
+                )
+            },
         ];
         for r in allowed {
             assert_eq!(
@@ -445,6 +470,39 @@ mod tests {
                 Some("script"),
             ),
             request(get, Some("evil.example"), false, None, None, None),
+            RouteRequest {
+                purpose: Some("prefetch"),
+                ..request(
+                    get,
+                    Some("evil.example"),
+                    false,
+                    Some("cross-site"),
+                    Some("navigate"),
+                    Some("document"),
+                )
+            },
+            RouteRequest {
+                purpose: Some("prefetch"),
+                ..request(
+                    get,
+                    None,
+                    false,
+                    Some("cross-site"),
+                    Some("navigate"),
+                    Some("document"),
+                )
+            },
+            RouteRequest {
+                purpose: Some("prefetch;prerender"),
+                ..request(
+                    get,
+                    Some("evil.example"),
+                    false,
+                    Some("cross-site"),
+                    Some("navigate"),
+                    Some("document"),
+                )
+            },
         ];
         for r in refused {
             assert!(
