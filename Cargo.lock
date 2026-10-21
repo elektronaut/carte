@@ -282,7 +282,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "carte"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "carte-api"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "carte-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "glob",
  "libc",
@@ -786,7 +786,7 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "fixture-app"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
 ]
