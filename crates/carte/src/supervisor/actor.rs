@@ -1923,7 +1923,7 @@ impl Actor {
         inst.restart_forced.clear();
         let mut failure = BootFailure::new(
             format!("{} was stopped", inst.label()),
-            "It was stopped while restarting.",
+            "It was stopped before it could start again.",
         );
         failure.transient = true;
         inst.fail_waiters(failure);
@@ -2726,11 +2726,8 @@ impl Actor {
             },
             Action::Down => {
                 let http = process.is_none_or(|name| {
-                    self.instances.get(key).is_some_and(|inst| {
-                        inst.procs
-                            .iter()
-                            .any(|p| p.spec.http && p.spec.name == name)
-                    })
+                    self.specs(key)
+                        .is_some_and(|specs| specs.iter().any(|s| s.http && s.name == name))
                 });
                 if http {
                     self.forget_give_up(key, "by hand");
