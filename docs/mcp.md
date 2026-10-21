@@ -55,7 +55,12 @@ With `--control`:
 A start or restart that fails returns an error with the last log lines.
 
 Each tool call runs on its own, so a slow `start` or `type` doesn't hold up
-the others. A call the client cancels gets no answer, though carte still
+the others. Calls sent before earlier ones have answered run at the same
+time, in no set order, and their answers come as each finishes. Two
+`type`s into one process can interleave, and a `logs` sent right after a
+`type` can miss what it printed, so wait for each answer when order
+matters. Up to 16 calls run at once; more get an error until one has
+answered. A call the client cancels gets no answer, though carte still
 finishes what it started, such as starting an app.
 
 There are no tools for sharing, `stop-all`, saving a pin or disable to the
