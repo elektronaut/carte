@@ -14,6 +14,8 @@
 //! | `FIXTURE_CHILD_PIDFILE` | Spawn a child that stays in the process group, write its pid here |
 //! | `FIXTURE_DAEMON_PIDFILE` | Spawn a self-daemonising grandchild (double fork + setsid), write its pid here |
 //! | `FIXTURE_ECHO_STDIN` | `1` echoes each stdin line to stdout as `echo: <line>` |
+//! | `FIXTURE_LIFELINE_PID` | Exit when this process exits; passed on to spawned children |
+//! | `FIXTURE_GUARD_PID` | With `FIXTURE_LIFELINE_PID`, only watch: SIGKILL this pid when the lifeline exits, and exit once either is gone |
 //!
 //! Every response names the app in an `X-Fixture-Name` header.
 //!
@@ -27,7 +29,21 @@ use std::process::{self, Command};
 use std::thread;
 use std::time::Duration;
 
+const LIFELINE_POLL: Duration = Duration::from_millis(200);
+
 fn main() {
+    if let Some(lifeline) = env_parse::<libc::pid_t>("FIXTURE_LIFELINE_PID") {
+        if let Some(guarded) = env_parse::<libc::pid_t>("FIXTURE_GUARD_PID") {
+            guard(lifeline, guarded);
+        }
+        thread::spawn(move || {
+            while alive(lifeline) {
+                thread::sleep(LIFELINE_POLL);
+            }
+            process::exit(0);
+        });
+    }
+
     if env::var_os("FIXTURE_SLEEPER").is_some() {
         sleep_forever();
     }
@@ -100,6 +116,22 @@ fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     env::var(key).ok()?.trim().parse().ok()
 }
 
+fn alive(pid: libc::pid_t) -> bool {
+    let found = unsafe { libc::kill(pid, 0) } == 0;
+    found || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+fn guard(lifeline: libc::pid_t, guarded: libc::pid_t) -> ! {
+    while alive(guarded) {
+        if !alive(lifeline) {
+            unsafe { libc::kill(guarded, libc::SIGKILL) };
+            break;
+        }
+        thread::sleep(LIFELINE_POLL);
+    }
+    process::exit(0);
+}
+
 fn sleep_forever() -> ! {
     loop {
         thread::sleep(Duration::from_secs(3600));
@@ -115,11 +147,12 @@ fn echo_stdin() {
 
 fn spawn_child(pidfile: &str) {
     let exe = env::current_exe().expect("current_exe");
-    match Command::new(exe)
-        .env_clear()
-        .env("FIXTURE_SLEEPER", "1")
-        .spawn()
-    {
+    let mut command = Command::new(exe);
+    command.env_clear().env("FIXTURE_SLEEPER", "1");
+    if let Some(lifeline) = env::var_os("FIXTURE_LIFELINE_PID") {
+        command.env("FIXTURE_LIFELINE_PID", lifeline);
+    }
+    match command.spawn() {
         Ok(child) => fs::write(pidfile, child.id().to_string()).expect("write child pidfile"),
         Err(e) => eprintln!("spawn child: {e}"),
     }

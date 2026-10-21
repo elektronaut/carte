@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 pub fn fixture() -> &'static Path {
@@ -17,6 +17,26 @@ pub fn fixture() -> &'static Path {
         let exe = std::env::current_exe().unwrap();
         exe.parent().unwrap().parent().unwrap().join("fixture-app")
     })
+}
+
+/// The process fixture apps exit with, as `FIXTURE_LIFELINE_PID`: the test
+/// process, or the one named in its own env.
+pub fn lifeline() -> String {
+    std::env::var("FIXTURE_LIFELINE_PID").unwrap_or_else(|_| std::process::id().to_string())
+}
+
+/// SIGKILLs `pid` if the lifeline exits first.
+pub fn guard(pid: u32) {
+    let mut guard = Command::new(fixture())
+        .env_clear()
+        .env("FIXTURE_LIFELINE_PID", lifeline())
+        .env("FIXTURE_GUARD_PID", pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn guard");
+    std::thread::spawn(move || guard.wait());
 }
 
 pub fn git(dir: &Path, args: &[&str]) {
