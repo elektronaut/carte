@@ -523,6 +523,9 @@ mod tests {
         for dir in &dirs {
             let loaded = CertificateAuthority::load_existing(dir, &["test"]);
             assert!(loaded.is_ok(), "{}: {:?}", dir.display(), loaded.err());
+            let record = fs::read_to_string(CertificateAuthority::created_path_in(dir)).unwrap();
+            let hash = sha256_hex(loaded.unwrap().cert_der());
+            assert_eq!(record, format!("created {hash}\n"), "{}", dir.display());
         }
     }
 
