@@ -141,7 +141,7 @@ pub fn strip(data: &[u8]) -> String {
     let mut stripper = Stripper::default();
     let mut out = String::new();
     let mut lines = stripper.feed(data);
-    lines.extend(stripper.settle());
+    lines.extend(stripper.close());
     for line in lines {
         out.push_str(&line);
         out.push('\n');
@@ -218,18 +218,28 @@ impl Stripper {
         lines
     }
 
-    /// Ends the open rows above the cursor and returns them as lines.
+    /// Ends the open rows above the cursor and returns them as lines, unless the
+    /// cursor reached its row by `ESC [ A` or `ESC [ B`: then a redraw, like a
+    /// completion dialog, may be under way, and they stay open.
     pub fn settle(&mut self) -> Vec<String> {
+        if self.moved {
+            return Vec::new();
+        }
+        self.close()
+    }
+
+    /// Whether there are open rows that [`Stripper::settle`] would end.
+    pub fn unsettled(&self) -> bool {
+        !self.moved && !self.above.is_empty()
+    }
+
+    /// Ends the open rows above the cursor and returns them as lines, as when the
+    /// output has ended.
+    pub fn close(&mut self) -> Vec<String> {
         self.above
             .drain(..)
             .map(|line| line.into_iter().collect())
             .collect()
-    }
-
-    /// Whether there are open rows above the cursor that [`Stripper::settle`] would
-    /// end.
-    pub fn unsettled(&self) -> bool {
-        !self.above.is_empty()
     }
 
     fn end_above(&mut self) {

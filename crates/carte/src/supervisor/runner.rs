@@ -60,7 +60,7 @@ impl ProcLog {
 
     /// Ends every line, a partial last one too, as when the process exits.
     pub fn flush(&mut self) -> Vec<(u64, String)> {
-        let mut lines = self.stripper.settle();
+        let mut lines = self.stripper.close();
         let pending = self.stripper.pending();
         if !pending.is_empty() {
             lines.push(pending);
@@ -446,12 +446,21 @@ mod tests {
     type Replayed = (Vec<String>, Vec<Option<String>>, String);
 
     fn replay<'a>(reads: impl IntoIterator<Item = &'a [u8]>) -> Replayed {
+        replay_settling(reads.into_iter().map(Some))
+    }
+
+    /// Like [`replay`], with `None` where the output went quiet and the reader
+    /// settled it.
+    fn replay_settling<'a>(reads: impl IntoIterator<Item = Option<&'a [u8]>>) -> Replayed {
         let mut log = ProcLog::new(1024 * 1024);
         let mut lines = Vec::new();
         let mut paused: Option<String> = None;
         let mut states = vec![None];
         for read in reads {
-            let finished = log.push(read);
+            let finished = match read {
+                Some(read) => log.push(read),
+                None => log.settle(),
+            };
             paused = match &paused {
                 Some(prompt) if finished.is_empty() => Some(prompt.clone()),
                 _ => log.prompt(),
@@ -466,7 +475,10 @@ mod tests {
     }
 
     /// The pauses without a resume between two different prompts, which shows when
-    /// a result and the next prompt arrive in different reads but not in one.
+    /// a result and the next prompt arrive in different reads but not in one: a
+    /// `None` between `Some(a)` and `Some(b)` with `a` other than `b` is dropped.
+    /// So the comparison can't tell a missed resume between two different
+    /// breakpoints.
     fn normalized((lines, states, pending): Replayed) -> Replayed {
         let mut kept: Vec<Option<String>> = Vec::new();
         for (i, state) in states.iter().enumerate() {
@@ -511,6 +523,39 @@ mod tests {
                     }
                 }
                 assert_eq!(normalized(replay(reads)), whole, "{name}, split at random");
+            }
+            let mut merged: Vec<Vec<u8>> = Vec::new();
+            for chunk in &chunks {
+                match merged.last_mut() {
+                    Some(last) if last.len() + chunk.len() <= 1024 => last.extend(chunk),
+                    _ => merged.push(chunk.clone()),
+                }
+            }
+            let (lines, _, pending) = replay(merged.iter().map(Vec::as_slice));
+            assert_eq!(
+                (&lines, &pending),
+                (&whole.0, &whole.2),
+                "{name}, reads merged"
+            );
+            let settled = chunks
+                .iter()
+                .flat_map(|chunk| [Some(chunk.as_slice()), None]);
+            assert_eq!(
+                normalized(replay_settling(settled)),
+                whole,
+                "{name}, settled after each read"
+            );
+            for _ in 0..20 {
+                let mut reads = Vec::new();
+                for chunk in &chunks {
+                    let at = random(chunk.len() + 1);
+                    reads.extend([Some(&chunk[..at]), None, Some(&chunk[at..])]);
+                }
+                assert_eq!(
+                    normalized(replay_settling(reads)),
+                    whole,
+                    "{name}, settled inside reads"
+                );
             }
         }
     }
