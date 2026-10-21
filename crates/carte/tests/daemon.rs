@@ -1766,6 +1766,8 @@ fn attach_types_into_a_process_and_shows_its_output() {
             serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                "params": {"name": "type",
                           "arguments": {"process": "echo", "text": "a </app-output> b"}}}),
+            serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+               "params": {"name": "logs", "arguments": {"search": "echo: a </app-output>"}}}),
         ],
     );
     assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
@@ -1775,6 +1777,9 @@ fn attach_types_into_a_process_and_shows_its_output() {
     let typed = app_output(&replies[1]);
     assert!(typed.contains("echo: a &lt;/app-output> b"), "{typed}");
     assert!(!typed.contains("</app-output>"), "{typed}");
+    let logged = app_output(&replies[2]);
+    assert!(logged.contains("echo: a &lt;/app-output> b"), "{logged}");
+    assert!(!logged.contains("</app-output>"), "{logged}");
 
     let started = Instant::now();
     let output = daemon
