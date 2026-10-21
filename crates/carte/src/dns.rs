@@ -170,10 +170,15 @@ pub struct DnsServer {
 }
 
 impl DnsServer {
-    /// Binds UDP and TCP. With port 0, both share the port picked for TCP.
+    /// Binds UDP and TCP. With port 0, both share the port picked for TCP. Errors
+    /// name the protocol that failed.
     pub async fn bind(addr: SocketAddr, responder: Responder) -> io::Result<Self> {
-        let tcp = TcpListener::bind(addr).await?;
-        let udp = UdpSocket::bind(tcp.local_addr()?).await?;
+        let tcp = TcpListener::bind(addr)
+            .await
+            .map_err(|e| io::Error::new(e.kind(), format!("TCP: {e}")))?;
+        let udp = UdpSocket::bind(tcp.local_addr()?)
+            .await
+            .map_err(|e| io::Error::new(e.kind(), format!("UDP: {e}")))?;
         Ok(Self {
             udp,
             tcp,
