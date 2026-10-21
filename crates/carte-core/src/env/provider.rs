@@ -1,13 +1,15 @@
 //! The env provider layer: mise, direnv, a login shell, or nothing.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read};
+use std::fs::File;
+use std::io::{self, IsTerminal, Read};
+use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use thiserror::Error;
@@ -48,6 +50,10 @@ pub trait CommandRunner {
 #[derive(Debug, Clone)]
 pub struct SystemRunner {
     pub search_path: Vec<PathBuf>,
+    /// Runs each command in a process group of its own, which a timeout kills
+    /// whole. Off while stdin is a terminal, so a profile can prompt there and
+    /// Ctrl-C reaches it.
+    pub own_group: bool,
 }
 
 impl SystemRunner {
@@ -62,7 +68,10 @@ impl SystemRunner {
         }
         search_path.push("/opt/homebrew/bin".into());
         search_path.push("/usr/local/bin".into());
-        Self { search_path }
+        Self {
+            search_path,
+            own_group: !io::stdin().is_terminal(),
+        }
     }
 }
 
@@ -79,90 +88,96 @@ impl CommandRunner for SystemRunner {
         if let Some(env) = &spec.env {
             command.env_clear().envs(env);
         }
-        let mut child = command
+        command
             .args(&spec.args)
             .current_dir(&spec.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .process_group(0)
-            .spawn()?;
-        let group = Pid::from_raw(child.id() as i32);
-        let stdout = Arc::new(Mutex::new(Vec::new()));
-        let stderr = Arc::new(Mutex::new(Vec::new()));
-        let (tx, rx) = mpsc::channel();
-        for (is_stdout, mut pipe, buf) in [
-            (
-                true,
-                child
-                    .stdout
-                    .take()
-                    .map(|p| Box::new(p) as Box<dyn Read + Send>),
-                stdout.clone(),
-            ),
-            (
-                false,
-                child
-                    .stderr
-                    .take()
-                    .map(|p| Box::new(p) as Box<dyn Read + Send>),
-                stderr.clone(),
-            ),
-        ]
-        .into_iter()
-        .filter_map(|(o, p, b)| p.map(|p| (o, p, b)))
-        {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let mut chunk = [0; 8192];
-                loop {
-                    match pipe.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => buf.lock().unwrap().extend_from_slice(&chunk[..n]),
-                        Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                        Err(_) => break,
-                    }
-                }
-                let _ = tx.send(is_stdout);
-            });
+            .stderr(Stdio::piped());
+        if self.own_group {
+            command.process_group(0);
         }
-        drop(tx);
-
-        let deadline = Instant::now() + spec.timeout;
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                let _ = killpg(group, Signal::SIGKILL);
-                let _ = child.wait();
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("{} timed out", spec.program.display()),
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
+        let mut child = command.spawn()?;
+        let mut stdout = Pipe::new(child.stdout.take().map(OwnedFd::from))?;
+        let mut stderr = Pipe::new(child.stderr.take().map(OwnedFd::from))?;
 
         // A background process started by a shell profile can keep the pipes
         // open after the shell exits, so don't wait for EOF forever.
-        let grace = deadline.min(Instant::now() + Duration::from_secs(1));
-        let mut stdout_held_open = true;
-        for _ in 0..2 {
-            match rx.recv_timeout(grace.saturating_duration_since(Instant::now())) {
-                Ok(true) => stdout_held_open = false,
-                Ok(false) => {}
+        let deadline = Instant::now() + spec.timeout;
+        let mut exited = None;
+        let mut grace = deadline;
+        loop {
+            stdout.drain();
+            stderr.drain();
+            if exited.is_none() {
+                exited = child.try_wait()?;
+                if exited.is_some() {
+                    grace = deadline.min(Instant::now() + Duration::from_secs(1));
+                }
+            }
+            match exited {
+                Some(_) if stdout.is_closed() && stderr.is_closed() => break,
+                Some(_) if Instant::now() >= grace => break,
+                None if Instant::now() >= deadline => {
+                    if self.own_group {
+                        let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+                    } else {
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("{} timed out", spec.program.display()),
+                    ));
+                }
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        Ok(CommandOutput {
+            success: exited.is_some_and(|status| status.success()),
+            stdout_held_open: !stdout.is_closed(),
+            stdout: stdout.buf,
+            stderr: String::from_utf8_lossy(&stderr.buf).into_owned(),
+        })
+    }
+}
+
+/// A non-blocking read end of a child's pipe, closed at EOF or when dropped.
+struct Pipe {
+    file: Option<File>,
+    buf: Vec<u8>,
+}
+
+impl Pipe {
+    fn new(fd: Option<OwnedFd>) -> io::Result<Self> {
+        if let Some(fd) = &fd {
+            fcntl(fd, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))?;
+        }
+        Ok(Self {
+            file: fd.map(File::from),
+            buf: Vec::new(),
+        })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.file.is_none()
+    }
+
+    fn drain(&mut self) {
+        let Some(file) = &mut self.file else {
+            return;
+        };
+        let mut chunk = [0; 8192];
+        loop {
+            match file.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
                 Err(_) => break,
             }
         }
-        let stdout = std::mem::take(&mut *stdout.lock().unwrap());
-        let stderr = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
-        Ok(CommandOutput {
-            success: status.success(),
-            stdout,
-            stderr,
-            stdout_held_open,
-        })
+        self.file = None;
     }
 }
 
@@ -992,6 +1007,7 @@ pub(crate) mod tests {
     fn system_runner_captures_output() {
         let runner = SystemRunner {
             search_path: vec!["/bin".into(), "/usr/bin".into()],
+            own_group: true,
         };
         let sh = runner.find_program("sh").unwrap();
         let output = runner
@@ -1013,6 +1029,7 @@ pub(crate) mod tests {
     fn system_runner_replaces_the_env_when_given_one() {
         let runner = SystemRunner {
             search_path: vec!["/usr/bin".into()],
+            own_group: true,
         };
         let output = runner
             .run(&CommandSpec {
@@ -1030,6 +1047,7 @@ pub(crate) mod tests {
     fn system_runner_times_out() {
         let runner = SystemRunner {
             search_path: vec!["/bin".into()],
+            own_group: true,
         };
         let started = Instant::now();
         let err = runner
@@ -1045,25 +1063,72 @@ pub(crate) mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
+    /// Kills a process group when dropped, even when an assertion failed.
+    struct GroupGuard(Pid);
+
+    impl Drop for GroupGuard {
+        fn drop(&mut self) {
+            let _ = killpg(self.0, Signal::SIGKILL);
+        }
+    }
+
+    fn read_pid(path: &Path) -> Pid {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse()
+            {
+                return Pid::from_raw(pid);
+            }
+            assert!(Instant::now() < deadline, "no pid in {}", path.display());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn group_is_gone(group: Pid) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while killpg(group, None).is_ok() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
     #[test]
     fn system_runner_keeps_output_when_a_background_process_holds_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
         let runner = SystemRunner {
             search_path: vec!["/bin".into()],
+            own_group: true,
         };
         let started = Instant::now();
         let output = runner
             .run(&CommandSpec {
                 program: "/bin/sh".into(),
-                args: vec!["-c".into(), "sleep 5 & echo {}".into()],
+                args: vec![
+                    "-c".into(),
+                    format!(
+                        "echo $$ > {}; (while echo more; do sleep 0.05; done) & echo {{}}",
+                        pid_file.display()
+                    ),
+                ],
                 cwd: "/".into(),
                 env: None,
                 timeout: Duration::from_secs(30),
             })
             .unwrap();
+        let group = GroupGuard(read_pid(&pid_file));
         assert!(output.success);
-        assert_eq!(output.stdout, b"{}\n");
+        assert!(output.stdout.starts_with(b"{}\n"), "{:?}", output.stdout);
         assert!(output.stdout_held_open);
         assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(
+            group_is_gone(group.0),
+            "the writer outlived its closed pipe and kept running"
+        );
     }
 
     #[test]
@@ -1072,33 +1137,25 @@ pub(crate) mod tests {
         let pid_file = dir.path().join("pid");
         let runner = SystemRunner {
             search_path: vec!["/bin".into()],
+            own_group: true,
         };
         let err = runner
             .run(&CommandSpec {
                 program: "/bin/sh".into(),
                 args: vec![
                     "-c".into(),
-                    format!("sleep 30 & echo $! > {}; sleep 30", pid_file.display()),
+                    format!("echo $$ > {}; sleep 30 & sleep 30", pid_file.display()),
                 ],
                 cwd: "/".into(),
                 env: None,
                 timeout: Duration::from_millis(500),
             })
             .unwrap_err();
+        let group = GroupGuard(read_pid(&pid_file));
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        let pid: i32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let pid = nix::unistd::Pid::from_raw(pid);
-        let gone = Instant::now() + Duration::from_secs(5);
-        while nix::sys::signal::kill(pid, None).is_ok() {
-            if Instant::now() >= gone {
-                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
-                panic!("the background sleep outlived the timeout");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        assert!(
+            group_is_gone(group.0),
+            "the provider's group outlived the timeout"
+        );
     }
 }
