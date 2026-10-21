@@ -65,9 +65,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace --locked
 
+  # A new advisory shouldn't fail unrelated pull requests, so the advisories
+  # check reports without failing the run.
+  deny:
+    name: Dependencies (${{ matrix.checks }})
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check ${{ matrix.checks }}
+
   automerge:
     name: Auto-merge Dependabot
-    needs: [fmt, test, msrv]
+    needs: [fmt, test, msrv, deny]
     if: github.event_name == 'pull_request' && github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
