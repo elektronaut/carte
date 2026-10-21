@@ -518,6 +518,12 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
             ),
         });
     }
+    if let Some(root) = raw.root.as_deref() {
+        check_absolute("root", root).map_err(|message| ConfigError::Invalid {
+            path: path.to_path_buf(),
+            message,
+        })?;
+    }
     Ok(ProjectFile {
         name,
         path: path.to_path_buf(),
@@ -536,6 +542,18 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
         processes: raw.processes,
         from_template: false,
     })
+}
+
+/// A path in a project file must not depend on the directory carte runs in,
+/// which is `/` for the daemon.
+fn check_absolute(key: &str, value: &str) -> Result<(), String> {
+    if value == "~" || value.starts_with("~/") || value.starts_with('/') {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{key}` must start with / or ~/, but {value:?} is relative"
+        ))
+    }
 }
 
 pub fn load_project_file(path: &Path) -> Result<ProjectFile, ConfigError> {
@@ -616,6 +634,9 @@ pub fn parse_kube_project(
         )));
     }
     let raw: RawKubeProject = from_toml(path, text)?;
+    if let Some(kubeconfig) = raw.kube.kubeconfig.as_deref() {
+        check_absolute("kube.kubeconfig", kubeconfig).map_err(invalid)?;
+    }
     if raw.kube.context.trim().is_empty() {
         return Err(invalid(
             "`kube.context` must name a kubeconfig context".into(),
@@ -1328,6 +1349,25 @@ mod tests {
         assert_eq!(
             project.services["alertmanager"].service_port,
             Some(ServicePort::Number(9093))
+        );
+    }
+
+    #[test]
+    fn paths_must_not_be_relative() {
+        let err = project("root = \"work\"\n").unwrap_err().to_string();
+        assert!(
+            err.contains("`root` must start with / or ~/, but \"work\" is relative"),
+            "{err}"
+        );
+        for root in ["/work", "~/work", "~"] {
+            assert!(project(&format!("root = \"{root}\"\n")).is_ok(), "{root}");
+        }
+        let message = invalid_message(kube(
+            "kube = { context = \"prod\", kubeconfig = \"kube/config\" }\n",
+        ));
+        assert!(
+            message.contains("`kube.kubeconfig` must start with"),
+            "{message}"
         );
     }
 
