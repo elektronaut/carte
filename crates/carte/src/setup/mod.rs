@@ -342,12 +342,13 @@ pub fn puma_dev_domains(plist: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether `tld` is dot-separated letters, digits and inner hyphens, safe to name a
-/// resolver file after.
+/// Whether `tld` is dot-separated labels of at most 63 letters, digits and inner
+/// hyphens, safe to name a resolver file after.
 pub fn is_tld(tld: &str) -> bool {
     !tld.is_empty()
         && tld.split('.').all(|label| {
             !label.is_empty()
+                && label.len() <= 63
                 && !label.starts_with('-')
                 && !label.ends_with('-')
                 && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -1245,6 +1246,8 @@ mod tests {
         ] {
             assert!(!is_tld(tld), "{tld}");
         }
+        assert!(is_tld(&format!("{}.test", "t".repeat(63))));
+        assert!(!is_tld(&format!("{}.test", "t".repeat(64))));
     }
 
     #[test]
