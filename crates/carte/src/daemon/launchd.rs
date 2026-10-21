@@ -7,16 +7,16 @@ use tracing::{info, warn};
 
 use crate::proxy::{Listener, ListenerOptions, Proxy};
 
-/// The proxy's listeners for the launchd socket `name`, or sockets bound to `addrs`
-/// when the daemon wasn't started by launchd with such a socket. The first address
-/// must bind; the others are skipped with a warning when they can't.
+/// The proxy's listeners on the sockets `activated` from launchd as `name`, or
+/// on sockets bound to `addrs` when there are none. The first address must bind;
+/// the others are skipped with a warning when they can't.
 pub async fn proxy_listeners(
     proxy: &Proxy,
     name: &str,
+    activated: Vec<TcpListener>,
     addrs: &[SocketAddr],
     options: ListenerOptions,
 ) -> io::Result<Vec<Listener>> {
-    let activated = activate_socket(name)?;
     if activated.is_empty() {
         let mut listeners = Vec::new();
         for (i, addr) in addrs.iter().enumerate() {
@@ -45,7 +45,6 @@ pub async fn proxy_listeners(
 #[cfg(target_os = "macos")]
 pub fn activate_socket(name: &str) -> io::Result<Vec<TcpListener>> {
     use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
 
     use libc::{c_char, c_int, size_t};
 
@@ -75,7 +74,15 @@ pub fn activate_socket(name: &str) -> io::Result<Vec<TcpListener>> {
     let raw = unsafe { std::slice::from_raw_parts(fds, count) }.to_vec();
     // SAFETY: `fds` came from malloc in launchd and is freed exactly once.
     unsafe { libc::free(fds.cast()) };
-    let listeners: Vec<TcpListener> = raw
+    listeners(raw)
+}
+
+/// Takes ownership of the listening sockets `fds` and marks them close-on-exec.
+#[cfg(any(target_os = "macos", test))]
+fn listeners(fds: Vec<std::os::fd::RawFd>) -> io::Result<Vec<TcpListener>> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let listeners: Vec<TcpListener> = fds
         .into_iter()
         // SAFETY: each descriptor is an open listening socket now owned by us alone.
         .map(|fd| unsafe { TcpListener::from_raw_fd(fd) })
@@ -93,7 +100,22 @@ pub fn activate_socket(_name: &str) -> io::Result<Vec<TcpListener>> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::AsRawFd;
+
     use super::*;
+
+    #[test]
+    fn handed_over_sockets_are_closed_on_exec() {
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+        let listeners = listeners(vec![fd]).unwrap();
+        let flags = unsafe { libc::fcntl(listeners[0].as_raw_fd(), libc::F_GETFD) };
+        assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+    }
 
     #[test]
     fn finds_no_sockets_outside_launchd() {

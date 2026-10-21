@@ -597,32 +597,21 @@ fn open_fds(pid: u32) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn spawn_descriptors_dont_leak_into_provider_commands() {
-    use carte_core::env::{CommandRunner, CommandSpec, SystemRunner};
+async fn spawn_descriptors_dont_leak_into_other_children() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let done = Arc::new(AtomicBool::new(false));
-    let provider = std::thread::spawn({
+    let children = std::thread::spawn({
         let done = done.clone();
         move || {
-            let runner = SystemRunner {
-                search_path: Vec::new(),
-                own_group: true,
-            };
-            let spec = CommandSpec {
-                program: "/bin/sh".into(),
-                args: vec![
-                    "-c".into(),
-                    "sleep 5 </dev/null >/dev/null 2>&1 & echo $!".into(),
-                ],
-                cwd: "/".into(),
-                env: None,
-                timeout: Duration::from_secs(10),
-            };
             let mut pids = Vec::new();
             while !done.load(Ordering::Relaxed) {
-                let output = runner.run(&spec).unwrap();
+                let output = std::process::Command::new("/bin/sh")
+                    .args(["-c", "sleep 5 </dev/null >/dev/null 2>&1 & echo $!"])
+                    .stdin(std::process::Stdio::null())
+                    .output()
+                    .unwrap();
                 pids.extend(
                     String::from_utf8_lossy(&output.stdout)
                         .trim()
@@ -640,7 +629,7 @@ async fn spawn_descriptors_dont_leak_into_provider_commands() {
         run_to_end(&mut handle).await;
     }
     done.store(true, Ordering::Relaxed);
-    let pids = provider.join().unwrap();
+    let pids = children.join().unwrap();
     let leaked: Vec<(u32, Vec<String>)> = pids
         .iter()
         .map(|&pid| (pid, open_fds(pid)))
