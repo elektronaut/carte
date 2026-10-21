@@ -68,6 +68,12 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
 
     let mut options = Options::new(&paths);
     options.ca_problem = ca_problem;
+    if let Some(recheck) = std::env::var("CARTE_TEST_TEARDOWN_RECHECK")
+        .ok()
+        .and_then(|v| carte_core::duration::parse(&v).ok())
+    {
+        options.teardown_recheck = recheck;
+    }
     let hold = options.boot_timeout + Duration::from_secs(10);
     let http_sockets = launchd::activate_socket("http")?;
     let https_sockets = launchd::activate_socket("https")?;

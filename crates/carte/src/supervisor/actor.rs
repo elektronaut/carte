@@ -2454,8 +2454,8 @@ impl Actor {
 
     /// Notes the stacks that have a worktree, cancels pending teardowns of those that
     /// came back, and checks off the actor's thread whether the others are removed:
-    /// every seen stack when discovery changed or every 30s, and in between only those
-    /// whose delay has passed.
+    /// every seen stack when discovery changed or every `teardown_recheck`, and in
+    /// between only those whose delay has passed.
     fn check_teardowns(&mut self) {
         let mut present = BTreeSet::new();
         for state in &self.world.projects {
@@ -2478,11 +2478,12 @@ impl Actor {
             return;
         }
         let now = Instant::now();
+        let recheck = self.options.teardown_recheck;
         let all = self.teardowns.stale
             || self
                 .teardowns
                 .checked_all
-                .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(30));
+                .is_none_or(|at| now.duration_since(at) >= recheck);
         let troubled = prune::troubled(&self.world);
         let roots = self.paths.dir_roots();
         let candidates: Vec<teardown::Candidate> = self
@@ -2556,6 +2557,11 @@ impl Actor {
             }
             let record = match status {
                 teardown::Status::Unrecorded => {
+                    tracing::debug!(
+                        "{}@{} has no stack record; nothing to tear down",
+                        id.0,
+                        id.1
+                    );
                     self.teardowns.seen.remove(&id);
                     self.teardowns.pending.remove(&id);
                     self.teardowns.paused.remove(&id);
@@ -2569,6 +2575,12 @@ impl Actor {
                             "its worktree is back",
                             vec![events::stack(&id.0, &id.1)],
                         );
+                    } else {
+                        tracing::debug!(
+                            "{}@{} isn't removed: a worktree is still there",
+                            id.0,
+                            id.1
+                        );
                     }
                     continue;
                 }
@@ -2580,6 +2592,12 @@ impl Actor {
                             EventKind::TeardownPaused,
                             format!("waits until carte can tell its worktrees are gone: {reason}"),
                             vec![events::stack(&id.0, &id.1)],
+                        );
+                    } else {
+                        tracing::debug!(
+                            "can't tell yet whether {}@{} is removed: {reason}",
+                            id.0,
+                            id.1
                         );
                     }
                     continue;
