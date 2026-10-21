@@ -693,6 +693,10 @@ it has `restart = "never"`:
   Starting it by hand (`carte up app/worker`) clears that and starts
   counting again.
 - Restarts show in `carte events`, and the give-up as `gave up`.
+- A restart whose environment can't be built, such as when a
+  `requires` entry is down or mise refuses the checkout, counts as a
+  crash of that process: the error goes to its log, and the rest of the
+  instance keeps running.
 - Stopping it by hand, disabling it, stopping the instance or an idle
   stop never restart it, and cancel a restart that's waiting.
 - During the start, nothing is restarted: a service or task that fails

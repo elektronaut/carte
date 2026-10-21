@@ -1127,7 +1127,10 @@ impl Actor {
         let specs = match result {
             Ok(specs) => specs,
             Err(message) => {
-                self.crash(key, None, None, message);
+                match build {
+                    Some(build) => self.build_failed(key, build, message),
+                    None => self.crash(key, None, None, message),
+                }
                 return;
             }
         };
@@ -1144,6 +1147,44 @@ impl Actor {
             }
         }
         self.advance(key);
+    }
+
+    /// A process's own env build failed: it shows as exited with the error, and
+    /// restarts as after a crash while the rest of the instance runs on.
+    fn build_failed(&mut self, key: &InstanceKey, build: u64, message: String) {
+        let Some(inst) = self.instances.get_mut(key) else {
+            return;
+        };
+        let Some(idx) = inst.procs.iter().position(|p| p.building == Some(build)) else {
+            return;
+        };
+        let ready = inst.state == Lifecycle::Ready;
+        let proc = &mut inst.procs[idx];
+        proc.building = None;
+        if proc.queued || proc.is_running() || proc.off {
+            return;
+        }
+        proc.state = ProcessState::Exited {
+            code: None,
+            signal: None,
+        };
+        proc.log
+            .lock()
+            .unwrap()
+            .push(format!("carte: {message}\n").as_bytes());
+        let name = proc.spec.name.clone();
+        let restarts =
+            proc.spec.http || proc.spec.serves_paths() || proc.spec.restart == Restart::OnFailure;
+        let message = format!("{name} couldn't start: {message}");
+        inst.last_error = Some(message.clone());
+        self.event(
+            EventKind::Crashed,
+            message,
+            vec![events::process(key, &name)],
+        );
+        if restarts && ready {
+            self.schedule_restart(key, idx);
+        }
     }
 
     fn spawn_proc(&mut self, key: &InstanceKey, idx: usize, spec: SpawnSpec) {
