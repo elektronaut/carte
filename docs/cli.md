@@ -197,8 +197,8 @@ carte attach shop@feature-x/worker
   is attached, carte answers for it with the top left corner, so prompts
   come at once. It only answers a process that reads keys without echo,
   as Reline does, so a query printed by an ordinary program doesn't
-  leave an answer in its input. The terminal UI, `attach` without a terminal and the MCP
-  `type` tool don't count as terminals.
+  leave an answer in its input. The terminal UI, `attach` without a
+  terminal and the MCP `type` tool don't count as terminals.
 - When the process exits, `attach` says how and ends. It also ends, and
   puts your terminal back, on `SIGTERM`, `SIGHUP` or `SIGINT`.
 - Without a terminal, `attach` types its input into the process as it
