@@ -12,7 +12,7 @@ use carte_api::{
 use carte_core::dirs::{self, DirRoots};
 use carte_core::model::{InstanceKey, ProjectState, Stack, World};
 use carte_core::prune::{self, Known, KnownProject, Listing, Orphan, OrphanKind, Plan, Skip};
-use carte_core::{config, discovery};
+use carte_core::{config, discovery, include};
 
 use crate::paths::Paths;
 
@@ -372,28 +372,49 @@ fn known(paths: &Paths, world: &World, in_use: InUse) -> (Known, Vec<Skip>) {
             },
         );
     }
-    known.skipped = troubled(world);
+    let troubled = troubled(world);
+    known.skipped = troubled.clone();
     let mut global = Vec::new();
     match discovery::project_files(&paths.projects_dir()) {
         Ok(files) => {
             known.complete = true;
             for file in files {
+                if may_be_template(&file.path) {
+                    match config::load_project_file(&file.path) {
+                        Ok(template) if !troubled.contains_key(&file.name) => {
+                            let (dirs, _, _) = include::expand_projects(
+                                template.root.as_deref(),
+                                &template.projects,
+                            );
+                            for (dir, _) in dirs {
+                                let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+                                    continue;
+                                };
+                                if !known.projects.contains_key(name) {
+                                    known.skipped.entry(name.to_string()).or_insert_with(|| {
+                                        format!(
+                                            "{} matches its directory, which has nothing to run now",
+                                            file.path.display()
+                                        )
+                                    });
+                                }
+                            }
+                        }
+                        _ => {
+                            known.complete = false;
+                            global.push(Skip {
+                                project: None,
+                                stack: None,
+                                reason: format!(
+                                    "the template {} has a problem, so no project counts as gone: the projects it makes may be missing",
+                                    file.path.display()
+                                ),
+                            });
+                        }
+                    }
+                }
                 if known.projects.contains_key(&file.name) {
                     continue;
-                }
-                if may_be_template(&file.path)
-                    && (known.skipped.contains_key(&file.name)
-                        || config::load_project_file(&file.path).is_err())
-                {
-                    known.complete = false;
-                    global.push(Skip {
-                        project: None,
-                        stack: None,
-                        reason: format!(
-                            "the template {} has a problem, so no project counts as gone: the projects it makes may be missing",
-                            file.path.display()
-                        ),
-                    });
                 }
                 known
                     .skipped
@@ -413,9 +434,6 @@ fn known(paths: &Paths, world: &World, in_use: InUse) -> (Known, Vec<Skip>) {
     (known, global)
 }
 
-/// Projects whose configuration or discovery has a problem, with the first one: their
-/// worktrees aren't known for sure, so nothing of theirs counts as gone. A problem
-/// with a single stack, such as a worktree named main, leaves the others known.
 /// Whether a project file is a template, or can't be read well enough to tell.
 fn may_be_template(path: &Path) -> bool {
     fs::read_to_string(path)
@@ -424,6 +442,9 @@ fn may_be_template(path: &Path) -> bool {
         .is_none_or(|doc| doc.contains_key("projects"))
 }
 
+/// Projects whose configuration or discovery has a problem, with the first one: their
+/// worktrees aren't known for sure, so nothing of theirs counts as gone. A problem
+/// with a single stack, such as a worktree named main, leaves the others known.
 pub fn troubled(world: &World) -> BTreeMap<String, String> {
     let mut troubled = BTreeMap::new();
     for problem in &world.problems {
@@ -549,6 +570,88 @@ mod tests {
         );
     }
 
+    fn leftovers(paths: &Paths) -> Vec<String> {
+        let mut gone: Vec<String> = super::plan(paths, InUse::default())
+            .orphans
+            .into_iter()
+            .filter_map(|o| o.project)
+            .collect();
+        gone.dedup();
+        gone
+    }
+
+    fn runnable_repo(dir: &Path) {
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join("Procfile"), "web: x\n").unwrap();
+    }
+
+    #[test]
+    fn a_template_making_a_project_of_its_own_name_is_still_checked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let paths = Paths::under(&root);
+        fs::create_dir_all(paths.projects_dir()).unwrap();
+        runnable_repo(&root.join("sites/sites"));
+        let data = paths.dir_roots().data;
+        for project in ["sites", "blog"] {
+            fs::create_dir_all(data.join(project).join("main/web")).unwrap();
+        }
+        fs::write(
+            paths.projects_dir().join("sites.toml"),
+            format!(
+                "projects = [\"{0}/sites/*\", \"{0}/ext/*\"]\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        assert!(leftovers(&paths).is_empty(), "{:?}", leftovers(&paths));
+    }
+
+    #[test]
+    fn a_template_skipped_as_a_duplicate_keeps_every_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let paths = Paths::under(&root);
+        fs::create_dir_all(paths.projects_dir().join("clients")).unwrap();
+        runnable_repo(&root.join("shop"));
+        runnable_repo(&root.join("clients/blog"));
+        let data = paths.dir_roots().data;
+        for project in ["shop", "blog"] {
+            fs::create_dir_all(data.join(project).join("main/web")).unwrap();
+        }
+        fs::write(
+            paths.projects_dir().join("shop.toml"),
+            format!("root = \"{}/shop\"\n", root.display()),
+        )
+        .unwrap();
+        fs::write(
+            paths.projects_dir().join("clients/shop.toml"),
+            format!("projects = \"{}/clients/*\"\n", root.display()),
+        )
+        .unwrap();
+        assert!(leftovers(&paths).is_empty(), "{:?}", leftovers(&paths));
+    }
+
+    #[test]
+    fn a_matched_directory_with_nothing_to_run_isnt_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let paths = Paths::under(&root);
+        fs::create_dir_all(paths.projects_dir()).unwrap();
+        runnable_repo(&root.join("sites/wiki"));
+        fs::create_dir_all(root.join("sites/blog/.git")).unwrap();
+        let data = paths.dir_roots().data;
+        for project in ["wiki", "blog", "old"] {
+            fs::create_dir_all(data.join(project).join("main/web")).unwrap();
+        }
+        fs::write(
+            paths.projects_dir().join("sites.toml"),
+            format!("projects = \"{}/sites/*\"\n", root.display()),
+        )
+        .unwrap();
+        assert_eq!(leftovers(&paths), ["old"]);
+    }
+
     #[test]
     fn a_template_with_a_problem_keeps_every_project() {
         let tmp = tempfile::tempdir().unwrap();
@@ -559,7 +662,7 @@ mod tests {
             fs::create_dir_all(data.join(project).join("main/web")).unwrap();
         }
         fs::write(paths.projects_dir().join("shop.toml"), "root = 3\n").unwrap();
-        let plan = super::plan(&paths, BTreeSet::new());
+        let plan = super::plan(&paths, InUse::default());
         let gone: Vec<_> = plan
             .orphans
             .iter()
@@ -577,7 +680,7 @@ mod tests {
             "root = \"/x\"\nprojects = \"*\"\n",
         ] {
             fs::write(paths.projects_dir().join("sites.toml"), text).unwrap();
-            let plan = super::plan(&paths, BTreeSet::new());
+            let plan = super::plan(&paths, InUse::default());
             assert!(plan.orphans.is_empty(), "{text}: {:?}", plan.orphans);
             assert!(
                 plan.skipped[0].reason.contains("sites.toml has a problem"),
