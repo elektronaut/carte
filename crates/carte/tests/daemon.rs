@@ -1635,7 +1635,7 @@ fn prune_removes_leftovers_of_what_no_longer_exists() {
         std::fs::create_dir_all(&dirs.run).unwrap();
         std::fs::write(
             carte_core::dirs::owner_marker(&dirs.run),
-            roots.data.display().to_string(),
+            carte_core::dirs::owner_marker_text(&roots.data),
         )
         .unwrap();
     }

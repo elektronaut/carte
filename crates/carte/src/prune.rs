@@ -32,6 +32,7 @@ pub fn plan(paths: &Paths, in_use: InUse) -> Plan {
     let listing = listing(&roots, &paths.run_dir());
     let mut plan = prune::plan(&roots, &paths.run_dir(), &listing, &known);
     plan.skipped.splice(0..0, global);
+    plan.skipped.extend(old_run_dirs(&roots, &listing));
     plan
 }
 
@@ -154,7 +155,7 @@ pub fn detach(
                 return (orphan, Detached::Running);
             }
             if orphan.kind == OrphanKind::RunDir && !owns_run_dir(roots, &orphan.path) {
-                let reason = "its owner marker doesn't name this carte, or a socket in it answers";
+                let reason = "its owner marker doesn't name this carte in the current format";
                 return (orphan, Detached::Kept(reason.into()));
             }
             let detached = match detach_one(&orphan) {
@@ -493,46 +494,37 @@ fn listing(roots: &DirRoots, pidfiles: &Path) -> Listing {
     listing
 }
 
-/// Whether a run directory is provably this carte's: its owner marker names this
-/// carte's data root in the current format, or in the older one, from when cartes
-/// shared run directories, and no socket in it answers.
-fn owns_run_dir(roots: &DirRoots, run_dir: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(dirs::owner_marker(run_dir)) else {
-        return false;
-    };
-    let owner = dirs::Owner::parse(&text);
-    owner.is(&roots.data) && (owner.current || !serves(run_dir, 4))
+/// The owner marker beside a run directory, when it can be read.
+fn run_dir_owner(run_dir: &Path) -> Option<dirs::Owner> {
+    fs::read_to_string(dirs::owner_marker(run_dir))
+        .ok()
+        .map(|text| dirs::Owner::parse(&text))
 }
 
-/// Whether a Unix socket in `dir`, or in its folders up to `depth` deep, takes a
-/// connection, or part of it can't be read. Symlinks aren't followed.
-fn serves(dir: &Path, depth: usize) -> bool {
-    use std::os::unix::fs::FileTypeExt;
+/// Whether a run directory is provably this carte's: its owner marker names this
+/// carte's data root, in the current format. An older marker proves nothing, since
+/// cartes used to share run directories.
+fn owns_run_dir(roots: &DirRoots, run_dir: &Path) -> bool {
+    run_dir_owner(run_dir).is_some_and(|owner| owner.current && owner.is(&roots.data))
+}
 
-    let Ok(read) = fs::read_dir(dir) else {
-        return true;
-    };
-    for entry in read {
-        let Ok(entry) = entry else {
-            return true;
-        };
-        let Ok(kind) = entry.file_type() else {
-            return true;
-        };
-        if kind.is_socket() {
-            match std::os::unix::net::UnixStream::connect(entry.path()) {
-                Err(err)
-                    if matches!(
-                        err.kind(),
-                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
-                    ) => {}
-                _ => return true,
-            }
-        } else if kind.is_dir() && (depth == 0 || serves(&entry.path(), depth - 1)) {
-            return true;
-        }
-    }
-    false
+/// Run directories whose older-format owner marker names this carte. They are listed,
+/// never removed.
+fn old_run_dirs(roots: &DirRoots, listing: &Listing) -> Vec<Skip> {
+    listing
+        .run
+        .iter()
+        .map(|name| roots.run.join(name))
+        .filter(|path| run_dir_owner(path).is_some_and(|o| !o.current && o.is(&roots.data)))
+        .map(|path| Skip {
+            project: None,
+            stack: None,
+            reason: format!(
+                "{}: from before this version; remove it by hand once no older carte uses it",
+                path.display()
+            ),
+        })
+        .collect()
 }
 
 fn dirs_in(dir: &Path) -> BTreeSet<String> {
@@ -626,9 +618,17 @@ mod tests {
         for app in ["acme-web", "acme-api", "acme-docs"] {
             fs::create_dir_all(run(app)).unwrap();
         }
-        let owner = roots.data.display().to_string();
-        fs::write(dirs::owner_marker(&run("acme-web")), &owner).unwrap();
+        fs::write(
+            dirs::owner_marker(&run("acme-web")),
+            dirs::owner_marker_text(&roots.data),
+        )
+        .unwrap();
         fs::write(dirs::owner_marker(&run("acme-api")), "/elsewhere/data").unwrap();
+        fs::write(
+            dirs::owner_marker(&run("acme-docs")),
+            roots.data.display().to_string(),
+        )
+        .unwrap();
 
         let apps = ["acme-web", "acme-api", "acme-docs"].map(String::from);
         let run_dirs: Vec<PathBuf> = stack_leftovers(&paths, "acme", "x", apps)
@@ -724,7 +724,11 @@ mod tests {
         let roots = paths.dir_roots();
         let run = roots.run.join("abcdefgh");
         fs::create_dir_all(&run).unwrap();
-        fs::write(dirs::owner_marker(&run), roots.data.display().to_string()).unwrap();
+        fs::write(
+            dirs::owner_marker(&run),
+            dirs::owner_marker_text(&roots.data),
+        )
+        .unwrap();
         let plan = super::plan(&paths, InUse::default());
         assert!(
             plan.orphans.iter().any(|o| o.path == run),
@@ -817,8 +821,11 @@ mod tests {
         fs::create_dir_all(roots.run.join("abcdefgh")).unwrap();
         fs::create_dir_all(roots.run.join("ijklmnop")).unwrap();
         fs::create_dir_all(roots.run.join("qrstuvwx")).unwrap();
-        let owner = roots.data.display().to_string();
-        fs::write(dirs::owner_marker(&roots.run.join("abcdefgh")), &owner).unwrap();
+        fs::write(
+            dirs::owner_marker(&roots.run.join("abcdefgh")),
+            dirs::owner_marker_text(&roots.data),
+        )
+        .unwrap();
         fs::write(
             dirs::owner_marker(&roots.run.join("ijklmnop")),
             "/elsewhere",
@@ -968,70 +975,54 @@ mod tests {
     }
 
     #[test]
-    fn old_format_run_directories_go_only_when_no_socket_answers() {
-        use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, bind, socket};
-
+    fn old_format_run_directories_are_listed_and_never_removed() {
         let tmp = tempfile::tempdir().unwrap();
-        let roots = DirRoots {
-            data: tmp.path().join("data"),
-            run: tmp.path().join("run"),
-        };
-        let pidfiles = tmp.path().join("pids");
-        let owner = roots.data.display().to_string();
+        let paths = Paths::under(tmp.path());
+        let roots = paths.dir_roots();
         let dir = |name: &str, marker: &str| {
             let run = roots.run.join(name);
-            fs::create_dir_all(run.join("sub")).unwrap();
+            fs::create_dir_all(&run).unwrap();
             fs::write(dirs::owner_marker(&run), marker).unwrap();
             run
         };
-        let in_use = dir("aaaaaaaa", &owner);
-        let _listener = std::os::unix::net::UnixListener::bind(in_use.join("sub/s")).unwrap();
-        let unused = dir("bbbbbbbb", &owner);
-        let bound = socket(
-            AddressFamily::Unix,
-            SockType::Stream,
-            SockFlag::empty(),
-            None,
-        )
-        .unwrap();
-        bind(
-            std::os::fd::AsRawFd::as_raw_fd(&bound),
-            &UnixAddr::new(&unused.join("s")).unwrap(),
-        )
-        .unwrap();
-        drop(bound);
+        let owner = roots.data.display().to_string();
+        let old = dir("aaaaaaaa", &owner);
+        let _listener = std::os::unix::net::UnixListener::bind(old.join("s")).unwrap();
+        let idle = dir("bbbbbbbb", &owner);
         let current = dir("cccccccc", &dirs::owner_marker_text(&roots.data));
-        let _current_listener = std::os::unix::net::UnixListener::bind(current.join("s")).unwrap();
+        dir("dddddddd", "/elsewhere/data");
 
-        let listing = listing(&roots, &pidfiles);
-        assert_eq!(
-            listing.run_owned,
-            BTreeSet::from(["bbbbbbbb", "cccccccc"].map(String::from))
-        );
-        let known = Known {
-            complete: true,
-            ..Known::default()
-        };
-        let plan = prune::plan(&roots, &pidfiles, &listing, &known);
+        let plan = super::plan(&paths, InUse::default());
         let planned: Vec<&Path> = plan.orphans.iter().map(|o| o.path.as_path()).collect();
-        assert_eq!(planned, [unused.as_path(), current.as_path()]);
+        assert_eq!(planned, [current.as_path()], "{plan:?}");
+        for path in [&old, &idle] {
+            assert!(
+                plan.skipped.iter().any(|s| s.reason
+                    == format!(
+                        "{}: from before this version; remove it by hand once no older carte uses it",
+                        path.display()
+                    )),
+                "{:?}",
+                plan.skipped
+            );
+        }
+        assert_eq!(plan.skipped.len(), 2, "{:?}", plan.skipped);
 
-        let mut orphans = plan.orphans;
-        orphans.push(Orphan {
+        let orphan = |path: &Path| Orphan {
             project: None,
             stack: None,
             kind: OrphanKind::RunDir,
             app: None,
-            path: in_use.clone(),
-        });
-        let detached = detach(orphans, &BTreeSet::new(), &roots);
-        let result = finish(detached, &BTreeMap::new(), Vec::new());
-        assert_eq!(result.removed.len(), 2, "{result:?}");
-        assert!(
-            in_use.is_dir(),
-            "a run directory in use is kept at detach too"
+            path: path.to_path_buf(),
+        };
+        let detached = detach(
+            vec![orphan(&old), orphan(&idle), orphan(&current)],
+            &BTreeSet::new(),
+            &roots,
         );
-        assert!(!unused.exists() && !current.exists());
+        let result = finish(detached, &BTreeMap::new(), Vec::new());
+        assert_eq!(result.removed.len(), 1, "{result:?}");
+        assert!(old.is_dir() && idle.is_dir() && !current.exists());
     }
 
     #[test]
