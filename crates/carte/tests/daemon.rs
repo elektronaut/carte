@@ -300,8 +300,9 @@ fn boots_an_app_on_the_first_request_and_stops_it_on_sigterm() {
         .collect();
     assert!(!pids.is_empty());
 
-    let logs = stdout(&daemon.run(&["logs", "web", "-n", "50"]));
-    assert!(logs.contains("acme-web@main/worker line 1"), "{logs}");
+    eventually("the worker's first line", || {
+        stdout(&daemon.run(&["logs", "web", "-n", "50"])).contains("acme-web@main/worker line 1")
+    });
 
     let marker = stdout(&daemon.run(&["logs", "web", "--mark"]));
     assert_eq!(marker.trim_end().chars().count(), 60, "{marker}");
