@@ -182,7 +182,8 @@ fn supervise(
             let n = unsafe { libc::read(sig_read, sigs.as_mut_ptr().cast(), sigs.len()) };
             for &sig in &sigs[..n.max(0) as usize] {
                 if FORWARDED.contains(&libc::c_int::from(sig)) {
-                    // SAFETY: killpg takes no pointers.
+                    // SAFETY: killpg takes no pointers; `pid` is the group of the
+                    // command this shim forked, above 1.
                     unsafe { libc::killpg(pid, sig.into()) };
                 }
             }
@@ -265,15 +266,16 @@ fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
         // SAFETY: `status` outlives the call.
         match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::WUNTRACED) } {
             p if p == pid && libc::WIFSTOPPED(status) => match libc::WSTOPSIG(status) {
-                // SAFETY: killpg takes no pointers.
+                // SAFETY: killpg takes no pointers; `pid` is the group of the
+                // command this shim forked, above 1.
                 libc::SIGTSTP => unsafe {
                     libc::killpg(pid, libc::SIGCONT);
                 },
-                // SAFETY: give_terminal has no preconditions; killpg takes no pointers.
-                libc::SIGTTIN | libc::SIGTTOU => unsafe {
+                libc::SIGTTIN | libc::SIGTTOU => {
                     give_terminal(pid);
-                    libc::killpg(pid, libc::SIGCONT);
-                },
+                    // SAFETY: as above.
+                    unsafe { libc::killpg(pid, libc::SIGCONT) };
+                }
                 _ => {}
             },
             p if p == pid => *leader = Some(status),
@@ -288,16 +290,13 @@ fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
 }
 
 fn group_alive(pgid: libc::pid_t) -> bool {
-    // SAFETY: killpg takes no pointers.
+    // SAFETY: signal 0 only checks that the group exists; `pgid` is the
+    // command's group or one from `descendant_groups`, all above 1.
     unsafe { libc::killpg(pgid, 0) == 0 || Errno::last() == Errno::EPERM }
 }
 
 /// Makes `pgid` the terminal's foreground group again, when stdin is one.
-///
-/// # Safety
-///
-/// Async-signal-safe, with no preconditions of its own.
-unsafe fn give_terminal(pgid: libc::pid_t) {
+fn give_terminal(pgid: libc::pid_t) {
     // SAFETY: the signal sets are initialised by sigemptyset or sigprocmask before use.
     unsafe {
         if libc::isatty(0) != 1 {
@@ -317,13 +316,14 @@ unsafe fn give_terminal(pgid: libc::pid_t) {
 fn descendant_groups() -> Vec<libc::pid_t> {
     crate::proctree::descendant_groups(std::process::id())
         .into_iter()
-        .map(|pgid| pgid as libc::pid_t)
+        .filter_map(crate::proctree::signal_target)
         .collect()
 }
 
 fn signal_groups(groups: &[libc::pid_t], sig: libc::c_int) {
     for &pgid in groups {
-        // SAFETY: killpg takes no pointers.
+        // SAFETY: killpg takes no pointers; callers pass the command's group
+        // and groups that went through `signal_target`, all above 1.
         unsafe { libc::killpg(pgid, sig) };
     }
 }
@@ -351,7 +351,7 @@ fn terminate_group(pgid: libc::pid_t, reaped: &mut Option<libc::c_int>) {
     let earlier: Vec<u32> = groups.iter().map(|&g| g as u32).collect();
     let groups: Vec<libc::pid_t> = crate::proctree::remaining_groups(std::process::id(), &earlier)
         .into_iter()
-        .map(|g| g as libc::pid_t)
+        .filter_map(crate::proctree::signal_target)
         .collect();
     signal_groups(&groups, libc::SIGKILL);
     if reaped.is_none() {

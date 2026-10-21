@@ -139,14 +139,14 @@ mod tests {
         {
             std::thread::sleep(Duration::from_millis(50));
         }
-        // SAFETY: kill takes no pointers.
+        // SAFETY: kill takes no pointers; `pid` is the `yes` this test spawned.
         unsafe { libc::kill(pid, libc::SIGSTOP) };
         let mut status = 0;
         // SAFETY: `status` outlives the call.
         unsafe { libc::waitpid(pid, &mut status, libc::WUNTRACED) };
         let measured = group_usage(id).unwrap().cpu_time.as_secs_f64();
 
-        // SAFETY: kill takes no pointers.
+        // SAFETY: as above.
         unsafe { libc::kill(pid, libc::SIGKILL) };
         // SAFETY: rusage is plain data, valid when zeroed.
         let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };

@@ -142,7 +142,8 @@ fn alive(pid: libc::pid_t) -> bool {
 fn guard(lifeline: libc::pid_t, guarded: libc::pid_t) -> ! {
     while alive(guarded) {
         if !alive(lifeline) {
-            // SAFETY: kill takes no pointers.
+            // SAFETY: kill takes no pointers; `guarded` is the pid the test
+            // passed in FIXTURE_GUARD_PID.
             unsafe { libc::kill(guarded, libc::SIGKILL) };
             break;
         }

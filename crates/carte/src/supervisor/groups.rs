@@ -34,6 +34,7 @@ impl GroupRecord {
     }
 
     pub fn add(&mut self, pgid: u32) {
+        // SAFETY: getsid takes no pointers.
         let sid = unsafe { libc::getsid(pgid as libc::pid_t) };
         if let Some(started) = start_time(pgid)
             && sid > 1
@@ -145,8 +146,10 @@ pub fn kill_leftovers(path: &Path) -> io::Result<usize> {
 /// The process's start time in microseconds since the epoch.
 #[cfg(target_os = "macos")]
 pub fn start_time(pid: u32) -> Option<u64> {
+    // SAFETY: proc_bsdinfo is plain data, valid when zeroed.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: `size` is the size of `info`.
     let n = unsafe {
         libc::proc_pidinfo(
             pid as i32,
@@ -231,10 +234,15 @@ mod tests {
             let bare_env = [c"CARTE_TEST_SLEEPER=1".as_ptr(), std::ptr::null()];
             let mut inner = [0; 2];
             let mut outer = [0; 2];
+            // SAFETY: each array has room for the two fds pipe writes.
             assert_eq!(unsafe { libc::pipe(inner.as_mut_ptr()) }, 0);
+            // SAFETY: as above.
             assert_eq!(unsafe { libc::pipe(outer.as_mut_ptr()) }, 0);
+            // SAFETY: the children make only async-signal-safe calls, on data
+            // built before the fork.
             let sid = unsafe { libc::fork() };
             if sid == 0 {
+                // SAFETY: as above; the reads and writes stay within `pids` and `member`.
                 unsafe {
                     libc::setsid();
                     let mut pids = [0 as libc::pid_t; 4];
@@ -269,6 +277,7 @@ mod tests {
                 }
             }
             let mut pids = [0 as libc::pid_t; 4];
+            // SAFETY: the fds are this test's own; the read stays within `pids`.
             let n = unsafe {
                 libc::close(inner[0]);
                 libc::close(inner[1]);
@@ -284,6 +293,7 @@ mod tests {
                 .filter_map(|pid| Some((pid, start_time(pid as u32)?)))
                 .collect();
             if !stays {
+                // SAFETY: a null status pointer is allowed.
                 unsafe { libc::waitpid(sid, std::ptr::null_mut(), 0) };
             }
             let session = Session {
@@ -324,10 +334,13 @@ mod tests {
                     && (pid != self.sid || self.stays)
                     && start_time(pid as u32) == Some(started)
                 {
+                    // SAFETY: kill takes no pointers; `pid` is one this test
+                    // forked, above 1 and still the same process.
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
             }
             if self.stays {
+                // SAFETY: a null status pointer is allowed.
                 unsafe { libc::waitpid(self.sid, std::ptr::null_mut(), 0) };
             }
         }

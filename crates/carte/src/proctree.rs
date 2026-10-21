@@ -94,6 +94,8 @@ pub fn exists(pid: u32) -> bool {
     let Some(pid) = signal_target(pid) else {
         return true;
     };
+    // SAFETY: signal 0 only checks that the process exists; `pid` went
+    // through `signal_target`.
     let found = unsafe { libc::kill(pid, 0) } == 0;
     found || nix::errno::Errno::last() != nix::errno::Errno::ESRCH
 }
@@ -123,6 +125,7 @@ fn environ(pid: u32) -> Option<Vec<u8>> {
 fn environ(pid: u32) -> Option<Vec<u8>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut size: libc::size_t = 0;
+    // SAFETY: a null buffer only asks for the size, written to `size`.
     let rc = unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
@@ -137,6 +140,7 @@ fn environ(pid: u32) -> Option<Vec<u8>> {
         return None;
     }
     let mut buf = vec![0u8; size];
+    // SAFETY: `size` is the byte length of `buf`.
     let rc = unsafe {
         libc::sysctl(
             mib.as_mut_ptr(),
@@ -173,6 +177,7 @@ pub fn boot_id() -> Option<String> {
         tv_usec: 0,
     };
     let mut size = std::mem::size_of::<libc::timeval>();
+    // SAFETY: the name is NUL-terminated, and `size` is the size of `time`.
     let rc = unsafe {
         libc::sysctlbyname(
             c"kern.boottime".as_ptr(),
@@ -310,7 +315,8 @@ mod tests {
         };
         let outer = descendant_groups(std::process::id());
         for &group in inner.iter().chain([&child]) {
-            // SAFETY: killpg takes no pointers.
+            // SAFETY: killpg takes no pointers; the groups are this test's
+            // forked child's and its child's, above 1.
             unsafe { libc::killpg(group as i32, libc::SIGKILL) };
         }
         // SAFETY: a null status pointer is allowed.
