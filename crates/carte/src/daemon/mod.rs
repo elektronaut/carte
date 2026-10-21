@@ -9,6 +9,7 @@ pub mod watch;
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -158,9 +159,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     ) {
         tokio::spawn(watching);
     }
-    let listener =
-        UnixListener::bind(&socket).with_context(|| format!("binding {}", socket.display()))?;
-    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+    let listener = bind_api(&socket).with_context(|| format!("binding {}", socket.display()))?;
     let reload_supervisor = supervisor.clone();
     let config_dir = paths.config_dir.clone();
     let api = api::Api {
@@ -218,4 +217,33 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     .await;
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+/// Binds the API socket under a temporary name and moves it into place once it
+/// listens, so a client that sees the socket can connect to it.
+fn bind_api(socket: &Path) -> std::io::Result<UnixListener> {
+    let mut pending = socket.as_os_str().to_owned();
+    pending.push(".new");
+    let pending = PathBuf::from(pending);
+    let _ = std::fs::remove_file(&pending);
+    let listener = UnixListener::bind(&pending)?;
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&pending, socket)?;
+    Ok(listener)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_api_socket_appears_listening_and_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("carte.sock");
+        let _listener = bind_api(&socket).unwrap();
+        UnixStream::connect(&socket).await.unwrap();
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(!dir.path().join("carte.sock.new").exists());
+    }
 }
