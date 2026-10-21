@@ -708,7 +708,7 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
             steps.push(trust_step());
             for ca in &facts.keychain_cas {
                 steps.push(Step::sudo(
-                    format!("Remove the old {} from the system keychain", ca.label),
+                    format!("Remove the old {} from the system keychain", ca.name()),
                     "security",
                     &["delete-certificate", "-Z", &ca.hash, trust::SYSTEM_KEYCHAIN],
                 ));
