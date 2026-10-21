@@ -1149,21 +1149,7 @@ impl Actor {
                 }
             }
         });
-        if proc.spec.is_checked() {
-            let tx = self.tx.clone();
-            let port = proc.port;
-            let readiness = proc.spec.ready.clone();
-            let ready_key = key.clone();
-            tokio::spawn(async move {
-                let result = runner::wait_ready(port, &readiness, boot_timeout).await;
-                let _ = tx.send(Msg::Internal(Internal::Ready {
-                    key: ready_key,
-                    run,
-                    idx,
-                    result,
-                }));
-            });
-        } else if proc.spec.is_task() {
+        if proc.spec.is_task() {
             let tx = self.tx.clone();
             let ready_key = key.clone();
             tokio::spawn(async move {
@@ -1236,6 +1222,26 @@ impl Actor {
         self.dirty = true;
     }
 
+    /// Waits for a started process to pass its readiness check. It starts once the
+    /// process has started, so the process is never ready before it is running.
+    fn check_ready(&self, key: &InstanceKey, run: u64, idx: usize) {
+        let proc = &self.instances[key].procs[idx];
+        let tx = self.tx.clone();
+        let port = proc.port;
+        let readiness = proc.spec.ready.clone();
+        let boot_timeout = self.options.boot_timeout;
+        let key = key.clone();
+        tokio::spawn(async move {
+            let result = runner::wait_ready(port, &readiness, boot_timeout).await;
+            let _ = tx.send(Msg::Internal(Internal::Ready {
+                key,
+                run,
+                idx,
+                result,
+            }));
+        });
+    }
+
     fn proc_event(&mut self, key: &InstanceKey, run: u64, idx: usize, event: runner::Event) {
         let Some(inst) = self.instances.get_mut(key) else {
             return;
@@ -1253,6 +1259,9 @@ impl Actor {
                     proc.state = ProcessState::Running;
                 }
                 proc.pid = Some(pid);
+                if proc.spec.is_checked() {
+                    self.check_ready(key, run, idx);
+                }
                 self.groups.add(pid);
                 self.advance(key);
             }
