@@ -444,6 +444,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
     let (snapshot_tx, snapshot_rx) = watch::channel(initial);
     let (shared_tx, shared_rx) = watch::channel(Arc::new(share::SharedRoutes::new()));
     let _ = std::fs::create_dir_all(paths.run_dir());
+    let left_behind = teardown::left_behind(&world, &paths.dir_roots());
     let actor = Actor {
         world,
         world_tx,
@@ -468,7 +469,10 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         share_pins: BTreeSet::new(),
         tunnel,
         events: EventLog::new(event_tx.clone()),
-        teardowns: Teardowns::default(),
+        teardowns: Teardowns {
+            seen: left_behind,
+            ..Teardowns::default()
+        },
         warming,
         warming_changed: false,
     };
@@ -614,6 +618,13 @@ impl Actor {
             Msg::Shutdown(reply) => {
                 self.save_warming();
                 self.shutdown = Some(reply);
+                for (project, stack) in self.teardowns.running.clone() {
+                    self.event(
+                        EventKind::TeardownFailed,
+                        "carte stopped while it ran; it runs again once carte starts",
+                        vec![events::stack(&project, &stack)],
+                    );
+                }
                 let keys: Vec<_> = self.instances.keys().cloned().collect();
                 for key in keys {
                     self.stop(&key, None);
@@ -622,9 +633,32 @@ impl Actor {
             Msg::Running(reply) => {
                 let _ = reply.send(self.running());
             }
+            Msg::InUse(reply) => {
+                let _ = reply.send(prune::InUse {
+                    running: self.running(),
+                    tearing_down: self.tearing_down(),
+                });
+            }
+            Msg::HasWorktree {
+                project,
+                stack,
+                reply,
+            } => {
+                let _ = reply.send(self.has_worktree(&project, &stack));
+            }
             Msg::Prune { orphans, reply } => {
-                let running = self.running();
-                let _ = reply.send(prune::detach(orphans, &running, &self.paths.dir_roots()));
+                let tearing_down = self.tearing_down();
+                let (kept, orphans): (Vec<_>, Vec<_>) = orphans
+                    .into_iter()
+                    .partition(|orphan| torn_down_reason(&tearing_down, orphan).is_some());
+                let mut detached = prune::detach(orphans, &self.running(), &self.paths.dir_roots());
+                for orphan in kept {
+                    let reason = torn_down_reason(&tearing_down, &orphan)
+                        .unwrap_or_default()
+                        .to_string();
+                    detached.push((orphan, prune::Detached::Kept(reason)));
+                }
+                let _ = reply.send(detached);
                 self.forget_gone_apps();
             }
             Msg::DetachStack {
@@ -633,16 +667,36 @@ impl Actor {
                 orphans,
                 reply,
             } => {
-                let present = self
-                    .world
-                    .project(&project)
-                    .is_some_and(|state| state.stacks().contains(&stack));
+                let present = self.has_worktree(&project, &stack);
                 let detached = (!present)
                     .then(|| prune::detach(orphans, &self.running(), &self.paths.dir_roots()));
                 let _ = reply.send(detached);
             }
             Msg::Internal(internal) => self.internal(internal),
         }
+    }
+
+    /// Whether a stack has a worktree now.
+    fn has_worktree(&self, project: &str, stack: &str) -> bool {
+        self.world
+            .project(project)
+            .is_some_and(|state| state.has_stack(stack))
+    }
+
+    /// Stacks whose teardown is pending or running, with the reason prune leaves
+    /// them alone.
+    fn tearing_down(&self) -> BTreeMap<StackId, String> {
+        let pending = self
+            .teardowns
+            .pending
+            .keys()
+            .map(|id| (id.clone(), "its teardown is pending".to_string()));
+        let running = self
+            .teardowns
+            .running
+            .iter()
+            .map(|id| (id.clone(), "its teardown is running".to_string()));
+        pending.chain(running).collect()
     }
 
     /// Instances that are starting or ready, or still have processes running.
@@ -800,6 +854,18 @@ impl Actor {
                 "carte is stopping",
                 "carte is shutting down and starts nothing new.",
             ));
+        }
+        if self
+            .teardowns
+            .running
+            .contains(&(key.project.clone(), key.stack.slug().to_string()))
+        {
+            let mut failure = BootFailure::new(
+                format!("{}@{} is being torn down", key.app, key.stack.slug()),
+                "Its stack's teardown is still running; it starts once that has ended.",
+            );
+            failure.transient = true;
+            return Err(failure);
         }
         if let Some(inst) = self.instances.get_mut(key) {
             if matches!(why, Why::Manual | Why::Restart) {
@@ -2313,7 +2379,10 @@ impl Actor {
         self.teardowns.checking = false;
         let now = Instant::now();
         for (id, status) in results {
-            if !self.teardowns.seen.contains(&id) || self.teardowns.running.contains(&id) {
+            if !self.teardowns.seen.contains(&id)
+                || self.teardowns.running.contains(&id)
+                || self.has_worktree(&id.0, &id.1)
+            {
                 continue;
             }
             let record = match status {
@@ -3397,6 +3466,15 @@ fn world_changes(old: &World, new: &World) -> Vec<(EventKind, String, Vec<EventS
         changes.push((EventKind::ConfigError, message, subjects));
     }
     changes
+}
+
+/// Why prune leaves an orphan alone, when it belongs to a stack being torn down.
+fn torn_down_reason<'a>(
+    tearing_down: &'a BTreeMap<StackId, String>,
+    orphan: &carte_core::prune::Orphan,
+) -> Option<&'a str> {
+    let id = (orphan.project.clone()?, orphan.stack.clone()?);
+    tearing_down.get(&id).map(String::as_str)
 }
 
 /// Another active instance from the checkout runs the process, or ran it until it

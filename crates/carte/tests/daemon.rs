@@ -185,21 +185,26 @@ impl Daemon {
             child: None,
             ports,
         };
-        let child = daemon
+        daemon.launch();
+        daemon
+    }
+
+    /// Starts `carte daemon` and waits until it listens.
+    fn launch(&mut self) {
+        let child = self
             .command(&["daemon"])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         guard(child.id());
-        daemon.child = Some(child);
-        let socket = carte::paths::Paths::under(&daemon.root).socket();
+        self.child = Some(child);
+        let socket = carte::paths::Paths::under(&self.root).socket();
         let started = Instant::now();
-        while !socket.exists() {
-            if let Some(status) = daemon.child.as_mut().unwrap().try_wait().unwrap() {
+        while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+            if let Some(status) = self.child.as_mut().unwrap().try_wait().unwrap() {
                 let mut stderr = String::new();
-                daemon
-                    .child
+                self.child
                     .as_mut()
                     .unwrap()
                     .stderr
@@ -215,7 +220,6 @@ impl Daemon {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
-        daemon
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -1814,12 +1818,27 @@ fn a_worktree_that_comes_back_cancels_the_teardown() {
 fn a_worktree_that_comes_back_during_the_teardown_keeps_the_folders() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
-    let started = marker.path().join("started");
-    let daemon = start_with_teardown("1s", &format!("touch {}; sleep 3", started.display()));
+    let started = marker.path().to_path_buf();
+    let teardown = format!(
+        "kind = \"teardown\"\ncommand = 'touch {}/$CARTE_APP; sleep 3'\n",
+        started.display()
+    );
+    let mut daemon = Daemon::start_prepared(
+        &format!(
+            "teardown_delay = \"1s\"\n\n[apps.acme-web.processes.drop]\n{teardown}\n[apps.acme-api.processes.drop]\n{teardown}"
+        ),
+        |work| repo(&work.join("acme-api"), "web: exec sleep 60\n"),
+    );
     let dirs = run_in_feature_x(&daemon);
 
     remove_feature_x(&daemon);
-    eventually("the teardown process", || started.exists());
+    let ran = || -> Vec<String> {
+        std::fs::read_dir(&started)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    eventually("the first teardown process", || !ran().is_empty());
     git(
         &daemon.root.join("work/acme-web"),
         &[
@@ -1830,6 +1849,15 @@ fn a_worktree_that_comes_back_during_the_teardown_keeps_the_folders() {
             "feature-x",
         ],
     );
+    eventually("the feature-x stack", || {
+        snapshot(&daemon).projects[0]
+            .stacks
+            .iter()
+            .any(|s| s.name == "feature-x")
+    });
+    let refused = daemon.request("web.feature-x.acme.test", "/");
+    assert!(!refused.starts_with("HTTP/1.1 200"), "{refused}");
+    assert!(refused.contains("being torn down"), "{refused}");
     eventually("the cancelled teardown", || {
         teardown_event(&daemon, EventKind::TeardownCancelled, false).is_some()
     });
@@ -1838,9 +1866,75 @@ fn a_worktree_that_comes_back_during_the_teardown_keeps_the_folders() {
         cancelled.message,
         "it has a worktree again; kept its folders"
     );
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(ran().len(), 1, "{:?}", ran());
     assert!(teardown_event(&daemon, EventKind::TeardownFinished, false).is_none());
     assert!(dirs.state.is_dir());
     assert!(dirs.run.is_dir());
+    let response = daemon.request("web.feature-x.acme.test", "/");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    daemon.stop();
+}
+
+#[test]
+fn prune_keeps_a_stack_whose_teardown_is_pending() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let daemon = start_with_teardown("3s", &format!("touch {}", marker.display()));
+    let dirs = run_in_feature_x(&daemon);
+    let stack_dir = dirs.state.parent().unwrap().to_path_buf();
+
+    remove_feature_x(&daemon);
+    eventually("the scheduled teardown", || {
+        teardown_event(&daemon, EventKind::TeardownScheduled, false).is_some()
+    });
+    let json = stdout(&daemon.run(&["prune", "--dry-run", "--json"]));
+    let output: carte_api::PruneOutput = serde_json::from_str(&json).unwrap();
+    assert!(
+        output
+            .list
+            .candidates
+            .iter()
+            .all(|c| !c.path.starts_with(&stack_dir)),
+        "{output:?}"
+    );
+    assert!(
+        output.list.skipped.iter().any(|s| {
+            s.stack.as_deref() == Some("feature-x") && s.reason == "its teardown is pending"
+        }),
+        "{output:?}"
+    );
+    daemon.run(&["prune", "--yes"]);
+    assert!(stack_dir.join("stack.toml").is_file());
+    eventually("the teardown", || {
+        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
+    });
+    assert!(marker.exists());
+    assert!(!stack_dir.exists());
+}
+
+#[test]
+fn a_teardown_cut_short_by_a_shutdown_runs_again_on_the_next_start() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let runs = marker.path().join("runs");
+    let mut daemon = start_with_teardown("1s", &format!("echo run >> {}; sleep 3", runs.display()));
+    let dirs = run_in_feature_x(&daemon);
+    let stack_dir = dirs.state.parent().unwrap().to_path_buf();
+
+    remove_feature_x(&daemon);
+    eventually("the teardown process", || runs.exists());
+    daemon.stop();
+    assert!(stack_dir.join("stack.toml").is_file());
+
+    daemon.launch();
+    eventually("the teardown", || {
+        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
+    });
+    assert_eq!(std::fs::read_to_string(&runs).unwrap(), "run\nrun\n");
+    assert!(!stack_dir.exists());
+    daemon.stop();
 }
 
 #[test]

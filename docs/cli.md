@@ -92,7 +92,8 @@ never runs a [teardown](configuration.md#teardown) or touches databases,
 so it names the stacks whose teardown never ran or failed, whose external
 resources may remain.
 
-It leaves alone anything of a running instance, and every project whose
+It leaves alone anything of a running instance or of a stack whose
+teardown is pending or running, and every project whose
 configuration or discovery has a problem (an `include` entry that matches
 nothing, a failing `git worktree list`), and says so. Several cartes
 (with different state directories) can share the run root, and give

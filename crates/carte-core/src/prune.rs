@@ -35,6 +35,9 @@ pub struct Known {
     pub complete: bool,
     /// Instances that are starting, running or stopping.
     pub running: BTreeSet<InstanceKey>,
+    /// Stacks whose teardown is pending or running, as (project, stack), with the
+    /// reason to leave them alone.
+    pub tearing_down: BTreeMap<(String, String), String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -276,7 +279,14 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
     }
 
     let mut running_stacks = BTreeSet::new();
+    let mut torn_down = BTreeMap::new();
     for orphan in candidates {
+        if let (Some(project), Some(stack)) = (&orphan.project, &orphan.stack)
+            && let Some(reason) = known.tearing_down.get(&(project.clone(), stack.clone()))
+        {
+            torn_down.insert((project.clone(), stack.clone()), reason.clone());
+            continue;
+        }
         if orphan.is_running(&known.running, roots) {
             if let Some(project) = &orphan.project {
                 running_stacks.insert((project.clone(), orphan.stack.clone()));
@@ -322,6 +332,15 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
             stack,
             reason: "running".into(),
         }))
+        .chain(
+            torn_down
+                .into_iter()
+                .map(|((project, stack), reason)| Skip {
+                    project: Some(project),
+                    stack: Some(stack),
+                    reason,
+                }),
+        )
         .collect();
     plan
 }
@@ -606,6 +625,32 @@ mod tests {
                     reason: "running".into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn stacks_being_torn_down_are_never_touched() {
+        let mut listing = listing(&[
+            ("nova", "feature-x", "nova-web"),
+            ("nova", "feature-y", "nova-web"),
+        ]);
+        listing
+            .pidfiles
+            .insert("nova".into(), ["nova-web@feature-x.pid".to_string()].into());
+        let mut known = known(&[("nova", &["nova-web"], &[])]);
+        known.tearing_down.insert(
+            ("nova".into(), "feature-x".into()),
+            "its teardown is pending".into(),
+        );
+        let plan = plan(&roots(), Path::new("/s/run"), &listing, &known);
+        assert_eq!(paths(&plan), ["/s/data/nova/feature-y"]);
+        assert_eq!(
+            plan.skipped,
+            [Skip {
+                project: Some("nova".into()),
+                stack: Some("feature-x".into()),
+                reason: "its teardown is pending".into(),
+            }]
         );
     }
 

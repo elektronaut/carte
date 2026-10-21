@@ -16,10 +16,18 @@ use carte_core::prune::{self, Known, KnownProject, Listing, Orphan, OrphanKind, 
 
 use crate::paths::Paths;
 
+/// What the supervisor uses: instances that run, and stacks being torn down, as
+/// (project, stack), with the reason to leave them alone.
+#[derive(Debug, Clone, Default)]
+pub struct InUse {
+    pub running: BTreeSet<InstanceKey>,
+    pub tearing_down: BTreeMap<(String, String), String>,
+}
+
 /// The leftovers on disk now, judged against a fresh load of the configuration.
-pub fn plan(paths: &Paths, running: BTreeSet<InstanceKey>) -> Plan {
+pub fn plan(paths: &Paths, in_use: InUse) -> Plan {
     let world = discovery::load_world(&paths.config_dir);
-    let (known, global) = known(paths, &world, running);
+    let (known, global) = known(paths, &world, in_use);
     let roots = paths.dir_roots();
     let listing = listing(&roots, &paths.run_dir());
     let mut plan = prune::plan(&roots, &paths.run_dir(), &listing, &known);
@@ -28,8 +36,8 @@ pub fn plan(paths: &Paths, running: BTreeSet<InstanceKey>) -> Plan {
 }
 
 /// What `carte prune` lists.
-pub fn list(paths: &Paths, running: BTreeSet<InstanceKey>) -> PruneList {
-    let plan = plan(paths, running);
+pub fn list(paths: &Paths, in_use: InUse) -> PruneList {
+    let plan = plan(paths, in_use);
     let candidates: Vec<PruneCandidate> = plan
         .orphans
         .iter()
@@ -58,10 +66,10 @@ pub fn list(paths: &Paths, running: BTreeSet<InstanceKey>) -> PruneList {
 /// The asked-for paths that are still leftovers, with their sizes, and the rest.
 pub fn select(
     paths: &Paths,
-    running: BTreeSet<InstanceKey>,
+    in_use: InUse,
     asked: &[PathBuf],
 ) -> (Vec<(Orphan, u64)>, Vec<PruneKept>) {
-    let mut orphans: BTreeMap<PathBuf, Orphan> = plan(paths, running)
+    let mut orphans: BTreeMap<PathBuf, Orphan> = plan(paths, in_use)
         .orphans
         .into_iter()
         .map(|orphan| (orphan.path.clone(), orphan))
@@ -123,6 +131,8 @@ pub fn stack_leftovers(
 pub enum Detached {
     /// A running instance owns it now.
     Running,
+    /// Left alone, for this reason.
+    Kept(String),
     /// Out of the way; a directory waits in this folder to be deleted.
     Done(Option<PathBuf>),
     Failed(String),
@@ -209,6 +219,13 @@ pub fn finish(
                 });
                 continue;
             }
+            Detached::Kept(reason) => {
+                kept.push(PruneKept {
+                    path: orphan.path,
+                    reason,
+                });
+                continue;
+            }
             Detached::Failed(message) => Some(message),
             Detached::Done(None) => None,
             Detached::Done(Some(trash)) => remove_trash(&trash)
@@ -289,9 +306,10 @@ fn candidate(orphan: &Orphan, bytes: u64) -> PruneCandidate {
 /// What exists: loaded projects, and the projects to leave alone because their
 /// configuration or discovery has a problem. The second value says why every project
 /// is left alone, when the project files couldn't be listed.
-fn known(paths: &Paths, world: &World, running: BTreeSet<InstanceKey>) -> (Known, Vec<Skip>) {
+fn known(paths: &Paths, world: &World, in_use: InUse) -> (Known, Vec<Skip>) {
     let mut known = Known {
-        running,
+        running: in_use.running,
+        tearing_down: in_use.tearing_down,
         ..Known::default()
     };
     for state in &world.projects {
