@@ -481,6 +481,8 @@ fn find_stack_anywhere<'a>(
 mod tests {
     use std::path::PathBuf;
 
+    use proptest::prelude::*;
+
     use super::*;
     use crate::test_support::{worktree, world};
 
@@ -1008,5 +1010,24 @@ mod tests {
             locate(&world, Path::new("/Users/dev/clients/acme-apix")),
             None
         );
+    }
+
+    proptest! {
+        #[test]
+        fn addresses_round_trip(
+            app in proptest::option::of("[a-z0-9._-]{1,10}"),
+            stack in proptest::option::of("[a-z0-9._-]{1,10}"),
+            process in proptest::option::of("[a-z0-9._-]{1,10}"),
+        ) {
+            let address = Address { app, stack, process };
+            prop_assert_eq!(parse(&address.to_string()), address);
+        }
+
+        #[test]
+        fn parsed_addresses_display_as_they_parse(input in "[a-z@/ ]{0,12}|\\PC{0,12}") {
+            if let Ok(address) = input.parse::<Address>() {
+                prop_assert_eq!(parse(&address.to_string()), address);
+            }
+        }
     }
 }

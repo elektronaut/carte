@@ -123,6 +123,7 @@ fn validate_label(kind: NameKind, name: &str) -> Result<(), NameError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::is_slug;
 
     #[test]
     fn slugs_names() {
@@ -223,5 +224,37 @@ mod tests {
             err.to_string(),
             "project name \"a--b\" contains \"--\", which carte uses to join public hostnames"
         );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn slugs_follow_the_grammar(name in "\\PC{0,40}|[a-zA-Z0-9/._ -]{0,40}") {
+            let slug = slugify(&name);
+            proptest::prop_assert!(is_slug(&slug), "{slug:?}");
+            proptest::prop_assert!(!slug.contains("--"));
+            proptest::prop_assert_eq!(slugify(&slug), slug);
+        }
+
+        #[test]
+        fn shortened_slugs_fit(name in "[a-z0-9/-]{0,100}", max in 0usize..80) {
+            let slug = slugify(&name);
+            if let Some(short) = shorten(&slug, max) {
+                proptest::prop_assert!(short.len() <= max, "{short:?}");
+                proptest::prop_assert!(is_slug(&short), "{short:?}");
+            }
+            proptest::prop_assert!(shorten(&slug, 63).is_some());
+        }
+
+        #[test]
+        fn valid_names_are_their_own_slugs(name in "[a-z0-9-]{0,70}|\\PC{0,10}") {
+            if validate_project_name(&name).is_ok() {
+                proptest::prop_assert_eq!(slugify(&name), name.clone());
+                proptest::prop_assert!((3..=63).contains(&name.len()));
+            }
+            proptest::prop_assert_eq!(
+                validate_project_name(&name).is_ok(),
+                validate_app_short_name(&name).is_ok()
+            );
+        }
     }
 }

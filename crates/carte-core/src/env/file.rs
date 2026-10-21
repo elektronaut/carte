@@ -163,6 +163,8 @@ fn parse_value(input: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn parse(content: &str) -> Vec<(String, String, usize)> {
@@ -300,5 +302,55 @@ mod tests {
                 dir.path().join(".env").display()
             )
         );
+    }
+
+    fn quoted(value: &str) -> String {
+        let mut out = String::from("\"");
+        for c in value.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    proptest! {
+        #[test]
+        fn never_panics(content in "(\\PC|[\"'#=\\\\\n\t ]){0,80}") {
+            let _ = parse_env_file(Path::new(".env"), &content);
+        }
+
+        #[test]
+        fn valid_lines_round_trip(
+            vars in proptest::collection::vec(
+                (
+                    "[A-Za-z_][A-Za-z0-9_.]{0,10}",
+                    "[^\"'\\s#][^\\s#]{0,10}|",
+                    "(\\PC|[\n\r\t]){0,12}",
+                    any::<bool>(),
+                ),
+                0..8,
+            ),
+        ) {
+            let lines: Vec<String> = vars
+                .iter()
+                .map(|(key, plain, any, quote)| match quote {
+                    true => format!("{key}={}", quoted(any)),
+                    false => format!("{key}={plain}"),
+                })
+                .collect();
+            let entries = parse_env_file(Path::new(".env"), &lines.join("\n")).unwrap();
+            prop_assert_eq!(entries.len(), vars.len());
+            for (i, (entry, (key, plain, any, quote))) in entries.iter().zip(&vars).enumerate() {
+                prop_assert_eq!(&entry.key, key);
+                prop_assert_eq!(&entry.value, if *quote { any } else { plain });
+                prop_assert_eq!(entry.line, i + 1);
+            }
+        }
     }
 }

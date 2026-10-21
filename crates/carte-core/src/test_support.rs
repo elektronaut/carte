@@ -153,3 +153,14 @@ pub fn world() -> World {
         kube_projects: Vec::new(),
     }
 }
+
+/// Whether `s` follows the `slugify` grammar: `^[a-z0-9]+(-[a-z0-9]+)*$`, or empty.
+pub fn is_slug(s: &str) -> bool {
+    s.is_empty()
+        || s.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+}

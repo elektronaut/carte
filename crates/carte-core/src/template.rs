@@ -372,6 +372,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::model::{AppSettings, Scheme};
+    use proptest::prelude::*;
 
     pub(crate) struct Urls {
         pub stack: &'static str,
@@ -752,5 +753,67 @@ pub(crate) mod tests {
         assert!(Template::parse("{{port | shout}}").is_err());
         assert!(Template::parse("{{app.name}}").unwrap().has_expressions());
         assert!(!Template::parse("plain").unwrap().has_expressions());
+    }
+
+    fn template_source() -> impl Strategy<Value = String> {
+        let piece = prop_oneof![
+            Just("{{".to_string()),
+            Just("}}".to_string()),
+            Just("|".to_string()),
+            Just("\"".to_string()),
+            Just(":".to_string()),
+            proptest::sample::select(vec![
+                "app.name",
+                "port",
+                "stack.id",
+                "url",
+                "public_host",
+                "nova-billing",
+                "upper",
+                "snake",
+                "slug",
+                "shout",
+                " ",
+            ])
+            .prop_map(str::to_string),
+            "\\PC{0,4}",
+        ];
+        proptest::collection::vec(piece, 0..12).prop_map(|pieces| pieces.concat())
+    }
+
+    proptest! {
+        #[test]
+        fn templates_parse_and_render_without_panicking(source in template_source()) {
+            match Template::parse(&source) {
+                Ok(template) => {
+                    prop_assert_eq!(template.source(), source.as_str());
+                    if let Err(err) = with_ctx(|ctx| template.render(ctx)) {
+                        prop_assert!(source.is_char_boundary(err.position));
+                    }
+                }
+                Err(err) => {
+                    prop_assert!(source.is_char_boundary(err.position), "{err:?}");
+                    prop_assert!(err.column() <= source.chars().count() + 1);
+                }
+            }
+        }
+
+        #[test]
+        fn text_without_braces_renders_to_itself(source in "\\PC{0,40}") {
+            prop_assume!(!source.contains("{{"));
+            prop_assert_eq!(ok(&source), source);
+        }
+
+        #[test]
+        fn filters_keep_to_their_alphabets(input in "\\PC{0,40}") {
+            let upper = Filter::Upper.apply(&input);
+            prop_assert!(
+                upper.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+            );
+            prop_assert_eq!(upper.chars().count(), input.chars().count());
+            prop_assert_eq!(Filter::Snake.apply(&input), upper.to_lowercase());
+            let slug = Filter::Slug.apply(&input);
+            prop_assert!(crate::test_support::is_slug(&slug), "{slug:?}");
+        }
     }
 }

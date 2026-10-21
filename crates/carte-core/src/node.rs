@@ -139,6 +139,8 @@ fn first_command_flags(script: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -233,5 +235,27 @@ mod tests {
         assert_eq!(dev_command(tmp.path()).as_deref(), Some("npm run dev"));
         package(tmp.path(), r#"{"scripts": {"build": "vite build"}}"#);
         assert_eq!(dev_command(tmp.path()), None);
+    }
+
+    proptest! {
+        #[test]
+        fn no_flags_when_the_first_command_passes_a_port(
+            words in proptest::collection::vec(
+                proptest::sample::select(vec![
+                    "vite", "next", "dev", "serve", "astro", "webpack-dev-server", "NODE_ENV=1",
+                    "cross-env", "npx", "--host", "--strictPort", "3000",
+                ]),
+                0..6,
+            ),
+            port in proptest::sample::select(vec!["--port", "-p", "--port=3000"]),
+            at in any::<proptest::sample::Index>(),
+            rest in "|( && | & | ; | \\| |\n)[a-z -]{0,12}",
+        ) {
+            let mut words = words;
+            words.insert(at.index(words.len() + 1), port);
+            let script = format!("{}{rest}", words.join(" "));
+            prop_assert_eq!(dev_server_flags(&script), "", "{}", script);
+            prop_assert_eq!(missing_dev_server_flags(&script), None, "{}", script);
+        }
     }
 }
