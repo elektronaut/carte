@@ -240,6 +240,9 @@ impl Facts {
             Err(CreateReason::Missing) => CaState::Missing,
             Err(CreateReason::Invalid(why)) => CaState::Replace(why),
             Err(CreateReason::Expiring) => CaState::Replace("it is about to expire".into()),
+            Err(CreateReason::NotTlsOnly) => {
+                CaState::Replace("it can sign more than HTTPS certificates".into())
+            }
             Err(CreateReason::TldsChanged { previous }) => {
                 CaState::Replace(format!("it was made for .{}", previous.join(", .")))
             }

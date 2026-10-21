@@ -44,7 +44,12 @@ pub enum CreateReason {
     Missing,
     Invalid(String),
     Expiring,
-    TldsChanged { previous: Vec<String> },
+    TldsChanged {
+        previous: Vec<String>,
+    },
+    /// It isn't limited to server authentication, as CAs made before carte trusted them
+    /// for TLS only. Only setup replaces such a CA.
+    NotTlsOnly,
 }
 
 pub(crate) struct IssuedLeaf {
@@ -196,6 +201,9 @@ impl CertificateAuthority {
         let covers_all = tlds.iter().all(|tld| previous.contains(tld));
         if !covers_all || (exact && !extra.is_empty()) {
             return Err(CreateReason::TldsChanged { previous });
+        }
+        if exact && !tls_only(&x509) {
+            return Err(CreateReason::NotTlsOnly);
         }
         let origin = if extra.is_empty() {
             CaOrigin::Loaded
@@ -374,6 +382,21 @@ fn current_hash(state_dir: &Path) -> Option<String> {
     let pem = fs::read(CertificateAuthority::cert_path_in(state_dir)).ok()?;
     let der = CertificateDer::from_pem_slice(&pem).ok()?;
     Some(sha256_hex(&der))
+}
+
+/// Whether the certificate's extended key usage is server authentication alone.
+fn tls_only(x509: &X509Certificate<'_>) -> bool {
+    x509.extended_key_usage().ok().flatten().is_some_and(|ext| {
+        let eku = &ext.value;
+        eku.server_auth
+            && !eku.any
+            && !eku.client_auth
+            && !eku.code_signing
+            && !eku.email_protection
+            && !eku.time_stamping
+            && !eku.ocsp_signing
+            && eku.other.is_empty()
+    })
 }
 
 fn permitted_dns_names(x509: &X509Certificate<'_>) -> Vec<String> {
@@ -573,6 +596,42 @@ mod tests {
             let hash = sha256_hex(loaded.unwrap().cert_der());
             assert_eq!(record, format!("created {hash}\n"), "{}", dir.display());
         }
+    }
+
+    /// A CA as carte made them before it limited them to server authentication.
+    fn write_ca_without_eku(dir: &Path) {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = CertificateParams::default();
+        params.distinguished_name = DistinguishedName::new();
+        params.distinguished_name.push(DnType::CommonName, "x");
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.name_constraints = Some(NameConstraints {
+            permitted_subtrees: vec![GeneralSubtree::DnsName("localhost".into())],
+            excluded_subtrees: Vec::new(),
+        });
+        let now = OffsetDateTime::now_utc();
+        params.not_before = now - Duration::days(1);
+        params.not_after = now + Duration::days(3650);
+        let cert = params.self_signed(&key).unwrap();
+        fs::write(dir.join("ca.pem"), cert.pem()).unwrap();
+        fs::write(dir.join("ca-key.pem"), key.serialize_pem()).unwrap();
+    }
+
+    #[test]
+    fn only_setup_replaces_a_ca_not_limited_to_tls() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_ca_without_eku(tmp.path());
+        let kept = CertificateAuthority::load_or_create(tmp.path(), "x", &["localhost"]).unwrap();
+        assert_eq!(kept.origin(), &CaOrigin::Loaded);
+        assert_eq!(
+            CertificateAuthority::load_existing(tmp.path(), &["localhost"]).unwrap_err(),
+            CreateReason::NotTlsOnly
+        );
+        let ca =
+            CertificateAuthority::load_exact_or_create(tmp.path(), "x", &["localhost"]).unwrap();
+        assert_eq!(ca.origin(), &CaOrigin::Created(CreateReason::NotTlsOnly));
+        assert!(CertificateAuthority::load_existing(tmp.path(), &["localhost"]).is_ok());
     }
 
     #[test]
