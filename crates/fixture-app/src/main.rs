@@ -15,6 +15,7 @@
 //! | `FIXTURE_GROUP_CHILD_PIDFILE` | Spawn a child in a process group of its own, write its pid here |
 //! | `FIXTURE_DAEMON_PIDFILE` | Spawn a self-daemonising grandchild (double fork + setsid), write its pid here |
 //! | `FIXTURE_ECHO_STDIN` | `1` echoes each stdin line to stdout as `echo: <line>` |
+//! | `FIXTURE_TAKE_TERMINAL` | `1` moves to a process group of its own, makes it the terminal's foreground group and exits |
 //! | `FIXTURE_LIFELINE_PID` | Exit when this process exits; passed on to spawned children |
 //! | `FIXTURE_GUARD_PID` | With `FIXTURE_LIFELINE_PID`, only watch: SIGKILL this pid when the lifeline exits, and exit once either is gone |
 //!
@@ -46,6 +47,10 @@ fn main() {
             }
             process::exit(0);
         });
+    }
+
+    if env::var("FIXTURE_TAKE_TERMINAL").as_deref() == Ok("1") {
+        take_terminal();
     }
 
     if env::var_os("FIXTURE_SLEEPER").is_some() {
@@ -135,6 +140,15 @@ fn guard(lifeline: libc::pid_t, guarded: libc::pid_t) -> ! {
             break;
         }
         thread::sleep(LIFELINE_POLL);
+    }
+    process::exit(0);
+}
+
+fn take_terminal() -> ! {
+    unsafe {
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        libc::setpgid(0, 0);
+        libc::tcsetpgrp(0, libc::getpid());
     }
     process::exit(0);
 }
