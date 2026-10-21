@@ -184,7 +184,9 @@ pub(super) struct Proc {
     /// The debugger prompt it waits at.
     pub paused: Option<String>,
     /// Stopped by a signal, such as SIGSTOP, and not continued yet.
-    pub suspended: bool,
+    suspended: bool,
+    /// Another process in its group was stopped by a signal when last sampled.
+    member_stopped: bool,
     /// Whether it waits at a prompt or is suspended, for the latest run's
     /// readiness check.
     held: watch::Sender<bool>,
@@ -198,17 +200,22 @@ impl Proc {
         )
     }
 
+    /// Stopped by a signal, or with another process in its group stopped.
+    pub fn is_suspended(&self) -> bool {
+        self.suspended || self.member_stopped
+    }
+
     /// Running and ready, and not being stopped or suspended: requests can go to it.
     fn serving(&self) -> bool {
         matches!(self.state, ProcessState::Starting | ProcessState::Running)
             && self.ready
-            && !self.suspended
+            && !self.is_suspended()
     }
 
     /// Tells the readiness check whether it waits at a prompt or is suspended.
     fn update_held(&self) {
         self.held
-            .send_replace(self.paused.is_some() || self.suspended);
+            .send_replace(self.paused.is_some() || self.is_suspended());
     }
 
     /// Holds back what starts after it: still queued, or running and not yet done.
@@ -271,7 +278,7 @@ impl Instance {
             && (self.route_port.is_some()
                 || self
                     .http()
-                    .is_none_or(|p| p.is_running() && p.ready && !p.suspended))
+                    .is_none_or(|p| p.is_running() && p.ready && !p.is_suspended()))
     }
 
     /// Ready, but its HTTP process or a process serving paths, other than one
@@ -1072,6 +1079,7 @@ impl Actor {
                 terminal: None,
                 paused: None,
                 suspended: false,
+                member_stopped: false,
                 held: watch::channel(false).0,
             });
         }
@@ -1363,6 +1371,7 @@ impl Actor {
         proc.stalled = false;
         proc.paused = None;
         proc.suspended = false;
+        proc.member_stopped = false;
         let (held, paused) = watch::channel(false);
         proc.held = held;
         let label = LogLabel {
@@ -1530,12 +1539,13 @@ impl Actor {
                 self.active(key);
             }
             runner::Event::Suspended(suspended) => {
-                if proc.suspended == suspended {
+                let was_suspended = proc.is_suspended();
+                proc.suspended = suspended;
+                if proc.is_suspended() == was_suspended {
                     return;
                 }
-                proc.suspended = suspended;
                 proc.update_held();
-                if !suspended {
+                if was_suspended {
                     inst.release_waiters();
                 }
                 self.active(key);
@@ -1547,7 +1557,9 @@ impl Actor {
                 };
                 proc.stop = None;
                 proc.terminal = None;
-                let was_paused = proc.paused.take().is_some() | std::mem::take(&mut proc.suspended);
+                let was_paused = proc.paused.take().is_some() | proc.is_suspended();
+                proc.suspended = false;
+                proc.member_stopped = false;
                 proc.held.send_replace(false);
                 let name = proc.spec.name.clone();
                 proc.log
@@ -1571,7 +1583,9 @@ impl Actor {
                 }
                 proc.stop = None;
                 proc.terminal = None;
-                let was_paused = proc.paused.take().is_some() | std::mem::take(&mut proc.suspended);
+                let was_paused = proc.paused.take().is_some() | proc.is_suspended();
+                proc.suspended = false;
+                proc.member_stopped = false;
                 proc.held.send_replace(false);
                 let manual = proc.manual_stop || inst.state == Lifecycle::Stopping;
                 proc.state = if manual {
@@ -2240,7 +2254,7 @@ impl Actor {
                     paused: inst
                         .procs
                         .iter()
-                        .filter(|p| p.paused.is_some() || p.suspended)
+                        .filter(|p| p.paused.is_some() || p.is_suspended())
                         .count() as u32,
                     last_activity: inst.last_activity,
                     memory_bytes: inst.procs.iter().map(|p| p.memory_bytes).sum(),
@@ -2651,6 +2665,7 @@ impl Actor {
     }
 
     fn sample_metrics(&mut self, now: Instant) {
+        let mut continued = Vec::new();
         for inst in self.instances.values_mut() {
             for proc in &mut inst.procs {
                 let Some(pid) = proc.pid.filter(|_| proc.is_running()) else {
@@ -2667,6 +2682,20 @@ impl Actor {
                     proc.cpu_percent = crate::metrics::cpu_percent(cpu, usage.cpu_time, now - at);
                 }
                 proc.cpu_sample = Some((now, usage.cpu_time));
+                let was_suspended = proc.is_suspended();
+                proc.member_stopped = usage.member_stopped;
+                if proc.is_suspended() != was_suspended {
+                    proc.update_held();
+                    inst.last_activity = Instant::now();
+                    if was_suspended {
+                        continued.push(inst.key.clone());
+                    }
+                }
+            }
+        }
+        for key in continued {
+            if let Some(inst) = self.instances.get_mut(&key) {
+                inst.release_waiters();
             }
         }
         self.dirty = true;

@@ -4937,6 +4937,46 @@ async fn a_paused_worker_keeps_the_app_from_idling_out() {
 }
 
 #[tokio::test]
+async fn a_program_that_suspends_itself_under_a_wrapper_shows_as_suspended() {
+    let setup = Setup::new();
+    let dir = setup.app(
+        "acme-web",
+        "web: exec {fixture}\nworker: (while [ ! -e go ]; do sleep 0.05; done; kill -CONT $(cat inner.pid)) & sh -c 'echo $$ > inner.pid; kill -TSTP $$; while :; do sleep 1; done'\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the worker to show as suspended", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Suspended
+    })
+    .await;
+    let inst = status(&handle.snapshot(), "acme-web", "main").clone();
+    assert_eq!(
+        inst.state,
+        InstanceState::Ready,
+        "a suspended worker leaves it ready"
+    );
+    assert_eq!(
+        inst.holds,
+        [carte_api::Hold::Suspended {
+            process: "worker".into()
+        }]
+    );
+
+    std::fs::write(dir.join("go"), "").unwrap();
+    wait_for(&handle, "the worker to run on once continued", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    assert!(
+        status(&handle.snapshot(), "acme-web", "main")
+            .holds
+            .is_empty()
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_web_process_suspended_while_booting_shows_as_suspended_and_doesnt_run_out_of_time() {
     let setup = Setup::new();
     let dir = setup.app(
