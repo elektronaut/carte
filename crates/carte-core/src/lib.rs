@@ -3,6 +3,7 @@
 //! short-lived commands such as git and env providers.
 
 pub mod address;
+pub mod ansi;
 pub mod config;
 pub mod config_edit;
 pub mod debugger;
