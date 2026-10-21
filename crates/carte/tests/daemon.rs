@@ -961,22 +961,123 @@ fn config_changes_are_seen_through_a_symlinked_config_dir() {
 impl Daemon {
     /// A request as the tunnel would send it to the share listener.
     fn public_request(&self, host: &str, auth: Option<&str>) -> String {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.share_port.unwrap())).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
-            .unwrap();
         let auth = auth
             .map(|a| format!("Authorization: Basic {a}\r\n"))
             .unwrap_or_default();
-        write!(
-            stream,
-            "GET / HTTP/1.1\r\nHost: {host}\r\n{auth}Connection: close\r\n\r\n"
-        )
-        .unwrap();
+        self.public_raw(&format!("GET / HTTP/1.1\r\nHost: {host}\r\n{auth}"))
+    }
+
+    /// Sends `head`, a request line and headers each ending in CRLF, to the share
+    /// listener.
+    fn public_raw(&self, head: &str) -> String {
+        self.raw(self.share_port.unwrap(), head)
+    }
+
+    fn raw(&self, port: u16, head: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        write!(stream, "{head}Connection: close\r\n\r\n").unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
         response
     }
+}
+
+/// The lines a fixture app's `/headers` answered with, as lowercased names and values.
+fn echoed_headers(response: &str) -> Vec<(String, String)> {
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    let (_, body) = response.split_once("\r\n\r\n").unwrap();
+    body.lines()
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+        .collect()
+}
+
+fn echoed<'a>(headers: &'a [(String, String)], name: &str) -> Vec<&'a str> {
+    headers
+        .iter()
+        .filter(|(n, _)| n == name)
+        .map(|(_, value)| value.as_str())
+        .collect()
+}
+
+/// Whether any address in an `X-Forwarded-For` chain is local, or the chain names no
+/// address at all, as a framework that trusts loopback proxies would read it.
+fn looks_local(chain: &[&str]) -> bool {
+    let addresses: Vec<std::net::IpAddr> = chain
+        .iter()
+        .flat_map(|value| value.split(','))
+        .filter_map(|address| address.trim().parse().ok())
+        .collect();
+    addresses.is_empty() || addresses.iter().any(|ip| ip.to_canonical().is_loopback())
+}
+
+#[test]
+fn shared_requests_carry_the_visitor_address_and_not_the_visitors_forwarding_headers() {
+    let daemon = Daemon::start_sharing();
+    daemon.run(&["share", "web"]);
+    let host = "web--acme.share.example";
+
+    let plain =
+        echoed_headers(&daemon.public_raw(&format!("GET /headers HTTP/1.1\r\nHost: {host}\r\n")));
+    assert!(
+        !looks_local(&echoed(&plain, "x-forwarded-for")),
+        "{plain:?}"
+    );
+
+    let sent = format!(
+        "GET /headers HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-For: 127.0.0.1, localhost\r\n\
+         Forwarded: for=127.0.0.1;proto=http;host=nova.example\r\nX-Forwarded-Port: 80\r\n\
+         X-Forwarded-Prefix: /nova\r\nX-Forwarded-Scheme: http\r\nX-Forwarded-Ssl: off\r\n\
+         X-Real-IP: 127.0.0.1\r\nClient-IP: 127.0.0.1\r\nX-Forwarded-Proto: http\r\n\
+         X-Forwarded-Host: nova.example\r\n"
+    );
+    let headers = echoed_headers(&daemon.public_raw(&sent));
+    for name in [
+        "forwarded",
+        "x-forwarded-port",
+        "x-forwarded-prefix",
+        "x-forwarded-scheme",
+        "x-forwarded-ssl",
+        "x-real-ip",
+        "client-ip",
+    ] {
+        assert_eq!(echoed(&headers, name), [] as [&str; 0], "{name}");
+    }
+    assert!(
+        !looks_local(&echoed(&headers, "x-forwarded-for")),
+        "{headers:?}"
+    );
+    assert_eq!(echoed(&headers, "x-forwarded-proto"), ["https"]);
+    assert_eq!(echoed(&headers, "x-forwarded-host"), [host]);
+
+    let tunnelled = echoed_headers(&daemon.public_raw(&format!(
+        "GET /headers HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-For: 127.0.0.1, 203.0.113.9\r\n"
+    )));
+    assert_eq!(echoed(&tunnelled, "x-forwarded-for"), ["203.0.113.9"]);
+
+    let absolute = echoed_headers(&daemon.public_raw(&format!(
+        "GET http://{host}/headers HTTP/1.1\r\nHost: worker--acme.share.example\r\n"
+    )));
+    assert_eq!(echoed(&absolute, "host"), [host]);
+}
+
+#[test]
+fn local_requests_come_from_loopback_under_the_name_they_were_routed_by() {
+    let daemon = Daemon::start();
+    let headers = echoed_headers(&daemon.request("web.acme.test", "/headers"));
+    assert_eq!(echoed(&headers, "peer"), ["127.0.0.1"]);
+    assert_eq!(echoed(&headers, "x-forwarded-for"), ["127.0.0.1"]);
+    assert_eq!(echoed(&headers, "x-forwarded-proto"), ["http"]);
+    assert_eq!(echoed(&headers, "host"), ["web.acme.test"]);
+
+    let absolute = echoed_headers(&daemon.raw(
+        daemon.http_port,
+        "GET http://web.acme.test/headers HTTP/1.1\r\nHost: worker.acme.test\r\n",
+    ));
+    assert_eq!(echoed(&absolute, "host"), ["web.acme.test"]);
 }
 
 #[test]
@@ -1084,6 +1185,10 @@ fn password_protected_shares_ask_for_credentials() {
         .encode(format!("{}:{}", credentials.user, credentials.password));
     let allowed = daemon.public_request("web--acme.share.example", Some(&right));
     assert!(allowed.starts_with("HTTP/1.1 200"), "{allowed}");
+    let headers = echoed_headers(&daemon.public_raw(&format!(
+        "GET /headers HTTP/1.1\r\nHost: web--acme.share.example\r\nAuthorization: Basic {right}\r\n"
+    )));
+    assert_eq!(echoed(&headers, "authorization"), [] as [&str; 0]);
     let requests = &snapshot(&daemon).shares[0].requests;
     assert_eq!(requests.iter().filter(|r| r.refused).count(), 2);
 }

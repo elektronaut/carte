@@ -17,6 +17,8 @@
 //! | `FIXTURE_LIFELINE_PID` | Exit when this process exits; passed on to spawned children |
 //! | `FIXTURE_GUARD_PID` | With `FIXTURE_LIFELINE_PID`, only watch: SIGKILL this pid when the lifeline exits, and exit once either is gone |
 //!
+//! `GET /headers` answers with the peer address and the request headers as received.
+//!
 //! Every response names the app in an `X-Fixture-Name` header.
 //!
 //! On start it prints `tty: true` or `tty: false` for stdout, then `ready` once listening.
@@ -187,11 +189,14 @@ fn serve(stream: TcpStream, name: &str) -> io::Result<()> {
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
     let mut content_length = 0usize;
+    let mut headers = format!("peer: {}\n", stream.peer_addr()?.ip());
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 || header.trim().is_empty() {
             break;
         }
+        headers.push_str(header.trim_end());
+        headers.push('\n');
         if let Some((k, v)) = header.split_once(':')
             && k.eq_ignore_ascii_case("content-length")
         {
@@ -205,6 +210,7 @@ fn serve(stream: TcpStream, name: &str) -> io::Result<()> {
     let (status, content_type, body) = match path {
         "/up" => ("200 OK", "text/plain", "ok".to_owned()),
         "/" => ("200 OK", "application/json", index_json(name)),
+        "/headers" => ("200 OK", "text/plain", headers),
         _ => ("404 Not Found", "text/plain", "not found".to_owned()),
     };
     let mut stream = stream;

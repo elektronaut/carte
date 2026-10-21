@@ -130,9 +130,13 @@ impl Router for SupervisorRouter {
         Box::pin(async move {
             let world = self.supervisor.world();
             let mut referrer = None;
+            let mut checked_authorization = false;
             let key = if request.kind == ListenerKind::Share {
                 match self.shared_key(&world, request) {
-                    Ok(key) => key,
+                    Ok((key, protected)) => {
+                        checked_authorization = protected;
+                        key
+                    }
                     Err(page) => return Route::Error(page),
                 }
             } else {
@@ -172,6 +176,7 @@ impl Router for SupervisorRouter {
                 Ok(Ok(upstream)) => Route::Upstream {
                     port: upstream.port,
                     guard: Box::new(Guard::new(self.supervisor.clone(), key)),
+                    checked_authorization,
                 },
                 Ok(Err(failure)) => {
                     let status = if failure.transient {
@@ -248,12 +253,13 @@ fn still_starting(snapshot: &Snapshot, key: &InstanceKey, path: &str) -> ErrorPa
 
 impl SupervisorRouter {
     /// The instance a request from the tunnel is for, once it is known to be shared
-    /// and its credentials check out. Every request that names a share is logged.
+    /// and its credentials check out, and whether the share has credentials. Every
+    /// request that names a share is logged.
     fn shared_key(
         &self,
         world: &World,
         request: RouteRequest<'_>,
-    ) -> Result<InstanceKey, ErrorPage> {
+    ) -> Result<(InstanceKey, bool), ErrorPage> {
         let not_shared = || {
             ErrorPage::new(
                 StatusCode::NOT_FOUND,
@@ -291,7 +297,7 @@ impl SupervisorRouter {
             )
             .with_basic_challenge("carte"));
         }
-        Ok(key)
+        Ok((key, credentials.is_some()))
     }
 }
 
