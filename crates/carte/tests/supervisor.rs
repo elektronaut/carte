@@ -2941,6 +2941,192 @@ async fn stopping_a_crashed_process_cancels_its_restart() {
     handle.shutdown().await;
 }
 
+/// An env file that holds env builds while shut: a FIFO in its place, which a
+/// build opens and reads until the test lets go of it.
+struct EnvGate {
+    path: PathBuf,
+    held: Option<std::fs::File>,
+}
+
+impl EnvGate {
+    const FILE: &str = ".env.gate";
+
+    fn new(checkout: &Path) -> Self {
+        let path = checkout.join(Self::FILE);
+        std::fs::write(&path, "").unwrap();
+        EnvGate { path, held: None }
+    }
+
+    fn shut(&self) {
+        let fifo = self.path.with_extension("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        std::fs::rename(&fifo, &self.path).unwrap();
+    }
+
+    /// Waits for a build to reach the gate, and holds it there.
+    async fn wait(&mut self) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match std::fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&self.path)
+                {
+                    Ok(file) => return file,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            }
+        })
+        .await;
+        self.held = Some(result.expect("timed out waiting for an env build"));
+    }
+
+    /// Lets the held builds and every later one through.
+    fn open(&mut self) {
+        let file = self.path.with_extension("file");
+        std::fs::write(&file, "").unwrap();
+        std::fs::rename(&file, &self.path).unwrap();
+        self.held = None;
+    }
+}
+
+fn gated_worker(setup: &Setup, pids: &Path) -> EnvGate {
+    let dir = setup.app(
+        "acme-web",
+        &format!(
+            "web: exec {{fixture}}\nworker: echo $$ >> {}; exec sleep 60\n",
+            pids.display()
+        ),
+    );
+    setup.project(&format!(
+        "[apps.acme-web]\nenv_files = [\"{}\"]\n",
+        EnvGate::FILE
+    ));
+    EnvGate::new(&dir)
+}
+
+fn pids_in(path: &Path) -> Vec<u32> {
+    lines(path).iter().map(|l| l.parse().unwrap()).collect()
+}
+
+#[tokio::test]
+async fn restarting_a_process_twice_while_its_env_is_built_starts_one_copy() {
+    let setup = Setup::new();
+    let pids = setup.root.join("pids.log");
+    let mut gate = gated_worker(&setup, &pids);
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    wait_for(&handle, "the worker to run", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    gate.shut();
+    handle
+        .control(control("web/worker", Action::Restart))
+        .await
+        .unwrap();
+    gate.wait().await;
+    handle
+        .control(control("web/worker", Action::Restart))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    gate.open();
+    wait_for(&handle, "the worker to run again", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = pids_in(&pids);
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(
+        process(&handle.snapshot(), "acme-web", "worker").pid,
+        Some(started[1])
+    );
+    handle.shutdown().await;
+    for pid in started {
+        assert!(!alive(pid), "{pid} survived shutdown");
+    }
+}
+
+#[tokio::test]
+async fn stopping_a_process_while_its_restart_builds_its_env_keeps_it_down() {
+    let setup = Setup::new();
+    let pids = setup.root.join("pids.log");
+    let mut gate = gated_worker(&setup, &pids);
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    wait_for(&handle, "the worker to run", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    gate.shut();
+    let pid = process(&handle.snapshot(), "acme-web", "worker")
+        .pid
+        .unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    gate.wait().await;
+    handle
+        .control(control("web/worker", Action::Down))
+        .await
+        .unwrap();
+    gate.open();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(pids_in(&pids), [pid]);
+    let worker = process(&handle.snapshot(), "acme-web", "worker").clone();
+    assert!(worker.pid.is_none(), "{worker:?}");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn stopping_a_queued_process_while_starting_keeps_it_from_launching() {
+    let setup = Setup::new();
+    let pids = setup.root.join("pids.log");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: exec {{fixture}}\nworker: echo $$ >> {}; exec sleep 60\n",
+            pids.display()
+        ),
+    );
+    setup.project(
+        r#"
+[apps.acme-web.processes.migrate]
+command = 'sleep 1'
+kind = "task"
+"#,
+    );
+    let handle = setup.start();
+
+    handle.control(control("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the task to run", |s| {
+        process(s, "acme-web", "migrate").state == ProcessState::Running
+    })
+    .await;
+    handle
+        .control(control("web/worker", Action::Down))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(pids_in(&pids).is_empty(), "{:?}", pids_in(&pids));
+    let worker = process(&handle.snapshot(), "acme-web", "worker").clone();
+    assert!(worker.pid.is_none(), "{worker:?}");
+    handle.shutdown().await;
+}
+
 #[tokio::test]
 async fn status_counts_down_to_a_crashed_process_restarting() {
     let setup = Setup::new();

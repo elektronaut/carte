@@ -39,6 +39,8 @@ pub(crate) enum Internal {
     EnvReady {
         key: InstanceKey,
         boot: u64,
+        /// The process build it answers, for one started on its own.
+        build: Option<u64>,
         result: Result<Vec<(usize, SpawnSpec)>, String>,
         provider: Option<(PathBuf, Env)>,
     },
@@ -158,6 +160,8 @@ pub(super) struct Proc {
     pub queued: bool,
     /// What a queued process runs, once its environment is built.
     spawn: Option<SpawnSpec>,
+    /// The pending environment build that starts it on its own.
+    building: Option<u64>,
     /// When it crashed within the last minute.
     crashes: Vec<Instant>,
     /// It crashed and waits to be restarted at this time.
@@ -655,13 +659,14 @@ impl Actor {
             Internal::EnvReady {
                 key,
                 boot,
+                build,
                 result,
                 provider,
             } => {
                 if let Some((path, env)) = provider {
                     self.providers.insert(path, env);
                 }
-                self.env_ready(&key, boot, result);
+                self.env_ready(&key, boot, build, result);
             }
             Internal::Proc {
                 key,
@@ -897,6 +902,7 @@ impl Actor {
                 ready: false,
                 queued: false,
                 spawn: None,
+                building: None,
                 crashes: Vec::new(),
                 restart_at: None,
                 gave_up: false,
@@ -984,7 +990,7 @@ impl Actor {
         }
         inst.state = Lifecycle::Starting;
         self.started_event(key, &why);
-        self.build_env(key, boot, to_run);
+        self.build_env(key, boot, to_run, None);
 
         for dep_key in deps {
             if !self
@@ -1017,8 +1023,9 @@ impl Actor {
         self.event(EventKind::Started, message, subjects);
     }
 
-    /// Starts one process of a running instance.
+    /// Starts one process of a running instance, unless it runs or is being started.
     fn start_process(&mut self, key: &InstanceKey, name: &str) -> Result<(), String> {
+        let build = self.next_id();
         let inst = self
             .instances
             .get_mut(key)
@@ -1035,16 +1042,17 @@ impl Actor {
             proc.crashes.clear();
             proc.stalls = 0;
         }
-        if inst.procs[idx].is_running() {
+        if proc.is_running() || proc.building.is_some() {
             return Ok(());
         }
+        proc.building = Some(build);
         inst.forced.insert(name.to_string());
         let boot = inst.boot;
-        self.build_env(key, boot, vec![idx]);
+        self.build_env(key, boot, vec![idx], Some(build));
         Ok(())
     }
 
-    fn build_env(&mut self, key: &InstanceKey, boot: u64, indices: Vec<usize>) {
+    fn build_env(&mut self, key: &InstanceKey, boot: u64, indices: Vec<usize>, build: Option<u64>) {
         let Ok((state, app)) = self.lookup(key) else {
             return;
         };
@@ -1094,16 +1102,20 @@ impl Actor {
             let _ = tx.send(Msg::Internal(Internal::EnvReady {
                 key,
                 boot,
+                build,
                 result,
                 provider,
             }));
         });
     }
 
+    /// Hands a built environment to the queued processes, or starts the process
+    /// built on its own unless it was stopped, started or built again meanwhile.
     fn env_ready(
         &mut self,
         key: &InstanceKey,
         boot: u64,
+        build: Option<u64>,
         result: Result<Vec<(usize, SpawnSpec)>, String>,
     ) {
         let Some(inst) = self.instances.get(key) else {
@@ -1123,7 +1135,11 @@ impl Actor {
             let proc = &mut self.instances.get_mut(key).expect("instance").procs[idx];
             if proc.queued {
                 proc.spawn = Some(spec);
-            } else {
+            } else if build.is_some_and(|build| proc.building == Some(build))
+                && !proc.is_running()
+                && !proc.off
+            {
+                proc.building = None;
                 self.spawn_proc(key, idx, spec);
             }
         }
@@ -1765,8 +1781,12 @@ impl Actor {
             return Ok(());
         }
         proc.restart_at = None;
-        if !proc.restart {
+        proc.building = None;
+        let restarting = proc.restart;
+        if !restarting {
             proc.off = true;
+            proc.queued = false;
+            proc.spawn = None;
         }
         let mut event = None;
         if inst.state == Lifecycle::Starting
@@ -1792,6 +1812,9 @@ impl Actor {
         if let Some((kind, why)) = event {
             self.events
                 .push(kind, why, vec![events::process(key, name)]);
+        }
+        if !restarting {
+            self.advance(key);
         }
         self.dirty = true;
         Ok(())
