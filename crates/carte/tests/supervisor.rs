@@ -1102,6 +1102,49 @@ async fn missing_infrastructure_when_a_worker_restarts_leaves_the_rest_running()
 }
 
 #[tokio::test]
+async fn missing_infrastructure_when_a_task_restarts_during_the_start_fails_the_start() {
+    let setup = Setup::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    setup.app("acme-web", "web: exec {fixture}\n");
+    setup.project(&format!(
+        "requires = [\"tcp://127.0.0.1:{port}\"]\n\n[apps.acme-web.processes.migrate]\ncommand = 'sleep 30'\nkind = \"task\"\n"
+    ));
+    let handle = setup.start();
+
+    handle.control(control("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the task to run", |s| {
+        process(s, "acme-web", "migrate").state == ProcessState::Running
+    })
+    .await;
+    drop(listener);
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the listener stayed open");
+    handle
+        .control(control("web/migrate", Action::Restart))
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        handle.ensure_ready(key("acme-web", Stack::Main)),
+    )
+    .await
+    .expect("the start ends");
+    let failure = result.unwrap_err();
+    assert!(failure.detail.contains("isn't reachable"), "{failure:?}");
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Crashed
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn running_processes_report_memory() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);
