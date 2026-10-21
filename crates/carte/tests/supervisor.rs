@@ -2836,6 +2836,7 @@ async fn give_up_on_web(handle: &Handle) {
         .await
         .unwrap();
     let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    assert!(pid > 1);
     kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
     wait_for_events(handle, "carte to give up", |lines| {
         lines.iter().any(|l| {
@@ -2957,6 +2958,25 @@ async fn a_config_change_lets_the_next_request_start_an_instance_carte_gave_up_o
         .await
         .unwrap();
     assert!(!process(&handle.snapshot(), "acme-web", "web").gave_up);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_project_scheme_change_lets_the_next_request_start_an_instance_carte_gave_up_on() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    crashing_web(&setup, &marker);
+    setup.project("");
+    let handle = setup.start();
+
+    give_up_on_web(&handle).await;
+    std::fs::remove_file(&marker).unwrap();
+    setup.project("scheme = \"http\"\n");
+    handle.reload(discovery::load_world(&setup.paths.config_dir));
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
     handle.shutdown().await;
 }
 
