@@ -543,7 +543,6 @@ impl Actor {
                     self.requested(&key, referrer.as_ref());
                 }
             }
-            Msg::AwaitStart { key, reply } => self.await_start(&key, reply),
             Msg::Activity(key, boot, activity) => self.activity(&key, boot, activity),
             Msg::Hold { target, reply } => {
                 let _ = reply.send(self.hold(&target));
@@ -855,8 +854,8 @@ impl Actor {
         }
     }
 
-    /// Answers once the start a control began is ready, or with why it isn't ready,
-    /// without starting anything.
+    /// Answers once the start a control just began is ready, or with why it isn't
+    /// ready, without starting anything.
     fn await_start(
         &mut self,
         key: &InstanceKey,
@@ -983,6 +982,7 @@ impl Actor {
             Err(failure) => {
                 inst.state = Lifecycle::Crashed;
                 inst.last_error = Some(failure.detail.clone());
+                inst.crashed = Some(failure.clone());
                 let message = failure.detail.clone();
                 self.event(EventKind::Crashed, message, vec![events::instance(key)]);
                 return Err(failure);
@@ -2648,7 +2648,7 @@ impl Actor {
     fn control(
         &mut self,
         request: ControlRequest,
-    ) -> Result<(ControlResponse, Vec<InstanceKey>), String> {
+    ) -> Result<(ControlResponse, Vec<super::Started>), String> {
         let target = self.resolve(&request.target)?;
         let keys = self.target_keys(&target, request.action)?;
         let mut response = ControlResponse {
@@ -2681,7 +2681,18 @@ impl Actor {
             return Err(response.messages.join("\n"));
         }
         self.dirty = true;
-        Ok((response, applied))
+        let wait = request.wait && matches!(request.action, Action::Up | Action::Restart);
+        let started = applied
+            .into_iter()
+            .map(|key| {
+                let (reply, outcome) = oneshot::channel();
+                if wait {
+                    self.await_start(&key, reply);
+                }
+                (key, outcome)
+            })
+            .collect();
+        Ok((response, started))
     }
 
     fn apply(
