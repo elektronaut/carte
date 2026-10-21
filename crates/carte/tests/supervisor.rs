@@ -643,6 +643,109 @@ async fn shutting_down_during_a_restart_doesnt_start_it_again() {
     assert_eq!(started, ["api", "web"]);
 }
 
+/// An app whose worker takes a moment to stop, and a log of its web process's starts.
+fn slow_to_stop(setup: &Setup) -> PathBuf {
+    let starts = setup.root.join("starts.log");
+    let trapped = setup.root.join("trapped");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: echo web >> {starts}; exec {{fixture}}\nworker: trap 'sleep 0.5; exit 0' TERM; touch {trapped}; while :; do sleep 0.05; done\n",
+            starts = starts.display(),
+            trapped = trapped.display()
+        ),
+    );
+    setup.project("");
+    starts
+}
+
+async fn restart_then(handle: &Handle, setup: &Setup, stop: impl AsyncFnOnce(&Handle)) {
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    wait_for_file(&setup.root.join("trapped")).await;
+    handle
+        .control(control("web", Action::Restart))
+        .await
+        .unwrap();
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Stopping
+    );
+    stop(handle).await;
+    wait_for(handle, "the stop", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Stopped
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Stopped
+    );
+}
+
+#[tokio::test]
+async fn down_during_a_restart_cancels_it() {
+    let setup = Setup::new();
+    let starts = slow_to_stop(&setup);
+    let handle = setup.start_with(|options| options.grace = Duration::from_secs(5));
+
+    restart_then(&handle, &setup, async |handle| {
+        handle.control(control("web", Action::Down)).await.unwrap();
+    })
+    .await;
+    assert_eq!(lines(&starts), ["web"]);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_all_during_a_restart_cancels_it() {
+    let setup = Setup::new();
+    let starts = slow_to_stop(&setup);
+    let handle = setup.start_with(|options| options.grace = Duration::from_secs(5));
+
+    restart_then(&handle, &setup, async |handle| {
+        let response = handle.stop_all(false).await;
+        assert_eq!(response.affected, ["acme-web@main"]);
+    })
+    .await;
+    assert_eq!(lines(&starts), ["web"]);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_restart_while_starting_answers_the_waiting_request_once_started_again() {
+    let setup = Setup::new();
+    let starts = setup.root.join("starts.log");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: echo web >> {}; FIXTURE_BOOT_DELAY_MS=1000 exec {{fixture}}\n",
+            starts.display()
+        ),
+    );
+    setup.project("[apps.acme-web.processes.web]\nready = \"/up\"\n");
+    let handle = setup.start();
+
+    let waiter = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.ensure_ready(key("acme-web", Stack::Main)).await })
+    };
+    wait_for_file(&starts).await;
+    handle
+        .control(control("web", Action::Restart))
+        .await
+        .unwrap();
+    let upstream = waiter.await.unwrap().unwrap();
+    assert_eq!(lines(&starts), ["web", "web"]);
+    assert_eq!(
+        Some(upstream.port),
+        process(&handle.snapshot(), "acme-web", "web").port
+    );
+    handle.shutdown().await;
+}
+
 #[tokio::test]
 async fn disabled_processes_stay_down_until_started_by_hand() {
     let setup = Setup::new();
