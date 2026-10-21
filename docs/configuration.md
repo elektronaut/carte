@@ -1005,6 +1005,7 @@ Each process's environment is built in layers, later ones winning:
 | `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE` | System roots plus carte's CA |
 | `NODE_EXTRA_CA_CERTS` | carte's CA |
 | `DISABLE_SPRING` | `1` |
+| `CARTE_SHIM` | Names the process carte runs the command under; set by carte itself, not by the config. If carte crashes along with it, the next start stops the process groups whose processes still carry it |
 
 When a mise config file (`mise.toml`, `mise.local.toml`, `.tool-versions`
 and the like) or a version file (`.node-version`, `.nvmrc`,

@@ -77,6 +77,12 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
         install_handler(sig)?;
     }
 
+    let me = std::process::id();
+    if let Some(started) = crate::supervisor::groups::start_time(me) {
+        // SAFETY: the shim runs no other threads.
+        unsafe { std::env::set_var(crate::proctree::SHIM_MARKER, format!("{me}.{started}")) };
+    }
+
     let tty = unsafe { libc::isatty(0) } == 1;
     let (sh, arg0) = shell();
     let command =
