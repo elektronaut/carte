@@ -316,6 +316,40 @@ async fn idle_instances_stop() {
 }
 
 #[tokio::test]
+async fn an_instance_over_the_instance_target_isnt_evicted_while_it_starts() {
+    let setup = Setup::new();
+    std::fs::write(
+        setup.paths.machine_config(),
+        "[limits]\ninstance_target = 1\n",
+    )
+    .unwrap();
+    setup.app("acme-web", "web: exec {fixture}\n");
+    setup.app(
+        "acme-api",
+        "web: FIXTURE_BOOT_DELAY_MS=1000 exec {fixture}\n",
+    );
+    setup.project("[apps.acme-api.processes.web]\nready = \"/up\"\n");
+    let handle = setup.start();
+
+    handle
+        .control(control("web", Action::Pin { save: false }))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-api", Stack::Main))
+        .await
+        .unwrap();
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    let lines = event_lines(&events);
+    assert!(!lines.iter().any(|l| l.contains("evicted")), "{lines:#?}");
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn connections_keep_an_instance_alive() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);

@@ -9,7 +9,11 @@ use crate::model::{InstanceKey, MemoryTarget, Project, Stack, World};
 pub struct Usage {
     pub key: InstanceKey,
     pub pinned: bool,
+    /// Still starting, for a request or for what started it.
+    pub starting: bool,
     pub requests_in_flight: u32,
+    /// Requests waiting for it to start or for a process to restart.
+    pub waiting: u32,
     /// Open upgraded connections (WebSocket, SSE).
     pub connections: u32,
     /// Commands run with `carte exec` that are still running.
@@ -27,7 +31,9 @@ impl Usage {
     /// Busy instances are never stopped for idleness or evicted.
     pub fn is_busy(&self) -> bool {
         self.pinned
+            || self.starting
             || self.requests_in_flight > 0
+            || self.waiting > 0
             || self.connections > 0
             || self.execs > 0
             || self.paused > 0
@@ -210,7 +216,9 @@ mod tests {
         Usage {
             key: key(app),
             pinned: false,
+            starting: false,
             requests_in_flight: 0,
+            waiting: 0,
             connections: 0,
             execs: 0,
             held_by: vec![],
@@ -324,6 +332,20 @@ mod tests {
         let mut b = usage("nova-b", 400, 12000, now);
         b.held_by = vec![key("nova-a")];
         assert!(evictions(&[a, b], targets(), capacity()).is_empty());
+    }
+
+    #[test]
+    fn starting_instances_and_waiting_requests_are_never_evicted() {
+        let now = Instant::now();
+        let mut starting = usage("nova-a", 500, 500, now);
+        starting.starting = true;
+        let mut waited_on = usage("nova-b", 400, 500, now);
+        waited_on.waiting = 1;
+        let targets = Targets {
+            instances: Some(1),
+            ..targets()
+        };
+        assert!(evictions(&[starting, waited_on], targets, capacity()).is_empty());
     }
 
     #[test]

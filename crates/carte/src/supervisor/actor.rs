@@ -1953,7 +1953,9 @@ impl Actor {
                 usages.push(Usage {
                     key: key.clone(),
                     pinned,
+                    starting: inst.state == Lifecycle::Starting,
                     requests_in_flight: inst.in_flight,
+                    waiting: inst.waiters.len() as u32,
                     connections: inst.connections,
                     execs: inst.execs.len() as u32,
                     held_by: holders.get(key).cloned().unwrap_or_default(),
