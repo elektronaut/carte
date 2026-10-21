@@ -280,17 +280,23 @@ impl ProcessSpec {
     /// Whether a request for `path` goes to this process: a path it serves, or one
     /// under it. The longer of two matches wins, by the returned length.
     pub fn path_match(&self, path: &str) -> Option<usize> {
-        let path = path.split(['?', '#']).next().unwrap_or(path);
-        self.paths
-            .iter()
-            .map(|prefix| prefix.trim_end_matches('/'))
-            .filter(|prefix| {
-                path.strip_prefix(prefix)
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-            })
-            .map(str::len)
-            .max()
+        path_match(&self.paths, path)
     }
+}
+
+/// Whether a request for `path` goes to a process serving `paths`; see
+/// [`ProcessSpec::path_match`].
+pub fn path_match(paths: &[String], path: &str) -> Option<usize> {
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    paths
+        .iter()
+        .map(|prefix| prefix.trim_end_matches('/'))
+        .filter(|prefix| {
+            path.strip_prefix(prefix)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+        .map(str::len)
+        .max()
 }
 
 /// The role a process plays in its instance's start and stop.
