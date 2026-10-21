@@ -845,7 +845,13 @@ pub fn stop_all(paths: &Paths, idle: bool, json: bool) -> anyhow::Result<ExitCod
 
 pub fn share(paths: &Paths, args: ShareArgs, json: bool) -> anyhow::Result<ExitCode> {
     let ttl_secs = match &args.ttl {
-        Some(ttl) => Some(carte_core::duration::parse(ttl)?.as_secs()),
+        Some(ttl) => {
+            let ttl = carte_core::duration::parse(ttl)?;
+            if ttl < std::time::Duration::from_secs(1) {
+                return Err(Failure::new(Exit::Usage, "--ttl must be at least 1s").into());
+            }
+            Some(ttl.as_secs())
+        }
         None => None,
     };
     let request = carte_api::ShareRequest {

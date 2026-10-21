@@ -19,7 +19,7 @@ pub fn parse(input: &str) -> Result<Duration, DurationError> {
         }
         let n: u64 = digits.parse().map_err(|_| err())?;
         digits.clear();
-        millis += n * match c {
+        let unit = match c {
             'm' if chars.next_if_eq(&'s').is_some() => 1,
             's' => 1000,
             'm' => 60_000,
@@ -27,6 +27,10 @@ pub fn parse(input: &str) -> Result<Duration, DurationError> {
             'd' => 86_400_000,
             _ => return Err(err()),
         };
+        millis = n
+            .checked_mul(unit)
+            .and_then(|part| millis.checked_add(part))
+            .ok_or_else(err)?;
     }
     if !digits.is_empty() || millis == 0 && input.trim().is_empty() {
         return Err(err());
@@ -34,14 +38,15 @@ pub fn parse(input: &str) -> Result<Duration, DurationError> {
     Ok(Duration::from_millis(millis))
 }
 
-/// Formats a duration the way `parse` reads it, using the largest units.
+/// Formats a duration the way `parse` reads it, using the largest units; less
+/// than a second shows in milliseconds.
 pub fn format(duration: Duration) -> String {
     let mut secs = duration.as_secs();
     if secs == 0 {
-        return "0s".into();
+        return format!("{}ms", duration.subsec_millis());
     }
     let mut out = String::new();
-    for (unit, size) in [('d', 86400), ('h', 3600), ('m', 60), ('s', 1)] {
+    for (unit, size) in [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)] {
         if secs >= size {
             out.push_str(&format!("{}{unit}", secs / size));
             secs %= size;
@@ -62,6 +67,11 @@ mod tests {
         assert_eq!(parse("1h30m"), Ok(Duration::from_secs(5400)));
         assert_eq!(parse("500ms"), Ok(Duration::from_millis(500)));
         assert_eq!(parse("1m30s250ms"), Ok(Duration::from_millis(90_250)));
+        assert!(parse("99999999999999999999d").is_err());
+        assert!(
+            parse("999999999999d").is_err(),
+            "overflows the milliseconds"
+        );
     }
 
     #[test]
@@ -76,5 +86,11 @@ mod tests {
     fn formats_round_trip() {
         assert_eq!(format(Duration::from_secs(5400)), "1h30m");
         assert_eq!(format(Duration::from_secs(900)), "15m");
+        assert_eq!(format(Duration::from_millis(500)), "500ms");
+        assert_eq!(
+            parse(&format(Duration::from_millis(500))),
+            Ok(Duration::from_millis(500))
+        );
+        assert_eq!(format(Duration::ZERO), "0ms");
     }
 }
