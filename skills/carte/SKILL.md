@@ -152,7 +152,7 @@ Every command takes `--json`. Exit codes:
 | 0 | ok |
 | 1 | other error |
 | 2 | invalid arguments |
-| 3 | the carte daemon isn't running |
+| 3 | the carte daemon isn't running, or is starting or stopping |
 | 4 | the address matches nothing, or there's no app in this directory |
 | 5 | the app failed to start or didn't get ready |
 

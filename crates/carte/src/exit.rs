@@ -11,7 +11,7 @@ pub enum Exit {
     Error = 1,
     /// Invalid arguments.
     Usage = 2,
-    /// The daemon isn't running.
+    /// The daemon isn't running, or is starting or stopping.
     DaemonDown = 3,
     /// The address names nothing, or more than one thing, or there is no app in the
     /// current directory.

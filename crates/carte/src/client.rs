@@ -79,15 +79,9 @@ impl Client {
         path: &str,
         body: Bytes,
     ) -> anyhow::Result<http::Response<Incoming>> {
-        let stream = UnixStream::connect(&self.socket).await.map_err(|err| {
-            Failure::new(
-                Exit::DaemonDown,
-                format!(
-                    "the carte daemon isn't running ({}: {err}); start it with `carte daemon`",
-                    self.socket.display()
-                ),
-            )
-        })?;
+        let stream = UnixStream::connect(&self.socket)
+            .await
+            .map_err(|err| unreachable(&self.socket, &err))?;
         let (mut sender, connection) =
             hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
         tokio::spawn(connection);
@@ -99,6 +93,23 @@ impl Client {
             .body(Full::new(body))?;
         Ok(sender.send_request(request).await?)
     }
+}
+
+/// Why the daemon couldn't be reached. A socket that refuses connections belongs
+/// to a daemon that is starting or stopping, or to one that crashed.
+fn unreachable(socket: &Path, err: &std::io::Error) -> Failure {
+    let message = if err.kind() == std::io::ErrorKind::ConnectionRefused && socket.exists() {
+        format!(
+            "the carte daemon is starting or stopping ({}: {err}); try again in a moment",
+            socket.display()
+        )
+    } else {
+        format!(
+            "the carte daemon isn't running ({}: {err}); start it with `carte daemon`",
+            socket.display()
+        )
+    };
+    Failure::new(Exit::DaemonDown, message)
 }
 
 async fn decode<T: DeserializeOwned>(response: http::Response<Incoming>) -> anyhow::Result<T> {
@@ -119,6 +130,28 @@ async fn decode<T: DeserializeOwned>(response: http::Response<Incoming>) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_socket_nobody_listens_on_means_starting_or_stopping() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("carte.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+
+        let err = Client::new(&socket)
+            .get::<serde_json::Value>("/")
+            .await
+            .unwrap_err();
+        let failure = err.downcast_ref::<Failure>().unwrap();
+        assert_eq!(failure.exit, Exit::DaemonDown);
+        assert!(failure.message.contains("is starting or stopping"), "{err}");
+
+        std::fs::remove_file(&socket).unwrap();
+        let err = Client::new(&socket)
+            .get::<serde_json::Value>("/")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("isn't running"), "{err}");
+    }
 
     #[tokio::test]
     async fn reads_bodies_larger_than_one_chunk() {
