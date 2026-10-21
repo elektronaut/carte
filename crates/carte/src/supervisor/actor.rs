@@ -3339,7 +3339,15 @@ fn check_requires(requires: &[String]) -> Result<(), String> {
             address
                 .to_socket_addrs()
                 .map(|mut addrs| {
-                    addrs.any(|addr| std::net::TcpStream::connect_timeout(&addr, timeout).is_ok())
+                    addrs.any(|addr| {
+                        std::net::TcpStream::connect_timeout(&addr, timeout).is_ok_and(|stream| {
+                            !crate::loopback::connected_to_itself(
+                                &stream,
+                                stream.local_addr(),
+                                stream.peer_addr(),
+                            )
+                        })
+                    })
                 })
                 .unwrap_or(false)
         } else {
