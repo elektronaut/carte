@@ -298,6 +298,13 @@ branches:
   `-` turned into a dash.
 - A name longer than 63 characters, the most a hostname label holds, is
   cut and ends in a short hash of the full name.
+- In hostnames, a long name is cut the same way when the project's
+  longest hostname would pass 253 characters, the most a hostname
+  holds. An app with `subdomains = true` keeps room for one subdomain
+  of up to 63 characters. The stack keeps its full name everywhere
+  else, such as in `CARTE_STACK`. This only happens when the app,
+  stack and project names are all long. When even a cut name doesn't
+  fit, a problem is reported.
 - A folder with the repo's own name gives way to the folder above it.
 - Worktrees of different repos with the same name form one stack.
 - Worktrees with a detached HEAD count like any other.
