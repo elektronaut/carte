@@ -269,6 +269,8 @@ fn bind_api(socket: &Path) -> std::io::Result<UnixListener> {
 mod tests {
     use super::*;
 
+    /// Retakes the lock after the drop for a while, since a child forked by a
+    /// parallel test shares it until that child execs or exits.
     #[test]
     fn only_one_daemon_holds_the_lock() {
         let dir = tempfile::tempdir().unwrap();
@@ -276,7 +278,11 @@ mod tests {
         let err = lock(dir.path()).unwrap_err().to_string();
         assert!(err.contains("already running"), "{err}");
         drop(first);
-        lock(dir.path()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while let Err(err) = lock(dir.path()) {
+            assert!(std::time::Instant::now() < deadline, "{err}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[tokio::test]
