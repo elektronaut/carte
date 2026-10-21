@@ -122,7 +122,7 @@ pub fn authorized(header: Option<&str>, credentials: &Credentials) -> bool {
         && decoded
             .iter()
             .zip(expected)
-            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            .fold(0u8, |diff, (a, b)| std::hint::black_box(diff | (a ^ b)))
             == 0
 }
 
