@@ -2658,37 +2658,48 @@ async fn a_clean_exit_of_the_web_process_restarts_it() {
     handle.shutdown().await;
 }
 
-#[tokio::test]
-async fn a_web_process_that_keeps_crashing_stops_the_instance_until_started_by_hand() {
-    let setup = Setup::new();
-    let marker = setup.root.join("started");
+/// An app whose web process crashes on every start after the first while `marker`
+/// exists; returns its checkout.
+fn crashing_web(setup: &Setup, marker: &Path) -> PathBuf {
     setup.app(
         "acme-web",
         &format!(
             "web: if [ -e {marker} ]; then echo crashing; exit 1; fi; touch {marker}; exec {{fixture}}\nworker: exec {{fixture}}\n",
             marker = marker.display()
         ),
-    );
-    setup.project("");
-    let handle = setup.start();
+    )
+}
 
+/// Starts acme-web, kills its web process and waits for carte to give up on it.
+async fn give_up_on_web(handle: &Handle) {
     handle
         .ensure_ready(key("acme-web", Stack::Main))
         .await
         .unwrap();
     let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
     kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
-    wait_for_events(&handle, "carte to give up", |lines| {
+    wait_for_events(handle, "carte to give up", |lines| {
         lines.iter().any(|l| {
             l == "acme-web/web gave up: web crashed 5 times within a minute; it stays down"
         })
     })
     .await;
-    wait_for(&handle, "the instance to stop", |s| {
+    wait_for(handle, "the instance to stop", |s| {
         let inst = status(s, "acme-web", "main");
         inst.state == InstanceState::Crashed && inst.processes.iter().all(|p| p.pid.is_none())
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_web_process_that_keeps_crashing_stops_the_instance_until_started_by_hand() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    crashing_web(&setup, &marker);
+    setup.project("");
+    let handle = setup.start();
+
+    give_up_on_web(&handle).await;
     let snapshot = handle.snapshot();
     let web = process(&snapshot, "acme-web", "web");
     assert!(
@@ -2734,6 +2745,45 @@ async fn a_web_process_that_keeps_crashing_stops_the_instance_until_started_by_h
         .await
         .unwrap();
     assert!(response.failures.is_empty(), "{response:?}");
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    assert!(!process(&handle.snapshot(), "acme-web", "web").gave_up);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn restart_txt_lets_the_next_request_start_an_instance_carte_gave_up_on() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    let checkout = crashing_web(&setup, &marker);
+    setup.project("");
+    let handle = setup.start();
+
+    give_up_on_web(&handle).await;
+    std::fs::remove_file(&marker).unwrap();
+    handle.restart_checkout(checkout);
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    assert!(!process(&handle.snapshot(), "acme-web", "web").gave_up);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_config_change_lets_the_next_request_start_an_instance_carte_gave_up_on() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    crashing_web(&setup, &marker);
+    setup.project("");
+    let handle = setup.start();
+
+    give_up_on_web(&handle).await;
+    std::fs::remove_file(&marker).unwrap();
+    setup.project("[apps.acme-web.env]\nFIXED = \"1\"\n");
+    handle.reload(discovery::load_world(&setup.paths.config_dir));
     handle
         .request(key("acme-web", Stack::Main), "/", None)
         .await
