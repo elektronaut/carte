@@ -22,7 +22,7 @@ pub struct Usage {
     pub execs: u32,
     /// Running instances that depend on this one.
     pub held_by: Vec<InstanceKey>,
-    /// Processes waiting at a debugger prompt.
+    /// Processes waiting at a debugger prompt or stopped by a signal.
     pub paused: u32,
     pub last_activity: Instant,
     pub memory_bytes: u64,

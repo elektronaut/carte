@@ -277,6 +277,18 @@ In the terminal UI, `t` types into the selected process, or the
 selected app's paused or web process, from either pane; the detach keys
 stop. The [MCP server](mcp.md)'s `type` tool lets an agent do it.
 
+A process stopped by a signal carte doesn't resume, like `SIGSTOP` from
+`kill -STOP`, shows as `suspended by a signal` in
+`carte status`, as `suspended: worker` in `carte ls` and with a yellow
+◆ in the terminal UI. carte sees this only for the command itself, not
+for a program it runs. An app whose web process is suspended shows as
+`suspended`, and its requests wait until the process continues; a
+request that waits too long gets a page that says so. As with a pause,
+the app doesn't stop for idleness or limits (`held by worker
+suspended`), and the boot timeout doesn't count the time it is
+suspended. `kill -CONT` with its pid lets it go on; `carte restart`
+starts it over.
+
 ## JSON output
 
 Every command takes `--json`. Fields listed here are stable: they keep
@@ -307,9 +319,9 @@ An **Instance** is:
 | `app`, `stack`, `checkout` | Names; `checkout` is `main` for an app running from its main checkout in another stack |
 | `checkout_path` | Where its code is |
 | `url`, `public_url` | `public_url` is null unless shared |
-| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](configuration.md#paths), is waiting to restart after a crash or to pass its readiness check again), `paused` (one of those waits at a debugger prompt), `stopping` or `crashed` |
-| `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](configuration.md#paths) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `paused` (at a debugger prompt), `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
-| `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec" \| "paused", … }`; `exec` counts `carte exec` commands still running, and `paused` names a process waiting at a debugger prompt |
+| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](configuration.md#paths), is waiting to restart after a crash or to pass its readiness check again), `paused` (one of those waits at a debugger prompt), `suspended` (one of those was stopped by a signal), `stopping` or `crashed` |
+| `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](configuration.md#paths) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `paused` (at a debugger prompt), `suspended` (stopped by a signal, such as `SIGSTOP`), `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
+| `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec" \| "paused" \| "suspended", … }`; `exec` counts `carte exec` commands still running, `paused` names a process waiting at a debugger prompt, and `suspended` one stopped by a signal |
 | `idle_in_secs` | Until idle shutdown, when counting down |
 | `last_error`, `last_event` | Null when there's none |
 | `boot` | `{ elapsed_ms, waiting_for }` while starting |

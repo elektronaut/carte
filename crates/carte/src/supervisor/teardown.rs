@@ -427,7 +427,11 @@ impl Job {
         let result = loop {
             tokio::select! {
                 event = event_rx.recv() => match event {
-                    Some(runner::Event::Started { .. } | runner::Event::Paused(_)) => {}
+                    Some(
+                        runner::Event::Started { .. }
+                        | runner::Event::Paused(_)
+                        | runner::Event::Suspended(_),
+                    ) => {}
                     Some(runner::Event::SpawnFailed(message)) => break Err((message, None)),
                     Some(runner::Event::Exited { code, signal }) => {
                         break match (stop.is_none(), code, signal) {

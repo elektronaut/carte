@@ -100,6 +100,33 @@ pub fn exists(pid: u32) -> bool {
     found || nix::errno::Errno::last() != nix::errno::Errno::ESRCH
 }
 
+/// Whether process `pid` is stopped by a signal; `None` when it can't be read.
+#[cfg(target_os = "macos")]
+pub fn is_stopped(pid: u32) -> Option<bool> {
+    // SAFETY: proc_bsdinfo is plain data, valid when zeroed.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `size` is the size of `info`.
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    (n == size).then_some(info.pbi_status == libc::SSTOP)
+}
+
+/// Whether process `pid` is stopped by a signal; `None` when it can't be read.
+#[cfg(target_os = "linux")]
+pub fn is_stopped(pid: u32) -> Option<bool> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let state = stat[stat.rfind(')')? + 2..].split_whitespace().next()?;
+    Some(matches!(state, "T" | "t"))
+}
+
 /// The value of `name` in process `pid`'s environment as its program was
 /// exec'd; `None` when it isn't set or can't be read. Changes the process made
 /// since aren't seen.

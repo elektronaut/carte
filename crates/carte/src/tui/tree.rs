@@ -79,6 +79,8 @@ pub enum State {
     Restarting,
     /// Waiting at a debugger prompt: a process, or an instance whose HTTP process is.
     Paused,
+    /// Stopped by a signal: a process, or an instance whose HTTP process is.
+    Suspended,
     Stopping,
     Stopped,
     /// A process that exited cleanly on its own.
@@ -152,6 +154,7 @@ impl Status {
                 | State::Starting
                 | State::Restarting
                 | State::Paused
+                | State::Suspended
                 | State::Stopping
                 | State::Crashed
                 | State::Unknown
@@ -372,6 +375,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
         InstanceState::Starting => State::Starting,
         InstanceState::Restarting => State::Restarting,
         InstanceState::Paused => State::Paused,
+        InstanceState::Suspended => State::Suspended,
         InstanceState::Stopping => State::Stopping,
         InstanceState::Crashed => State::Crashed,
         InstanceState::Stopped if disabled.is_some() => State::Disabled,
@@ -388,6 +392,7 @@ fn instance_node(snapshot: &Snapshot, project: &ProjectStatus, inst: &InstanceSt
             Hold::Dependent { app } => Some(short(app)),
             Hold::Exec { count } => Some(plural(*count, "exec")),
             Hold::Paused { process } => Some(format!("{process} at a breakpoint")),
+            Hold::Suspended { process } => Some(format!("{process} suspended")),
             Hold::Unknown => Some("unknown".into()),
         })
         .collect();
@@ -446,6 +451,7 @@ fn process_node(instance: &NodeId, process: &ProcessStatus) -> Node {
     let state = match process.state {
         ProcessState::Running => State::Ready,
         ProcessState::Paused => State::Paused,
+        ProcessState::Suspended => State::Suspended,
         ProcessState::Starting => State::Starting,
         ProcessState::Stopping => State::Stopping,
         ProcessState::Exited { code: Some(0), .. } => State::Exited,
@@ -459,7 +465,7 @@ fn process_node(instance: &NodeId, process: &ProcessStatus) -> Node {
     let status = Status {
         running: usize::from(matches!(
             state,
-            State::Ready | State::Starting | State::Paused
+            State::Ready | State::Starting | State::Paused | State::Suspended
         )),
         total: 1,
         pinned: policy_source(process, Policy::Pinned),
@@ -505,6 +511,7 @@ fn aggregate(children: &[Node]) -> Status {
     let state = [
         State::Crashed,
         State::Paused,
+        State::Suspended,
         State::Starting,
         State::Restarting,
         State::Ready,

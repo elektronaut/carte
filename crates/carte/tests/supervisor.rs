@@ -4937,6 +4937,52 @@ async fn a_paused_worker_keeps_the_app_from_idling_out() {
 }
 
 #[tokio::test]
+async fn a_web_process_suspended_while_booting_shows_as_suspended_and_doesnt_run_out_of_time() {
+    let setup = Setup::new();
+    let dir = setup.app(
+        "acme-web",
+        "web: (while [ ! -e go ]; do sleep 0.05; done; kill -CONT $$) & kill -STOP $$; exec {fixture}\n",
+    );
+    setup.project("");
+    let handle = setup.start_with(|options| options.boot_timeout = Duration::from_secs(2));
+    handle.control(control("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the instance to show as suspended", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Suspended
+    })
+    .await;
+    let inst = status(&handle.snapshot(), "acme-web", "main").clone();
+    assert_eq!(inst.processes[0].state, ProcessState::Suspended);
+    assert_eq!(
+        inst.holds,
+        [carte_api::Hold::Suspended {
+            process: "web".into()
+        }]
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        status(&handle.snapshot(), "acme-web", "main").state,
+        InstanceState::Suspended
+    );
+
+    std::fs::write(dir.join("go"), "").unwrap();
+    wait_for(&handle, "the instance to be ready once continued", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Ready
+    })
+    .await;
+    let inst = status(&handle.snapshot(), "acme-web", "main").clone();
+    assert_eq!(inst.processes[0].state, ProcessState::Running);
+    assert!(inst.holds.is_empty(), "{:?}", inst.holds);
+    let (events, _) = handle.events(None, 100).await.unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == carte_api::EventKind::Crashed),
+        "{events:#?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_web_process_paused_while_booting_doesnt_run_out_of_time() {
     let setup = Setup::new();
     setup.app(

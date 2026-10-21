@@ -175,6 +175,9 @@ pub enum Event {
     /// Its last line became a debugger prompt waiting for input (`Some`, the prompt),
     /// or stopped being one.
     Paused(Option<String>),
+    /// It was stopped by a signal it didn't send itself on ctrl-z, such as
+    /// SIGSTOP (`true`), or continued (`false`).
+    Suspended(bool),
     /// `code` is `None` when a signal ended the process.
     Exited {
         code: Option<i32>,
@@ -301,8 +304,11 @@ pub async fn run(
         })
     });
 
+    let suspended = |suspended| {
+        let _ = events.send(Event::Suspended(suspended));
+    };
     let status = tokio::select! {
-        status = handle.wait() => status,
+        status = handle.wait_reporting(suspended) => status,
         Ok(grace) = stop => handle.stop(grace).await,
     };
 

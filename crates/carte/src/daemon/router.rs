@@ -273,7 +273,7 @@ fn not_started(key: &InstanceKey, from: &str) -> ErrorPage {
 /// Once the instance is ready, the process a request waits for is the one serving
 /// its path, unless that one is off, else the HTTP process. While it starts (it
 /// has boot progress), the request waits for the whole instance, so any paused
-/// process holds it up.
+/// or suspended process holds it up.
 fn still_starting(snapshot: &Snapshot, key: &InstanceKey, path: &str) -> ErrorPage {
     let label = format!("{}@{}", key.app, key.stack.slug());
     let instance = snapshot
@@ -293,14 +293,23 @@ fn still_starting(snapshot: &Snapshot, key: &InstanceKey, path: &str) -> ErrorPa
         .max_by_key(|(len, _)| *len)
         .map(|(_, p)| p)
         .or_else(|| processes.iter().copied().find(|p| p.http));
-    let is_paused = |p: &&ProcessStatus| p.state == ProcessState::Paused;
+    let is_held =
+        |p: &&ProcessStatus| matches!(p.state, ProcessState::Paused | ProcessState::Suspended);
     let starting = instance.is_some_and(|i| i.boot.is_some());
-    let paused = waited_for.filter(is_paused).or_else(|| {
+    let held = waited_for.filter(is_held).or_else(|| {
         starting
-            .then(|| processes.iter().copied().find(is_paused))
+            .then(|| processes.iter().copied().find(is_held))
             .flatten()
     });
-    let page = match paused {
+    let page = match held {
+        Some(process) if process.state == ProcessState::Suspended => ErrorPage::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("{label} is suspended"),
+            format!(
+                "Its {} process was stopped by a signal, such as SIGSTOP. This page will work once it continues; `carte restart {label}` starts it over.",
+                process.name
+            ),
+        ),
         Some(process) => ErrorPage::new(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("{label} is paused at a breakpoint"),
@@ -768,6 +777,43 @@ mod tests {
             attach(&page),
             "carte attach nova-billing@main/web",
             "an off path process leaves its paths to web"
+        );
+    }
+
+    #[test]
+    fn the_waiting_page_names_the_suspended_process_the_request_waits_for() {
+        use carte_api::InstanceState;
+        let (mut snapshot, key) = cable_app(InstanceState::Suspended, false);
+        set(
+            &mut snapshot,
+            ProcessState::Running,
+            ProcessState::Suspended,
+        );
+        let page = still_starting(&snapshot, &key, "/cable");
+        assert_eq!(page.title, "nova-billing@main is suspended");
+        assert!(
+            page.detail.starts_with("Its cable process"),
+            "{}",
+            page.detail
+        );
+        assert!(
+            page.detail.contains("`carte restart nova-billing@main`"),
+            "{}",
+            page.detail
+        );
+        let page = still_starting(&snapshot, &key, "/");
+        assert_eq!(page.title, "nova-billing@main is still starting");
+
+        let (mut snapshot, key) = cable_app(InstanceState::Suspended, true);
+        set(
+            &mut snapshot,
+            ProcessState::Starting,
+            ProcessState::Suspended,
+        );
+        let page = still_starting(&snapshot, &key, "/");
+        assert_eq!(
+            page.title, "nova-billing@main is suspended",
+            "while booting, a request for / waits for cable too"
         );
     }
 }

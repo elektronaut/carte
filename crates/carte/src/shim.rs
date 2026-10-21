@@ -9,6 +9,8 @@
 //! 2. writes the command's pid (= pgid) to the lifeline as 4 little-endian bytes;
 //! 3. forwards SIGTERM, SIGINT and SIGHUP to the group, and continues it when
 //!    it stops itself with a job-control signal, as programs do on ctrl-z;
+//!    when the command stops on another signal, such as SIGSTOP, writes `S` to
+//!    the lifeline, and `C` when it continues;
 //! 4. on EOF from the lifeline, sends TERM to the group and to the groups its
 //!    descendants made, waits a short grace, sends KILL and exits;
 //! 5. when the command exits, cleans up what is left of those groups the same
@@ -139,21 +141,28 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
     Ok(libc::WEXITSTATUS(status))
 }
 
-fn poll(fds: &mut [libc::pollfd]) -> libc::c_int {
+fn poll(fds: &mut [libc::pollfd], timeout_ms: libc::c_int) -> libc::c_int {
     // SAFETY: the pointer and length come from one live slice.
-    unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) }
+    unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) }
 }
 
 /// Forwards signals to the group until the command exits, and returns its
 /// status. Takes the group down and returns `None` when the lifeline closes,
 /// and takes it down before returning an error.
+///
+/// Writes `S` to the lifeline when the command stops on a signal it isn't
+/// continued from here, and `C` once it runs again. While it is
+/// stopped, its state is checked every 100 ms, as macOS doesn't report a
+/// continue to `waitpid`.
 fn supervise(
     pid: libc::pid_t,
     lifeline: RawFd,
     sig_read: RawFd,
-    poll: fn(&mut [libc::pollfd]) -> libc::c_int,
+    poll: fn(&mut [libc::pollfd], libc::c_int) -> libc::c_int,
 ) -> io::Result<Option<libc::c_int>> {
     let mut status = None;
+    let mut stopped = false;
+    let mut reported = false;
     while status.is_none() {
         let mut pfds = [
             libc::pollfd {
@@ -167,7 +176,7 @@ fn supervise(
                 revents: 0,
             },
         ];
-        if poll(&mut pfds) < 0 {
+        if poll(&mut pfds, if reported { 100 } else { -1 }) < 0 {
             let err = io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EINTR) {
                 continue;
@@ -194,7 +203,14 @@ fn supervise(
             return Ok(None);
         }
 
-        reap(pid, &mut status);
+        reap(pid, &mut status, &mut stopped);
+        if stopped && crate::proctree::is_stopped(pid as u32) == Some(false) {
+            stopped = false;
+        }
+        if status.is_none() && stopped != reported {
+            reported = stopped;
+            report(lifeline, if stopped { b'S' } else { b'C' });
+        }
     }
     Ok(status)
 }
@@ -259,12 +275,14 @@ fn lifeline_closed(fd: RawFd) -> bool {
 /// Reaps every exited child, the leader's status going to `leader`; on Linux
 /// the shim also adopts the command's orphaned descendants. A leader stopped by
 /// SIGTSTP, SIGTTIN or SIGTTOU has its group continued, and after SIGTTIN or
-/// SIGTTOU has the terminal back first.
-fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
+/// SIGTTOU has the terminal back first. A leader stopped by another signal sets
+/// `stopped`, and a continue the system reports clears it.
+fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>, stopped: &mut bool) {
     loop {
         let mut status = 0;
+        let flags = libc::WNOHANG | libc::WUNTRACED | libc::WCONTINUED;
         // SAFETY: `status` outlives the call.
-        match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::WUNTRACED) } {
+        match unsafe { libc::waitpid(-1, &mut status, flags) } {
             p if p == pid && libc::WIFSTOPPED(status) => match libc::WSTOPSIG(status) {
                 // SAFETY: killpg takes no pointers; `pid` is the group of the
                 // command this shim forked, above 1.
@@ -276,8 +294,9 @@ fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
                     // SAFETY: as above.
                     unsafe { libc::killpg(pid, libc::SIGCONT) };
                 }
-                _ => {}
+                _ => *stopped = true,
             },
+            p if p == pid && libc::WIFCONTINUED(status) => *stopped = false,
             p if p == pid => *leader = Some(status),
             p if p > 0 => {}
             -1 if Errno::last() == Errno::ECHILD => {
@@ -287,6 +306,13 @@ fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
             _ => return,
         }
     }
+}
+
+/// Writes one report byte to the lifeline without blocking; a daemon that
+/// doesn't read reports, or a full socket, loses it.
+fn report(lifeline: RawFd, byte: u8) {
+    // SAFETY: sends one byte from `byte`, which outlives the call.
+    unsafe { libc::send(lifeline, (&raw const byte).cast(), 1, libc::MSG_DONTWAIT) };
 }
 
 fn group_alive(pgid: libc::pid_t) -> bool {
@@ -339,7 +365,7 @@ fn terminate_group(pgid: libc::pid_t, reaped: &mut Option<libc::c_int>) {
     signal_groups(&groups, libc::SIGCONT);
     let deadline = Instant::now() + GROUP_GRACE;
     loop {
-        reap(pgid, reaped);
+        reap(pgid, reaped, &mut false);
         if reaped.is_some() && !groups.iter().any(|&g| group_alive(g)) {
             return;
         }
@@ -427,7 +453,7 @@ mod tests {
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
-    fn failing_poll(_: &mut [libc::pollfd]) -> libc::c_int {
+    fn failing_poll(_: &mut [libc::pollfd], _: libc::c_int) -> libc::c_int {
         Errno::set_raw(libc::EINVAL);
         -1
     }
