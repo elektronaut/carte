@@ -1133,13 +1133,13 @@ impl Actor {
         };
         for (idx, spec) in specs {
             let proc = &mut self.instances.get_mut(key).expect("instance").procs[idx];
+            let own = build.is_some_and(|build| proc.building == Some(build));
+            if own {
+                proc.building = None;
+            }
             if proc.queued {
                 proc.spawn = Some(spec);
-            } else if build.is_some_and(|build| proc.building == Some(build))
-                && !proc.is_running()
-                && !proc.off
-            {
-                proc.building = None;
+            } else if own && !proc.is_running() && !proc.off {
                 self.spawn_proc(key, idx, spec);
             }
         }
@@ -1780,8 +1780,8 @@ impl Actor {
             self.stop(key, why);
             return Ok(());
         }
-        proc.restart_at = None;
-        proc.building = None;
+        let waiting = proc.restart_at.take().is_some();
+        let building = proc.building.take().is_some();
         let restarting = proc.restart;
         if !restarting {
             proc.off = true;
@@ -1806,6 +1806,8 @@ impl Actor {
                 EventKind::Stopped
             };
             event = why.map(|why| (kind, why));
+        } else if (waiting || building) && !restarting {
+            event = why.map(|why| (EventKind::Stopped, why));
         }
         inst.forced.remove(name);
         inst.release_waiters();
