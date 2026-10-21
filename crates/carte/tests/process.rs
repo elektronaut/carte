@@ -364,6 +364,57 @@ async fn a_group_that_suspends_itself_is_resumed() {
 }
 
 #[tokio::test]
+async fn a_command_stopped_by_a_signal_is_reported_until_it_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = dir.path().join("go");
+    let done = dir.path().join("done");
+    let mut handle = spawner()
+        .spawn(&SpawnSpec::new(
+            "(while [ ! -e go ]; do sleep 0.05; done; kill -CONT $$) & kill -STOP $$; while [ ! -e done ]; do sleep 0.05; done",
+            dir.path(),
+        ))
+        .await
+        .unwrap();
+    drain(handle.take_output().unwrap());
+    let mut reports = Vec::new();
+    let status = tokio::time::timeout(
+        Duration::from_secs(10),
+        handle.wait_reporting(|suspended| {
+            reports.push(suspended);
+            let next = if suspended { &go } else { &done };
+            std::fs::write(next, "").unwrap();
+        }),
+    )
+    .await
+    .expect("the command continues and exits")
+    .unwrap();
+    assert!(status.success());
+    assert_eq!(reports, [true, false]);
+}
+
+#[tokio::test]
+async fn a_group_that_suspends_itself_is_not_reported_as_suspended() {
+    let mut handle = spawner()
+        .spawn(&SpawnSpec::new(
+            "kill -TSTP $$; echo resumed",
+            std::env::temp_dir(),
+        ))
+        .await
+        .unwrap();
+    drain(handle.take_output().unwrap());
+    let mut reports = Vec::new();
+    let status = tokio::time::timeout(
+        Duration::from_secs(10),
+        handle.wait_reporting(|suspended| reports.push(suspended)),
+    )
+    .await
+    .expect("the group is resumed and exits")
+    .unwrap();
+    assert!(status.success());
+    assert!(!reports.contains(&true), "{reports:?}");
+}
+
+#[tokio::test]
 async fn a_group_left_in_the_background_gets_the_terminal_back() {
     let command = format!(
         "{}; echo ready; read line; echo got $line",

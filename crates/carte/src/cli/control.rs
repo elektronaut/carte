@@ -346,6 +346,7 @@ fn process_word(process: &carte_api::ProcessStatus) -> String {
         ProcessState::Starting => "starting".to_string(),
         ProcessState::Running => "running".to_string(),
         ProcessState::Paused => "paused at a breakpoint".to_string(),
+        ProcessState::Suspended => "suspended by a signal".to_string(),
         ProcessState::Stopping => "stopping".to_string(),
         ProcessState::Exited {
             code: Some(code), ..
@@ -388,6 +389,7 @@ fn hold_word(hold: &Hold) -> String {
         Hold::Dependent { app } => app.clone(),
         Hold::Exec { count } => execs(*count),
         Hold::Paused { process } => format!("{process} at a breakpoint"),
+        Hold::Suspended { process } => format!("{process} suspended"),
         Hold::Unknown => "unknown".into(),
     }
 }
@@ -485,6 +487,7 @@ fn state_word(inst: &InstanceStatus) -> String {
         InstanceState::Ready => "ready",
         InstanceState::Restarting => "restarting",
         InstanceState::Paused => "paused",
+        InstanceState::Suspended => "suspended",
         InstanceState::Stopping => "stopping",
         InstanceState::Crashed => "crashed",
         InstanceState::Unknown => "unknown",
@@ -517,6 +520,7 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
                 p.state,
                 ProcessState::Running
                     | ProcessState::Paused
+                    | ProcessState::Suspended
                     | ProcessState::Starting
                     | ProcessState::Done
             )
@@ -539,7 +543,10 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
         .collect();
     if matches!(
         inst.state,
-        InstanceState::Ready | InstanceState::Restarting | InstanceState::Paused
+        InstanceState::Ready
+            | InstanceState::Restarting
+            | InstanceState::Paused
+            | InstanceState::Suspended
     ) && !down.is_empty()
     {
         parts.push(format!("down: {}", down.join(", ")));
@@ -553,6 +560,15 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
     if !paused.is_empty() {
         parts.push(format!("paused: {} (carte attach)", paused.join(", ")));
     }
+    let suspended: Vec<&str> = inst
+        .processes
+        .iter()
+        .filter(|p| p.state == ProcessState::Suspended)
+        .map(|p| p.name.as_str())
+        .collect();
+    if !suspended.is_empty() {
+        parts.push(format!("suspended: {}", suspended.join(", ")));
+    }
     for hold in &inst.holds {
         parts.push(match hold {
             Hold::Pinned => "pinned".into(),
@@ -560,7 +576,7 @@ fn notes(inst: &InstanceStatus, share: Option<&carte_api::ShareStatus>) -> Strin
             Hold::Connections { count } => format!("held by {count} connections"),
             Hold::Dependent { app } => format!("held by {app}"),
             Hold::Exec { count } => format!("held by {}", execs(*count)),
-            Hold::Paused { .. } => continue,
+            Hold::Paused { .. } | Hold::Suspended { .. } => continue,
             Hold::Unknown => "held by unknown".into(),
         });
     }
@@ -1200,6 +1216,31 @@ nova-billing  ready
             status.contains("  held by    worker at a breakpoint\n"),
             "{status}"
         );
+        assert!(!ls.contains("down:"), "{ls}");
+    }
+
+    #[test]
+    fn shows_a_process_suspended_by_a_signal() {
+        let mut snapshot = shared_sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.state = InstanceState::Suspended;
+        billing.processes[0].state = ProcessState::Suspended;
+        billing.holds = vec![Hold::Suspended {
+            process: "web".into(),
+        }];
+        let instances = vec![billing.clone()];
+        let status = render_status(&snapshot, &instances);
+        assert!(status.starts_with("nova-billing  suspended\n"), "{status}");
+        assert!(status.contains("web suspended by a signal,"), "{status}");
+        assert!(status.contains("  held by    web suspended\n"), "{status}");
+        assert!(!status.contains("answer"), "{status}");
+        let ls = render_ls(&snapshot, false);
+        assert!(
+            ls.lines()
+                .any(|l| l.starts_with("nova-billing ") && l.contains(" suspended  https://")),
+            "{ls}"
+        );
+        assert!(ls.contains("suspended: web"), "{ls}");
         assert!(!ls.contains("down:"), "{ls}");
     }
 

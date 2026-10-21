@@ -183,7 +183,10 @@ pub(super) struct Proc {
     terminal: Option<Arc<Terminal>>,
     /// The debugger prompt it waits at.
     pub paused: Option<String>,
-    /// Whether it waits at one, for the latest run's readiness check.
+    /// Stopped by a signal, such as SIGSTOP, and not continued yet.
+    pub suspended: bool,
+    /// Whether it waits at a prompt or is suspended, for the latest run's
+    /// readiness check.
     held: watch::Sender<bool>,
 }
 
@@ -195,9 +198,17 @@ impl Proc {
         )
     }
 
-    /// Running and ready, and not being stopped: requests can go to it.
+    /// Running and ready, and not being stopped or suspended: requests can go to it.
     fn serving(&self) -> bool {
-        matches!(self.state, ProcessState::Starting | ProcessState::Running) && self.ready
+        matches!(self.state, ProcessState::Starting | ProcessState::Running)
+            && self.ready
+            && !self.suspended
+    }
+
+    /// Tells the readiness check whether it waits at a prompt or is suspended.
+    fn update_held(&self) {
+        self.held
+            .send_replace(self.paused.is_some() || self.suspended);
     }
 
     /// Holds back what starts after it: still queued, or running and not yet done.
@@ -253,11 +264,14 @@ impl Instance {
         matches!(self.state, Lifecycle::Starting | Lifecycle::Ready)
     }
 
-    /// Ready, with its HTTP process up: not waiting to restart or to pass its
-    /// readiness check again after a crash.
+    /// Ready, with its HTTP process up: not suspended, and not waiting to restart
+    /// or to pass its readiness check again after a crash.
     fn web_serving(&self) -> bool {
         self.state == Lifecycle::Ready
-            && (self.route_port.is_some() || self.http().is_none_or(|p| p.is_running() && p.ready))
+            && (self.route_port.is_some()
+                || self
+                    .http()
+                    .is_none_or(|p| p.is_running() && p.ready && !p.suspended))
     }
 
     /// Ready, but its HTTP process or a process serving paths, other than one
@@ -1057,6 +1071,7 @@ impl Actor {
                 cpu_sample: None,
                 terminal: None,
                 paused: None,
+                suspended: false,
                 held: watch::channel(false).0,
             });
         }
@@ -1347,6 +1362,7 @@ impl Actor {
         proc.ready = false;
         proc.stalled = false;
         proc.paused = None;
+        proc.suspended = false;
         let (held, paused) = watch::channel(false);
         proc.held = held;
         let label = LogLabel {
@@ -1503,13 +1519,24 @@ impl Actor {
                 let attached = proc.terminal.as_ref().is_some_and(|t| t.clients() > 0);
                 let name = proc.spec.name.clone();
                 proc.paused = prompt.clone();
-                proc.held.send_replace(prompt.is_some());
+                proc.update_held();
                 if let Some(prompt) = prompt.filter(|_| !attached) {
                     self.event(
                         EventKind::Paused,
                         format!("at {prompt}"),
                         vec![events::process(key, &name)],
                     );
+                }
+                self.active(key);
+            }
+            runner::Event::Suspended(suspended) => {
+                if proc.suspended == suspended {
+                    return;
+                }
+                proc.suspended = suspended;
+                proc.update_held();
+                if !suspended {
+                    inst.release_waiters();
                 }
                 self.active(key);
             }
@@ -1520,7 +1547,7 @@ impl Actor {
                 };
                 proc.stop = None;
                 proc.terminal = None;
-                let was_paused = proc.paused.take().is_some();
+                let was_paused = proc.paused.take().is_some() | std::mem::take(&mut proc.suspended);
                 proc.held.send_replace(false);
                 let name = proc.spec.name.clone();
                 proc.log
@@ -1544,7 +1571,7 @@ impl Actor {
                 }
                 proc.stop = None;
                 proc.terminal = None;
-                let was_paused = proc.paused.take().is_some();
+                let was_paused = proc.paused.take().is_some() | std::mem::take(&mut proc.suspended);
                 proc.held.send_replace(false);
                 let manual = proc.manual_stop || inst.state == Lifecycle::Stopping;
                 proc.state = if manual {
@@ -2210,7 +2237,11 @@ impl Actor {
                     connections: inst.connections,
                     execs: inst.execs.len() as u32,
                     held_by: holders.get(key).cloned().unwrap_or_default(),
-                    paused: inst.procs.iter().filter(|p| p.paused.is_some()).count() as u32,
+                    paused: inst
+                        .procs
+                        .iter()
+                        .filter(|p| p.paused.is_some() || p.suspended)
+                        .count() as u32,
                     last_activity: inst.last_activity,
                     memory_bytes: inst.procs.iter().map(|p| p.memory_bytes).sum(),
                     ptys: inst

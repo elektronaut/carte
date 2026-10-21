@@ -259,6 +259,41 @@ impl ProcessHandle {
         Ok(status)
     }
 
+    /// Waits for the shim like [`ProcessHandle::wait`], and on the way calls
+    /// `suspended` with `true` when the command is stopped by a signal it doesn't
+    /// send itself on ctrl-z, such as SIGSTOP, and with `false` when it continues.
+    pub async fn wait_reporting(
+        &mut self,
+        mut suspended: impl FnMut(bool),
+    ) -> io::Result<ExitStatus> {
+        if let Some(status) = self.status {
+            return Ok(status);
+        }
+        let mut lifeline = self.lifeline.as_ref();
+        let mut buf = [0u8; 64];
+        loop {
+            tokio::select! {
+                status = self.shim.wait() => {
+                    let status = status?;
+                    self.status = Some(status);
+                    return Ok(status);
+                }
+                read = read_reports(lifeline, &mut buf), if lifeline.is_some() => match read {
+                    Ok(n) if n > 0 => {
+                        for &report in &buf[..n] {
+                            match report {
+                                b'S' => suspended(true),
+                                b'C' => suspended(false),
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => lifeline = None,
+                },
+            }
+        }
+    }
+
     /// SIGTERM to the group, then SIGKILL if it hasn't exited after `grace`.
     /// SIGCONT follows the SIGTERM, so a stopped group handles it. Groups the
     /// command's descendants run in get the same signals.
@@ -417,6 +452,17 @@ fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
         Err(io::Error::last_os_error())
     } else {
         Ok(n as usize)
+    }
+}
+
+async fn read_reports(lifeline: Option<&UnixStream>, buf: &mut [u8]) -> io::Result<usize> {
+    let lifeline = lifeline.expect("an open lifeline");
+    loop {
+        lifeline.readable().await?;
+        match lifeline.try_read(buf) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+            read => return read,
+        }
     }
 }
 

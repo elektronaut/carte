@@ -327,6 +327,9 @@ pub enum InstanceState {
     /// Running, but its HTTP process stopped at a debugger prompt; requests wait until
     /// someone answers it, with `carte attach`.
     Paused,
+    /// Running, but its HTTP process was stopped by a signal, such as SIGSTOP;
+    /// requests wait until it continues.
+    Suspended,
     Stopping,
     Crashed,
     /// Sent by a newer daemon than this client knows.
@@ -343,6 +346,7 @@ impl InstanceState {
                 | InstanceState::Ready
                 | InstanceState::Restarting
                 | InstanceState::Paused
+                | InstanceState::Suspended
         )
     }
 }
@@ -366,6 +370,10 @@ pub enum Hold {
     },
     /// A process waiting at a debugger prompt.
     Paused {
+        process: String,
+    },
+    /// A process stopped by a signal, such as SIGSTOP.
+    Suspended {
         process: String,
     },
     /// Sent by a newer daemon than this client knows.
@@ -405,6 +413,8 @@ pub enum ProcessState {
     Running,
     /// Running, and waiting at a debugger prompt.
     Paused,
+    /// Running, but stopped by a signal, such as SIGSTOP, until it continues.
+    Suspended,
     Stopping,
     Exited {
         code: Option<i32>,
@@ -815,6 +825,7 @@ mod tests {
         assert_eq!(parse(r#""hibernating""#), InstanceState::Unknown);
         assert!(!InstanceState::Unknown.is_running());
         assert!(InstanceState::Paused.is_running());
+        assert!(InstanceState::Suspended.is_running());
 
         let state: ProcessState =
             serde_json::from_str(r#"{"state":"hibernating","since_ms":12}"#).unwrap();

@@ -216,6 +216,11 @@ fn stack_status(
                     process: proc.spec.name.clone(),
                 });
             }
+            for proc in inst.procs.iter().filter(|p| p.suspended) {
+                holds.push(Hold::Suspended {
+                    process: proc.spec.name.clone(),
+                });
+            }
             for dependent in holders.get(&key).into_iter().flatten() {
                 let app = if dependent.stack == key.stack {
                     dependent.app.clone()
@@ -241,6 +246,7 @@ fn stack_status(
                         ProcessStatus {
                             name: p.spec.name.clone(),
                             state: match p.state {
+                                ProcessState::Running if p.suspended => ProcessState::Suspended,
                                 ProcessState::Running if p.paused.is_some() => ProcessState::Paused,
                                 state => state,
                             },
@@ -378,13 +384,16 @@ fn api_policy(policy: Policy) -> ApiPolicy {
 
 /// A ready instance whose HTTP process isn't serving shows as restarting.
 fn instance_state(inst: &Instance) -> InstanceState {
+    let serves = |p: &&Proc| p.spec.http || p.spec.serves_paths();
     match inst.state {
         Lifecycle::Stopped => InstanceState::Stopped,
         Lifecycle::Starting | Lifecycle::Ready
-            if inst
-                .procs
-                .iter()
-                .any(|p| (p.spec.http || p.spec.serves_paths()) && p.paused.is_some()) =>
+            if inst.procs.iter().filter(serves).any(|p| p.suspended) =>
+        {
+            InstanceState::Suspended
+        }
+        Lifecycle::Starting | Lifecycle::Ready
+            if inst.procs.iter().filter(serves).any(|p| p.paused.is_some()) =>
         {
             InstanceState::Paused
         }
