@@ -66,7 +66,10 @@ cargo test --workspace
 ```
 
 CI runs them on macOS and Linux. `carte setup` is macOS-only for now, but
-the rest of the suite passes on both.
+the rest of the suite passes on both. CI runs the tests with
+[cargo-nextest](https://nexte.st), `cargo nextest run --workspace --profile ci`,
+which runs each test in its own process and fails one that is still running
+after three minutes (`.config/nextest.toml`). Either runner works locally.
 
 ## Tests and commits
 

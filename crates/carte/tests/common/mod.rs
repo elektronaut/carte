@@ -9,14 +9,35 @@ use std::sync::OnceLock;
 pub fn fixture() -> &'static Path {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
-        let status = Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "-p", "fixture-app"])
-            .status()
-            .expect("cargo build fixture-app");
-        assert!(status.success());
         let exe = std::env::current_exe().unwrap();
-        exe.parent().unwrap().parent().unwrap().join("fixture-app")
+        let dir = exe.parent().unwrap().parent().unwrap();
+        match std::env::var("NEXTEST_RUN_ID") {
+            Ok(run) => build_fixture_once(dir, &run),
+            Err(_) => build_fixture(),
+        }
+        dir.join("fixture-app")
     })
+}
+
+fn build_fixture() {
+    let status = Command::new(env!("CARGO"))
+        .args(["build", "--quiet", "-p", "fixture-app"])
+        .status()
+        .expect("cargo build fixture-app");
+    assert!(status.success());
+}
+
+/// Builds the fixture app once per nextest run, which starts a process for each
+/// test: every `cargo build` replaces the binary, and macOS kills a process that
+/// starts it meanwhile.
+fn build_fixture_once(dir: &Path, run: &str) {
+    let lock = std::fs::File::create(dir.join("fixture-app.lock")).unwrap();
+    lock.lock().unwrap();
+    let built = dir.join("fixture-app.run");
+    if std::fs::read_to_string(&built).ok().as_deref() != Some(run) {
+        build_fixture();
+        std::fs::write(&built, run).unwrap();
+    }
 }
 
 /// The process fixture apps exit with, as `FIXTURE_LIFELINE_PID`: the test
