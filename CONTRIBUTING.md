@@ -71,6 +71,15 @@ the rest of the suite passes on both. CI runs the tests with
 which runs each test in its own process and fails one that is still running
 after three minutes (`.config/nextest.toml`). Either runner works locally.
 
+CI also checks dependencies with [cargo-deny](https://github.com/EmbarkStudios/cargo-deny)
+against `deny.toml`: licenses, sources and duplicate versions, and security
+advisories. A new advisory shows up in the run without failing it. Run
+`cargo deny check` to see the same locally.
+
+Property tests in carte-core use proptest and run with the rest of the
+suite. When one fails, proptest saves the case under
+`crates/carte-core/proptest-regressions/`; commit that file with the fix.
+
 ## Tests and commits
 
 - Add tests for any behavior you change.
