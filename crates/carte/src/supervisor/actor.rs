@@ -272,7 +272,10 @@ impl Instance {
     fn upstream(&self) -> Option<Upstream> {
         self.route_port
             .or_else(|| self.http().map(|p| p.port))
-            .map(|port| Upstream { port })
+            .map(|port| Upstream {
+                port,
+                boot: self.boot,
+            })
     }
 
     pub(super) fn any_running(&self) -> bool {
@@ -314,7 +317,10 @@ impl Instance {
                 failure.log = proc.log.lock().unwrap().tail(40);
                 return Some(Err(failure));
             }
-            return proc.serving().then_some(Ok(Upstream { port: proc.port }));
+            return proc.serving().then_some(Ok(Upstream {
+                port: proc.port,
+                boot: self.boot,
+            }));
         }
         self.web_serving().then(|| {
             self.upstream()
@@ -534,7 +540,7 @@ impl Actor {
                     self.requested(&key, referrer.as_ref());
                 }
             }
-            Msg::Activity(key, activity) => self.activity(&key, activity),
+            Msg::Activity(key, boot, activity) => self.activity(&key, boot, activity),
             Msg::Hold { target, reply } => {
                 let _ = reply.send(self.hold(&target));
             }
@@ -1968,8 +1974,9 @@ impl Actor {
 
     // Activity, idling and limits
 
-    fn activity(&mut self, key: &InstanceKey, activity: Activity) {
-        let Some(inst) = self.instances.get_mut(key) else {
+    fn activity(&mut self, key: &InstanceKey, boot: Option<u64>, activity: Activity) {
+        let current = |inst: &&mut Instance| boot.is_none_or(|boot| inst.boot == boot);
+        let Some(inst) = self.instances.get_mut(key).filter(current) else {
             return;
         };
         match activity {
