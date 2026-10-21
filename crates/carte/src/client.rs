@@ -49,10 +49,16 @@ fn version_hint(headers: &HeaderMap) -> Option<String> {
 
 /// Warns once, when asked to, that the daemon runs another carte.
 fn check_version(headers: &HeaderMap) {
-    if WARN_ABOUT_VERSION.swap(false, Ordering::Relaxed)
+    warn_once(&WARN_ABOUT_VERSION, headers, &mut std::io::stderr());
+}
+
+/// Warns on `out` about the first answer after `armed` was set, if it comes from
+/// another carte.
+fn warn_once(armed: &AtomicBool, headers: &HeaderMap, out: &mut impl std::io::Write) {
+    if armed.swap(false, Ordering::Relaxed)
         && let Some(hint) = version_hint(headers)
     {
-        eprintln!("warning: {hint}");
+        let _ = writeln!(out, "warning: {hint}");
     }
 }
 
@@ -286,6 +292,39 @@ mod tests {
         ));
         tokio::spawn(async move { axum::serve(listener, app).await });
         Client::new(&socket)
+    }
+
+    #[test]
+    fn warns_once_and_only_about_another_version() {
+        let headers = |version: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                carte_api::VERSION_HEADER,
+                http::HeaderValue::from_static(version),
+            );
+            headers
+        };
+        let this = env!("CARGO_PKG_VERSION");
+        let mut out = Vec::new();
+
+        let armed = AtomicBool::new(true);
+        warn_once(&armed, &headers("0.0.1"), &mut out);
+        warn_once(&armed, &headers("0.0.1"), &mut out);
+        assert_eq!(
+            String::from_utf8(std::mem::take(&mut out)).unwrap(),
+            format!(
+                "warning: the daemon runs carte 0.0.1, this is {this}; run `carte daemon restart`\n"
+            )
+        );
+
+        let armed = AtomicBool::new(true);
+        warn_once(&armed, &headers(this), &mut out);
+        warn_once(&armed, &headers("0.0.1"), &mut out);
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+
+        let armed = AtomicBool::new(false);
+        warn_once(&armed, &headers("0.0.1"), &mut out);
+        assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
     }
 
     #[tokio::test]
