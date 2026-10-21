@@ -138,7 +138,7 @@ passes its readiness check counts as a crash too. carte gives up on it
 at the fifth crash within a minute, or after 5 readiness timeouts in a
 row. Then it stops the app, and requests get the error page with its
 log instead of starting it. Fix the cause, then run `carte up` or
-`carte restart`; `carte down` also clears it.
+`carte restart`; `carte down` and `carte stop-all` also clear it.
 
 When `carte status` shows a process as `paused at a breakpoint` (the
 app as `paused` when it's the web process), it stopped at a debugger

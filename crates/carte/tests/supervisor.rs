@@ -2512,6 +2512,63 @@ async fn a_web_process_that_never_becomes_ready_five_times_in_a_row_stops_the_in
 }
 
 #[tokio::test]
+async fn stop_all_clears_a_give_up_but_stop_all_idle_leaves_it() {
+    let setup = Setup::new();
+    let marker = setup.root.join("started");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: if [ -e {marker} ]; then echo crashing; exit 1; fi; touch {marker}; exec {{fixture}}\n",
+            marker = marker.display()
+        ),
+    );
+    setup.project("");
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "carte to give up", |s| {
+        let inst = status(s, "acme-web", "main");
+        inst.state == InstanceState::Crashed
+            && inst.processes.iter().all(|p| p.pid.is_none() && p.gave_up)
+    })
+    .await;
+
+    let response = handle.stop_all(true).await;
+    assert!(response.affected.is_empty(), "{response:?}");
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Crashed
+    );
+    assert!(process(&snapshot, "acme-web", "web").gave_up);
+
+    let response = handle.stop_all(false).await;
+    assert_eq!(response.affected, ["acme-web@main"], "{response:?}");
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Stopped
+    );
+    assert!(!process(&snapshot, "acme-web", "web").gave_up);
+    wait_for_events(&handle, "the stop", |lines| {
+        lines.iter().any(|l| l == "acme-web stopped: stop-all")
+    })
+    .await;
+
+    std::fs::remove_file(&marker).unwrap();
+    handle
+        .request(key("acme-web", Stack::Main), "/", None)
+        .await
+        .unwrap();
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_clean_exit_or_restart_never_keeps_a_process_down_after_it_exits() {
     let setup = Setup::new();
     let log = setup.root.join("runs.log");

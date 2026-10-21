@@ -63,7 +63,7 @@ address inside it when given one.
 | `carte open [address]` | Open in the browser |
 | `carte share [address] [--apps a,b] [--ttl 2h] [--auth] [--pin] [--replace]` | Put apps on the public internet |
 | `carte unshare [address]` | End a share |
-| `carte stop-all [--idle]` | Stop every instance and kube forward, or the idle ones |
+| `carte stop-all [--idle]` | Stop every instance and kube forward, or the idle ones; without `--idle`, also clears give-ups |
 | `carte prune [--dry-run] [-y]` | Remove leftover state folders, run directories and pidfiles; see below |
 | `carte project add\|ls\|edit\|rm` | Manage project files |
 | `carte setup [--dry-run\|--check\|--uninstall] [--tld tld] [--share domain]` | Set up the machine |
