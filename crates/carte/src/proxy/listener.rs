@@ -13,8 +13,8 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use super::ListenerKind;
 use super::forward::{Inbound, Shared, handle};
+use super::{BoxFuture, ListenerKind};
 
 /// How a listener treats its connections.
 #[derive(Clone)]
@@ -120,11 +120,13 @@ impl Listener {
                 shutdown: shutdown.clone(),
                 tracker: tracker.clone(),
             });
+            let closing = self.shared.router.closing(self.options.kind);
             tracker.spawn(serve_connection(
                 stream,
                 acceptor.clone(),
                 inbound,
                 self.shared.clone(),
+                closing,
             ));
         }
         drop(self.listener);
@@ -147,10 +149,21 @@ async fn serve_connection(
     acceptor: Option<TlsAcceptor>,
     inbound: Arc<Inbound>,
     shared: Arc<Shared>,
+    closing: Option<BoxFuture<'static, ()>>,
 ) {
     let _ = stream.set_nodelay(true);
+    let shutdown = inbound.shutdown.clone();
+    let stop = async move {
+        match closing {
+            Some(closing) => tokio::select! {
+                () = shutdown.cancelled() => {}
+                () = closing => {}
+            },
+            None => shutdown.cancelled().await,
+        }
+    };
     let Some(acceptor) = acceptor else {
-        return serve_http(TokioIo::new(stream), inbound, shared).await;
+        return serve_http(TokioIo::new(stream), inbound, shared, stop).await;
     };
     let handshake = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream));
     let stream = tokio::select! {
@@ -165,17 +178,22 @@ async fn serve_connection(
         },
     };
     if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
-        serve_h2(TokioIo::new(stream), inbound, shared).await;
+        serve_h2(TokioIo::new(stream), inbound, shared, stop).await;
     } else {
-        serve_http(TokioIo::new(stream), inbound, shared).await;
+        serve_http(TokioIo::new(stream), inbound, shared, stop).await;
     }
 }
 
-async fn serve_http<I>(io: I, inbound: Arc<Inbound>, shared: Arc<Shared>)
-where
+/// Serves requests until the client closes the connection or `stop` resolves,
+/// then lets requests in flight finish.
+async fn serve_http<I>(
+    io: I,
+    inbound: Arc<Inbound>,
+    shared: Arc<Shared>,
+    stop: impl Future<Output = ()>,
+) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let shutdown = inbound.shutdown.clone();
     let service = service_fn(move |request| handle(shared.clone(), inbound.clone(), request));
     let mut connection = pin!(
         http1::Builder::new()
@@ -185,7 +203,7 @@ where
     );
     let result = tokio::select! {
         result = connection.as_mut() => result,
-        () = shutdown.cancelled() => {
+        () = stop => {
             connection.as_mut().graceful_shutdown();
             connection.await
         }
@@ -195,18 +213,23 @@ where
     }
 }
 
-async fn serve_h2<I>(io: I, inbound: Arc<Inbound>, shared: Arc<Shared>)
-where
+/// Serves requests until the client closes the connection or `stop` resolves,
+/// then lets requests in flight finish.
+async fn serve_h2<I>(
+    io: I,
+    inbound: Arc<Inbound>,
+    shared: Arc<Shared>,
+    stop: impl Future<Output = ()>,
+) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let shutdown = inbound.shutdown.clone();
     let service = service_fn(move |request| handle(shared.clone(), inbound.clone(), request));
     let mut builder = http2::Builder::new(TokioExecutor::new());
     builder.timer(TokioTimer::new()).enable_connect_protocol();
     let mut connection = pin!(builder.serve_connection(io, service));
     let result = tokio::select! {
         result = connection.as_mut() => result,
-        () = shutdown.cancelled() => {
+        () = stop => {
             connection.as_mut().graceful_shutdown();
             connection.await
         }

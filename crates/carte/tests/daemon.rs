@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{fixture, git, guard, lifeline, repo};
+use tokio_tungstenite::tungstenite;
 
 struct Daemon {
     _dir: tempfile::TempDir,
@@ -69,7 +70,7 @@ impl Daemon {
     }
 
     fn start_sharing_with(provider: &str, domain: &str) -> Self {
-        Self::start_sharing_prepared(provider, domain, |_| {})
+        Self::start_sharing_configured(provider, domain, "", |_| {})
     }
 
     /// Sharing, after `prepare` has set up more files under `work`.
@@ -78,11 +79,25 @@ impl Daemon {
         domain: &str,
         prepare: impl FnOnce(&std::path::Path),
     ) -> Self {
+        Self::start_sharing_configured(provider, domain, "", prepare)
+    }
+
+    /// Sharing, with `extra_project` added to the acme project file.
+    fn start_sharing_project(provider: &str, domain: &str, extra_project: &str) -> Self {
+        Self::start_sharing_configured(provider, domain, extra_project, |_| {})
+    }
+
+    fn start_sharing_configured(
+        provider: &str,
+        domain: &str,
+        extra_project: &str,
+        prepare: impl FnOnce(&std::path::Path),
+    ) -> Self {
         let share = free_port();
         let share_port = share.number;
         let mut daemon = Self::start_configured(
             false,
-            "",
+            extra_project,
             prepare,
             &format!(
                 "\n[share]\nprovider = \"{provider}\"\ndomain = \"{domain}\"\nport = {share_port}\n"
@@ -1109,6 +1124,144 @@ fn shares_reach_only_shared_apps_and_carry_the_public_url() {
             .request("web.acme.test", "/")
             .starts_with("HTTP/1.1 200")
     );
+}
+
+/// A WebSocket server on `port` that echoes text, for an app carte doesn't run.
+fn websocket_echo(port: u16) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let Ok(mut socket) = tungstenite::accept(stream) else {
+                    return;
+                };
+                while let Ok(message) = socket.read() {
+                    if message.is_text() && socket.send(message).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+}
+
+impl Daemon {
+    /// Sharing the acme web app as `port = …`, served by a WebSocket echo server.
+    fn start_sharing_websockets() -> (Self, Port) {
+        let app = free_port();
+        let daemon = Self::start_sharing_project(
+            "none",
+            "share.example",
+            &format!("\n[apps.acme-web]\nport = {}\n", app.number),
+        );
+        websocket_echo(app.number);
+        (daemon, app)
+    }
+
+    /// A WebSocket through the share listener, checked to echo.
+    fn shared_websocket(&self, host: &str) -> tungstenite::WebSocket<TcpStream> {
+        let stream = TcpStream::connect(("127.0.0.1", self.share_port.unwrap())).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let (mut socket, _) = tungstenite::client(format!("ws://{host}/cable"), stream).unwrap();
+        socket.send(tungstenite::Message::text("ping")).unwrap();
+        assert_eq!(socket.read().unwrap().into_text().unwrap().as_str(), "ping");
+        socket
+    }
+}
+
+/// Waits for the server to end `socket`, failing if it is still open when the read
+/// times out.
+fn assert_closed(socket: &mut tungstenite::WebSocket<TcpStream>) {
+    let started = Instant::now();
+    loop {
+        match socket.read() {
+            Ok(message) if message.is_close() => {}
+            Ok(message) => panic!("still open: {message:?}"),
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                panic!("still open after {:?}", started.elapsed())
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+#[test]
+fn shared_websockets_close_when_the_share_ends() {
+    let (daemon, _app) = Daemon::start_sharing_websockets();
+    daemon.run(&["share", "web"]);
+    let mut socket = daemon.shared_websocket("web--acme.share.example");
+    daemon.run(&["unshare", "web"]);
+    assert_closed(&mut socket);
+}
+
+#[test]
+fn shared_websockets_close_when_the_share_expires() {
+    let (daemon, _app) = Daemon::start_sharing_websockets();
+    daemon.run(&["share", "web", "--ttl", "5s"]);
+    let mut socket = daemon.shared_websocket("web--acme.share.example");
+    assert_closed(&mut socket);
+    assert!(snapshot(&daemon).shares.is_empty());
+}
+
+#[test]
+fn shared_keep_alive_connections_close_when_the_share_ends() {
+    let daemon = Daemon::start_sharing();
+    daemon.run(&["share", "web"]);
+    let mut stream = TcpStream::connect(("127.0.0.1", daemon.share_port.unwrap())).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let get = "GET / HTTP/1.1\r\nHost: web--acme.share.example\r\n\r\n";
+    stream.write_all(get.as_bytes()).unwrap();
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    let length = loop {
+        let n = stream.read(&mut buf).unwrap();
+        assert!(
+            n > 0,
+            "closed early: {}",
+            String::from_utf8_lossy(&response)
+        );
+        response.extend_from_slice(&buf[..n]);
+        let text = String::from_utf8_lossy(&response).to_string();
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+            let length: usize = head
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length: ")?
+                        .parse()
+                        .ok()
+                })
+                .expect("a content length");
+            break length - body.len();
+        }
+    };
+    let mut rest = vec![0u8; length];
+    stream.read_exact(&mut rest).unwrap();
+
+    daemon.run(&["unshare", "web"]);
+    let read = stream.read(&mut buf);
+    assert!(
+        matches!(read, Ok(0))
+            || read
+                .as_ref()
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionReset),
+        "the connection is still open: {read:?}"
+    );
+    let _ = stream.write_all(get.as_bytes());
+    let mut after = Vec::new();
+    let _ = stream.read_to_end(&mut after);
+    assert!(after.is_empty(), "{}", String::from_utf8_lossy(&after));
 }
 
 #[test]

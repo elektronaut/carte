@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use carte_api::{ExternalRequest, ProcessState, ProcessStatus, Snapshot};
+use carte_api::{Credentials, ExternalRequest, ProcessState, ProcessStatus, Snapshot};
 use carte_core::kube::{self, KubeTarget};
 use carte_core::model::{InstanceKey, World, path_match};
 use carte_core::naming;
@@ -74,6 +74,10 @@ impl Router for DaemonRouter {
     ) -> ErrorPage {
         self.supervisor.upstream_failed(request, port, error)
     }
+
+    fn closing(&self, kind: ListenerKind) -> Option<BoxFuture<'static, ()>> {
+        self.supervisor.closing(kind)
+    }
 }
 
 /// Who sent a request that another site made, as a phrase for the error page; `None`
@@ -131,10 +135,12 @@ impl Router for SupervisorRouter {
             let world = self.supervisor.world();
             let mut referrer = None;
             let mut checked_authorization = false;
+            let mut shared = None;
             let key = if request.kind == ListenerKind::Share {
                 match self.shared_key(&world, request) {
-                    Ok((key, protected)) => {
-                        checked_authorization = protected;
+                    Ok((key, credentials)) => {
+                        checked_authorization = credentials.is_some();
+                        shared = Some(credentials);
                         key
                     }
                     Err(page) => return Route::Error(page),
@@ -159,7 +165,7 @@ impl Router for SupervisorRouter {
                 Some(Served::File(path)) => {
                     return Route::File {
                         path,
-                        guard: Box::new(Guard::new(self.supervisor.clone(), key)),
+                        guard: Box::new(Guard::new(self.supervisor.clone(), key, shared)),
                     };
                 }
                 Some(Served::Missing) => {
@@ -173,9 +179,16 @@ impl Router for SupervisorRouter {
             }
             let ready = self.supervisor.request(key.clone(), request.path, referrer);
             match tokio::time::timeout(self.hold, ready).await {
+                Ok(Ok(_))
+                    if shared.as_ref().is_some_and(|credentials| {
+                        self.supervisor.shared_routes().get(&key) != Some(credentials)
+                    }) =>
+                {
+                    Route::Error(not_shared())
+                }
                 Ok(Ok(upstream)) => Route::Upstream {
                     port: upstream.port,
-                    guard: Box::new(Guard::new(self.supervisor.clone(), key)),
+                    guard: Box::new(Guard::new(self.supervisor.clone(), key, shared)),
                     checked_authorization,
                 },
                 Ok(Err(failure)) => {
@@ -198,6 +211,26 @@ impl Router for SupervisorRouter {
                 )),
             }
         })
+    }
+
+    fn closing(&self, kind: ListenerKind) -> Option<BoxFuture<'static, ()>> {
+        if kind != ListenerKind::Share {
+            return None;
+        }
+        let mut shared = self.supervisor.watch_shared();
+        Some(Box::pin(async move {
+            let mut routes = shared.borrow_and_update().clone();
+            while shared.changed().await.is_ok() {
+                let now = shared.borrow_and_update().clone();
+                if routes
+                    .iter()
+                    .any(|(key, credentials)| now.get(key) != Some(credentials))
+                {
+                    return;
+                }
+                routes = now;
+            }
+        }))
     }
 }
 
@@ -253,20 +286,13 @@ fn still_starting(snapshot: &Snapshot, key: &InstanceKey, path: &str) -> ErrorPa
 
 impl SupervisorRouter {
     /// The instance a request from the tunnel is for, once it is known to be shared
-    /// and its credentials check out, and whether the share has credentials. Every
+    /// and its credentials check out, with the credentials it is shared with. Every
     /// request that names a share is logged.
     fn shared_key(
         &self,
         world: &World,
         request: RouteRequest<'_>,
-    ) -> Result<(InstanceKey, bool), ErrorPage> {
-        let not_shared = || {
-            ErrorPage::new(
-                StatusCode::NOT_FOUND,
-                "Not shared",
-                "Nothing is shared under this name.",
-            )
-        };
+    ) -> Result<(InstanceKey, Option<Credentials>), ErrorPage> {
         let host = request.host.split(':').next().unwrap_or(request.host);
         let routes = self.supervisor.shared_routes();
         let key = match &world.machine.share {
@@ -297,8 +323,16 @@ impl SupervisorRouter {
             )
             .with_basic_challenge("carte"));
         }
-        Ok((key, credentials.is_some()))
+        Ok((key, credentials.clone()))
     }
+}
+
+fn not_shared() -> ErrorPage {
+    ErrorPage::new(
+        StatusCode::NOT_FOUND,
+        "Not shared",
+        "Nothing is shared under this name.",
+    )
 }
 
 enum Served {
@@ -339,15 +373,18 @@ struct Guard {
     supervisor: Handle,
     key: InstanceKey,
     long_lived: bool,
+    /// For a request from the tunnel, the credentials its instance was shared with.
+    shared: Option<Option<Credentials>>,
 }
 
 impl Guard {
-    fn new(supervisor: Handle, key: InstanceKey) -> Self {
+    fn new(supervisor: Handle, key: InstanceKey, shared: Option<Option<Credentials>>) -> Self {
         supervisor.activity(key.clone(), Activity::RequestStarted);
         Guard {
             supervisor,
             key,
             long_lived: false,
+            shared,
         }
     }
 }
@@ -361,6 +398,18 @@ impl ActivityGuard for Guard {
             self.supervisor
                 .activity(self.key.clone(), Activity::ConnectionOpened);
         }
+    }
+
+    fn closed(&self) -> Option<BoxFuture<'static, ErrorPage>> {
+        let credentials = self.shared.clone()?;
+        let key = self.key.clone();
+        let mut shared = self.supervisor.watch_shared();
+        Some(Box::pin(async move {
+            let _ = shared
+                .wait_for(|routes| routes.get(&key) != Some(&credentials))
+                .await;
+            not_shared()
+        }))
     }
 }
 

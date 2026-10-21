@@ -21,6 +21,7 @@ carte-core.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 gethostname.workspace = true
+getrandom.workspace = true
 hickory-proto.workspace = true
 http.workspace = true
 http-body-util.workspace = true

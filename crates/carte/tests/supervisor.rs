@@ -1174,6 +1174,53 @@ async fn sharing_a_running_app_restarts_it_with_its_public_url() {
 }
 
 #[tokio::test]
+async fn sharing_more_apps_keeps_the_end_of_the_share() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.app("acme-api", WEB);
+    setup.project("");
+    share_config(&setup);
+    let handle = setup.start();
+
+    let first = handle
+        .share(carte_api::ShareRequest {
+            ttl_secs: Some(60),
+            ..share_request("web", false)
+        })
+        .await
+        .unwrap();
+    assert!(
+        first
+            .share
+            .expires_in_secs
+            .is_some_and(|secs| (50..=60).contains(&secs))
+    );
+    let second = handle.share(share_request("api", false)).await.unwrap();
+    assert_eq!(second.share.apps.len(), 2);
+    assert!(
+        second
+            .share
+            .expires_in_secs
+            .is_some_and(|secs| (50..=60).contains(&secs)),
+        "{:?}",
+        second.share.expires_in_secs
+    );
+    let longer = handle
+        .share(carte_api::ShareRequest {
+            ttl_secs: Some(600),
+            ..share_request("api", false)
+        })
+        .await
+        .unwrap();
+    assert!(
+        longer.share.expires_in_secs.is_some_and(|secs| secs > 60),
+        "{:?}",
+        longer.share.expires_in_secs
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_single_host_provider_shares_one_app_at_a_time() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);
