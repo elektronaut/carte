@@ -188,6 +188,15 @@ impl Template {
             if text.is_empty() {
                 return Err(err(position, TemplateErrorKind::EmptyExpression));
             }
+            if let Some(literal) = text
+                .strip_prefix('"')
+                .and_then(|t| t.strip_suffix('"'))
+                .filter(|_| segments.len() == 0)
+            {
+                parts.push(Part::Text(literal.to_string()));
+                rest = close + 2;
+                continue;
+            }
             let expr = parse_expr(text).map_err(|(offset, kind)| err(position + offset, kind))?;
             let filters = segments
                 .map(|(position, name)| match name {
@@ -466,6 +475,15 @@ pub(crate) mod tests {
         assert_eq!(
             ok("unix://{{ run_dir }}/redis.sock"),
             "unix:///run/abcdefgh/redis.sock"
+        );
+    }
+
+    #[test]
+    fn quoted_text_renders_as_is() {
+        assert_eq!(ok("{{\"{{\"}}.Names}}"), "{{.Names}}");
+        assert_eq!(
+            ok("{{ \"{{\" }}.ID}} {{app.short}}"),
+            "{{.ID}} postcard-frontend"
         );
     }
 

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use thiserror::Error;
 
+pub(crate) use file::is_valid_key;
 pub use file::{EnvFile, EnvFileEntry, EnvFileError, parse_env_file, read_env_files};
 pub use provider::{
     CommandOutput, CommandRunner, CommandSpec, ProviderError, SystemRunner, detect_provider,
@@ -255,6 +256,14 @@ pub enum EnvError {
     },
     #[error("{origin} template {key:?} rendered an empty variable name")]
     EmptyKey { origin: TemplateOrigin, key: String },
+    #[error(
+        "{origin} template {key:?} rendered the variable name {name:?}: use letters, digits and underscores"
+    )]
+    InvalidKey {
+        origin: TemplateOrigin,
+        key: String,
+        name: String,
+    },
 }
 
 /// Runs the provider, reads env files and renders the rest.
@@ -382,11 +391,25 @@ fn render_entry(
             }) => continue,
             Err(error) => return Err(err(error)),
         };
-        let name = key.render(&ctx).map_err(err)?;
+        let name = match key.render(&ctx) {
+            Ok(name) => name,
+            Err(TemplateError {
+                kind: TemplateErrorKind::NotShared(_),
+                ..
+            }) => continue,
+            Err(error) => return Err(err(error)),
+        };
         if name.is_empty() {
             return Err(EnvError::EmptyKey {
                 origin: origin.clone(),
                 key: entry.key.clone(),
+            });
+        }
+        if !is_valid_key(&name) {
+            return Err(EnvError::InvalidKey {
+                origin: origin.clone(),
+                key: entry.key.clone(),
+                name,
             });
         }
         rendered.push((name, value, Some(app.name.clone())));
@@ -964,6 +987,28 @@ mod tests {
     }
 
     #[test]
+    fn public_hosts_in_keys_skip_apps_that_are_not_shared() {
+        let mut fx = Fixture::new();
+        fx.urls.shared = vec!["nova-postcard-api"];
+        fx.project.env = vec![tpl("{{public_host:app | snake | upper}}", "1")];
+        let env = fx.render_empty();
+        let names: Vec<_> = env
+            .to_vars()
+            .into_keys()
+            .filter(|k| k.contains("EXAMPLE_DEV"))
+            .collect();
+        assert_eq!(names, ["POSTCARD_API__FEATURE_X__NOVA_EXAMPLE_DEV"]);
+    }
+
+    #[test]
+    fn rendered_names_must_be_valid() {
+        let mut fx = Fixture::new();
+        fx.project.env = vec![tpl("{{host:app}}", "1")];
+        let err = render_env(&fx.request(), Env::new(), &[]).unwrap_err();
+        assert!(matches!(err, EnvError::InvalidKey { .. }), "{err}");
+    }
+
+    #[test]
     fn key_templates_render_hosts_per_app() {
         let mut fx = Fixture::new();
         fx.urls.shared = vec!["nova-postcard-api"];
@@ -1030,7 +1075,7 @@ mod tests {
     #[test]
     fn key_template_rendering_empty_is_an_error() {
         let mut fx = Fixture::new();
-        fx.project.env = vec![tpl("{{ app.name | slug }}", "x")];
+        fx.project.env = vec![tpl("{{ app.name | slug | snake }}", "x")];
         fx.project.apps[1].name = "--".into();
         let err = render_env(&fx.request(), Env::new(), &[]).unwrap_err();
         assert!(matches!(err, EnvError::EmptyKey { .. }));
