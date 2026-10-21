@@ -113,6 +113,8 @@ pub(super) struct Instance {
     warmed_after: Option<String>,
     /// Its HTTP process crashed too often: requests get this until it's started by hand.
     gave_up: Option<BootFailure>,
+    /// Why the latest start crashed.
+    crashed: Option<BootFailure>,
 }
 
 /// A request waiting for an instance, or one of its processes, to serve it.
@@ -240,6 +242,7 @@ impl Instance {
             opened: false,
             warmed_after: None,
             gave_up: None,
+            crashed: None,
         }
     }
 
@@ -540,6 +543,7 @@ impl Actor {
                     self.requested(&key, referrer.as_ref());
                 }
             }
+            Msg::AwaitStart { key, reply } => self.await_start(&key, reply),
             Msg::Activity(key, boot, activity) => self.activity(&key, boot, activity),
             Msg::Hold { target, reply } => {
                 let _ = reply.send(self.hold(&target));
@@ -851,6 +855,52 @@ impl Actor {
         }
     }
 
+    /// Answers once the start a control began is ready, or with why it isn't ready,
+    /// without starting anything.
+    fn await_start(
+        &mut self,
+        key: &InstanceKey,
+        reply: oneshot::Sender<Result<Upstream, BootFailure>>,
+    ) {
+        let Some(inst) = self.instances.get_mut(key) else {
+            let _ = reply.send(Err(BootFailure::not_running(&key.app)));
+            return;
+        };
+        match inst.state {
+            Lifecycle::Starting | Lifecycle::Ready => match inst.answer(None) {
+                Some(result) => {
+                    let _ = reply.send(result);
+                }
+                None => inst.waiters.push(Waiter { path: None, reply }),
+            },
+            Lifecycle::Stopping if inst.restart_pending => {
+                inst.waiters.push(Waiter { path: None, reply });
+            }
+            Lifecycle::Crashed => {
+                let label = inst.label();
+                let failure = inst
+                    .gave_up
+                    .clone()
+                    .or_else(|| inst.crashed.clone())
+                    .unwrap_or_else(|| {
+                        BootFailure::new(
+                            format!("{label} crashed"),
+                            inst.last_error.clone().unwrap_or_default(),
+                        )
+                    });
+                let _ = reply.send(Err(failure));
+            }
+            Lifecycle::Stopping | Lifecycle::Stopped => {
+                let mut failure = BootFailure::new(
+                    format!("{} was stopped", inst.label()),
+                    "It was stopped before it was ready.",
+                );
+                failure.transient = true;
+                let _ = reply.send(Err(failure));
+            }
+        }
+    }
+
     /// Starts an instance and its dependencies. `force` starts a disabled process once.
     /// A crashed or stopping instance whose processes still run is restarted once they
     /// have exited, services last. An instance carte gave up on starts only by hand.
@@ -998,6 +1048,7 @@ impl Actor {
         inst.checkout = Some(checkout.clone());
         inst.boot = boot;
         inst.last_error = None;
+        inst.crashed = None;
         inst.env_changed = false;
         inst.last_activity = Instant::now();
         inst.started_at = Instant::now();
@@ -1765,6 +1816,7 @@ impl Actor {
         inst.last_error = Some(message.clone());
         let mut failure = BootFailure::new(format!("{} crashed", inst.label()), message.clone());
         failure.log = log;
+        inst.crashed = Some(failure.clone());
         inst.fail_waiters(failure);
         inst.signal_stop(self.options.grace, false);
         if let Some(proc) = failed.and_then(|idx| inst.procs.get_mut(idx)) {

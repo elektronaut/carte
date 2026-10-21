@@ -273,6 +273,40 @@ async fn waiting_up_answers_once_ready_or_failed() {
 }
 
 #[tokio::test]
+async fn waiting_up_reports_a_crash_without_starting_the_app_again() {
+    let setup = Setup::new();
+    let starts = setup.root.join("starts.log");
+    setup.app(
+        "acme-api",
+        "web: FIXTURE_BOOT_DELAY_MS=2500 exec {fixture}\n",
+    );
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: echo web >> {}; sleep 1; echo failing; exit 1\n",
+            starts.display()
+        ),
+    );
+    setup.project("[apps.acme-api.processes.web]\nready = \"/up\"\n");
+    let handle = setup.start();
+
+    let mut up = waiting("@main", Action::Up);
+    up.target.project = Some("acme".into());
+    let response = handle.control(up).await.unwrap();
+    assert_eq!(response.affected, ["acme-api@main", "acme-web@main"]);
+    assert_eq!(response.failures.len(), 1, "{response:?}");
+    let failure = &response.failures[0];
+    assert_eq!(failure.instance, "acme-web@main");
+    assert!(failure.detail.contains("exited with code 1"), "{failure:?}");
+    assert!(
+        failure.log.iter().any(|l| l.contains("failing")),
+        "{failure:?}"
+    );
+    assert_eq!(lines(&starts), ["web"]);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn waiting_restart_answers_with_the_new_process_ready() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);
