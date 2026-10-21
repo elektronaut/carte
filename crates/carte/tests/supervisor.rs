@@ -3085,13 +3085,14 @@ async fn a_web_process_that_never_becomes_ready_after_a_restart_counts_as_a_cras
         ),
     );
     setup.project("");
-    let handle = setup.start_with(|options| options.boot_timeout = Duration::from_secs(3));
+    let handle = setup.start_with(|options| options.boot_timeout = Duration::from_secs(1));
 
     handle
         .ensure_ready(key("acme-web", Stack::Main))
         .await
         .unwrap();
     let pid = process(&handle.snapshot(), "acme-web", "web").pid.unwrap();
+    assert!(pid > 1);
     kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
     let gave_up = "acme-web/web gave up: web crashed 5 times within a minute; it stays down";
     let result = tokio::time::timeout(Duration::from_secs(60), async {
@@ -3121,7 +3122,7 @@ async fn a_web_process_that_never_becomes_ready_after_a_restart_counts_as_a_cras
     let stalled = event_lines(&events)
         .into_iter()
         .filter(|l| {
-            l.contains("web did not accept connections on port ") && l.ends_with(" within 3s")
+            l.contains("web did not accept connections on port ") && l.ends_with(" within 1s")
         })
         .count();
     assert_eq!(stalled, 4, "{:#?}", event_lines(&events));
