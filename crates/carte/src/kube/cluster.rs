@@ -449,7 +449,8 @@ pub fn read_kubeconfig(
 
 /// A digest of what `context` resolves to: its entry, its cluster's and its user's,
 /// with the env its login plugin runs with. Other contexts, `current-context` and,
-/// without a login plugin, the env leave it be.
+/// without a login plugin, the env leave it be. Fails when the context, its cluster
+/// or its named user is missing, as in a file cut off mid-rewrite.
 pub fn context_digest(
     kubeconfig: &Kubeconfig,
     context: &str,
@@ -464,11 +465,24 @@ pub fn context_digest(
         .find(|c| c.name == context)
         .ok_or_else(missing)?;
     let entry = named.context.as_ref().ok_or_else(missing)?;
-    let cluster = kubeconfig.clusters.iter().find(|c| c.name == entry.cluster);
+    let cluster = kubeconfig
+        .clusters
+        .iter()
+        .find(|c| c.name == entry.cluster)
+        .ok_or_else(|| {
+            ApiError::Other(format!("the kubeconfig has no cluster {:?}", entry.cluster))
+        })?;
     let user = entry
         .user
         .as_ref()
-        .and_then(|user| kubeconfig.auth_infos.iter().find(|a| a.name == *user));
+        .map(|user| {
+            kubeconfig
+                .auth_infos
+                .iter()
+                .find(|a| a.name == *user)
+                .ok_or_else(|| ApiError::Other(format!("the kubeconfig has no user {user:?}")))
+        })
+        .transpose()?;
     let json = serde_json::to_vec(&(named, cluster, user))
         .map_err(|err| ApiError::Other(err.to_string()))?;
     Ok(Sha256::digest(json).into())
@@ -976,6 +990,19 @@ users:
         user.exec = None;
         user.token = Some("secret".to_string().into());
         assert_eq!(digest(&kubeconfig, "a"), digest(&kubeconfig, "b"));
+    }
+
+    #[test]
+    fn a_context_without_its_cluster_or_user_fails() {
+        let kubeconfig = Kubeconfig::from_yaml(KUBECONFIG).unwrap();
+        let env = BTreeMap::new();
+        context_digest(&kubeconfig, "prod", &env).unwrap();
+        let mut without_cluster = kubeconfig.clone();
+        without_cluster.clusters.clear();
+        assert!(context_digest(&without_cluster, "prod", &env).is_err());
+        let mut without_user = kubeconfig.clone();
+        without_user.auth_infos.clear();
+        assert!(context_digest(&without_user, "prod", &env).is_err());
     }
 
     #[test]

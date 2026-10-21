@@ -1606,9 +1606,13 @@ async fn a_kubeconfig_caught_mid_rewrite_keeps_the_client() {
         .await;
     let route = || setup.kube.route(target("grafana", Some("monitoring")));
     let dialer = upstream(route().await).unwrap();
+    let full = kubeconfig("prod", SERVER, "one");
+    let users = full.find("users:").unwrap();
     for partial in [
         "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\n  cluster: [",
         "",
+        &full[..users],
+        &full[..users + "users:\n".len()],
     ] {
         rewrite(&setup.kubeconfig, partial);
         assert_eq!(upstream(route().await).unwrap(), dialer);

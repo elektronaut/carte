@@ -22,7 +22,7 @@ use futures_util::StreamExt;
 use http::StatusCode;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use cluster::Bounded;
 pub use cluster::{
@@ -152,6 +152,9 @@ struct ClusterEntry {
     env: BTreeMap<String, String>,
     /// When each kubeconfig file changed last, as of the last read.
     stamps: Vec<Option<SystemTime>>,
+    /// The stamps of the files when they last couldn't be read, so that this is
+    /// logged once per change.
+    unread: Option<Vec<Option<SystemTime>>>,
     /// What the project's context resolved to.
     context: [u8; 32],
     cluster: Arc<dyn Cluster>,
@@ -790,9 +793,16 @@ impl Inner {
         });
         let (kubeconfig, context) = match read {
             Ok(read) => read,
-            Err(err) => match slot.as_ref() {
+            Err(err) => match slot.as_mut() {
                 Some(entry) if entry.project == *project => {
-                    debug!("{}: kept the kube client: {}", project.name, err.summary());
+                    if entry.unread.as_ref() != Some(&stamps) {
+                        warn!(
+                            "{}: kept the kube client, as the kubeconfig can't be read: {}",
+                            project.name,
+                            err.summary()
+                        );
+                        entry.unread = Some(stamps);
+                    }
                     return Ok(entry.cluster.clone());
                 }
                 _ => return Err(err),
@@ -804,6 +814,7 @@ impl Inner {
         {
             entry.env = env;
             entry.stamps = stamps;
+            entry.unread = None;
             return Ok(entry.cluster.clone());
         }
         let cluster = tokio::time::timeout(
@@ -820,6 +831,7 @@ impl Inner {
             project: project.clone(),
             env,
             stamps,
+            unread: None,
             context,
             cluster: cluster.clone(),
         });
