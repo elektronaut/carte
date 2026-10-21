@@ -1662,7 +1662,7 @@ impl Actor {
     }
 
     /// Forgets that carte gave up on an instance, so the next request starts it.
-    fn forget_give_up(&mut self, key: &InstanceKey) {
+    fn forget_give_up(&mut self, key: &InstanceKey, why: &str) {
         let Some(inst) = self.instances.get_mut(key) else {
             return;
         };
@@ -1674,7 +1674,7 @@ impl Actor {
         }
         if inst.state == Lifecycle::Crashed && !inst.any_running() {
             inst.state = Lifecycle::Stopped;
-            self.event(EventKind::Stopped, "by hand", vec![events::instance(key)]);
+            self.event(EventKind::Stopped, why, vec![events::instance(key)]);
         }
         self.dirty = true;
     }
@@ -2505,7 +2505,7 @@ impl Actor {
                     })
                 });
                 if http {
-                    self.forget_give_up(key);
+                    self.forget_give_up(key, "by hand");
                 }
                 match process {
                     Some(name) => self.stop_process(key, name, by_hand).map(|_| None),
@@ -2968,7 +2968,9 @@ impl Actor {
         let keys: Vec<InstanceKey> = self
             .instances
             .values()
-            .filter(|i| i.is_active() && !busy.contains(&i.key))
+            .filter(|i| {
+                (i.is_active() || (!idle_only && i.gave_up.is_some())) && !busy.contains(&i.key)
+            })
             .map(|i| i.key.clone())
             .collect();
         let why = if idle_only {
@@ -2977,6 +2979,9 @@ impl Actor {
             "stop-all"
         };
         for key in &keys {
+            if !idle_only {
+                self.forget_give_up(key, why);
+            }
             self.stop(key, Some(why));
         }
         ControlResponse {
