@@ -22,7 +22,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 
-use crate::proctree::descendant_groups;
+use crate::proctree::{descendant_groups, remaining_groups};
 
 /// How a process's stdio is connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,11 +278,8 @@ impl ProcessHandle {
         if let Ok(status) = tokio::time::timeout(grace, self.wait()).await {
             return status;
         }
-        for pgid in descendant_groups(self.shim_pid) {
-            if pgid != self.pid && !others.contains(&pgid) {
-                others.push(pgid);
-            }
-        }
+        let mut others = remaining_groups(self.shim_pid, &others);
+        others.retain(|&pgid| pgid != self.pid);
         signal_groups(&others, Signal::SIGKILL);
         ignore_esrch(self.signal_group(Signal::SIGKILL))?;
         if let Ok(status) = tokio::time::timeout(Duration::from_secs(5), self.wait()).await {

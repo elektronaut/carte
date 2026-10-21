@@ -473,9 +473,15 @@ replaced with `$PORT`, with a notice.
 Stopping a process stops everything it started, including children it
 moved to process groups of their own, as overmind or a job supervisor
 does: each gets SIGTERM, then SIGKILL if it's still running after the
-grace. On macOS, a child that detaches itself by forking twice and
-calling `setsid`, as a daemon does, is out of reach once its parent has
-exited, and keeps running.
+grace. The same happens when the process exits and leaves something
+running.
+
+On Linux this includes daemons a command starts on purpose, such as
+`redis-server --daemonize yes` or `pg_ctl start`: they stop with the
+process, so run such a service in the foreground as a process of its
+own. On macOS, a child that starts a session of its own with `setsid`,
+as a daemon does, is out of reach once its parent has exited, and
+keeps running.
 
 Processes that look like file watchers default to `scope = "checkout"`:
 names containing `watch`, `css` and `js`, and commands with `-w`,

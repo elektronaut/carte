@@ -1,6 +1,6 @@
 //! A record of running process groups, so a restarted daemon can kill what a
-//! crashed one left behind. Each entry carries the leader's start time, so a
-//! recycled pid is never mistaken for one of ours.
+//! crashed one left behind. Each entry carries the leader's start time and its
+//! session, the shim's, so a recycled pid is never mistaken for one of ours.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -10,9 +10,11 @@ use std::path::{Path, PathBuf};
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 
+use crate::proctree::group_in_session;
+
 pub struct GroupRecord {
     path: PathBuf,
-    groups: BTreeMap<u32, u64>,
+    groups: BTreeMap<u32, (u64, u32)>,
 }
 
 impl GroupRecord {
@@ -24,8 +26,11 @@ impl GroupRecord {
     }
 
     pub fn add(&mut self, pgid: u32) {
-        if let Some(started) = start_time(pgid) {
-            self.groups.insert(pgid, started);
+        let sid = unsafe { libc::getsid(pgid as libc::pid_t) };
+        if let Some(started) = start_time(pgid)
+            && sid > 0
+        {
+            self.groups.insert(pgid, (started, sid as u32));
             self.save();
         }
     }
@@ -40,7 +45,7 @@ impl GroupRecord {
         let text: String = self
             .groups
             .iter()
-            .map(|(pgid, started)| format!("{pgid} {started}\n"))
+            .map(|(pgid, (started, sid))| format!("{pgid} {started} {sid}\n"))
             .collect();
         let tmp = self.path.with_extension("tmp");
         if fs::write(&tmp, text).is_ok() {
@@ -50,9 +55,8 @@ impl GroupRecord {
 }
 
 /// Kills the groups recorded by a previous run whose leaders are still the same
-/// processes, or have exited while other members remain, and returns how many
-/// it killed. A pid isn't reused while a group of that id exists, so a group
-/// without its leader is still the recorded one.
+/// processes, or have exited while a member remains in the recorded session,
+/// and returns how many it killed.
 pub fn kill_leftovers(path: &Path) -> io::Result<usize> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -68,9 +72,12 @@ pub fn kill_leftovers(path: &Path) -> io::Result<usize> {
         ) else {
             continue;
         };
-        if start_time(pgid).is_none_or(|leader| leader == started)
-            && killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL).is_ok()
-        {
+        let sid = parts.next().and_then(|sid| sid.parse::<u32>().ok());
+        let ours = match start_time(pgid) {
+            Some(leader) => leader == started,
+            None => sid.is_some_and(|sid| group_in_session(pgid, sid)),
+        };
+        if ours && killpg(Pid::from_raw(pgid as i32), Signal::SIGKILL).is_ok() {
             killed += 1;
         }
     }
@@ -124,8 +131,8 @@ mod tests {
         assert!(!path.exists());
     }
 
-    #[test]
-    fn groups_whose_leader_exited_are_killed() {
+    /// A process group whose leader has exited, and its remaining member.
+    fn leaderless_group() -> (libc::pid_t, libc::pid_t) {
         let mut fds = [0; 2];
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let leader = unsafe { libc::fork() };
@@ -149,10 +156,16 @@ mod tests {
             libc::waitpid(leader, std::ptr::null_mut(), 0);
         }
         assert_eq!(n, 4);
+        (leader, member)
+    }
 
+    #[test]
+    fn groups_whose_leader_exited_are_killed() {
+        let (leader, member) = leaderless_group();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("groups");
-        fs::write(&path, format!("{leader} 1\n")).unwrap();
+        let sid = unsafe { libc::getsid(0) };
+        fs::write(&path, format!("{leader} 1 {sid}\n")).unwrap();
         assert_eq!(kill_leftovers(&path).unwrap(), 1);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while start_time(member as u32).is_some() {
@@ -162,6 +175,20 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn leaderless_groups_in_another_session_are_spared() {
+        let (leader, member) = leaderless_group();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("groups");
+        let other = unsafe { libc::getsid(0) } + 1;
+        fs::write(&path, format!("{leader} 1 {other}\n{leader} 1\n")).unwrap();
+        let killed = kill_leftovers(&path).unwrap();
+        let alive = start_time(member as u32).is_some();
+        unsafe { libc::kill(member, libc::SIGKILL) };
+        assert_eq!(killed, 0);
+        assert!(alive);
     }
 
     #[test]

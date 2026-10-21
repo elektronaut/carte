@@ -283,11 +283,11 @@ fn terminate_group(pgid: libc::pid_t, reaped: &mut Option<libc::c_int>) {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    for group in descendant_groups() {
-        if !groups.contains(&group) {
-            groups.push(group);
-        }
-    }
+    let earlier: Vec<u32> = groups.iter().map(|&g| g as u32).collect();
+    let groups: Vec<libc::pid_t> = crate::proctree::remaining_groups(std::process::id(), &earlier)
+        .into_iter()
+        .map(|g| g as libc::pid_t)
+        .collect();
     signal_groups(&groups, libc::SIGKILL);
     if reaped.is_none() {
         let mut status = 0;

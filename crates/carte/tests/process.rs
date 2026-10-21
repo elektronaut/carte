@@ -432,6 +432,24 @@ async fn stop_reaches_groups_the_command_makes() {
 }
 
 #[tokio::test]
+async fn groups_left_when_the_command_exits_are_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("child.pid");
+    let mut handle = spawner()
+        .spawn(
+            &spec()
+                .env("FIXTURE_GROUP_CHILD_PIDFILE", &pidfile)
+                .env("FIXTURE_CRASH", "0"),
+        )
+        .await
+        .unwrap();
+    let (status, _) = run_to_end(&mut handle).await;
+    assert!(status.success());
+    let child = read_pidfile(&pidfile).await;
+    wait_dead(child).await;
+}
+
+#[tokio::test]
 async fn closing_the_lifeline_reaches_groups_the_command_makes() {
     let dir = tempfile::tempdir().unwrap();
     let pidfile = dir.path().join("child.pid");
