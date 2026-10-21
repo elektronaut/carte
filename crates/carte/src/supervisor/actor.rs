@@ -2575,16 +2575,7 @@ impl Actor {
                 key.stack.slug()
             ));
         }
-        if matches!(
-            action,
-            Action::Pin { save: true }
-                | Action::Unpin { save: true }
-                | Action::Disable { save: true }
-                | Action::Enable { save: true }
-        ) && let Some(state) = self.world.project(&key.project)
-        {
-            carte_core::config_edit::policy_file(&state.project).map_err(|e| e.to_string())?;
-        }
+        let edit = self.policy_edit(key, process, &action)?;
         let by_hand = Some("by hand");
         match action {
             Action::Up => match process {
@@ -2654,12 +2645,12 @@ impl Actor {
                 } else if let Some(name) = process {
                     self.start_process(key, name)?;
                 }
-                self.maybe_save(save, key, process, Some(Policy::Pinned))
+                self.save_policy(edit, key, process, Some(Policy::Pinned))
             }
             Action::Unpin { save } => {
                 self.set_override(key, process, Policy::Auto);
                 self.policy_event(key, process, "unpinned", save);
-                self.maybe_save(save, key, process, None)
+                self.save_policy(edit, key, process, None)
             }
             Action::Disable { save } => {
                 self.set_override(key, process, Policy::Disabled);
@@ -2678,12 +2669,12 @@ impl Actor {
                     Some(_) => {}
                     None => self.stop(key, Some("disabled")),
                 }
-                self.maybe_save(save, key, process, Some(Policy::Disabled))
+                self.save_policy(edit, key, process, Some(Policy::Disabled))
             }
             Action::Enable { save } => {
                 self.set_override(key, process, Policy::Auto);
                 self.policy_event(key, process, "enabled", save);
-                self.maybe_save(save, key, process, None)
+                self.save_policy(edit, key, process, None)
             }
         }
     }
@@ -2701,18 +2692,20 @@ impl Actor {
         self.event(EventKind::PolicyChanged, message, vec![subject]);
     }
 
-    /// Writes the policy to the project file, applies it to every running instance
-    /// of the app and drops the temporary overrides it replaces.
-    fn maybe_save(
-        &mut self,
-        save: bool,
+    /// The project file as a saving policy action leaves it, made before the action
+    /// changes anything, so a save that can't be made changes nothing.
+    fn policy_edit(
+        &self,
         key: &InstanceKey,
         process: Option<&str>,
-        policy: Option<Policy>,
-    ) -> Result<Option<String>, String> {
-        if !save {
-            return Ok(None);
-        }
+        action: &Action,
+    ) -> Result<Option<(PathBuf, String)>, String> {
+        let policy = match action {
+            Action::Pin { save: true } => Some(Policy::Pinned),
+            Action::Disable { save: true } => Some(Policy::Disabled),
+            Action::Unpin { save: true } | Action::Enable { save: true } => None,
+            _ => return Ok(None),
+        };
         let state = self
             .world
             .project(&key.project)
@@ -2720,15 +2713,31 @@ impl Actor {
         let path = carte_core::config_edit::policy_file(&state.project)
             .map_err(|err| err.to_string())?
             .to_path_buf();
-        let app_policy = state
-            .project
-            .app(&key.app)
-            .and_then(|a| a.settings.policy)
-            .unwrap_or_default();
         let text = std::fs::read_to_string(&path)
             .map_err(|err| format!("reading {}: {err}", path.display()))?;
         let edited = carte_core::config_edit::set_policy(&text, &key.app, process, policy)
-            .map_err(|err| err.to_string())?;
+            .map_err(|err| format!("{}: {err}", path.display()))?;
+        Ok(Some((path, edited)))
+    }
+
+    /// Writes the policy to the project file, applies it to every running instance
+    /// of the app and drops the temporary overrides it replaces.
+    fn save_policy(
+        &mut self,
+        edit: Option<(PathBuf, String)>,
+        key: &InstanceKey,
+        process: Option<&str>,
+        policy: Option<Policy>,
+    ) -> Result<Option<String>, String> {
+        let Some((path, edited)) = edit else {
+            return Ok(None);
+        };
+        let app_policy = self
+            .world
+            .project(&key.project)
+            .and_then(|state| state.project.app(&key.app))
+            .and_then(|a| a.settings.policy)
+            .unwrap_or_default();
         std::fs::write(&path, edited)
             .map_err(|err| format!("writing {}: {err}", path.display()))?;
 

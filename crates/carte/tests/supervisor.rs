@@ -1310,6 +1310,31 @@ async fn saved_policies_are_written_to_the_project_file() {
 }
 
 #[tokio::test]
+async fn a_save_that_fails_changes_nothing() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("");
+    let handle = setup.start();
+    std::fs::write(setup.paths.project_file("acme"), "[[\n").unwrap();
+
+    let err = handle
+        .control(control("web", Action::Pin { save: true }))
+        .await
+        .unwrap_err();
+    assert!(err.contains("acme.toml"), "{err}");
+    let snapshot = handle.snapshot();
+    let web = status(&snapshot, "acme-web", "main");
+    assert_eq!(web.state, InstanceState::Stopped, "{web:?}");
+    assert!(
+        web.processes
+            .iter()
+            .all(|p| p.policy == carte_api::Policy::Auto && !p.temporary),
+        "{web:?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn policies_of_template_projects_are_not_saved_to_the_template() {
     let setup = Setup::new();
     let sites = setup.root.join("work/sites");
