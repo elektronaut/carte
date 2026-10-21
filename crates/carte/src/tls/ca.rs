@@ -304,7 +304,7 @@ impl CertificateAuthority {
             .open(&created)
             .and_then(|mut file| file.write_all(record.as_bytes()))
             .map_err(TlsError::io("write", &created))?;
-        let pair = format!("{}{}", cert.pem(), key.serialize_pem());
+        let pair = format!("{}{}", key.serialize_pem(), cert.pem());
         write_atomic(&Self::key_path_in(state_dir), pair.as_bytes(), 0o600)?;
         write_atomic(&cert_path, cert.pem().as_bytes(), 0o644)?;
 
@@ -570,6 +570,15 @@ mod tests {
             new.cert_pem()
         );
         assert!(CertificateAuthority::load_existing(tmp.path(), &["test"]).is_ok());
+    }
+
+    #[test]
+    fn an_older_carte_still_reads_the_key_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        create(tmp.path());
+        let pair = fs::read_to_string(tmp.path().join("ca-key.pem")).unwrap();
+        assert!(pem_block(&pair, "CERTIFICATE").is_some());
+        assert!(KeyPair::from_pem(&pair).is_ok());
     }
 
     #[test]
