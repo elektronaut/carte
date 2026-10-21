@@ -93,6 +93,9 @@ pub(super) struct Instance {
     pub route_port: Option<u16>,
     waiters: Vec<Waiter>,
     pub in_flight: u32,
+    /// When each request answered with an upstream, whose proxy hasn't sent
+    /// `RequestStarted` yet, stops counting as in flight.
+    answered: Vec<Instant>,
     pub connections: u32,
     /// Holds from `carte exec`, by id.
     pub execs: BTreeSet<u64>,
@@ -242,6 +245,7 @@ impl Instance {
             route_port: None,
             waiters: Vec::new(),
             in_flight: 0,
+            answered: Vec::new(),
             connections: 0,
             execs: BTreeSet::new(),
             last_activity: Instant::now(),
@@ -262,6 +266,21 @@ impl Instance {
 
     fn is_active(&self) -> bool {
         matches!(self.state, Lifecycle::Starting | Lifecycle::Ready)
+    }
+
+    /// Requests in flight, counting those answered whose proxy hasn't started them.
+    pub fn requests(&self) -> u32 {
+        let now = Instant::now();
+        self.in_flight + self.answered.iter().filter(|until| **until > now).count() as u32
+    }
+
+    /// Sends a waiting request its answer. An upstream for a proxied request counts
+    /// as in flight until the proxy starts the request, or for [`ANSWERED`].
+    fn reply(&mut self, waiter: Waiter, result: Result<Upstream, BootFailure>) {
+        let proxied = waiter.path.is_some() && result.is_ok();
+        if waiter.reply.send(result).is_ok() && proxied {
+            self.answered.push(Instant::now() + ANSWERED);
+        }
     }
 
     /// Ready, with its HTTP process up: not suspended, and not waiting to restart
@@ -353,9 +372,7 @@ impl Instance {
         let mut waiting = Vec::new();
         for waiter in std::mem::take(&mut self.waiters) {
             match self.answer(waiter.path.as_deref()) {
-                Some(result) => {
-                    let _ = waiter.reply.send(result);
-                }
+                Some(result) => self.reply(waiter, result),
                 None => waiting.push(waiter),
             }
         }
@@ -396,6 +413,10 @@ impl Instance {
 /// How long a newly ready instance counts as starting, so it isn't evicted between
 /// the response that started it and the requests that follow.
 const JUST_READY: Duration = Duration::from_secs(10);
+
+/// How long a request answered with its upstream counts as in flight before the
+/// proxy starts it.
+const ANSWERED: Duration = Duration::from_secs(2);
 
 /// Temporary policies from `pin`/`disable`, per instance and process (`None` = all).
 pub(super) type Overrides = BTreeMap<(InstanceKey, Option<String>), Policy>;
@@ -842,9 +863,7 @@ impl Actor {
             match inst.state {
                 Lifecycle::Starting | Lifecycle::Ready => {
                     match inst.answer(path.as_deref()) {
-                        Some(result) => {
-                            let _ = reply.send(result);
-                        }
+                        Some(result) => inst.reply(Waiter { path, reply }, result),
                         None => {
                             inst.last_activity = Instant::now();
                             inst.waiters.push(Waiter { path, reply });
@@ -865,9 +884,7 @@ impl Actor {
             Ok(()) => {
                 let inst = self.instances.get_mut(&key).expect("started instance");
                 match inst.answer(path.as_deref()) {
-                    Some(result) => {
-                        let _ = reply.send(result);
-                    }
+                    Some(result) => inst.reply(Waiter { path, reply }, result),
                     None => inst.waiters.push(Waiter { path, reply }),
                 }
             }
@@ -2050,6 +2067,7 @@ impl Actor {
         };
         inst.state = Lifecycle::Stopped;
         inst.in_flight = 0;
+        inst.answered.clear();
         inst.connections = 0;
         if !inst.restart_pending {
             inst.execs.clear();
@@ -2087,7 +2105,12 @@ impl Actor {
             return;
         };
         match activity {
-            Activity::RequestStarted => inst.in_flight += 1,
+            Activity::RequestStarted => {
+                inst.in_flight += 1;
+                if boot.is_some() && !inst.answered.is_empty() {
+                    inst.answered.remove(0);
+                }
+            }
             Activity::RequestEnded => inst.in_flight = inst.in_flight.saturating_sub(1),
             Activity::ConnectionOpened => inst.connections += 1,
             Activity::ConnectionClosed => inst.connections = inst.connections.saturating_sub(1),
@@ -2232,7 +2255,7 @@ impl Actor {
                     starting: inst.state == Lifecycle::Starting,
                     just_ready: inst.state == Lifecycle::Ready
                         && inst.ready_at.elapsed() < JUST_READY,
-                    requests_in_flight: inst.in_flight,
+                    requests_in_flight: inst.requests(),
                     waiting: inst.waiters.len() as u32,
                     connections: inst.connections,
                     execs: inst.execs.len() as u32,
@@ -2264,6 +2287,11 @@ impl Actor {
         self.enforce_log_budget();
         self.adopt_shared_processes();
         self.expire_shares(now);
+        for inst in self.instances.values_mut() {
+            let before = inst.answered.len();
+            inst.answered.retain(|until| *until > now);
+            self.dirty |= inst.answered.len() != before;
+        }
         let usages = self.usages();
         let mut to_stop = BTreeMap::new();
         for usage in &usages {
