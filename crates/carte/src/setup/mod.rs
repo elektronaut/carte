@@ -21,7 +21,7 @@ use carte_core::model::MachineConfig;
 use crate::cli::prompt::tilde;
 use crate::dns;
 use crate::paths::Paths;
-use crate::tls::trust::{self, CommandLine};
+use crate::tls::trust::{self, CommandLine, KeychainCa};
 use crate::tls::{CertificateAuthority, CreateReason};
 use plist::{Agent, LABEL, OLD_LABEL};
 use skill::{SkillDir, SkillFacts, SkillLink};
@@ -118,13 +118,15 @@ impl SetupEnv {
         CertificateAuthority::cert_path_in(&self.paths.state_dir)
     }
 
-    /// The CA's certificate, key and the trust bundle made from it.
-    pub fn ca_files(&self) -> [PathBuf; 3] {
+    /// The CA's certificate, key, the trust bundle made from it and the record of the CAs
+    /// created here.
+    pub fn ca_files(&self) -> [PathBuf; 4] {
         let state = &self.paths.state_dir;
         [
             self.ca_cert(),
             state.join("ca-key.pem"),
             state.join("ca-bundle.pem"),
+            CertificateAuthority::created_path_in(state),
         ]
     }
 
@@ -200,8 +202,8 @@ pub struct Facts {
     pub ca: CaState,
     /// The CA's files that exist.
     pub ca_files: Vec<PathBuf>,
-    /// SHA-256 hashes of carte's CAs in the system keychain.
-    pub keychain_cas: Vec<String>,
+    /// The CAs in the system keychain that this install created.
+    pub keychain_cas: Vec<KeychainCa>,
     pub agent_plist: Option<String>,
     pub agent_loaded: bool,
     /// The agent under its old label.
@@ -246,7 +248,11 @@ impl Facts {
             resolvers,
             ca,
             ca_files: env.ca_files().into_iter().filter(|f| f.exists()).collect(),
-            keychain_cas: trust::keychain_cas(),
+            keychain_cas: trust::own_cas(
+                trust::keychain_cas(),
+                CertificateAuthority::created_hashes(&env.paths.state_dir).as_deref(),
+                &crate::tls::ca::default_common_name(),
+            ),
             agent_plist: fs::read_to_string(env.agent_plist()).ok(),
             agent_loaded: check::launchd_loaded(&env.service(LABEL)),
             old_agent: OldAgent {
@@ -823,11 +829,11 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
         ));
     }
 
-    for hash in &facts.keychain_cas {
+    for ca in &facts.keychain_cas {
         plan.steps.push(Step::sudo(
-            "Remove carte's local CA from the system keychain",
+            format!("Remove {} from the system keychain", ca.label),
             "security",
-            &["delete-certificate", "-Z", hash, trust::SYSTEM_KEYCHAIN],
+            &["delete-certificate", "-Z", &ca.hash, trust::SYSTEM_KEYCHAIN],
         ));
     }
     if !facts.ca_files.is_empty() {
@@ -1290,12 +1296,25 @@ mod tests {
             resolvers: resolvers(&[("test", &env.resolver_contents())]),
             ca: CaState::Trusted,
             ca_files: env.ca_files()[..2].to_vec(),
-            keychain_cas: vec!["1D2D".into(), "C544".into()],
+            keychain_cas: vec![
+                KeychainCa {
+                    hash: "1D2D".into(),
+                    label: "carte local CA (alice@mac)".into(),
+                },
+                KeychainCa {
+                    hash: "C544".into(),
+                    label: "carte local CA (alice@mac)".into(),
+                },
+            ],
             agent_plist: Some("x".into()),
             agent_loaded: true,
             ..fresh()
         };
         let plan = plan_uninstall(&env, &facts);
+        assert_eq!(
+            plan.steps[5].description,
+            "Remove carte local CA (alice@mac) from the system keychain"
+        );
         let root = dir.path().display();
         assert_eq!(
             commands(&plan),

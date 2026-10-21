@@ -1,5 +1,7 @@
 use std::fmt;
 use std::fs;
+use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use rcgen::{
@@ -9,6 +11,7 @@ use rcgen::{
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -79,6 +82,26 @@ impl CertificateAuthority {
 
     fn key_path_in(state_dir: &Path) -> PathBuf {
         state_dir.join("ca-key.pem")
+    }
+
+    /// The SHA-256 hashes of the CAs created in the state dir, one per line.
+    pub fn created_path_in(state_dir: &Path) -> PathBuf {
+        state_dir.join("ca-created")
+    }
+
+    /// The uppercase SHA-256 hashes of the CAs created in `state_dir` and of the one in it
+    /// now, or `None` when nothing was recorded, as before carte kept the record.
+    pub fn created_hashes(state_dir: &Path) -> Option<Vec<String>> {
+        let recorded = fs::read_to_string(Self::created_path_in(state_dir)).ok()?;
+        let mut hashes: Vec<String> = recorded
+            .lines()
+            .map(|line| line.trim().to_ascii_uppercase())
+            .filter(|line| !line.is_empty())
+            .chain(current_hash(state_dir))
+            .collect();
+        hashes.sort();
+        hashes.dedup();
+        Some(hashes)
     }
 
     pub fn cert_pem(&self) -> &str {
@@ -196,6 +219,19 @@ impl CertificateAuthority {
         let cert = params.self_signed(&key)?;
 
         let cert_path = Self::cert_path_in(state_dir);
+        let mut record = current_hash(state_dir)
+            .map(|old| format!("{old}\n"))
+            .unwrap_or_default();
+        record.push_str(&sha256_hex(cert.der()));
+        record.push('\n');
+        let created = Self::created_path_in(state_dir);
+        fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o644)
+            .open(&created)
+            .and_then(|mut file| file.write_all(record.as_bytes()))
+            .map_err(TlsError::io("write", &created))?;
         write_atomic(
             &Self::key_path_in(state_dir),
             key.serialize_pem().as_bytes(),
@@ -267,6 +303,20 @@ pub fn default_common_name() -> String {
         name.push(')');
     }
     name
+}
+
+/// A certificate's SHA-256 hash in uppercase hex, as `security` prints it.
+pub fn sha256_hex(der: &[u8]) -> String {
+    Sha256::digest(der)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect()
+}
+
+fn current_hash(state_dir: &Path) -> Option<String> {
+    let pem = fs::read(CertificateAuthority::cert_path_in(state_dir)).ok()?;
+    let der = CertificateDer::from_pem_slice(&pem).ok()?;
+    Some(sha256_hex(&der))
 }
 
 fn permitted_dns_names(x509: &X509Certificate<'_>) -> Vec<String> {
@@ -377,6 +427,42 @@ mod tests {
             ))
         );
         assert_eq!(create(tmp.path()).origin(), &CaOrigin::Loaded);
+    }
+
+    #[test]
+    fn records_the_hash_of_every_ca_it_creates() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(CertificateAuthority::created_hashes(tmp.path()), None);
+        let first = sha256_hex(create(tmp.path()).cert_der());
+        assert_eq!(
+            CertificateAuthority::created_hashes(tmp.path()),
+            Some(vec![first.clone()])
+        );
+        create(tmp.path());
+        fs::write(tmp.path().join("ca-key.pem"), "garbage").unwrap();
+        let second = sha256_hex(create(tmp.path()).cert_der());
+        let mut both = vec![first, second];
+        both.sort();
+        assert_eq!(CertificateAuthority::created_hashes(tmp.path()), Some(both));
+    }
+
+    #[test]
+    fn records_a_ca_made_before_the_record_when_replacing_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = sha256_hex(create(tmp.path()).cert_der());
+        fs::remove_file(CertificateAuthority::created_path_in(tmp.path())).unwrap();
+        fs::write(tmp.path().join("ca-key.pem"), "garbage").unwrap();
+        let new = sha256_hex(create(tmp.path()).cert_der());
+        let hashes = CertificateAuthority::created_hashes(tmp.path()).unwrap();
+        assert!(hashes.contains(&old) && hashes.contains(&new), "{hashes:?}");
+    }
+
+    #[test]
+    fn hashes_like_security_does() {
+        assert_eq!(
+            sha256_hex(b"carte"),
+            "D2C12420B9815E07B29B1256FDD6E39A94B69ED192009F0C5D7AFFFC99DE44E9"
+        );
     }
 
     #[test]
