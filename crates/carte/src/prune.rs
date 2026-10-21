@@ -372,35 +372,31 @@ fn known(paths: &Paths, world: &World, in_use: InUse) -> (Known, Vec<Skip>) {
             },
         );
     }
-    let troubled = troubled(world);
-    known.skipped = troubled.clone();
+    known.skipped = troubled(world);
     let mut global = Vec::new();
     match discovery::project_files(&paths.projects_dir()) {
         Ok(files) => {
             known.complete = true;
+            let mut names = BTreeSet::new();
             for file in files {
+                let first = names.insert(file.name.clone());
                 if may_be_template(&file.path) {
-                    match config::load_project_file(&file.path) {
-                        Ok(template) if !troubled.contains_key(&file.name) => {
-                            let (dirs, _, _) = include::expand_projects(
-                                template.root.as_deref(),
-                                &template.projects,
+                    let expanded = config::load_project_file(&file.path)
+                        .ok()
+                        .filter(|_| first)
+                        .map(|t| include::expand_projects(t.root.as_deref(), &t.projects))
+                        .filter(|(_, _, problems)| problems.is_empty());
+                    match expanded {
+                        Some((dirs, _, _)) => {
+                            known.present.extend(
+                                dirs.iter()
+                                    .filter_map(|(dir, _)| dir.file_name()?.to_str())
+                                    .filter(|name| !known.projects.contains_key(*name))
+                                    .map(str::to_string),
                             );
-                            for (dir, _) in dirs {
-                                let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
-                                    continue;
-                                };
-                                if !known.projects.contains_key(name) {
-                                    known.skipped.entry(name.to_string()).or_insert_with(|| {
-                                        format!(
-                                            "{} matches its directory, which has nothing to run now",
-                                            file.path.display()
-                                        )
-                                    });
-                                }
-                            }
+                            known.present.insert(file.name);
                         }
-                        _ => {
+                        None => {
                             known.complete = false;
                             global.push(Skip {
                                 project: None,
@@ -412,6 +408,7 @@ fn known(paths: &Paths, world: &World, in_use: InUse) -> (Known, Vec<Skip>) {
                             });
                         }
                     }
+                    continue;
                 }
                 if known.projects.contains_key(&file.name) {
                     continue;
@@ -638,17 +635,57 @@ mod tests {
         let root = tmp.path().canonicalize().unwrap();
         let paths = Paths::under(&root);
         fs::create_dir_all(paths.projects_dir()).unwrap();
-        runnable_repo(&root.join("sites/wiki"));
+        fs::create_dir_all(root.join("sites/wiki")).unwrap();
+        fs::write(root.join("sites/wiki/Procfile"), "web: x\n").unwrap();
         fs::create_dir_all(root.join("sites/blog/.git")).unwrap();
         let data = paths.dir_roots().data;
         for project in ["wiki", "blog", "old"] {
-            fs::create_dir_all(data.join(project).join("main/web")).unwrap();
+            fs::create_dir_all(data.join(project).join("main").join(project)).unwrap();
         }
         fs::write(
             paths.projects_dir().join("sites.toml"),
             format!("projects = \"{}/sites/*\"\n", root.display()),
         )
         .unwrap();
+        assert_eq!(leftovers(&paths), ["old"]);
+
+        let roots = paths.dir_roots();
+        let run = roots.run.join("abcdefgh");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(dirs::owner_marker(&run), roots.data.display().to_string()).unwrap();
+        let plan = super::plan(&paths, InUse::default());
+        assert!(
+            plan.orphans.iter().any(|o| o.path == run),
+            "a matched directory doesn't hold up unclaimed run directories: {:?}",
+            plan.skipped
+        );
+    }
+
+    #[test]
+    fn a_problem_of_a_project_named_like_its_template_isnt_the_templates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let paths = Paths::under(&root);
+        fs::create_dir_all(paths.projects_dir()).unwrap();
+        runnable_repo(&root.join("sites/sites"));
+        let data = paths.dir_roots().data;
+        for project in ["sites", "old"] {
+            fs::create_dir_all(data.join(project).join("main/web")).unwrap();
+        }
+        fs::write(
+            paths.projects_dir().join("sites.toml"),
+            format!(
+                "projects = \"{}/sites/*\"\n[apps.sites]\naliases = [\"a.b\"]\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+        let plan = super::plan(&paths, InUse::default());
+        assert!(
+            plan.skipped.iter().all(|s| s.project.is_some()),
+            "{:?}",
+            plan.skipped
+        );
         assert_eq!(leftovers(&paths), ["old"]);
     }
 
