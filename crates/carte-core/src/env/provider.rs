@@ -1263,11 +1263,41 @@ pub(crate) mod tests {
     }
 
     /// Kills a process group when dropped, even when an assertion failed.
-    struct GroupGuard(Pid);
+    /// The process group a test's shell led, killed when dropped unless it was seen
+    /// to be gone, after which its id may belong to someone else.
+    struct GroupGuard {
+        group: Pid,
+        alive: bool,
+    }
+
+    impl GroupGuard {
+        fn new(group: Pid) -> Self {
+            assert!(group.as_raw() > 1, "not a group of ours: {group}");
+            Self { group, alive: true }
+        }
+
+        /// Waits up to five seconds for the group to be gone. A group that can't be
+        /// signalled for lack of permission isn't gone.
+        fn is_gone(&mut self) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match killpg(self.group, None) {
+                    Err(nix::errno::Errno::ESRCH) => {
+                        self.alive = false;
+                        return true;
+                    }
+                    _ if Instant::now() >= deadline => return false,
+                    _ => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        }
+    }
 
     impl Drop for GroupGuard {
         fn drop(&mut self) {
-            let _ = killpg(self.0, Signal::SIGKILL);
+            if self.alive {
+                let _ = killpg(self.group, Signal::SIGKILL);
+            }
         }
     }
 
@@ -1282,17 +1312,6 @@ pub(crate) mod tests {
             assert!(Instant::now() < deadline, "no pid in {}", path.display());
             std::thread::sleep(Duration::from_millis(10));
         }
-    }
-
-    fn group_is_gone(group: Pid) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while killpg(group, None).is_ok() {
-            if Instant::now() >= deadline {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        true
     }
 
     #[test]
@@ -1319,13 +1338,13 @@ pub(crate) mod tests {
                 timeout: Duration::from_secs(30),
             })
             .unwrap();
-        let group = GroupGuard(read_pid(&pid_file));
+        let mut group = GroupGuard::new(read_pid(&pid_file));
         assert!(output.success);
         assert!(output.stdout.starts_with(b"{}\n"), "{:?}", output.stdout);
         assert!(output.stdout_held_open);
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(
-            group_is_gone(group.0),
+            group.is_gone(),
             "the writer outlived its closed pipe and kept running"
         );
     }
@@ -1350,11 +1369,8 @@ pub(crate) mod tests {
                 timeout: Duration::from_millis(500),
             })
             .unwrap_err();
-        let group = GroupGuard(read_pid(&pid_file));
+        let mut group = GroupGuard::new(read_pid(&pid_file));
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert!(
-            group_is_gone(group.0),
-            "the provider's group outlived the timeout"
-        );
+        assert!(group.is_gone(), "the provider's group outlived the timeout");
     }
 }
