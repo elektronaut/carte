@@ -168,7 +168,7 @@ impl SetupEnv {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaState {
     Missing,
-    /// It exists but `load_or_create` would replace it.
+    /// It exists but setup replaces it.
     Replace(String),
     Untrusted,
     Trusted,
@@ -996,7 +996,7 @@ fn run_step(step: &Step, env: &SetupEnv) -> anyhow::Result<()> {
             _ => {}
         },
         Action::CreateCa => {
-            let ca = CertificateAuthority::load_or_create(
+            let ca = CertificateAuthority::load_exact_or_create(
                 &env.paths.state_dir,
                 &crate::tls::ca::default_common_name(),
                 &env.machine.served_tlds(),

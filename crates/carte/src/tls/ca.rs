@@ -31,6 +31,10 @@ pub struct CertificateAuthority {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CaOrigin {
     Loaded,
+    /// Loaded, though it can also sign names under `extra`, TLDs carte no longer serves.
+    Wider {
+        extra: Vec<String>,
+    },
     Created(CreateReason),
 }
 
@@ -51,16 +55,35 @@ pub(crate) struct IssuedLeaf {
 
 impl CertificateAuthority {
     /// Loads the CA from `state_dir`, or creates one when it is missing, unreadable, close to
-    /// expiry or constrained to other TLDs.
+    /// expiry or doesn't cover every TLD. A CA that also covers other TLDs is kept, as
+    /// `CaOrigin::Wider`, so a daemon restart doesn't swap out a trusted CA.
     pub fn load_or_create<S: AsRef<str>>(
         state_dir: &Path,
         common_name: &str,
         tlds: &[S],
     ) -> Result<Self, TlsError> {
+        Self::load_or_create_matching(state_dir, common_name, tlds, false)
+    }
+
+    /// Like `load_or_create`, but also replaces a CA that covers more than `tlds`.
+    pub fn load_exact_or_create<S: AsRef<str>>(
+        state_dir: &Path,
+        common_name: &str,
+        tlds: &[S],
+    ) -> Result<Self, TlsError> {
+        Self::load_or_create_matching(state_dir, common_name, tlds, true)
+    }
+
+    fn load_or_create_matching<S: AsRef<str>>(
+        state_dir: &Path,
+        common_name: &str,
+        tlds: &[S],
+        exact: bool,
+    ) -> Result<Self, TlsError> {
         let tlds = normalize_tlds(tlds)?;
         ensure_private_dir(state_dir)?;
         let _lock = lock_ca(state_dir)?;
-        let reason = match Self::load(state_dir, &tlds) {
+        let reason = match Self::load(state_dir, &tlds, exact) {
             Ok(ca) => return Ok(ca),
             Err(reason) => reason,
         };
@@ -68,13 +91,13 @@ impl CertificateAuthority {
     }
 
     /// Loads the CA from `state_dir` without creating or replacing anything; the error
-    /// says why `load_or_create` would create a new one.
+    /// says why `load_exact_or_create` would create a new one.
     pub fn load_existing<S: AsRef<str>>(
         state_dir: &Path,
         tlds: &[S],
     ) -> Result<Self, CreateReason> {
         let tlds = normalize_tlds(tlds).map_err(|e| CreateReason::Invalid(e.to_string()))?;
-        Self::load(state_dir, &tlds)
+        Self::load(state_dir, &tlds, true)
     }
 
     pub fn cert_path_in(state_dir: &Path) -> PathBuf {
@@ -128,7 +151,7 @@ impl CertificateAuthority {
         self.tlds.iter().any(|tld| is_within(host, tld))
     }
 
-    fn load(state_dir: &Path, tlds: &[String]) -> Result<Self, CreateReason> {
+    fn load(state_dir: &Path, tlds: &[String], exact: bool) -> Result<Self, CreateReason> {
         let cert_path = Self::cert_path_in(state_dir);
         let key_path = Self::key_path_in(state_dir);
         let (cert_pem, key_pem) = match (
@@ -165,9 +188,20 @@ impl CertificateAuthority {
             return Err(CreateReason::Expiring);
         }
         let previous = permitted_dns_names(&x509);
-        if previous != tlds {
+        let extra: Vec<String> = previous
+            .iter()
+            .filter(|tld| !tlds.contains(tld))
+            .cloned()
+            .collect();
+        let covers_all = tlds.iter().all(|tld| previous.contains(tld));
+        if !covers_all || (exact && !extra.is_empty()) {
             return Err(CreateReason::TldsChanged { previous });
         }
+        let origin = if extra.is_empty() {
+            CaOrigin::Loaded
+        } else {
+            CaOrigin::Wider { extra }
+        };
 
         let issuer = Issuer::from_ca_cert_der(&cert_der, key)
             .map_err(|_| invalid("unusable certificate"))?;
@@ -177,7 +211,7 @@ impl CertificateAuthority {
             cert_path,
             issuer,
             tlds: tlds.to_vec(),
-            origin: CaOrigin::Loaded,
+            origin,
         })
     }
 
@@ -186,6 +220,18 @@ impl CertificateAuthority {
         common_name: &str,
         tlds: Vec<String>,
         reason: CreateReason,
+    ) -> Result<Self, TlsError> {
+        let lifetime = Duration::days(3650);
+        Self::create_for(state_dir, common_name, tlds, reason, lifetime)
+    }
+
+    /// Writes a CA that expires after `lifetime`; tests use a short one.
+    pub(crate) fn create_for(
+        state_dir: &Path,
+        common_name: &str,
+        tlds: Vec<String>,
+        reason: CreateReason,
+        lifetime: Duration,
     ) -> Result<Self, TlsError> {
         let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
         let now = OffsetDateTime::now_utc();
@@ -215,7 +261,7 @@ impl CertificateAuthority {
             ],
         });
         params.not_before = now - Duration::days(1);
-        params.not_after = now + Duration::days(3650);
+        params.not_after = now + lifetime;
         let cert = params.self_signed(&key)?;
 
         let cert_path = Self::cert_path_in(state_dir);
@@ -530,10 +576,29 @@ mod tests {
     }
 
     #[test]
-    fn replaces_a_ca_made_for_more_tlds() {
+    fn keeps_a_ca_made_for_more_tlds_unless_asked_for_an_exact_one() {
         let tmp = tempfile::tempdir().unwrap();
-        CertificateAuthority::load_or_create(tmp.path(), "x", &["dev", "localhost"]).unwrap();
-        let ca = CertificateAuthority::load_or_create(tmp.path(), "x", &["localhost"]).unwrap();
+        let wide =
+            CertificateAuthority::load_or_create(tmp.path(), "x", &["dev", "localhost"]).unwrap();
+        let kept = CertificateAuthority::load_or_create(tmp.path(), "x", &["localhost"]).unwrap();
+        assert_eq!(
+            kept.origin(),
+            &CaOrigin::Wider {
+                extra: vec!["dev".into()]
+            }
+        );
+        assert_eq!(kept.cert_der(), wide.cert_der());
+        assert_eq!(kept.tlds(), ["localhost"]);
+        assert!(!kept.covers("app.dev"));
+        assert_eq!(
+            CertificateAuthority::load_existing(tmp.path(), &["localhost"]).unwrap_err(),
+            CreateReason::TldsChanged {
+                previous: vec!["dev".into(), "localhost".into()]
+            }
+        );
+
+        let ca =
+            CertificateAuthority::load_exact_or_create(tmp.path(), "x", &["localhost"]).unwrap();
         assert_eq!(
             ca.origin(),
             &CaOrigin::Created(CreateReason::TldsChanged {

@@ -466,7 +466,11 @@ pub fn render_ls(snapshot: &Snapshot, all: bool) -> String {
             .flatten()
             .collect::<Vec<_>>()
             .join("/");
-        out.push_str(&format!("problem: {place}: {}\n", problem.message));
+        if place.is_empty() {
+            out.push_str(&format!("problem: {}\n", problem.message));
+        } else {
+            out.push_str(&format!("problem: {place}: {}\n", problem.message));
+        }
     }
     out
 }
