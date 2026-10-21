@@ -49,6 +49,39 @@ impl ErrorPage {
         self
     }
 
+    /// The page as a visitor through a share sees it: the status with a fixed title
+    /// and message for it, keeping `Retry-After` and the credentials challenge but
+    /// none of the title, detail or log.
+    pub fn public(&self) -> Self {
+        let (title, detail) = match self.status {
+            StatusCode::UNAUTHORIZED => (
+                "Credentials needed",
+                "This share is protected; ask whoever shared it for the user name and password.",
+            ),
+            StatusCode::NOT_FOUND => ("Not found", "There is nothing here."),
+            StatusCode::SERVICE_UNAVAILABLE => (
+                "This app isn't available right now",
+                "Try again in a moment.",
+            ),
+            status if status.is_server_error() => (
+                "This app isn't available right now",
+                "The app couldn't answer.",
+            ),
+            _ => (
+                self.status.canonical_reason().unwrap_or("Error"),
+                "The request can't be served.",
+            ),
+        };
+        Self {
+            status: self.status,
+            title: title.into(),
+            detail: detail.into(),
+            log: Vec::new(),
+            retry_after: self.retry_after,
+            challenge: self.challenge.clone(),
+        }
+    }
+
     /// Renders the page for a request with the given headers.
     pub fn render(&self, request_headers: &HeaderMap) -> Response<Full<Bytes>> {
         let (content_type, body) = if wants_html(request_headers) {
@@ -227,6 +260,42 @@ mod tests {
         assert!(!html.contains("<pre>"));
         let (_, text) = render(&page, None).await;
         assert_eq!(text, "404 Not found\n\nnothing here\n");
+    }
+
+    #[tokio::test]
+    async fn public_pages_carry_only_the_status_and_a_fixed_message() {
+        let page = page().with_retry_after(Duration::from_secs(2));
+        let (response, text) = render(&page.public(), None).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[RETRY_AFTER], "2");
+        assert_eq!(
+            text,
+            "503 This app isn't available right now\n\nTry again in a moment.\n"
+        );
+        let (_, html) = render(&page.public(), Some("text/html")).await;
+        for detail in ["frontend", "Waited", "puma", "127.0.0.1", "<pre>"] {
+            assert!(!html.contains(detail), "{detail} in {html}");
+        }
+
+        let failed = ErrorPage::new(StatusCode::BAD_GATEWAY, "nova crashed", "exit 1");
+        let (_, text) = render(&failed.public(), None).await;
+        assert_eq!(
+            text,
+            "502 This app isn't available right now\n\nThe app couldn't answer.\n"
+        );
+
+        let missing = ErrorPage::new(StatusCode::NOT_FOUND, "No app here", "nova@main has none");
+        let (_, text) = render(&missing.public(), None).await;
+        assert_eq!(text, "404 Not found\n\nThere is nothing here.\n");
+
+        let refused = ErrorPage::new(StatusCode::FORBIDDEN, "Refused", "port 4000 on shop")
+            .with_basic_challenge("carte");
+        let (response, text) = render(&refused.public(), None).await;
+        assert_eq!(
+            response.headers()[http::header::WWW_AUTHENTICATE],
+            "Basic realm=\"carte\", charset=\"UTF-8\""
+        );
+        assert_eq!(text, "403 Forbidden\n\nThe request can't be served.\n");
     }
 
     #[tokio::test]

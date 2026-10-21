@@ -88,7 +88,7 @@ pub(crate) async fn handle(
             "No host",
             "The request has no Host header, so carte can't tell which app it is for.",
         );
-        return Ok(render(&page, request.headers()));
+        return Ok(render(&page, inbound.kind, request.headers()));
     };
     let path = request
         .uri()
@@ -129,7 +129,7 @@ pub(crate) async fn handle(
     };
     let route = shared.router.route(route_request).await;
     Ok(match route {
-        Route::Error(page) => render(&page, request.headers()),
+        Route::Error(page) => render(&page, inbound.kind, request.headers()),
         Route::Upstream { port, guard } => {
             let upstream = Upstream::Port(port);
             forward(&shared, &inbound, route_request, upstream, guard, request).await
@@ -201,7 +201,7 @@ async fn forward(
                 Upstream::Port(port) => shared.router.upstream_failed(route_request, port, &error),
                 Upstream::Dialed(dialer) => dialer.failed(&error),
             };
-            return render(&page, &request_headers);
+            return render(&page, inbound.kind, &request_headers);
         }
     };
 
@@ -253,7 +253,7 @@ async fn forward(
             .map(|collected| collected.to_bytes())
             .unwrap_or_default();
         if let Some(page) = host_check_page(&bytes, route_request.host) {
-            return render(&page, &request_headers);
+            return render(&page, inbound.kind, &request_headers);
         }
         return Response::from_parts(parts, boxed(GuardedBody::new(Full::new(bytes), guard)));
     }
@@ -287,8 +287,16 @@ fn host_check_page(body: &Bytes, host: &str) -> Option<ErrorPage> {
     ))
 }
 
-fn render(page: &ErrorPage, request_headers: &HeaderMap) -> Response<ProxyBody> {
-    page.render(request_headers).map(boxed)
+/// Renders carte's own page; a share's visitors get its public form.
+fn render(
+    page: &ErrorPage,
+    kind: ListenerKind,
+    request_headers: &HeaderMap,
+) -> Response<ProxyBody> {
+    match kind {
+        ListenerKind::Local => page.render(request_headers).map(boxed),
+        ListenerKind::Share => page.public().render(request_headers).map(boxed),
+    }
 }
 
 fn request_host<B>(request: &Request<B>) -> Option<String> {

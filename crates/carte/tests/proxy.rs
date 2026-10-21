@@ -795,6 +795,105 @@ async fn reports_unreachable_upstreams_through_the_router() {
 }
 
 #[tokio::test]
+async fn share_visitors_get_pages_without_the_details() {
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = closed.local_addr().unwrap().port();
+    drop(closed);
+    let crashed = ErrorPage::new(
+        StatusCode::BAD_GATEWAY,
+        "shop@feature-x crashed",
+        "carte gave up restarting web. Run `carte restart shop@feature-x/web` to start it again.",
+    )
+    .with_log(["Listening in /work/shop on 41234", "boot-marker"]);
+    let paused = ErrorPage::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "shop@feature-x is paused at a breakpoint",
+        "Its web process waits at a debugger prompt. Run `carte attach shop@feature-x/web` to answer it.",
+    )
+    .with_retry_after(Duration::from_secs(5));
+    let stopped = ErrorPage::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "shop@feature-x was stopped",
+        "It was stopped while one of its processes restarted.",
+    )
+    .with_retry_after(Duration::from_secs(2));
+    let router = Arc::new(
+        TestRouter::default()
+            .with("crashed.test", Target::Page(crashed))
+            .with("paused.test", Target::Page(paused))
+            .with("stopped.test", Target::Page(stopped))
+            .with("down.test", Target::Port(port)),
+    );
+    let local = start(router.clone(), ListenerOptions::local()).await;
+    let share = start(router, ListenerOptions::share("share.example")).await;
+    let port = port.to_string();
+    let cases: [(&str, StatusCode, &[&str]); 5] = [
+        (
+            "crashed.test",
+            StatusCode::BAD_GATEWAY,
+            &[
+                "shop",
+                "/work/shop",
+                "41234",
+                "boot-marker",
+                "carte restart",
+            ],
+        ),
+        (
+            "paused.test",
+            StatusCode::SERVICE_UNAVAILABLE,
+            &["shop", "breakpoint", "carte attach"],
+        ),
+        (
+            "stopped.test",
+            StatusCode::SERVICE_UNAVAILABLE,
+            &["shop", "stopped"],
+        ),
+        (
+            "down.test",
+            StatusCode::BAD_GATEWAY,
+            &[&port, "Nothing answered"],
+        ),
+        ("nowhere.test", StatusCode::NOT_FOUND, &["nowhere"]),
+    ];
+
+    for (host, status, details) in cases {
+        for accept in ["text/html", "*/*"] {
+            let request = || {
+                get(host, "/")
+                    .header(ACCEPT, accept)
+                    .body(Empty::new())
+                    .unwrap()
+            };
+            let response = send(local.addr, request()).await;
+            assert_eq!(response.status(), status);
+            let body = body_text(response).await;
+            for detail in details {
+                assert!(body.contains(detail), "{detail} missing from {body}");
+            }
+
+            let response = send(share.addr, request()).await;
+            assert_eq!(response.status(), status);
+            let body = body_text(response).await;
+            for detail in details {
+                assert!(!body.contains(detail), "{detail} in {body}");
+            }
+        }
+    }
+
+    let response = send(
+        share.addr,
+        get("stopped.test", "/").body(Empty::new()).unwrap(),
+    )
+    .await;
+    assert_eq!(response.headers()[RETRY_AFTER], "2");
+    assert_eq!(
+        body_text(response).await,
+        "503 This app isn't available right now\n\nTry again in a moment.\n"
+    );
+}
+
+#[tokio::test]
 async fn shuts_down_gracefully() {
     let port = echo_upstream("127.0.0.1:0").await;
     let gate = Arc::new(Semaphore::new(0));

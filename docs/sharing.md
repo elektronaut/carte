@@ -45,5 +45,10 @@ restarts.
 While an app is shared, `CARTE_PUBLIC_URL` holds its public URL, and the
 share domain is added to `RAILS_DEVELOPMENT_HOSTS`.
 
+When a shared app is starting, has crashed or can't be reached, visitors
+get a plain page with the status and a short message, such as "This app
+isn't available right now". The error page with the log and the carte
+commands to run only shows at the app's local address.
+
 The `[share]` section of the machine config holds the provider and
 domain; see [Configuration](configuration.md#share).

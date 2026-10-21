@@ -122,10 +122,10 @@ carte env -p worker                   # another process's env
 ```
 
 A request to an app that failed to boot gets an error page with the last
-log lines. `carte events` answers "why did it stop or restart?". While
-the web process (or the dev server serving `/vite-dev/` or `/packs/`)
-restarts after a crash, the app shows as `restarting` and requests wait
-for it.
+log lines; visitors through a share get only the status. `carte events`
+answers "why did it stop or restart?". While the web process (or the dev
+server serving `/vite-dev/` or `/packs/`) restarts after a crash, the app
+shows as `restarting` and requests wait for it.
 
 A worker or service that crashes after the start is restarted on its
 own after a short wait, which `carte status` shows as `restarting in 2s`
