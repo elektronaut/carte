@@ -94,6 +94,14 @@ suite. When one fails, proptest saves the case under
 - Leave the version and `CHANGELOG.md` alone. Both are updated
   automatically when a release is cut.
 
+### Fuzzing
+
+`fuzz/` holds [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) targets
+for carte-core's parsers. It isn't part of the workspace and needs a nightly
+toolchain: `cargo +nightly fuzz run strip`. A weekly workflow runs every
+target for a few minutes. When it finds a crash, open an issue with the
+input from the run's artifacts and add a regression test with the fix.
+
 ## Skeletons
 
 Leave out optional sections you have nothing for.
