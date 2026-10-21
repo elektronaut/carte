@@ -424,28 +424,76 @@ fn drop_taken_aliases(world: &mut World) {
         .iter()
         .map(|state| state.project.name.clone())
         .collect();
-    let mut local_aliases = BTreeSet::new();
-    let skipped = |project: &str, app: &str, alias: &str| Problem {
-        project: Some(project.to_string()),
-        app: Some(app.to_string()),
-        stack: None,
-        message: format!("alias {alias:?} is skipped: a project or another app already uses it"),
-    };
+    let mut claims: BTreeMap<String, Vec<AliasClaim>> = BTreeMap::new();
+    for state in &world.projects {
+        let template = state
+            .project
+            .config_path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .filter(|stem| *stem != state.project.name);
+        for app in &state.project.apps {
+            for alias in &app.settings.aliases {
+                claims.entry(alias.clone()).or_default().push(AliasClaim {
+                    project: state.project.name.clone(),
+                    app: app.name.clone(),
+                    template: template.clone(),
+                });
+            }
+        }
+    }
     let mut problems = Vec::new();
+    let mut skipped: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for (alias, claims) in claims {
+        let (losers, message) = if project_names.contains(&alias) || kube_names.contains(&alias) {
+            let reason = match claims.as_slice() {
+                [only] if only.project == alias => "it's the project's own name".to_string(),
+                _ => format!("project {alias} already uses it"),
+            };
+            let message = format!(
+                "alias {alias:?} is skipped for {}: {reason}",
+                claim_list(&claims, None)
+            );
+            (&claims[..], message)
+        } else if claims.len() > 1 {
+            let winner = &claims[0];
+            let message = format!(
+                "alias {alias:?} goes to {}/{}; skipped for {}",
+                winner.project,
+                winner.app,
+                claim_list(&claims[1..], Some(&winner.app))
+            );
+            (&claims[1..], message)
+        } else {
+            continue;
+        };
+        let first = &losers[0];
+        let template = first
+            .template
+            .as_ref()
+            .filter(|t| losers.iter().all(|c| c.template.as_ref() == Some(*t)));
+        problems.push(Problem {
+            project: Some(template.unwrap_or(&first.project).clone()),
+            app: match (template, losers) {
+                (None, [only]) => Some(only.app.clone()),
+                _ => None,
+            },
+            stack: None,
+            message,
+        });
+        for claim in losers {
+            skipped.insert((claim.project.clone(), claim.app.clone(), alias.clone()));
+        }
+    }
     for state in &mut world.projects {
         let project = state.project.name.clone();
         for app in &mut state.project.apps {
             app.settings.aliases.retain(|alias| {
-                let free = !kube_names.contains(alias)
-                    && !project_names.contains(alias)
-                    && local_aliases.insert(alias.clone());
-                if !free {
-                    problems.push(skipped(&project, &app.name, alias));
-                }
-                free
+                !skipped.contains(&(project.clone(), app.name.clone(), alias.clone()))
             });
         }
     }
+
     let mut taken: BTreeSet<String> = world
         .projects
         .iter()
@@ -465,13 +513,47 @@ fn drop_taken_aliases(world: &mut World) {
             settings.aliases.retain(|alias| {
                 let free = taken.insert(alias.clone());
                 if !free {
-                    problems.push(skipped(&project.name, service, alias));
+                    problems.push(Problem {
+                        project: Some(project.name.clone()),
+                        app: Some(service.clone()),
+                        stack: None,
+                        message: format!(
+                            "alias {alias:?} is skipped: a project or another app already uses it"
+                        ),
+                    });
                 }
                 free
             });
         }
     }
     world.problems.extend(problems);
+}
+
+struct AliasClaim {
+    project: String,
+    app: String,
+    /// The template that made the project.
+    template: Option<String>,
+}
+
+/// `nova, orbit and shop/api`, cut short after three: an app named like
+/// `same_app` is given by its project alone.
+fn claim_list(claims: &[AliasClaim], same_app: Option<&str>) -> String {
+    let names: Vec<String> = claims
+        .iter()
+        .map(|c| {
+            if Some(c.app.as_str()) == same_app {
+                c.project.clone()
+            } else {
+                format!("{}/{}", c.project, c.app)
+            }
+        })
+        .collect();
+    match names.as_slice() {
+        [only] => only.clone(),
+        [shown @ .., last] if names.len() <= 3 => format!("{} and {last}", shown.join(", ")),
+        _ => format!("{} and {} more", names[..3].join(", "), names.len() - 3),
+    }
 }
 
 /// Adds a project for each directory a template's `projects` entries match, made from
@@ -1305,7 +1387,7 @@ prunable gitdir file points to non-existent location
     fn project_names_beat_local_aliases() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        for name in ["nova", "shop"] {
+        for name in ["nova", "shop", "wiki"] {
             std::fs::create_dir_all(root.join(name)).unwrap();
         }
         let projects = root.join("config/projects");
@@ -1323,16 +1405,44 @@ prunable gitdir file points to non-existent location
             format!("root = \"{}\"\n", root.join("shop").display()),
         )
         .unwrap();
+        std::fs::write(
+            projects.join("wiki.toml"),
+            format!(
+                "root = \"{}\"\n[apps.wiki]\naliases = [\"wiki\"]\n",
+                root.join("wiki").display()
+            ),
+        )
+        .unwrap();
 
         let world = load_world(&root.join("config"));
         let nova = world.project("nova").unwrap();
         assert_eq!(nova.project.apps[0].settings.aliases, ["orders"]);
-        let messages: Vec<_> = world.problems.iter().map(|p| p.message.as_str()).collect();
-        assert_eq!(
-            messages,
-            ["alias \"shop\" is skipped: a project or another app already uses it"]
+        assert!(
+            world.project("wiki").unwrap().project.apps[0]
+                .settings
+                .aliases
+                .is_empty()
         );
-        assert_eq!(world.problems[0].project.as_deref(), Some("nova"));
+        let problems: Vec<_> = world
+            .problems
+            .iter()
+            .map(|p| (p.project.as_deref(), p.app.as_deref(), p.message.as_str()))
+            .collect();
+        assert_eq!(
+            problems,
+            [
+                (
+                    Some("nova"),
+                    Some("nova"),
+                    "alias \"shop\" is skipped for nova/nova: project shop already uses it"
+                ),
+                (
+                    Some("wiki"),
+                    Some("wiki"),
+                    "alias \"wiki\" is skipped for wiki/wiki: it's the project's own name"
+                ),
+            ]
+        );
         let resolved = crate::naming::resolve_host(&world, "shop.localhost").unwrap();
         assert_eq!(resolved.key.project, "shop");
     }
@@ -1342,7 +1452,8 @@ prunable gitdir file points to non-existent location
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
         let sites = root.join("sites");
-        for name in ["acme", "nova"] {
+        let names = ["acme", "mono", "nova", "orbit", "shop"];
+        for name in names {
             let dir = sites.join(name);
             repo(&dir);
             std::fs::create_dir_all(dir.join("apps/web")).unwrap();
@@ -1372,13 +1483,15 @@ prunable gitdir file points to non-existent location
                 .clone()
         };
         assert_eq!(aliases("acme"), ["store"]);
-        assert!(aliases("nova").is_empty());
+        for name in &names[1..] {
+            assert!(aliases(name).is_empty(), "{name}");
+        }
         assert_eq!(world.problems.len(), 1, "{:?}", world.problems);
-        assert_eq!(world.problems[0].project.as_deref(), Some("nova"));
-        assert!(
-            world.problems[0]
-                .message
-                .contains("alias \"store\" is skipped")
+        assert_eq!(world.problems[0].project.as_deref(), Some("sites"));
+        assert_eq!(world.problems[0].app, None);
+        assert_eq!(
+            world.problems[0].message,
+            "alias \"store\" goes to acme/web; skipped for mono, nova, orbit and 1 more"
         );
         let resolved = crate::naming::resolve_host(&world, "store.localhost").unwrap();
         assert_eq!(resolved.key.project, "acme");
