@@ -105,6 +105,9 @@ beside it names this carte.
 
 ### Logs
 
+Log lines are plain text: carte removes escape codes and control
+characters, and splits a line longer than 16384 characters.
+
 | Option | |
 | --- | --- |
 | `-f`, `--follow` | Keep printing new lines |

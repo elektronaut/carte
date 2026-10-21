@@ -889,6 +889,24 @@ mod tests {
     }
 
     #[test]
+    fn an_unterminated_string_at_a_prompt_ends_with_the_answer() {
+        let (_, states, _) = replay_with([
+            Step::Read(b"\x1b[1G(rdbg) \x1b[8G"),
+            Step::Read(b"\x1b]"),
+            Step::Read(b"c\r\n"),
+            Step::Quiet,
+        ]);
+        assert_eq!(states, [None, Some("(rdbg)".to_string()), None]);
+        let (lines, states, _) = replay([
+            b"(rdbg) \x1b]0;cut".as_slice(),
+            b"\x1b[1G(rdbg) c\r\n".as_slice(),
+            b"after\r\n".as_slice(),
+        ]);
+        assert_eq!(states, [None, Some("(rdbg)".to_string()), None]);
+        assert_eq!(lines, ["(rdbg) c", "after"]);
+    }
+
+    #[test]
     fn a_long_unfinished_line_is_never_a_prompt() {
         let mut log = ProcLog::new(64 * 1024);
         log.push(b"(rdbg) ");

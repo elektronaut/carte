@@ -157,13 +157,20 @@ enum State {
     Escape,
     EscapeIntermediate,
     Csi,
-    /// OSC, DCS, SOS, PM and APC: everything up to BEL or ST is dropped.
+    /// OSC, DCS, SOS, PM and APC: dropped up to BEL, ST, CAN, SUB,
+    /// another escape or a newline.
     String,
     StringEscape,
 }
 
 /// The farthest right a cursor movement takes the cursor.
 const MAX_COLUMN: usize = 4096;
+
+/// The longest a line gets, in characters, before it wraps.
+const MAX_LINE: usize = 16 * 1024;
+
+/// The most CSI parameter bytes kept; the rest are dropped.
+const MAX_CSI: usize = 32;
 
 /// Turns raw terminal output into plain lines, incrementally.
 ///
@@ -185,7 +192,12 @@ const MAX_COLUMN: usize = 4096;
 /// written after moving up past those rows is dropped until the cursor is back,
 /// so redraws of earlier rows, like a multi-line progress bar, don't reach the
 /// log, and a move up or down of more than a screen counts as one. Other control
-/// characters except tab are dropped. Invalid UTF-8 becomes U+FFFD.
+/// characters except tab are dropped, C1 controls too. Invalid UTF-8 becomes
+/// U+FFFD. A line longer than [`MAX_LINE`] wraps.
+///
+/// An escape sequence cut short by a control character or by text it can't hold
+/// ends there, so a stray ESC loses nothing after it. An OSC, DCS, SOS, PM or APC
+/// string also ends at CAN, SUB, any other escape sequence, or a newline.
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
     state: State,
@@ -317,14 +329,15 @@ impl Stripper {
                     }
                     b']' | b'P' | b'X' | b'^' | b'_' => State::String,
                     0x20..=0x2f => State::EscapeIntermediate,
-                    _ => State::Ground,
+                    0x30..=0x7e => State::Ground,
+                    _ => return self.interrupt(b, lines),
                 }
             }
-            State::EscapeIntermediate => {
-                if !(0x20..=0x2f).contains(&b) {
-                    self.state = State::Ground;
-                }
-            }
+            State::EscapeIntermediate => match b {
+                0x20..=0x2f => {}
+                0x30..=0x7e => self.state = State::Ground,
+                _ => self.interrupt(b, lines),
+            },
             State::Csi => match b {
                 0x40..=0x7e => {
                     match b {
@@ -344,23 +357,36 @@ impl Stripper {
                     }
                     self.state = State::Ground;
                 }
-                0x20..=0x3f => self.csi.push(b),
-                0x1b => self.state = State::Escape,
-                _ => self.state = State::Ground,
+                0x20..=0x3f => {
+                    if self.csi.len() < MAX_CSI {
+                        self.csi.push(b)
+                    }
+                }
+                _ => self.interrupt(b, lines),
             },
             State::String => match b {
-                0x07 => self.state = State::Ground,
+                0x07 | 0x18 | 0x1a => self.state = State::Ground,
                 0x1b => self.state = State::StringEscape,
+                b'\n' => self.interrupt(b, lines),
                 _ => {}
             },
             State::StringEscape => {
-                self.state = if b == b'\\' {
-                    State::Ground
+                if b == b'\\' {
+                    self.state = State::Ground;
                 } else {
-                    State::String
-                };
+                    self.state = State::Escape;
+                    self.byte(b, lines);
+                }
             }
         }
+    }
+
+    /// Ends an escape sequence at a byte that can't be part of it, as if no
+    /// sequence had started: ESC starts another, CAN and SUB are dropped, and other
+    /// controls and text are output.
+    fn interrupt(&mut self, b: u8, lines: &mut Vec<String>) {
+        self.state = State::Ground;
+        self.ground(b, lines);
     }
 
     fn ground(&mut self, b: u8, lines: &mut Vec<String>) {
@@ -423,8 +449,12 @@ impl Stripper {
     }
 
     fn put(&mut self, c: char) {
-        if self.row != 0 {
+        if self.row != 0 || (c.is_control() && c != '\t') {
             return;
+        }
+        if self.cursor >= MAX_LINE {
+            self.cursor = 0;
+            self.down(1, true);
         }
         if !self.moved {
             self.end_above();
@@ -694,6 +724,73 @@ mod tests {
         assert!(s.feed(b"a\x1b[3").is_empty());
         assert!(s.feed(b"1mb\n").is_empty());
         assert_eq!(s.settle(), ["ab"]);
+    }
+
+    #[test]
+    fn an_escape_ends_an_unterminated_string() {
+        assert_eq!(strip(b"\x1b]0;t\x1b[31mred\n"), "red\n");
+        assert_eq!(strip(b"\x1b]0;t\x1b\x1b]0;u\x07x\n"), "x\n");
+    }
+
+    #[test]
+    fn cancel_and_substitute_end_a_string() {
+        assert_eq!(strip(b"\x1bPjunk\x18after\n"), "after\n");
+        assert_eq!(strip(b"\x1b_junk\x1aafter\n"), "after\n");
+        assert_eq!(strip(b"a\x1b[31\x18b\n"), "ab\n");
+    }
+
+    #[test]
+    fn a_newline_ends_an_unterminated_string() {
+        assert_eq!(strip(b"\x1b]0;cut off\nnext\n"), "\nnext\n");
+        assert_eq!(strip(b"(rdbg) \x1b]c\r\nnext\n"), "(rdbg) \nnext\n");
+    }
+
+    #[test]
+    fn control_characters_cut_an_escape_short() {
+        assert_eq!(strip(b"a\x1b\nb\n"), "a\nb\n");
+        assert_eq!(strip(b"a\x1b(\nb\n"), "a\nb\n");
+        assert_eq!(strip(b"abc\x1b[\rX\n"), "Xbc\n");
+        assert_eq!(strip("a\x1bå\n".as_bytes()), "aå\n");
+    }
+
+    #[test]
+    fn a_line_without_an_end_wraps() {
+        let mut s = Stripper::default();
+        let mut lines = Vec::new();
+        for _ in 0..10 {
+            lines.extend(s.feed(&b"a".repeat(1024 * 1024)));
+            assert!(s.pending_len() <= MAX_LINE, "{}", s.pending_len());
+        }
+        lines.extend(s.close());
+        lines.push(s.pending());
+        assert!(lines.iter().all(|line| line.len() <= MAX_LINE));
+        assert_eq!(
+            lines.iter().map(String::len).sum::<usize>(),
+            10 * 1024 * 1024
+        );
+        assert_eq!(strip(&b"a".repeat(MAX_LINE + 1)).lines().count(), 2);
+    }
+
+    #[test]
+    fn csi_parameters_stop_at_a_limit() {
+        let mut s = Stripper::default();
+        s.feed(b"a\x1b[");
+        for _ in 0..1024 {
+            s.feed(&b"1".repeat(1024));
+            assert!(s.csi.len() <= MAX_CSI, "{}", s.csi.len());
+        }
+        s.feed(b"mb");
+        assert_eq!(s.pending(), "ab");
+    }
+
+    #[test]
+    fn drops_c1_controls() {
+        let text = strip("a\u{9b}31mb\u{9d}0;t\u{9c}c\n".as_bytes());
+        assert!(
+            !text.chars().any(|c| ('\u{80}'..='\u{9f}').contains(&c)),
+            "{text:?}"
+        );
+        assert_eq!(text, "a31mb0;tc\n");
     }
 
     #[test]
