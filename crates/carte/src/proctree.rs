@@ -291,6 +291,7 @@ mod tests {
     fn finds_the_groups_of_children_and_grandchildren() {
         // SAFETY: the child makes only async-signal-safe calls.
         let child = unsafe { libc::fork() };
+        assert!(child >= 0, "fork failed");
         if child == 0 {
             // SAFETY: setpgid, fork, sleep and _exit take no pointers.
             unsafe {
@@ -314,10 +315,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         };
         let outer = descendant_groups(std::process::id());
-        for &group in inner.iter().chain([&child]) {
+        for target in inner
+            .iter()
+            .chain([&child])
+            .filter_map(|&group| signal_target(group))
+        {
             // SAFETY: killpg takes no pointers; the groups are this test's
-            // forked child's and its child's, above 1.
-            unsafe { libc::killpg(group as i32, libc::SIGKILL) };
+            // forked child's and its child's, through `signal_target`.
+            unsafe { libc::killpg(target, libc::SIGKILL) };
         }
         // SAFETY: a null status pointer is allowed.
         unsafe { libc::waitpid(child as i32, std::ptr::null_mut(), 0) };
