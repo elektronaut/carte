@@ -1265,6 +1265,32 @@ fn shared_keep_alive_connections_close_when_the_share_ends() {
 }
 
 #[test]
+fn requests_waiting_for_a_boot_need_credentials_added_meanwhile() {
+    let daemon = Daemon::start_sharing_prepared("none", "share.example", |work| {
+        let fixture = fixture().display().to_string();
+        repo(
+            &work.join("acme-slow"),
+            &format!("web: sleep 3; exec {fixture}\n"),
+        );
+    });
+    daemon.run(&["share", "slow"]);
+    let waiting = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| daemon.public_request("slow--acme.share.example", None));
+        eventually("the boot to start", || {
+            snapshot(&daemon)
+                .projects
+                .iter()
+                .flat_map(|p| &p.stacks)
+                .flat_map(|s| &s.instances)
+                .any(|i| i.app == "acme-slow" && i.boot.is_some())
+        });
+        daemon.run(&["share", "slow", "--auth"]);
+        waiting.join().unwrap()
+    });
+    assert!(waiting.starts_with("HTTP/1.1 404"), "{waiting}");
+}
+
+#[test]
 fn shared_apps_that_fail_to_boot_show_visitors_a_plain_page() {
     let daemon = Daemon::start_sharing_prepared("none", "share.example", |work| {
         let fixture = fixture().display().to_string();
