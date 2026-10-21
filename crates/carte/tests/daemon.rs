@@ -4,9 +4,10 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use carte::supervisor::runner::PortBlocks;
 use common::{fixture, git, guard, lifeline, repo};
 use tokio_tungstenite::tungstenite;
 
@@ -19,39 +20,24 @@ struct Daemon {
     /// Searched before the inherited `PATH`, for fake tunnel programs.
     bin: Option<PathBuf>,
     child: Option<Child>,
-    ports: Vec<Port>,
-}
-
-/// A port reserved for one test daemon: other test processes skip it while the
-/// lock is held.
-struct Port {
-    number: u16,
-    _lock: std::fs::File,
 }
 
 /// A free port between 20000 and 29999, apart from the ephemeral range and from
 /// the blocks the daemons under test pick their apps' ports from, so a test's
 /// listener and another daemon's app can't get the same one.
-/// Checks by connecting: macOS sockets aren't created close-on-exec, so a listener
-/// bound here could leak into a daemon spawned meanwhile and hold the port.
-fn free_port() -> Port {
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let start = 20_000 + (std::process::id() % 400) as u16 * 25;
-    let locks = std::env::temp_dir().join("carte-test-ports");
-    std::fs::create_dir_all(&locks).unwrap();
-    loop {
-        let number = 20_000 + (start - 20_000 + NEXT.fetch_add(1, Ordering::Relaxed)) % 10_000;
-        let lock = std::fs::File::create(locks.join(number.to_string())).unwrap();
-        if lock.try_lock().is_ok()
-            && TcpStream::connect(("127.0.0.1", number)).is_err()
-            && TcpStream::connect(("::1", number)).is_err()
-        {
-            return Port {
-                number,
-                _lock: lock,
-            };
-        }
-    }
+fn free_port() -> u16 {
+    static PORTS: Mutex<Option<PortBlocks>> = Mutex::new(None);
+    PORTS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| {
+            PortBlocks::new(
+                std::env::temp_dir().join("carte-test-listener-blocks"),
+                20_000,
+            )
+        })
+        .next()
+        .expect("a free block of test ports")
 }
 
 impl Daemon {
@@ -94,8 +80,7 @@ impl Daemon {
         extra_project: &str,
         prepare: impl FnOnce(&std::path::Path),
     ) -> Self {
-        let share = free_port();
-        let share_port = share.number;
+        let share_port = free_port();
         let mut daemon = Self::start_configured(
             false,
             extra_project,
@@ -105,7 +90,6 @@ impl Daemon {
             ),
         );
         daemon.share_port = Some(share_port);
-        daemon.ports.push(share);
         daemon
     }
 
@@ -149,8 +133,7 @@ impl Daemon {
         } else {
             std::fs::create_dir_all(config.join("projects")).unwrap();
         }
-        let ports = vec![free_port(), free_port(), free_port()];
-        let (http_port, https_port, dns_port) = (ports[0].number, ports[1].number, ports[2].number);
+        let (http_port, https_port, dns_port) = (free_port(), free_port(), free_port());
         std::fs::write(
             config.join("config.toml"),
             format!(
@@ -184,7 +167,6 @@ impl Daemon {
             share_port: None,
             bin: Some(bin),
             child: None,
-            ports,
         };
         daemon.launch();
         daemon
@@ -1268,15 +1250,15 @@ fn websocket_echo(port: u16) {
 
 impl Daemon {
     /// Sharing the acme web app as `port = …`, served by a WebSocket echo server.
-    fn start_sharing_websockets() -> (Self, Port) {
+    fn start_sharing_websockets() -> Self {
         let app = free_port();
         let daemon = Self::start_sharing_project(
             "none",
             "share.example",
-            &format!("\n[apps.acme-web]\nport = {}\n", app.number),
+            &format!("\n[apps.acme-web]\nport = {app}\n"),
         );
-        websocket_echo(app.number);
-        (daemon, app)
+        websocket_echo(app);
+        daemon
     }
 
     /// A WebSocket through the share listener, checked to echo.
@@ -1315,7 +1297,7 @@ fn assert_closed(socket: &mut tungstenite::WebSocket<TcpStream>) {
 
 #[test]
 fn shared_websockets_close_when_the_share_ends() {
-    let (daemon, _app) = Daemon::start_sharing_websockets();
+    let daemon = Daemon::start_sharing_websockets();
     daemon.run(&["share", "web"]);
     let mut socket = daemon.shared_websocket("web--acme.share.example");
     daemon.run(&["unshare", "web"]);
@@ -1324,7 +1306,7 @@ fn shared_websockets_close_when_the_share_ends() {
 
 #[test]
 fn shared_websockets_close_when_the_share_expires() {
-    let (daemon, _app) = Daemon::start_sharing_websockets();
+    let daemon = Daemon::start_sharing_websockets();
     daemon.run(&["share", "web", "--ttl", "5s"]);
     let mut socket = daemon.shared_websocket("web--acme.share.example");
     assert_closed(&mut socket);
