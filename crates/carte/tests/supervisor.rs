@@ -3511,6 +3511,40 @@ async fn attached_clients_share_a_process_and_its_size() {
 }
 
 #[tokio::test]
+async fn cursor_position_queries_are_answered_while_no_terminal_is_attached() {
+    use carte_api::attach::TermSize;
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "ask: stty -icanon -echo; while read line; do printf '\\033['; sleep 0.1; printf '6n'; echo \"reply $(dd bs=1 count=6 2>/dev/null | od -An -tx1 | tr -d ' \\n')\"; done\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    let (_, terminal) = handle.attach(here("web"), None).await.unwrap();
+    let mut watcher = terminal.join(None, false);
+
+    watcher.write(b"go\n").await.unwrap();
+    read_until(&mut watcher, "reply 1b5b313b3152").await;
+
+    let mut tty = terminal.join(Some(TermSize { cols: 80, rows: 24 }), true);
+    assert!(
+        !String::from_utf8_lossy(&tty.replay).contains("\x1b[6n"),
+        "a replay leaves out answered queries: {:?}",
+        String::from_utf8_lossy(&tty.replay)
+    );
+    tty.write(b"go\n").await.unwrap();
+    read_until(&mut tty, "\x1b[6n").await;
+    tty.write(b"\x1b[5;7R").await.unwrap();
+    read_until(&mut watcher, "reply 1b5b353b3752").await;
+
+    drop(tty);
+    watcher.write(b"go\n").await.unwrap();
+    read_until(&mut watcher, "reply 1b5b313b3152").await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn attaching_needs_a_running_process_with_a_pty() {
     let setup = Setup::new();
     setup.app(

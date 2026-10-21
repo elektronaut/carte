@@ -1,5 +1,6 @@
 //! A process's pty as attached clients share it: output as it comes, input from any
-//! of them, and a size that fits the smallest attached terminal.
+//! of them, and a size that fits the smallest attached terminal. While no attached
+//! terminal can, carte answers the process's cursor-position queries itself.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -25,10 +26,14 @@ pub struct Terminal {
     ended: watch::Sender<Option<String>>,
 }
 
+/// Clients that sent a size are terminals, which answer cursor-position queries
+/// themselves; the others, like the terminal UI and MCP `type`, show or return
+/// output without one.
 struct Clients {
     next: u64,
     sizes: BTreeMap<u64, Option<TermSize>>,
     current: TermSize,
+    queries: CursorQueries,
 }
 
 impl Terminal {
@@ -42,17 +47,30 @@ impl Terminal {
                 next: 0,
                 sizes: BTreeMap::new(),
                 current: size,
+                queries: CursorQueries::default(),
             }),
             writing: tokio::sync::Mutex::new(()),
             ended: watch::channel(None).0,
         })
     }
 
-    /// Hands output to the attached clients. Called with the log locked, right after
-    /// the output went into it, so a client that joins gets each byte once.
-    pub(super) fn output(&self, data: &[u8]) {
+    /// Hands output to the attached clients, and answers the cursor-position queries
+    /// in it that no attached terminal got whole. Called with the log locked, right
+    /// after the output went into it, so a client that joins gets each byte once.
+    pub(super) fn output(self: &Arc<Self>, data: &[u8]) {
         if self.output.receiver_count() > 0 {
             let _ = self.output.send(Bytes::copy_from_slice(data));
+        }
+        let unanswered = {
+            let mut clients = self.clients.lock().unwrap();
+            let terminals = clients.terminals();
+            clients.queries.feed(data, &terminals)
+        };
+        if unanswered > 0 {
+            let terminal = self.clone();
+            tokio::spawn(async move {
+                let _ = terminal.write(&CURSOR_ANSWER.repeat(unanswered)).await;
+            });
         }
     }
 
@@ -62,28 +80,29 @@ impl Terminal {
     }
 
     /// Attaches a client. `size` takes part in sizing the pty; with `replay` the
-    /// client gets the last screen of output, as many lines as its terminal has rows.
+    /// client gets the last screen of output, as many lines as its terminal has rows,
+    /// without the cursor-position queries in it, which were answered or given up on.
     pub fn join(self: &Arc<Self>, size: Option<TermSize>, replay: bool) -> Client {
         let size = size.filter(|s| s.cols > 0 && s.rows > 0);
-        let (output, replay) = {
+        let (output, replay, id) = {
             let log = self.log.lock().unwrap();
             let output = self.output.subscribe();
             let rows = size.unwrap_or(self.configured).rows;
-            let mut replay = if replay {
-                log.raw.last_lines(usize::from(rows))
+            let mut screen = if replay {
+                without_cursor_queries(&log.raw.last_lines(usize::from(rows)))
             } else {
                 Vec::new()
             };
-            replay.drain(..replay.len().saturating_sub(1024 * 1024));
-            (output, replay)
-        };
-        let id = {
+            screen.drain(..screen.len().saturating_sub(1024 * 1024));
             let mut clients = self.clients.lock().unwrap();
             clients.next += 1;
             let id = clients.next;
             clients.sizes.insert(id, size);
+            if size.is_some() && replay {
+                clients.queries.replayed_to(id);
+            }
             self.fit(&mut clients);
-            id
+            (output, screen, id)
         };
         Client {
             terminal: self.clone(),
@@ -127,6 +146,83 @@ impl Terminal {
             clients.current = size;
         }
     }
+}
+
+impl Clients {
+    fn terminals(&self) -> Vec<u64> {
+        self.sizes
+            .iter()
+            .filter(|(_, size)| size.is_some())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+}
+
+/// A cursor-position query, which Reline sends before each prompt and then waits
+/// half a second for the answer to.
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
+/// The top left corner, Reline's own guess when nobody answers. A real position near
+/// the bottom would make it scroll.
+const CURSOR_ANSWER: &[u8] = b"\x1b[1;1R";
+
+/// Finds cursor-position queries in output however it is split into reads, and tells
+/// which of them no attached terminal got whole.
+#[derive(Debug, Default)]
+struct CursorQueries {
+    /// How much of a query the output so far ends with.
+    matched: usize,
+    /// The terminals that got the query in progress from its first byte.
+    seen_by: Vec<u64>,
+}
+
+impl CursorQueries {
+    /// Reads `data`, which went to the attached `terminals`, and returns how many
+    /// queries ended in it that none of them got whole.
+    fn feed(&mut self, data: &[u8], terminals: &[u64]) -> usize {
+        let mut unanswered = 0;
+        for &byte in data {
+            if byte == CURSOR_QUERY[self.matched] {
+                self.matched += 1;
+            } else {
+                self.matched = usize::from(byte == CURSOR_QUERY[0]);
+            }
+            if self.matched == 1 {
+                self.seen_by.clear();
+                self.seen_by.extend_from_slice(terminals);
+            }
+            if self.matched == CURSOR_QUERY.len() {
+                self.matched = 0;
+                if !self.seen_by.iter().any(|id| terminals.contains(id)) {
+                    unanswered += 1;
+                }
+            }
+        }
+        unanswered
+    }
+
+    /// Terminal `id` joined with the last screen of output, so it got the start of a
+    /// query in progress.
+    fn replayed_to(&mut self, id: u64) {
+        if self.matched > 0 {
+            self.seen_by.push(id);
+        }
+    }
+}
+
+/// `data` without its complete cursor-position queries.
+fn without_cursor_queries(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut rest = data;
+    while let Some(at) = rest
+        .windows(CURSOR_QUERY.len())
+        .position(|w| w == CURSOR_QUERY)
+    {
+        out.extend_from_slice(&rest[..at]);
+        rest = &rest[at + CURSOR_QUERY.len()..];
+    }
+    out.extend_from_slice(rest);
+    out
 }
 
 /// One attached client; dropping it detaches.
@@ -174,5 +270,71 @@ impl Drop for Client {
         let mut clients = self.terminal.clients.lock().unwrap();
         clients.sizes.remove(&self.id);
         self.terminal.fit(&mut clients);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OUTPUT: &[u8] =
+        b"\x1b[1G\xe2\x96\xbd\x1b[6n\x1b[1G\x1b[K\x1b[6n\x1b[?25l\x1b[0m>> \x1b[4G";
+
+    #[test]
+    fn finds_queries_however_the_output_is_split() {
+        for at in 0..=OUTPUT.len() {
+            let mut queries = CursorQueries::default();
+            let (one, two) = OUTPUT.split_at(at);
+            let found = queries.feed(one, &[]) + queries.feed(two, &[]);
+            assert_eq!(found, 2, "split at {at}");
+        }
+        let mut queries = CursorQueries::default();
+        let found: usize = OUTPUT.iter().map(|b| queries.feed(&[*b], &[])).sum();
+        assert_eq!(found, 2, "a byte at a time");
+    }
+
+    #[test]
+    fn other_sequences_are_no_queries() {
+        let mut queries = CursorQueries::default();
+        assert_eq!(
+            queries.feed(b"\x1b[16n \x1b[6;1R \x1b[?6n \x1b6n [6n \x1b[6", &[]),
+            0
+        );
+        assert_eq!(queries.feed(b"m \x1b\x1b[6n", &[]), 1);
+    }
+
+    #[test]
+    fn a_query_an_attached_terminal_got_whole_is_left_to_it() {
+        let mut queries = CursorQueries::default();
+        assert_eq!(queries.feed(b"\x1b[6n", &[1]), 0);
+        assert_eq!(queries.feed(b"\x1b[", &[1]), 0);
+        assert_eq!(queries.feed(b"6n", &[1, 2]), 0);
+        assert_eq!(queries.feed(b"\x1b[6n", &[]), 1, "nobody attached");
+    }
+
+    #[test]
+    fn a_query_whose_start_a_terminal_missed_is_answered() {
+        let mut queries = CursorQueries::default();
+        assert_eq!(queries.feed(b"\x1b[", &[]), 0);
+        assert_eq!(queries.feed(b"6n", &[1]), 1, "joined in the middle");
+        assert_eq!(queries.feed(b"\x1b[", &[1]), 0);
+        assert_eq!(queries.feed(b"6n", &[2]), 1, "left in the middle");
+    }
+
+    #[test]
+    fn a_terminal_that_joins_with_the_start_of_a_query_answers_it() {
+        let mut queries = CursorQueries::default();
+        assert_eq!(queries.feed(b"\x1b[", &[]), 0);
+        queries.replayed_to(1);
+        assert_eq!(queries.feed(b"6n", &[1]), 0);
+    }
+
+    #[test]
+    fn replays_leave_out_whole_queries() {
+        assert_eq!(
+            without_cursor_queries(OUTPUT),
+            b"\x1b[1G\xe2\x96\xbd\x1b[1G\x1b[K\x1b[?25l\x1b[0m>> \x1b[4G"
+        );
+        assert_eq!(without_cursor_queries(b">> \x1b[6"), b">> \x1b[6");
     }
 }
