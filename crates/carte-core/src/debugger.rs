@@ -57,6 +57,8 @@ pub fn prompt(line: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -108,6 +110,17 @@ mod tests {
             "Processing by OrdersController#show",
         ] {
             assert_eq!(prompt(line), None, "{line:?}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prompts_are_a_prefix_of_the_line(
+            line in "[ \\[\\]0-9]{0,4}(pry|irb|irb:rdbg|\\(rdbg|\\(byebug)?[():@#>*a-z0-9 ]{0,12}|\\PC{0,16}",
+        ) {
+            if let Some(found) = prompt(&line) {
+                prop_assert!(line.trim_start().starts_with(found), "{found:?}");
+            }
         }
     }
 }

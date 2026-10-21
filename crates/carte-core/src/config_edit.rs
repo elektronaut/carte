@@ -101,6 +101,8 @@ pub fn set_policy(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     const FILE: &str = "# my project\nrepos = \"~/work/nova-*\"   # all of them\nstrip_prefix = \"nova-\"\n\n[apps.nova-clock]\nname = \"clock\" # short\n";
@@ -191,5 +193,101 @@ mod tests {
             set_policy("[[", "x", None, None),
             Err(EditError::Parse(_))
         ));
+    }
+
+    fn policy() -> impl Strategy<Value = Option<Policy>> {
+        proptest::option::of(proptest::sample::select(vec![
+            Policy::Pinned,
+            Policy::Auto,
+            Policy::Disabled,
+        ]))
+    }
+
+    fn policy_line(policy: Option<Policy>) -> String {
+        policy.map_or(String::new(), |p| {
+            format!("policy = {}\n", toml::Value::try_from(p).unwrap())
+        })
+    }
+
+    /// A project file with `[apps.<app>]` tables, some with a policy and processes,
+    /// some processes written inline.
+    fn project_file() -> impl Strategy<Value = String> {
+        let process = ("[a-c]", policy(), any::<bool>());
+        let app = ("[a-c]", policy(), proptest::collection::vec(process, 0..3));
+        proptest::collection::btree_map("[a-c]", app, 0..3).prop_map(|apps| {
+            let mut text = String::from("# acme\nstrip_prefix = \"acme-\" # keep\n");
+            for (app, (name, policy, processes)) in apps {
+                text.push_str(&format!("\n[apps.{app}]\nname = \"{name}\"\n"));
+                text.push_str(&policy_line(policy));
+                let mut seen = Vec::new();
+                for (process, policy, inline) in processes {
+                    if seen.contains(&process) {
+                        continue;
+                    }
+                    seen.push(process.clone());
+                    match (inline, policy) {
+                        (true, Some(p)) => text.push_str(&format!(
+                            "processes.{process} = {{ policy = {} }}\n",
+                            toml::Value::try_from(p).unwrap()
+                        )),
+                        _ => text.push_str(&format!(
+                            "\n[apps.{app}.processes.{process}]\ncommand = \"run\"\n{}",
+                            policy_line(policy)
+                        )),
+                    }
+                }
+            }
+            text
+        })
+    }
+
+    /// The table at `path`, if every step is one.
+    fn table_at<'a>(table: &'a toml::Table, path: &[&str]) -> Option<&'a toml::Table> {
+        path.iter()
+            .try_fold(table, |table, key| table.get(*key)?.as_table())
+    }
+
+    /// `table` without the `policy` at `path` and without empty tables.
+    fn rest(mut table: toml::Table, path: &[&str]) -> toml::Table {
+        fn prune(table: &mut toml::Table) {
+            for (_, value) in table.iter_mut() {
+                if let toml::Value::Table(inner) = value {
+                    prune(inner);
+                }
+            }
+            table.retain(|_, v| v.as_table().is_none_or(|t| !t.is_empty()));
+        }
+        let mut target = Some(&mut table);
+        for key in path {
+            target = target.and_then(|t| t.get_mut(*key)?.as_table_mut());
+        }
+        if let Some(target) = target {
+            target.remove("policy");
+        }
+        prune(&mut table);
+        table
+    }
+
+    proptest! {
+        #[test]
+        fn set_policy_changes_only_that_policy(
+            text in project_file(),
+            app in "[a-d]",
+            process in proptest::option::of("[a-d]"),
+            policy in policy(),
+        ) {
+            let before: toml::Table = text.parse().unwrap();
+            let Ok(out) = set_policy(&text, &app, process.as_deref(), policy) else {
+                return Ok(());
+            };
+            let after: toml::Table = out.parse().unwrap();
+            let mut path = vec!["apps", app.as_str()];
+            path.extend(process.as_deref().map(|p| ["processes", p]).into_iter().flatten());
+            let read = table_at(&after, &path)
+                .and_then(|t| t.get("policy"))
+                .map(|v| v.clone().try_into::<Policy>().unwrap());
+            prop_assert_eq!(read, policy, "{}", out);
+            prop_assert_eq!(rest(after, &path), rest(before, &path), "{}", out);
+        }
     }
 }

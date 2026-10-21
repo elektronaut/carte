@@ -61,6 +61,8 @@ pub fn format(duration: Duration) -> String {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -99,5 +101,20 @@ mod tests {
         assert_eq!(format(Duration::from_millis(1500)), "1s500ms");
         assert_eq!(format(Duration::from_millis(61_250)), "1m1s250ms");
         assert_eq!(parse("1s500ms"), Ok(Duration::from_millis(1500)));
+    }
+
+    proptest! {
+        #[test]
+        fn formatted_durations_parse_back(millis in any::<u64>()) {
+            let duration = Duration::from_millis(millis);
+            prop_assert_eq!(parse(&format(duration)), Ok(duration));
+        }
+
+        #[test]
+        fn parsed_durations_format_and_parse_back(input in "[0-9msdh ]{0,16}|\\PC{0,16}") {
+            if let Ok(duration) = parse(&input) {
+                prop_assert_eq!(parse(&format(duration)), Ok(duration));
+            }
+        }
     }
 }

@@ -420,7 +420,9 @@ pub fn collisions(state: &ProjectState) -> Vec<Problem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Worktree;
     use crate::test_support::{self, app, project, state, worktree, world};
+    use proptest::prelude::*;
     use sha2::{Digest, Sha256};
 
     fn branch(slug: &str) -> Stack {
@@ -1115,5 +1117,135 @@ mod tests {
                 .to_string(),
             "app nova-postcard-frontend doesn't allow subdomains (www)"
         );
+    }
+
+    /// A project with distinct app labels, maybe a collapsed app, and stacks that
+    /// don't collide with an app.
+    fn generated_project() -> impl Strategy<Value = ProjectState> {
+        (
+            "[a-z]{3,8}",
+            any::<bool>(),
+            proptest::collection::btree_set("[a-z]{1,6}(-[a-z0-9]{1,4})?", 1..4),
+            proptest::collection::vec("[a-zA-Z0-9/_.-]{1,90}", 0..4),
+        )
+            .prop_map(|(name, collapsed, shorts, branches)| {
+                let mut apps: Vec<App> = shorts
+                    .iter()
+                    .filter(|short| **short != name)
+                    .map(|short| app(&format!("{name}-{short}"), short, "/w/app"))
+                    .collect();
+                if collapsed || apps.is_empty() {
+                    apps.push(app(&name, &name, "/w/app"));
+                }
+                let mut worktrees: Vec<(&str, Vec<Worktree>)> =
+                    apps.iter().map(|a| (a.name.as_str(), Vec::new())).collect();
+                for (i, branch) in branches.iter().enumerate() {
+                    let wt = worktree(branch, "/w/stack");
+                    if !wt.slug.is_empty() && !shorts.contains(&wt.slug) {
+                        let n = worktrees.len();
+                        worktrees[i % n].1.push(wt);
+                    }
+                }
+                state(
+                    project(&name, Some(&format!("{name}-")), apps.clone()),
+                    worktrees,
+                )
+            })
+    }
+
+    fn generated_world() -> impl Strategy<Value = World> {
+        proptest::collection::vec(generated_project(), 1..4).prop_map(|projects| {
+            let mut world = world();
+            world.projects = Vec::new();
+            for state in projects {
+                if world.project(&state.project.name).is_none() {
+                    world.projects.push(state);
+                }
+            }
+            world
+        })
+    }
+
+    fn every_instance(world: &World) -> Vec<(&ProjectState, &App, Stack)> {
+        world
+            .projects
+            .iter()
+            .flat_map(|state| {
+                let stacks: Vec<Stack> = std::iter::once(Stack::Main)
+                    .chain(state.stacks().into_iter().map(Stack::Branch))
+                    .collect();
+                state.project.apps.iter().flat_map(move |app| {
+                    stacks
+                        .clone()
+                        .into_iter()
+                        .map(move |stack| (state, app, stack))
+                })
+            })
+            .collect()
+    }
+
+    /// `labels_under_tld`, with an invalid host's text left out.
+    fn labels_or_reason(world: &World, host: &str) -> Result<Vec<String>, Option<NotFound>> {
+        labels_under_tld(world, host).map_err(|e| match e {
+            NotFound::InvalidHost { .. } => None,
+            other => Some(other),
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn local_hosts_resolve_to_their_instance(world in generated_world()) {
+            for (state, app, stack) in every_instance(&world) {
+                let host = local_host(&world.machine.tld, &state.project, app, &stack);
+                let expected = resolved(&state.project.name, &app.name, stack, &[]);
+                prop_assert_eq!(resolve_host(&world, &host), Ok(expected), "{}", host);
+            }
+        }
+
+        #[test]
+        fn public_labels_resolve_to_their_instance(world in generated_world()) {
+            for (state, app, stack) in every_instance(&world) {
+                let Ok(label) = public_label(state, app, &stack) else {
+                    continue;
+                };
+                prop_assert!(label.len() <= 63, "{}", label);
+                prop_assert!(!label.contains("---"), "{}", label);
+                let expected = key(&state.project.name, &app.name, stack.clone());
+                prop_assert_eq!(resolve_public_label(&world, &label), Some(expected), "{}", label);
+            }
+        }
+
+        #[test]
+        fn any_host_is_handled(host in "\\PC{0,30}|[a-zA-Z0-9.:\\[\\]-]{0,30}") {
+            let world = world();
+            let _ = host_labels(&host);
+            let _ = labels_under_tld(&world, &host);
+            let _ = resolve_host(&world, &host);
+            let _ = resolve_public_host(&world, &host);
+        }
+
+        #[test]
+        fn case_a_trailing_dot_and_a_port_dont_matter(
+            labels in proptest::collection::vec("[a-zA-Z0-9-]{0,6}|test|localhost|nova", 1..5),
+            dot in any::<bool>(),
+            port in proptest::option::of(any::<u16>()),
+        ) {
+            let world = world();
+            let host = labels.join(".");
+            prop_assume!(!host.ends_with('.'));
+            let mut variant = host.to_ascii_uppercase();
+            if dot {
+                variant.push('.');
+            }
+            if let Some(port) = port {
+                variant.push_str(&format!(":{port}"));
+            }
+            prop_assert_eq!(
+                host_labels(&host).ok(),
+                host_labels(&variant).ok(),
+                "{} vs {}", host, variant
+            );
+            prop_assert_eq!(labels_or_reason(&world, &host), labels_or_reason(&world, &variant));
+        }
     }
 }

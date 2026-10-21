@@ -1286,6 +1286,8 @@ impl<'de> Deserialize<'de> for EnvValue {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn project(text: &str) -> Result<ProjectFile, ConfigError> {
@@ -2255,5 +2257,25 @@ mod tests {
         assert_eq!(problems[0].app.as_deref(), Some("nova-ab"));
         assert!(problems[1].message.contains("already used by api"));
         assert!(problems[2].message.contains("\"--\""));
+    }
+
+    proptest! {
+        #[test]
+        fn byte_sizes_never_panic(input in "\\PC{0,16}|[0-9]{0,22} ?[kKmMgGtTiIbB]{0,3}") {
+            let _ = ByteSize::parse(&input);
+        }
+
+        #[test]
+        fn byte_sizes_multiply_by_their_unit(
+            n in any::<u64>(),
+            (unit, exp) in proptest::sample::select(vec![
+                ("", 0), ("B", 0), ("k", 1), ("KB", 1), ("KiB", 1), ("MB", 2), ("mib", 2),
+                ("G", 3), ("GB", 3), ("TB", 4), ("tib", 4),
+            ]),
+            space in any::<bool>(),
+        ) {
+            let input = format!("{n}{}{unit}", if space { " " } else { "" });
+            prop_assert_eq!(ByteSize::parse(&input), n.checked_mul(1024u64.pow(exp)));
+        }
     }
 }

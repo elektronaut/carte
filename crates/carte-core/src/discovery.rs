@@ -827,8 +827,11 @@ fn find_elsewhere(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::model::{Policy, Stack};
+    use crate::test_support::is_slug;
 
     #[test]
     fn finds_apps_of_other_projects() {
@@ -1924,5 +1927,48 @@ prunable gitdir file points to non-existent location
             state.stacks().into_iter().collect::<Vec<_>>(),
             vec!["api", "feature"]
         );
+    }
+
+    proptest! {
+        #[test]
+        fn one_entry_per_worktree_line(
+            lines in proptest::collection::vec(
+                prop_oneof![
+                    "worktree( /[a-z/]{0,10})?",
+                    "HEAD [0-9a-f]{0,8}",
+                    "branch (refs/heads/)?[a-z/]{0,8}",
+                    proptest::sample::select(vec!["bare", "detached", "locked", "prunable", ""])
+                        .prop_map(str::to_string),
+                    "\\PC{0,10}",
+                ],
+                0..12,
+            ),
+        ) {
+            let output = lines.join("\n");
+            let worktrees: Vec<&str> = output
+                .lines()
+                .filter(|l| l.split_once(' ').map_or(*l, |(key, _)| key) == "worktree")
+                .collect();
+            let entries = parse_worktree_list(&output);
+            prop_assert_eq!(entries.len(), worktrees.len());
+            for (entry, line) in entries.iter().zip(worktrees) {
+                let path = line.split_once(' ').map_or("", |(_, path)| path);
+                prop_assert_eq!(&entry.path, &PathBuf::from(path));
+            }
+        }
+
+        #[test]
+        fn stack_names_are_slugs(
+            repo in "[a-zA-Z0-9._-]{0,12}",
+            paths in proptest::collection::vec("(/[a-zA-Z0-9._ -]{0,80}){0,4}", 0..5),
+        ) {
+            let paths: Vec<&Path> = paths.iter().map(Path::new).collect();
+            let names = stack_names(&repo, &paths);
+            prop_assert_eq!(names.len(), paths.len());
+            for name in names {
+                prop_assert!(is_slug(&name), "{name:?}");
+                prop_assert!(name.len() <= 63, "{name:?}");
+            }
+        }
     }
 }
