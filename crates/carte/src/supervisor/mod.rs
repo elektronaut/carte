@@ -34,6 +34,8 @@ use crate::prune;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Upstream {
     pub port: u16,
+    /// The start of the instance that answered, for [`Handle::activity`].
+    pub boot: u64,
 }
 
 /// Why an instance couldn't serve a request, in words for an error page.
@@ -130,7 +132,7 @@ pub(crate) enum Msg {
         /// the reply is [`BootFailure::is_not_running`].
         start: bool,
     },
-    Activity(InstanceKey, Activity),
+    Activity(InstanceKey, Option<u64>, Activity),
     /// Keeps a running instance from idling out; answers with the instance and the
     /// hold's id for `Release`.
     Hold {
@@ -320,8 +322,10 @@ impl Handle {
             .unwrap_or_else(|_| Err(BootFailure::new("carte is shutting down", "")))
     }
 
-    pub fn activity(&self, key: InstanceKey, activity: Activity) {
-        self.send(Msg::Activity(key, activity));
+    /// Counts a request or connection for the start `boot` of an instance, from its
+    /// [`Upstream`], or for whichever start runs; one for an earlier start is ignored.
+    pub fn activity(&self, key: InstanceKey, boot: Option<u64>, activity: Activity) {
+        self.send(Msg::Activity(key, boot, activity));
     }
 
     /// Keeps the running instance an address names from idling out until

@@ -354,16 +354,62 @@ async fn connections_keep_an_instance_alive() {
     let handle = setup.start();
     let web = key("acme-web", Stack::Main);
 
-    handle.ensure_ready(web.clone()).await.unwrap();
-    handle.activity(web.clone(), supervisor::Activity::ConnectionOpened);
+    let upstream = handle.ensure_ready(web.clone()).await.unwrap();
+    handle.activity(
+        web.clone(),
+        Some(upstream.boot),
+        supervisor::Activity::ConnectionOpened,
+    );
     tokio::time::sleep(Duration::from_millis(1800)).await;
     assert_eq!(
         status(&handle.snapshot(), "acme-web", "main").state,
         InstanceState::Ready
     );
-    handle.activity(web, supervisor::Activity::ConnectionClosed);
+    handle.activity(
+        web,
+        Some(upstream.boot),
+        supervisor::Activity::ConnectionClosed,
+    );
     wait_for(&handle, "idle stop", |s| {
         status(s, "acme-web", "main").state == InstanceState::Stopped
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_connection_to_the_previous_run_that_closes_late_isnt_counted_against_the_new_one() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("");
+    let handle = setup.start();
+    let web = key("acme-web", Stack::Main);
+
+    let before = handle.ensure_ready(web.clone()).await.unwrap();
+    handle.activity(
+        web.clone(),
+        Some(before.boot),
+        supervisor::Activity::ConnectionOpened,
+    );
+    handle
+        .control(waiting("web", Action::Restart))
+        .await
+        .unwrap();
+    let after = handle.ensure_ready(web.clone()).await.unwrap();
+    handle.activity(
+        web.clone(),
+        Some(after.boot),
+        supervisor::Activity::ConnectionOpened,
+    );
+    handle.activity(
+        web.clone(),
+        Some(before.boot),
+        supervisor::Activity::ConnectionClosed,
+    );
+    wait_for(&handle, "one open connection", |s| {
+        status(s, "acme-web", "main")
+            .holds
+            .contains(&carte_api::Hold::Connections { count: 1 })
     })
     .await;
     handle.shutdown().await;

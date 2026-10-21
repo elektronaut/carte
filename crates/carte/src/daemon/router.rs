@@ -167,7 +167,7 @@ impl Router for SupervisorRouter {
                 Some(Served::File(path)) => {
                     return Route::File {
                         path,
-                        guard: Box::new(Guard::new(self.supervisor.clone(), key, shared)),
+                        guard: Box::new(Guard::new(self.supervisor.clone(), key, None, shared)),
                     };
                 }
                 Some(Served::Missing) => {
@@ -203,7 +203,12 @@ impl Router for SupervisorRouter {
                 }
                 Ok(Ok(upstream)) => Route::Upstream {
                     port: upstream.port,
-                    guard: Box::new(Guard::new(self.supervisor.clone(), key, shared)),
+                    guard: Box::new(Guard::new(
+                        self.supervisor.clone(),
+                        key,
+                        Some(upstream.boot),
+                        shared,
+                    )),
                     checked_authorization,
                 },
                 Ok(Err(failure)) if failure.is_not_running() => {
@@ -402,17 +407,25 @@ fn served_files(world: &World, key: &InstanceKey, request: RouteRequest<'_>) -> 
 struct Guard {
     supervisor: Handle,
     key: InstanceKey,
+    /// The start of the instance it goes to; `None` for a file carte serves.
+    boot: Option<u64>,
     long_lived: bool,
     /// For a request from the tunnel, the credentials its instance was shared with.
     shared: Option<Option<Credentials>>,
 }
 
 impl Guard {
-    fn new(supervisor: Handle, key: InstanceKey, shared: Option<Option<Credentials>>) -> Self {
-        supervisor.activity(key.clone(), Activity::RequestStarted);
+    fn new(
+        supervisor: Handle,
+        key: InstanceKey,
+        boot: Option<u64>,
+        shared: Option<Option<Credentials>>,
+    ) -> Self {
+        supervisor.activity(key.clone(), boot, Activity::RequestStarted);
         Guard {
             supervisor,
             key,
+            boot,
             long_lived: false,
             shared,
         }
@@ -424,9 +437,9 @@ impl ActivityGuard for Guard {
         if !self.long_lived {
             self.long_lived = true;
             self.supervisor
-                .activity(self.key.clone(), Activity::RequestEnded);
+                .activity(self.key.clone(), self.boot, Activity::RequestEnded);
             self.supervisor
-                .activity(self.key.clone(), Activity::ConnectionOpened);
+                .activity(self.key.clone(), self.boot, Activity::ConnectionOpened);
         }
     }
 
@@ -450,7 +463,8 @@ impl Drop for Guard {
         } else {
             Activity::RequestEnded
         };
-        self.supervisor.activity(self.key.clone(), activity);
+        self.supervisor
+            .activity(self.key.clone(), self.boot, activity);
     }
 }
 
