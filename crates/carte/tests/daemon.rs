@@ -1485,7 +1485,8 @@ fn sharing_without_a_share_section_explains_itself() {
     assert!(stderr.contains("sharing isn't set up"), "{stderr}");
 }
 
-/// Runs `carte mcp` in the app's checkout and sends it one request per line.
+/// Runs `carte mcp` in the app's checkout and sends it one request per line. Tool
+/// calls answer in the order they finish, so the replies come sorted by id.
 fn mcp_session(
     daemon: &Daemon,
     extra: &[&str],
@@ -1512,10 +1513,12 @@ fn mcp_session(
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    stdout(&output)
+    let mut replies: Vec<serde_json::Value> = stdout(&output)
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+        .collect();
+    replies.sort_by_key(|reply| reply["id"].as_u64());
+    replies
 }
 
 /// The app's output in an MCP tool result, out of its `<app-output>` wrapper.
