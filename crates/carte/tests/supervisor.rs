@@ -3053,6 +3053,54 @@ async fn stopping_a_process_while_its_restart_builds_its_env_keeps_it_down() {
     assert_eq!(pids_in(&pids), [pid]);
     let worker = process(&handle.snapshot(), "acme-web", "worker").clone();
     assert!(worker.pid.is_none(), "{worker:?}");
+    wait_for_events(&handle, "the stop", |lines| {
+        lines
+            .iter()
+            .any(|l| l == "acme-web/worker stopped: by hand")
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_process_started_by_hand_while_queued_still_restarts_after_a_crash() {
+    let setup = Setup::new();
+    setup.app("acme-web", "web: exec {fixture}\nworker: exec sleep 60\n");
+    setup.project(
+        r#"
+[apps.acme-web.processes.migrate]
+command = 'sleep 1'
+kind = "task"
+"#,
+    );
+    let handle = setup.start();
+
+    handle.control(control("web", Action::Up)).await.unwrap();
+    wait_for(&handle, "the task to run", |s| {
+        process(s, "acme-web", "migrate").state == ProcessState::Running
+    })
+    .await;
+    handle
+        .control(control("web/worker", Action::Up))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    wait_for(&handle, "the worker to run", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    let pid = process(&handle.snapshot(), "acme-web", "worker")
+        .pid
+        .unwrap();
+    kill(Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGKILL).unwrap();
+    wait_for(&handle, "the worker to come back", |s| {
+        let p = process(s, "acme-web", "worker");
+        p.state == ProcessState::Running && p.pid.is_some_and(|p| p != pid)
+    })
+    .await;
     handle.shutdown().await;
 }
 
