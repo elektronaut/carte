@@ -692,8 +692,13 @@ async fn logs_are_kept_and_filtered() {
         cwd: None,
         project: None,
     };
+    wait_for_logs(&handle, &target, |lines| {
+        ["line 3", "ready"]
+            .iter()
+            .all(|text| lines.iter().any(|l| l.text.contains(text)))
+    })
+    .await;
     let (lines, filter) = handle.logs(request(&target)).await.unwrap();
-    assert!(lines.iter().any(|l| l.text.contains("ready")), "{lines:?}");
     assert!(lines.iter().all(|l| filter.matches(l)));
     let (lines, _) = handle
         .logs(LogsRequest {
@@ -713,6 +718,30 @@ async fn logs_are_kept_and_filtered() {
         .unwrap();
     assert!(ranked[0].text.contains("line 2"), "{ranked:?}");
     handle.shutdown().await;
+}
+
+/// Waits until the target's logs pass `check`, as a process's output reaches its
+/// log after the process answers on its port.
+async fn wait_for_logs(
+    handle: &Handle,
+    target: &Address,
+    check: impl Fn(&[carte_api::LogLine]) -> bool,
+) {
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (lines, _) = handle.logs(request(target)).await.unwrap();
+            if check(&lines) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "timed out waiting for the logs: {:?}",
+        handle.logs(request(target)).await.unwrap().0
+    );
 }
 
 fn request(target: &Address) -> LogsRequest {
