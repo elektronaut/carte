@@ -152,7 +152,7 @@ fn add(paths: &Paths, args: AddArgs) -> anyhow::Result<ExitCode> {
     }
     let root = tilde(&dir);
     let text = project_toml(&root, &include, strip_prefix.as_deref(), &entries);
-    let (state, problems) = discover(&file_path, &text)?;
+    let (state, problems) = discover(&machine.tld, &file_path, &text)?;
 
     print_summary(&machine, &state, &problems, &file_path, &text);
     if state.project.apps.is_empty() {
@@ -368,9 +368,15 @@ pub(super) fn named_apps(
         .collect()
 }
 
-pub(super) fn discover(path: &Path, text: &str) -> anyhow::Result<(ProjectState, Vec<Problem>)> {
+pub(super) fn discover(
+    tld: &str,
+    path: &Path,
+    text: &str,
+) -> anyhow::Result<(ProjectState, Vec<Problem>)> {
     let file = config::parse_project(path, text)?;
-    Ok(discovery::discover_project(file))
+    let (state, mut problems) = discovery::discover_project(file);
+    problems.extend(naming::collisions(tld, &state));
+    Ok((state, problems))
 }
 
 pub(super) fn print_summary(
@@ -577,12 +583,15 @@ fn print_problems(project: &ProjectSummary) {
 }
 
 /// The project's problems after a parse and discovery, or the parse error.
-fn validate(path: &Path, text: &str) -> Result<(ProjectState, Vec<Problem>), String> {
-    discover(path, text).map_err(|err| format!("{err:#}"))
+fn validate(tld: &str, path: &Path, text: &str) -> Result<(ProjectState, Vec<Problem>), String> {
+    discover(tld, path, text).map_err(|err| format!("{err:#}"))
 }
 
 fn edit(paths: &Paths, name: &str) -> anyhow::Result<ExitCode> {
     let path = paths.project_file(name);
+    let tld = config::load_machine_config(&paths.machine_config())
+        .map(|machine| machine.tld)
+        .unwrap_or_else(|_| MachineConfig::default().tld);
     let original = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == ErrorKind::NotFound => bail!(
@@ -660,7 +669,7 @@ fn edit(paths: &Paths, name: &str) -> anyhow::Result<ExitCode> {
             );
             return Ok(ExitCode::SUCCESS);
         }
-        match validate(&path, &text) {
+        match validate(&tld, &path, &text) {
             Ok((state, problems)) if problems.is_empty() => {
                 println!(
                     "{} is valid: {} apps.",

@@ -293,7 +293,6 @@ pub fn discover_project(file: ProjectFile) -> (ProjectState, Vec<Problem>) {
         scan_dirs: expanded.scan_dirs,
         checkout_apps,
     };
-    problems.extend(naming::collisions(&state));
     (state, problems)
 }
 
@@ -439,7 +438,7 @@ pub fn load_world(config_dir: &Path) -> World {
         .iter()
         .flat_map(|state| {
             let mut problems = naming::long_hosts(&world.machine.tld, state);
-            problems.extend(naming::label_collisions(&world.machine.tld, state));
+            problems.extend(naming::collisions(&world.machine.tld, state));
             problems
         })
         .collect();
@@ -1881,6 +1880,93 @@ prunable gitdir file points to non-existent location
     }
 
     #[test]
+    fn reports_hostnames_that_dont_fit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let (project, app, stack) = ("p".repeat(63), "a".repeat(63), "s".repeat(63));
+        repo(&root.join(&app));
+        git(
+            &root.join(&app),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "x",
+                &format!("../wt/{stack}"),
+            ],
+        );
+        let config_dir = root.join("config");
+        std::fs::create_dir_all(config_dir.join("projects")).unwrap();
+        let tld = format!("{}.{}", "t".repeat(35), "t".repeat(34));
+        std::fs::write(config_dir.join("config.toml"), format!("tld = \"{tld}\"\n")).unwrap();
+        std::fs::write(
+            config_dir.join(format!("projects/{project}.toml")),
+            format!(
+                "root = \"{}\"\ninclude = [\"{app}\"]\n\n[apps.{app}]\nsubdomains = true\n",
+                root.display()
+            ),
+        )
+        .unwrap();
+
+        let world = load_world(&config_dir);
+        let found: Vec<_> = world
+            .problems
+            .iter()
+            .map(|p| {
+                (
+                    p.stack.as_deref(),
+                    p.message.contains("room for subdomains"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [(Some("main"), true), (Some(stack.as_str()), true)],
+            "{:?}",
+            world.problems
+        );
+
+        let label = naming::stack_label(&tld, &world.projects[0].project, &stack).into_owned();
+        git(
+            &root.join(&app),
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "y",
+                &format!("../wt/{label}"),
+            ],
+        );
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!("tld = \"{}.test\"\n", "t".repeat(64)),
+        )
+        .unwrap();
+        let world = load_world(&config_dir);
+        assert!(
+            world
+                .problems
+                .iter()
+                .any(|p| p.project.is_none() && p.message.contains("64 characters")),
+            "{:?}",
+            world.problems
+        );
+        std::fs::write(config_dir.join("config.toml"), format!("tld = \"{tld}\"\n")).unwrap();
+        let world = load_world(&config_dir);
+        assert!(
+            world
+                .problems
+                .iter()
+                .any(|p| p.stack.as_deref() == Some(stack.as_str())
+                    && p.message.contains(&format!("the name of stack {label}"))),
+            "{:?}",
+            world.problems
+        );
+    }
+
+    #[test]
     fn reports_stacks_named_like_an_app_or_main_or_shared_by_a_repo() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
@@ -1905,7 +1991,8 @@ prunable gitdir file points to non-existent location
             ),
         )
         .unwrap();
-        let (state, problems) = discover_project(file);
+        let (state, mut problems) = discover_project(file);
+        problems.extend(naming::collisions("test", &state));
         assert_eq!(state.project.apps.len(), 2);
         let found: Vec<_> = problems
             .iter()
