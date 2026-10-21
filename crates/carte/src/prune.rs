@@ -11,7 +11,7 @@ use carte_api::{
 };
 use carte_core::dirs::{self, DirRoots};
 use carte_core::discovery;
-use carte_core::model::{InstanceKey, Stack, World};
+use carte_core::model::{InstanceKey, ProjectState, Stack, World};
 use carte_core::prune::{self, Known, KnownProject, Listing, Orphan, OrphanKind, Plan, Skip};
 
 use crate::paths::Paths;
@@ -303,16 +303,67 @@ fn candidate(orphan: &Orphan, bytes: u64) -> PruneCandidate {
     }
 }
 
+/// The main checkouts of a project's git repos.
+pub fn project_repos(state: &ProjectState) -> BTreeSet<PathBuf> {
+    let apps = state.project.apps.iter().filter_map(|app| app.repo.clone());
+    state.repo_worktrees.keys().cloned().chain(apps).collect()
+}
+
+/// The worktrees git still lists for `repos` although their directory is missing,
+/// such as on a volume that isn't mounted; why when git can't tell.
+pub fn missing_worktrees(repos: &BTreeSet<PathBuf>) -> Result<BTreeSet<PathBuf>, String> {
+    let mut missing = BTreeSet::new();
+    for repo in repos {
+        if !repo.is_dir() {
+            return Err(format!("its repo {} is missing", repo.display()));
+        }
+        missing.extend(discovery::prunable_worktrees(repo).map_err(|err| err.to_string())?);
+    }
+    Ok(missing)
+}
+
+/// The project's stacks without a worktree whose record names one of `missing`.
+fn recorded_in(
+    roots: &dirs::DirRoots,
+    state: &ProjectState,
+    missing: &BTreeSet<PathBuf>,
+) -> Vec<String> {
+    let project = &state.project.name;
+    let Ok(entries) = fs::read_dir(roots.data.join(project)) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|stack| stack != "main" && !state.has_stack(stack))
+        .filter(|stack| {
+            crate::instance_dirs::read_stack_record(&roots.stack_dir(project, stack))
+                .ok()
+                .flatten()
+                .is_some_and(|record| record.paths().any(|path| missing.contains(path)))
+        })
+        .collect()
+}
+
 /// What exists: loaded projects, and the projects to leave alone because their
 /// configuration or discovery has a problem. The second value says why every project
 /// is left alone, when the project files couldn't be listed.
 fn known(paths: &Paths, world: &World, in_use: InUse) -> (Known, Vec<Skip>) {
     let mut known = Known {
         running: in_use.running,
-        tearing_down: in_use.tearing_down,
+        held: in_use.tearing_down,
         ..Known::default()
     };
+    let roots = paths.dir_roots();
     for state in &world.projects {
+        if let Ok(missing) = missing_worktrees(&project_repos(state)) {
+            for stack in recorded_in(&roots, state, &missing) {
+                known
+                    .held
+                    .entry((state.project.name.clone(), stack))
+                    .or_insert_with(|| "worktree missing, git still lists it".into());
+            }
+        }
         known.projects.insert(
             state.project.name.clone(),
             KnownProject {

@@ -2318,41 +2318,33 @@ impl Actor {
                 .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(30));
         let troubled = prune::troubled(&self.world);
         let roots = self.paths.dir_roots();
-        let candidates: Vec<teardown::Candidate> =
-            self.teardowns
-                .seen
-                .iter()
-                .filter(|id| !present.contains(*id) && !self.teardowns.running.contains(*id))
-                .filter(|id| {
-                    all || (self.teardown_due(id, now) && !self.teardowns.paused.contains(*id))
-                })
-                .map(|(project, stack)| {
-                    let state = self.world.project(project);
-                    let troubled = match state {
-                        None => Some("its project isn't loaded".to_string()),
-                        Some(_) => troubled
-                            .get(project)
-                            .map(|reason| format!("project {project} has a problem: {reason}")),
-                    };
-                    let state = state.filter(|_| troubled.is_none());
-                    let repos = state
-                        .map(|state| {
-                            let apps =
-                                state.project.apps.iter().map(|app| {
-                                    app.repo.clone().unwrap_or_else(|| app.path.clone())
-                                });
-                            state.repo_worktrees.keys().cloned().chain(apps).collect()
-                        })
-                        .unwrap_or_default();
-                    teardown::Candidate {
-                        id: (project.clone(), stack.clone()),
-                        stacks: state.map(ProjectState::stacks),
-                        troubled,
-                        repos,
-                        stack_dir: roots.stack_dir(project, stack),
-                    }
-                })
-                .collect();
+        let candidates: Vec<teardown::Candidate> = self
+            .teardowns
+            .seen
+            .iter()
+            .filter(|id| !present.contains(*id) && !self.teardowns.running.contains(*id))
+            .filter(|id| {
+                all || (self.teardown_due(id, now) && !self.teardowns.paused.contains(*id))
+            })
+            .map(|(project, stack)| {
+                let state = self.world.project(project);
+                let troubled = match state {
+                    None => Some("its project isn't loaded".to_string()),
+                    Some(_) => troubled
+                        .get(project)
+                        .map(|reason| format!("project {project} has a problem: {reason}")),
+                };
+                let state = state.filter(|_| troubled.is_none());
+                let repos = state.map(prune::project_repos).unwrap_or_default();
+                teardown::Candidate {
+                    id: (project.clone(), stack.clone()),
+                    stacks: state.map(ProjectState::stacks),
+                    troubled,
+                    repos,
+                    stack_dir: roots.stack_dir(project, stack),
+                }
+            })
+            .collect();
         if all {
             self.teardowns.stale = false;
             self.teardowns.checked_all = Some(now);
