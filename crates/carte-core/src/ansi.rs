@@ -24,7 +24,8 @@ enum State {
     EscapeIntermediate,
     Csi,
     /// OSC, DCS, SOS, PM and APC, `osc` for OSC: dropped up to BEL, ST, CAN, SUB
-    /// or another escape, and an OSC up to a newline or carriage return too.
+    /// or another escape, an OSC up to a newline or carriage return too, and the
+    /// others up to a newline after [`MAX_STRING`] bytes.
     String {
         osc: bool,
     },
@@ -34,6 +35,9 @@ enum State {
         osc: bool,
     },
 }
+
+/// How many bytes a DCS, SOS, PM or APC string drops before a newline ends it.
+const MAX_STRING: usize = 1024 * 1024;
 
 /// The farthest right a cursor movement takes the cursor.
 const MAX_COLUMN: usize = 4096;
@@ -69,12 +73,15 @@ const MAX_CSI: usize = 32;
 ///
 /// An escape sequence cut short by a control character or by text it can't hold
 /// ends there, so a stray ESC loses nothing after it. An OSC, DCS, SOS, PM or APC
-/// string also ends at CAN, SUB, U+009C or any other escape sequence, and an OSC
-/// at a newline or carriage return.
+/// string also ends at CAN, SUB, U+009C or any other escape sequence, an OSC at a
+/// newline or carriage return, and any other at a newline once it is longer than
+/// [`MAX_STRING`].
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
     state: State,
     csi: Vec<u8>,
+    /// Bytes the current string has dropped.
+    string_len: usize,
     line: Vec<char>,
     cursor: usize,
     utf8: Vec<u8>,
@@ -209,8 +216,10 @@ impl Stripper {
                         self.csi.clear();
                         State::Csi
                     }
-                    b']' => State::String { osc: true },
-                    b'P' | b'X' | b'^' | b'_' => State::String { osc: false },
+                    b']' | b'P' | b'X' | b'^' | b'_' => {
+                        self.string_len = 0;
+                        State::String { osc: b == b']' }
+                    }
                     0x20..=0x2f => State::EscapeIntermediate,
                     0x30..=0x7e => State::Ground,
                     _ => return self.interrupt(b, lines),
@@ -247,13 +256,17 @@ impl Stripper {
                 }
                 _ => self.interrupt(b, lines),
             },
-            State::String { osc } => match b {
-                0x07 | 0x18 | 0x1a => self.state = State::Ground,
-                0x1b => self.state = State::StringEscape,
-                0xc2 => self.state = State::StringC2 { osc },
-                b'\n' | b'\r' if osc => self.interrupt(b, lines),
-                _ => {}
-            },
+            State::String { osc } => {
+                self.string_len = self.string_len.saturating_add(1);
+                match b {
+                    0x07 | 0x18 | 0x1a => self.state = State::Ground,
+                    0x1b => self.state = State::StringEscape,
+                    0xc2 => self.state = State::StringC2 { osc },
+                    b'\n' | b'\r' if osc => self.interrupt(b, lines),
+                    b'\n' if self.string_len > MAX_STRING => self.interrupt(b, lines),
+                    _ => {}
+                }
+            }
             State::StringC2 { osc } => {
                 self.state = State::String { osc };
                 if b == 0x9c {
@@ -578,6 +591,27 @@ mod tests {
         s.feed(b"\x1b]0;title\xc2");
         s.feed(b"\x9cafter");
         assert_eq!(s.pending(), "after");
+    }
+
+    #[test]
+    fn a_long_unterminated_dcs_ends_at_a_newline() {
+        let mut s = Stripper::default();
+        s.feed(b"\x1bP");
+        let mut lines = Vec::new();
+        for i in 0..256 * 1024 {
+            lines.extend(s.feed(format!("line {i}\n").as_bytes()));
+        }
+        lines.extend(s.close());
+        assert!(!lines.is_empty());
+        assert_eq!(lines.last().unwrap(), "line 262143");
+        assert!(lines.len() > 100_000, "{}", lines.len());
+    }
+
+    #[test]
+    fn a_lone_c2_inside_a_string_changes_nothing() {
+        assert_eq!(strip(b"\x1b]0;a\xc2\x1b\\b"), "b");
+        assert_eq!(strip(b"\x1b]0;a\xc2\nb"), "\nb");
+        assert_eq!(strip(b"\x1bPa\xc2\xc2\x9cb"), "b");
     }
 
     #[test]
