@@ -106,9 +106,10 @@ has a problem or doesn't load, no project counts as gone, since the
 projects it makes may be missing only for that. A directory a template
 matches keeps its data even while it has nothing to run, such as in the
 middle of a checkout. Several cartes
-(with different state directories) can share the run root, and give
-the same instance the same run directory, so a run directory is only
-removed when the `.owner` file beside it names this carte.
+(with different state directories) can share the run root. Each gives
+its instances run directories of their own, and a run directory is only
+removed, by prune or a stack's teardown, when the `.owner` file beside
+it names this carte.
 
 prune moves what it removes into a `.carte-prune-*` folder beside it,
 then deletes that, making read-only directories in it writable if it

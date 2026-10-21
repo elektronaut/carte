@@ -1050,14 +1050,15 @@ creates them before its processes start, and creates nothing inside them.
 - The **run directory**, `CARTE_RUN_DIR`, is for sockets and other
   files that don't need to survive a reboot. Its path is short, so a Unix
   socket in it stays under the operating system's limit of about 100
-  bytes: a hash of project, stack and app in the per-user temp directory
-  on macOS, in `$XDG_RUNTIME_DIR/carte` or `/tmp/carte-<uid>` on Linux.
+  bytes: a hash of carte's state directory, project, stack and app in
+  the per-user temp directory on macOS, in `$XDG_RUNTIME_DIR/carte` or `/tmp/carte-<uid>` on Linux.
   `CARTE_RUNTIME_HOME` in the daemon's environment moves it; `carte env`
   shows the daemon's path while it runs. The folder and each run
   directory must be real directories owned by you: carte refuses a
   symlink or another user's folder, and closes the folder to other
   users. Beside each run directory, a `<hash>.owner` file names the
-  carte that made it, by its state directory's `data` folder.
+  carte that made it, by its state directory's `data` folder. carte
+  writes it only when it's missing, and never changes another carte's.
 
 Commands aren't templated, so they use the variables like `$PORT`. A
 process that wants a subdirectory creates it:

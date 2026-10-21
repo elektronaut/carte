@@ -59,7 +59,12 @@ impl DirRoots {
         let stack = key.stack.slug();
         InstanceDirs {
             state: self.stack_dir(&key.project, stack).join(&key.app),
-            run: self.run.join(short_hash(&[&key.project, stack, &key.app])),
+            run: self.run.join(short_hash(&[
+                &self.data.to_string_lossy(),
+                &key.project,
+                stack,
+                &key.app,
+            ])),
         }
     }
 }
@@ -162,7 +167,16 @@ mod tests {
             dirs.state,
             PathBuf::from("/state/data/nova/feature-x/nova-billing")
         );
-        assert_eq!(dirs.run, PathBuf::from("/run/carte/2svx4lo4"));
+        assert_eq!(dirs.run, PathBuf::from("/run/carte/72bkht4w"));
+        let other = DirRoots {
+            data: "/other/data".into(),
+            ..roots()
+        };
+        assert_ne!(
+            other.instance(&key(Stack::Branch("feature-x".into()))).run,
+            dirs.run,
+            "cartes sharing a run root get their own run directories"
+        );
         let main = roots().instance(&key(Stack::Main));
         assert_eq!(
             main.state,
