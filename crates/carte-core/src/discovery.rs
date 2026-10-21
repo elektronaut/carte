@@ -984,6 +984,43 @@ prunable gitdir file points to non-existent location
         assert_eq!(location.stack, Stack::Main);
     }
 
+    #[test]
+    fn a_directory_through_a_symlink_is_one_app() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().canonicalize().unwrap().join("real");
+        let mono = real.join("mono");
+        repo(&mono);
+        for app in ["web", "api"] {
+            std::fs::create_dir_all(mono.join("apps").join(app)).unwrap();
+            std::fs::write(mono.join("apps").join(app).join("Procfile"), "web: x\n").unwrap();
+        }
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let file = config::parse_project(
+            &real.join("mono.toml"),
+            &format!(
+                "root = \"{0}/mono\"\ninclude = [\"apps/*\"]\n[apps.front]\npath = \"{0}/mono/apps/web\"\n",
+                link.display()
+            ),
+        )
+        .unwrap();
+        let (state, problems) = discover_project(file);
+        assert!(problems.is_empty(), "{problems:?}");
+        let apps: Vec<_> = state
+            .project
+            .apps
+            .iter()
+            .map(|a| (a.name.as_str(), a.path.clone()))
+            .collect();
+        assert_eq!(
+            apps,
+            [
+                ("api", mono.join("apps/api")),
+                ("front", mono.join("apps/web")),
+            ]
+        );
+    }
+
     fn names(repo: &str, paths: &[&str]) -> Vec<String> {
         let paths: Vec<&Path> = paths.iter().map(Path::new).collect();
         stack_names(repo, &paths)
