@@ -1235,7 +1235,7 @@ pub(crate) mod tests {
 
     impl Drop for GroupGuard {
         fn drop(&mut self) {
-            if self.alive {
+            if self.alive && killpg(self.group, None).is_ok() {
                 let _ = killpg(self.group, Signal::SIGKILL);
             }
         }
