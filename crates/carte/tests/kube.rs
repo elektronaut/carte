@@ -1598,6 +1598,46 @@ async fn a_changed_server_or_user_gives_new_connections_a_new_client() {
 }
 
 #[tokio::test]
+async fn a_kubeconfig_caught_mid_rewrite_keeps_the_client() {
+    let setup = Setup::new(PROJECT);
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let dialer = upstream(route().await).unwrap();
+    for partial in [
+        "apiVersion: v1\nkind: Config\nclusters:\n- name: prod\n  cluster: [",
+        "",
+    ] {
+        rewrite(&setup.kubeconfig, partial);
+        assert_eq!(upstream(route().await).unwrap(), dialer);
+        assert_eq!(get(&dialer).await, "grafana-a");
+        assert_eq!(setup.cluster.state().clients, 1, "{partial:?}");
+    }
+    std::fs::remove_file(&setup.kubeconfig).unwrap();
+    assert_eq!(upstream(route().await).unwrap(), dialer);
+    assert_eq!(setup.cluster.state().clients, 1);
+    let events = setup.events().await;
+    assert!(
+        events.iter().all(|e| e.kind != EventKind::Failed),
+        "{events:?}"
+    );
+
+    std::fs::write(&setup.kubeconfig, kubeconfig("other", SERVER, "one")).unwrap();
+    upstream(route().await).unwrap();
+    assert_eq!(
+        setup.cluster.state().clients,
+        1,
+        "the same context once the rewrite is done"
+    );
+    rewrite(&setup.kubeconfig, "garbage: [");
+    rewrite(&setup.kubeconfig, &kubeconfig("prod", SERVER, "two"));
+    upstream(route().await).unwrap();
+    assert_eq!(setup.cluster.state().clients, 2);
+}
+
+#[tokio::test]
 async fn kubeconfig_files_from_the_provider_env_are_watched() {
     let setup = Setup::new(PROJECT);
     setup

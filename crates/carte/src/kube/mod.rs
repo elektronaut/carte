@@ -22,7 +22,7 @@ use futures_util::StreamExt;
 use http::StatusCode;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use cluster::Bounded;
 pub use cluster::{
@@ -775,6 +775,8 @@ impl Inner {
 
     /// Reads the kubeconfig and keeps the slot's client while what the context
     /// resolves to, with its login plugin's env, is the same, else connects again.
+    /// A kubeconfig that can't be read, as while a tool rewrites it, keeps the
+    /// client and its stamps, so that it's read again on the next request.
     async fn reconnect(
         &self,
         project: &KubeProject,
@@ -782,8 +784,20 @@ impl Inner {
         slot: &mut Option<ClusterEntry>,
     ) -> Result<Arc<dyn Cluster>, ApiError> {
         let stamps = kubeconfig_stamps(project, &env);
-        let kubeconfig = cluster::read_kubeconfig(project, &env)?;
-        let context = cluster::context_digest(&kubeconfig, &project.context, &env)?;
+        let read = cluster::read_kubeconfig(project, &env).and_then(|kubeconfig| {
+            let context = cluster::context_digest(&kubeconfig, &project.context, &env)?;
+            Ok((kubeconfig, context))
+        });
+        let (kubeconfig, context) = match read {
+            Ok(read) => read,
+            Err(err) => match slot.as_ref() {
+                Some(entry) if entry.project == *project => {
+                    debug!("{}: kept the kube client: {}", project.name, err.summary());
+                    return Ok(entry.cluster.clone());
+                }
+                _ => return Err(err),
+            },
+        };
         if let Some(entry) = slot.as_mut()
             && entry.project == *project
             && entry.context == context
