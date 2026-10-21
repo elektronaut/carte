@@ -242,7 +242,7 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
         CaState::Replace(why) => report.push(
             Status::Warn,
             "CA",
-            format!("{ca} will be replaced when the daemon starts: {why}"),
+            format!("{ca} needs replacing, as `carte setup` does: {why}"),
         ),
         CaState::Untrusted => report.push(Status::Missing, "CA", format!("{ca} is not trusted")),
         CaState::Trusted => report.push(Status::Ok, "CA", format!("{ca} is trusted")),
