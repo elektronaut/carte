@@ -281,6 +281,25 @@ async fn suspend_character_on_the_pty_does_not_stop_the_app() {
     stop(handle).await;
 }
 
+/// Waits until `pid` is stopped.
+async fn wait_stopped(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        if String::from_utf8_lossy(&ps.stdout)
+            .trim_start()
+            .starts_with('T')
+        {
+            return;
+        }
+        assert!(Instant::now() < deadline, "pid {pid} not stopped");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// A command that leaves `marker` behind when SIGTERM reaches its handler.
 fn trapping_term(marker: &Path) -> SpawnSpec {
     SpawnSpec::new(
@@ -301,6 +320,7 @@ async fn stop_resumes_a_stopped_group() {
     read_until(&mut output, &mut Vec::new(), "ready").await;
     drain(output);
     handle.signal_group(Signal::SIGSTOP).unwrap();
+    wait_stopped(handle.pid()).await;
     let started = Instant::now();
     let status = handle.stop(Duration::from_secs(5)).await.unwrap();
     assert_eq!(status.code(), Some(3));
@@ -321,6 +341,7 @@ async fn closing_the_lifeline_resumes_a_stopped_group() {
     read_until(&mut output, &mut Vec::new(), "ready").await;
     drain(output);
     handle.signal_group(Signal::SIGSTOP).unwrap();
+    wait_stopped(handle.pid()).await;
     handle.close_lifeline();
     tokio::time::timeout(Duration::from_secs(10), handle.wait())
         .await
