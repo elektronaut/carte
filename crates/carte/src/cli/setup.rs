@@ -10,6 +10,7 @@ use crate::setup::{self, Facts, SetupEnv, check};
 pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
     let mut env = SetupEnv::from_system(paths)?;
     if let Some(domain) = &args.share {
+        env.check_tld()?;
         return share(&env, domain, &args.tunnel, args.dry_run);
     }
     let mut facts = Facts::gather(&env);
@@ -20,6 +21,9 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
     };
     if let Some(tld) = &tld {
         env.machine.tld = tld.clone();
+    }
+    env.check_tld()?;
+    if tld.is_some() {
         facts = Facts::gather(&env);
     }
     if args.no_skill {

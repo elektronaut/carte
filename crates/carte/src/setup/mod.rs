@@ -46,13 +46,6 @@ pub struct SetupEnv {
 impl SetupEnv {
     pub fn from_system(paths: &Paths) -> anyhow::Result<Self> {
         let machine = config::load_machine_config(&paths.machine_config())?;
-        if !is_tld(&machine.tld) {
-            bail!(
-                "{} sets tld = {:?}, which isn't a TLD; try `localhost` or `test`",
-                tilde(&paths.machine_config()),
-                machine.tld
-            );
-        }
         let tld_configured = fs::read_to_string(paths.machine_config())
             .ok()
             .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
@@ -61,7 +54,7 @@ impl SetupEnv {
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
             .context("HOME is not set")?;
-        let resolver_dir = dns::resolver_file_path(&machine.tld)
+        let resolver_dir = dns::resolver_file_path("localhost")
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/etc/resolver"));
@@ -77,6 +70,19 @@ impl SetupEnv {
             home,
             tld_configured,
         })
+    }
+
+    /// Refuses a TLD that isn't one before it names a resolver file. Setup checks the
+    /// TLD it ends up with, so `--tld` can replace a bad one from `config.toml`.
+    pub fn check_tld(&self) -> anyhow::Result<()> {
+        if !is_tld(&self.machine.tld) {
+            bail!(
+                "{} sets tld = {:?}, which isn't a TLD; fix it there, or choose one with `carte setup --tld test`",
+                tilde(&self.paths.machine_config()),
+                self.machine.tld
+            );
+        }
+        Ok(())
     }
 
     /// Whether the TLD needs a resolver file: `.localhost` resolves to loopback without one.
@@ -375,7 +381,7 @@ pub fn previous_tlds(env: &SetupEnv, facts: &Facts) -> Vec<String> {
         .iter()
         .cloned()
         .chain(from_resolvers)
-        .filter(|tld| tld != "localhost")
+        .filter(|tld| tld != "localhost" && is_tld(tld))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -1193,14 +1199,19 @@ mod tests {
             let paths = Paths::under(dir.path());
             fs::create_dir_all(&paths.config_dir).unwrap();
             fs::write(paths.machine_config(), format!("tld = {tld:?}\n")).unwrap();
-            let err = SetupEnv::from_system(&paths).unwrap_err().to_string();
+            let mut env = SetupEnv::from_system(&paths).unwrap();
+            assert_eq!(env.resolver_dir, Path::new("/etc/resolver"));
+            let err = env.check_tld().unwrap_err().to_string();
             assert!(err.contains("isn't a TLD"), "{tld}: {err}");
+            env.machine.tld = "test".into();
+            env.check_tld().unwrap();
         }
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(dir.path());
         fs::create_dir_all(&paths.config_dir).unwrap();
         fs::write(paths.machine_config(), "tld = \"test\"\n").unwrap();
         let env = SetupEnv::from_system(&paths).unwrap();
+        env.check_tld().unwrap();
         assert_eq!(env.resolver_file(), Path::new("/etc/resolver/test"));
     }
 
@@ -1212,13 +1223,21 @@ mod tests {
                 ("test", "nameserver 127.0.0.1\nport 9253\n"),
                 ("dev", "nameserver 127.0.0.1\nport 9999\n"),
                 ("localhost", PUMA_DEV_RESOLVER),
+                (".test", "nameserver 127.0.0.1\nport 9253\n"),
+                ("-x", PUMA_DEV_RESOLVER),
             ]),
             ..fresh()
         };
         assert_eq!(previous_tlds(&env, &facts), ["test"]);
-        assert_eq!(leftover_resolvers(&env, &facts), ["localhost", "test"]);
+        assert_eq!(
+            leftover_resolvers(&env, &facts),
+            ["-x", ".test", "localhost", "test"]
+        );
         let test = with_test_tld(env);
-        assert_eq!(leftover_resolvers(&test, &facts), ["localhost"]);
+        assert_eq!(
+            leftover_resolvers(&test, &facts),
+            ["-x", ".test", "localhost"]
+        );
     }
 
     #[test]
