@@ -33,7 +33,7 @@ enum State {
 const MAX_COLUMN: usize = 4096;
 
 /// The longest a line gets, in characters, before it wraps.
-const MAX_LINE: usize = 16 * 1024;
+pub const MAX_LINE: usize = 16 * 1024;
 
 /// The most CSI parameter bytes kept; the rest are dropped.
 const MAX_CSI: usize = 32;
@@ -88,6 +88,10 @@ pub struct Stripper {
 
 /// The farthest a move up reaches into lines already ended.
 const ROWS_UP: isize = 24;
+
+/// The most rows a [`Stripper`] keeps open above and below the cursor's and
+/// settled, together.
+pub const MAX_OPEN_ROWS: usize = 2 * ROWS_UP as usize;
 
 impl Stripper {
     /// Feeds bytes and returns the lines they complete.
@@ -182,6 +186,11 @@ impl Stripper {
     /// The length of the current incomplete line, in characters.
     pub fn pending_len(&self) -> usize {
         self.line.len()
+    }
+
+    /// How many rows besides the cursor's are open or settled.
+    pub fn open_rows(&self) -> usize {
+        self.above.len() + self.below.len() + self.settled.len()
     }
 
     fn byte(&mut self, b: u8, lines: &mut Vec<String>) {
