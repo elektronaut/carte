@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use carte_api::{EventKind, EventSubject, LogLine};
 use carte_core::dirs::{DirRoots, StackRecord};
 use carte_core::model::{App, Checkout, InstanceKey, MachineConfig, ProjectState, Stack, World};
-use carte_core::{duration, procfile, teardown};
+use carte_core::{discovery, duration, procfile, teardown};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{info, warn};
 
@@ -75,6 +75,8 @@ pub(super) struct Candidate {
     pub stacks: Option<BTreeSet<String>>,
     /// Why the project's worktrees aren't known for sure.
     pub troubled: Option<String>,
+    /// The main checkouts of the project's repos, to ask git about missing worktrees.
+    pub repos: BTreeSet<PathBuf>,
     pub stack_dir: PathBuf,
 }
 
@@ -105,6 +107,26 @@ pub(super) fn check(candidates: Vec<Candidate>) -> Vec<(StackId, Status)> {
             };
             if let Some(reason) = candidate.troubled {
                 return (candidate.id, Status::Unknown(reason));
+            }
+            let mut prunable = BTreeSet::new();
+            for repo in &candidate.repos {
+                if !repo.is_dir() {
+                    let reason = format!("its repo {} is missing", repo.display());
+                    return (candidate.id, Status::Unknown(reason));
+                }
+                match discovery::prunable_worktrees(repo) {
+                    Ok(paths) => prunable.extend(paths),
+                    Err(err) => return (candidate.id, Status::Unknown(err.to_string())),
+                }
+            }
+            if let Some(path) = record.paths().find(|path| prunable.contains(*path)) {
+                return (
+                    candidate.id,
+                    Status::Unknown(format!(
+                        "git still lists its worktree {}, which is missing; run `git worktree prune` once it's gone for good",
+                        path.display()
+                    )),
+                );
             }
             let removed = teardown::is_removed(
                 &candidate.id.1,
@@ -530,6 +552,7 @@ mod tests {
             id: ("acme".into(), "feature-x".into()),
             stacks: troubled.is_none().then(BTreeSet::new),
             troubled: troubled.map(str::to_string),
+            repos: BTreeSet::new(),
             stack_dir: stack_dir.to_path_buf(),
         }
     }

@@ -837,7 +837,10 @@ DATABASE = "billing_{{stack | snake}}"
   any more, and the directories of the worktrees carte last saw for it
   are gone. A rebase or a `git switch` inside the worktree keeps the
   directory, so it never counts, however long it takes; neither does
-  deleting a branch. The `main` stack is never removed, and a stack
+  deleting a branch. Nor does a worktree whose directory is missing
+  while git still lists it, such as one on a volume that isn't mounted
+  or a repo moved without `git worktree prune`; it counts once git no
+  longer lists it. The `main` stack is never removed, and a stack
   where no instance ever ran has nothing to tear down. carte checks
   when its worktrees change and every 30 seconds.
 - **Moving a worktree.** The stack is named after the worktree's
