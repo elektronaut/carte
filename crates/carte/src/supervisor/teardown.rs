@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use carte_api::{EventKind, EventSubject, LogLine};
-use carte_core::dirs::StackRecord;
-use carte_core::model::{App, Checkout, InstanceKey, MachineConfig, ProjectState, Stack};
+use carte_core::dirs::{DirRoots, StackRecord};
+use carte_core::model::{App, Checkout, InstanceKey, MachineConfig, ProjectState, Stack, World};
 use carte_core::{duration, procfile, teardown};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{info, warn};
@@ -26,7 +26,8 @@ pub(super) type StackId = (String, String);
 
 #[derive(Default)]
 pub(super) struct Teardowns {
-    /// Stacks that had a worktree while this daemon ran; only those are torn down.
+    /// Stacks that had a worktree while this daemon ran, or that a daemon before it
+    /// left behind; only those are torn down.
     pub seen: BTreeSet<StackId>,
     /// Removed stacks waiting out the delay, and since when.
     pub pending: BTreeMap<StackId, Instant>,
@@ -40,6 +41,31 @@ pub(super) struct Teardowns {
     pub checked_all: Option<Instant>,
     /// Discovery changed since that check.
     pub stale: bool,
+}
+
+/// Stacks of loaded projects that have a folder and no worktree: their teardown
+/// was cut short when carte stopped, or their worktrees went while it didn't run.
+/// Those without a record are dropped by the first check.
+pub(super) fn left_behind(world: &World, roots: &DirRoots) -> BTreeSet<StackId> {
+    let mut stacks = BTreeSet::new();
+    for state in &world.projects {
+        let project = &state.project.name;
+        let Ok(entries) = std::fs::read_dir(roots.data.join(project)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "main"
+                || name.starts_with('.')
+                || state.has_stack(&name)
+                || !entry.file_type().is_ok_and(|t| t.is_dir())
+            {
+                continue;
+            }
+            stacks.insert((project.clone(), name));
+        }
+    }
+    stacks
 }
 
 /// A stack that was seen and has no worktree now.
@@ -96,6 +122,14 @@ pub(super) fn check(candidates: Vec<Candidate>) -> Vec<(StackId, Status)> {
         .collect()
 }
 
+/// How a job's teardown processes ended.
+enum Ran {
+    Succeeded,
+    Failed,
+    /// The stack has a worktree again, so the rest didn't run.
+    Cancelled,
+}
+
 /// One stack's teardown, with what it needs from the supervisor.
 pub(super) struct Job {
     pub id: StackId,
@@ -120,41 +154,35 @@ impl Job {
     /// Waits for the stack's instances to stop, runs the teardown processes, and
     /// removes the stack's folders when every one succeeded.
     pub(super) async fn run(self) {
-        let ok = self.run_processes().await;
         let (project, stack) = &self.id;
         let subject = events::stack(project, stack);
-        if !ok {
-            warn!("teardown of {project}@{stack} failed; its folders are kept");
-            self.event(
-                EventKind::TeardownFailed,
-                "kept its folders; `carte prune` removes them".into(),
-                subject,
-                None,
-            );
-        } else {
-            match self.remove_folders().await {
-                Ok(false) => {
-                    info!("{project}@{stack} has a worktree again; its folders are kept");
-                    self.event(
-                        EventKind::TeardownCancelled,
-                        "it has a worktree again; kept its folders".into(),
-                        subject,
-                        None,
-                    );
-                }
-                Ok(true) => {
-                    info!("tore down {project}@{stack}");
-                    self.event(
-                        EventKind::TeardownFinished,
-                        "removed its folders".into(),
-                        subject,
-                        None,
-                    );
-                }
-                Err(message) => {
-                    warn!("teardown of {project}@{stack}: {message}");
-                    self.event(EventKind::TeardownFailed, message, subject, None);
-                }
+        let removed = match self.run_processes().await {
+            Ran::Succeeded => self.remove_folders().await,
+            Ran::Cancelled => Ok(false),
+            Ran::Failed => Err("kept its folders; `carte prune` removes them".into()),
+        };
+        match removed {
+            Ok(false) => {
+                info!("{project}@{stack} has a worktree again; its folders are kept");
+                self.event(
+                    EventKind::TeardownCancelled,
+                    "it has a worktree again; kept its folders".into(),
+                    subject,
+                    None,
+                );
+            }
+            Ok(true) => {
+                info!("tore down {project}@{stack}");
+                self.event(
+                    EventKind::TeardownFinished,
+                    "removed its folders".into(),
+                    subject,
+                    None,
+                );
+            }
+            Err(message) => {
+                warn!("teardown of {project}@{stack}: {message}");
+                self.event(EventKind::TeardownFailed, message, subject, None);
             }
         }
         let _ = self
@@ -191,11 +219,11 @@ impl Job {
         rx.await.ok()
     }
 
-    async fn run_processes(&self) -> bool {
+    async fn run_processes(&self) -> Ran {
         let deadline = Instant::now() + self.grace * 2 + Duration::from_secs(5);
         loop {
             let Some(running) = self.running().await else {
-                return false;
+                return Ran::Failed;
             };
             if !running
                 .iter()
@@ -210,7 +238,7 @@ impl Job {
                     events::stack(&self.id.0, &self.id.1),
                     None,
                 );
-                return false;
+                return Ran::Failed;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -236,7 +264,7 @@ impl Job {
         })
         .await;
         let Ok(built) = built else {
-            return false;
+            return Ran::Failed;
         };
 
         let mut ok = true;
@@ -257,6 +285,11 @@ impl Job {
                 }
             };
             for (name, spec) in specs {
+                match self.has_worktree().await {
+                    Some(false) => {}
+                    Some(true) => return Ran::Cancelled,
+                    None => return Ran::Failed,
+                }
                 let started = Instant::now();
                 let subject = events::process(&key, &name);
                 match self.run_one(&key, &name, spec).await {
@@ -273,7 +306,20 @@ impl Job {
                 }
             }
         }
-        ok
+        if ok { Ran::Succeeded } else { Ran::Failed }
+    }
+
+    /// Whether the stack has a worktree again; `None` once carte has stopped.
+    async fn has_worktree(&self) -> Option<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(Msg::HasWorktree {
+                project: self.id.0.clone(),
+                stack: self.id.1.clone(),
+                reply,
+            })
+            .ok()?;
+        rx.await.ok()
     }
 
     /// What renders each app's teardown env, for the apps that have teardown

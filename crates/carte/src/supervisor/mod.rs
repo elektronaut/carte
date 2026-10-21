@@ -187,6 +187,14 @@ pub(crate) enum Msg {
     },
     Shutdown(oneshot::Sender<()>),
     Running(oneshot::Sender<BTreeSet<InstanceKey>>),
+    /// What prune leaves alone.
+    InUse(oneshot::Sender<prune::InUse>),
+    /// Whether a stack has a worktree again, for a teardown about to run a process.
+    HasWorktree {
+        project: String,
+        stack: String,
+        reply: oneshot::Sender<bool>,
+    },
     Prune {
         orphans: Vec<Orphan>,
         reply: oneshot::Sender<Vec<(Orphan, prune::Detached)>>,
@@ -497,8 +505,15 @@ impl Handle {
         rx.await.unwrap_or_default()
     }
 
-    /// Takes leftovers out of the way, skipping any a running instance owns, without
-    /// an instance starting in between.
+    /// Running instances, and stacks whose teardown is pending or running.
+    pub async fn in_use(&self) -> prune::InUse {
+        let (reply, rx) = oneshot::channel();
+        self.send(Msg::InUse(reply));
+        rx.await.unwrap_or_default()
+    }
+
+    /// Takes leftovers out of the way, skipping any a running instance owns or of a
+    /// stack being torn down, without an instance starting in between.
     pub async fn prune(&self, orphans: Vec<Orphan>) -> Vec<(Orphan, prune::Detached)> {
         let (reply, rx) = oneshot::channel();
         self.send(Msg::Prune { orphans, reply });

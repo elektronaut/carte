@@ -475,9 +475,9 @@ async fn kube_services(
 }
 
 async fn prune_list(State(api): State<Api>) -> Response {
-    let running = api.supervisor.running().await;
+    let in_use = api.supervisor.in_use().await;
     let paths = api.paths.clone();
-    match tokio::task::spawn_blocking(move || crate::prune::list(&paths, running)).await {
+    match tokio::task::spawn_blocking(move || crate::prune::list(&paths, in_use)).await {
         Ok(list) => Json(list).into_response(),
         Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
@@ -486,10 +486,10 @@ async fn prune_list(State(api): State<Api>) -> Response {
 /// Removes the asked-for leftovers that still are leftovers once the configuration is
 /// read again, and that no running instance owns when the supervisor gets to them.
 async fn prune(State(api): State<Api>, Json(request): Json<PruneRequest>) -> Response {
-    let running = api.supervisor.running().await;
+    let in_use = api.supervisor.in_use().await;
     let paths = api.paths.clone();
     let selected =
-        tokio::task::spawn_blocking(move || crate::prune::select(&paths, running, &request.paths))
+        tokio::task::spawn_blocking(move || crate::prune::select(&paths, in_use, &request.paths))
             .await;
     let (selected, kept) = match selected {
         Ok(selected) => selected,

@@ -851,9 +851,13 @@ DATABASE = "billing_{{stack | snake}}"
   adding it again doesn't tear anything down; a worktree with the name
   coming back cancels it. If
   it comes back while the teardown runs, the teardown processes that
-  already ran aren't undone, but the folders are kept. carte only tears
-  down stacks it saw with a worktree since the daemon started, and keeps
-  pending teardowns in memory: a daemon restart forgets them.
+  already ran aren't undone, the rest don't run, and the folders are
+  kept; its apps start once the teardown has stopped. carte tears down
+  stacks it saw with a worktree since the daemon started, and, when the
+  daemon starts, stacks whose folders it finds with their worktrees gone:
+  a teardown that was pending or cut short when the daemon stopped runs
+  again after the delay, as does one for a worktree removed while it
+  wasn't running.
 - **Discovery.** Nothing is torn down in a project whose configuration
   or discovery has a problem, such as a failing `git worktree list` or
   an `include` entry that matches nothing, or in a stack whose
@@ -880,8 +884,9 @@ DATABASE = "billing_{{stack | snake}}"
   no app has one, carte deletes the stack's
   [directories](#instance-directories) and pidfiles. When one fails, the
   folders stay and the failure shows in `carte events`; it isn't run
-  again. [`carte prune`](cli.md#prune) later lists such stacks, and
-  removes their files without running any teardown.
+  again until the daemon restarts. [`carte prune`](cli.md#prune) later
+  lists such stacks, and removes their files without running any
+  teardown.
 
 Teardown commands are destructive by design, so make them specific to
 the stack, with `{{stack}}` or `$CARTE_STACK`, and safe to run when
@@ -1047,11 +1052,10 @@ branch seen in them.
 
 When a stack's worktrees are gone, its [teardown](#teardown) deletes
 its directories. carte doesn't delete them when an app or project goes
-away, when a teardown fails, or when the worktree went away while the
-daemon wasn't running; [`carte prune`](cli.md#prune) removes those
-leftovers. It removes a run directory only when its `.owner` file names
-this carte, and deletes the `.carte-prune-*` folders an interrupted
-prune left.
+away or when a teardown fails; [`carte prune`](cli.md#prune) removes
+those leftovers. It removes a run directory only when its `.owner` file
+names this carte, and deletes the `.carte-prune-*` folders an
+interrupted prune left.
 
 ### Env templates
 
