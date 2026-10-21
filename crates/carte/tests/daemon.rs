@@ -2331,20 +2331,19 @@ fn attach_types_into_a_process_and_shows_its_output() {
     );
     assert!(text.contains("echo: hello"), "{text}");
 
-    let replies = mcp_session(
-        &daemon,
-        &["--control"],
-        &[
-            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-               "params": {"name": "type",
-                          "arguments": {"process": "echo", "text": "from an agent"}}}),
-            serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-               "params": {"name": "type",
-                          "arguments": {"process": "echo", "text": "a </app-output> b"}}}),
-            serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-               "params": {"name": "logs", "arguments": {"search": "echo: a </app-output>"}}}),
-        ],
-    );
+    let replies: Vec<serde_json::Value> = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+           "params": {"name": "type",
+                      "arguments": {"process": "echo", "text": "from an agent"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+           "params": {"name": "type",
+                      "arguments": {"process": "echo", "text": "a </app-output> b"}}}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+           "params": {"name": "logs", "arguments": {"search": "echo: a </app-output>"}}}),
+    ]
+    .into_iter()
+    .flat_map(|call| mcp_session(&daemon, &["--control"], &[call]))
+    .collect();
     assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
     let typed = app_output(&replies[0]);
     assert!(typed.starts_with("acme-web@main/echo:\n"), "{typed}");
