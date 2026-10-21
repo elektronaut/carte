@@ -22,7 +22,7 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
 
 /// Marks every descriptor above stderr close-on-exec.
 /// Runs between fork and exec, so only async-signal-safe calls.
-pub fn cloexec_above_stderr() {
+fn cloexec_above_stderr() {
     #[cfg(target_os = "linux")]
     // SAFETY: close_range takes no pointers.
     if unsafe {

@@ -66,7 +66,7 @@ pub fn system_roots_pem() -> Result<String, TlsError> {
     let keychain = "/System/Library/Keychains/SystemRootCertificates.keychain";
     let args = ["find-certificate", "-a", "-p", keychain];
     let command = format!("security {}", args.join(" "));
-    let output = std::process::Command::new("security")
+    let output = carte_core::spawn::command("security")
         .args(args)
         .output()
         .map_err(|e| TlsError::Command {
