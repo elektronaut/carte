@@ -64,13 +64,14 @@ fn longest_host_without_stack(tld: &str, project: &Project, reserve: bool) -> us
 
 /// A stack's label in local hostnames: its name, cut and given a hash of the whole
 /// name when the project's longest hostname would pass 253 characters. Room for a
-/// subdomain label is kept when the cut leaves enough of the name, and given up
-/// when it doesn't.
+/// subdomain label is kept as far as a cut to the shortest label allows.
 pub fn stack_label<'a>(tld: &str, project: &Project, slug: &'a str) -> Cow<'a, str> {
     let budget =
         |reserve| 253usize.saturating_sub(longest_host_without_stack(tld, project, reserve) + 1);
-    let label = crate::slug::shorten(slug, budget(true))
-        .or_else(|| crate::slug::shorten(slug, budget(false)));
+    let fits = budget(false);
+    let label = (fits >= 8)
+        .then(|| crate::slug::shorten(slug, budget(true).max(8).min(fits)))
+        .flatten();
     match label {
         Some(label) if label.len() < slug.len() => Cow::Owned(label),
         _ => Cow::Borrowed(slug),
@@ -897,32 +898,87 @@ mod tests {
         assert_eq!(stacks, ["main".to_string(), "s".repeat(63)]);
     }
 
+    fn short_room(stack: &str, room: &str) -> String {
+        format!(
+            "shop in stack {stack} leaves {room} before its hostname passes 253; \
+             longer ones can't be reached"
+        )
+    }
+
     #[test]
     fn hosts_that_only_leave_short_subdomains_say_so() {
+        let long = "s".repeat(63);
         let tld = long_tld(70);
         let world = long_world(&tld, true);
-        let problems = long_hosts(&tld, &world.projects[0]);
-        assert_eq!(problems.len(), 2, "{problems:?}");
-        assert_eq!(problems[0].stack.as_deref(), Some("main"));
-        assert_eq!(problems[0].app.as_deref(), Some("shop"));
-        assert!(
-            problems[0]
-                .message
-                .contains("room for subdomains of only 54 characters"),
-            "{problems:?}"
-        );
-        assert_eq!(problems[1].stack.as_deref(), Some("s".repeat(63).as_str()));
-        assert!(
-            problems[1].message.contains("room for subdomains"),
-            "the stack is cut without the room for subdomains: {problems:?}"
+        let messages: Vec<_> = long_hosts(&tld, &world.projects[0])
+            .into_iter()
+            .map(|p| (p.stack.unwrap(), p.app.unwrap(), p.message))
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                (
+                    "main".to_string(),
+                    "shop".to_string(),
+                    short_room("main", "room for subdomains of only 54 characters")
+                ),
+                (
+                    long.clone(),
+                    "shop".to_string(),
+                    short_room(&long, "room for subdomains of only 45 characters")
+                ),
+            ]
         );
         let state = &world.projects[0];
-        let stack = branch(&"s".repeat(63));
+        let stack = branch(&long);
         let host = local_host(&tld, &state.project, &state.project.apps[0], &stack);
-        assert!(host.len() <= 253, "{host}");
+        assert_eq!(host.len(), 207, "{host}");
         assert_eq!(
             resolve_host(&world, &host),
             Ok(resolved(&state.project.name, "shop", stack, &[]))
+        );
+
+        let tld = long_tld(116);
+        let world = long_world(&tld, true);
+        let messages: Vec<_> = long_hosts(&tld, &world.projects[0])
+            .into_iter()
+            .map(|p| p.message)
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                short_room("main", "room for subdomains of only 8 characters"),
+                short_room(&long, "no room for subdomains"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stack_label_is_cut_short_to_keep_room_for_subdomains() {
+        let long = "s".repeat(63);
+        let tld = long_tld(60);
+        let world = long_world(&tld, true);
+        let state = &world.projects[0];
+        assert_eq!(stack_label(&tld, &state.project, &long).len(), 8);
+        let stack = branch(&long);
+        let host = local_host(&tld, &state.project, &state.project.apps[0], &stack);
+        let sub = "b".repeat(253 - host.len() - 1);
+        assert_eq!(sub.len(), 55);
+        let full = format!("{sub}.{host}");
+        assert_eq!(
+            resolve_host(&world, &full),
+            Ok(resolved(&state.project.name, "shop", stack, &[&sub]))
+        );
+        let messages: Vec<_> = long_hosts(&tld, state)
+            .into_iter()
+            .map(|p| p.message)
+            .collect();
+        assert_eq!(
+            messages,
+            [short_room(
+                &long,
+                "room for subdomains of only 55 characters"
+            )]
         );
     }
 

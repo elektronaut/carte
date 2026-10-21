@@ -300,16 +300,18 @@ branches:
   cut and ends in a short hash of the full name.
 - In hostnames, a long name is cut the same way when the project's
   longest hostname would pass 253 characters, the most a hostname
-  holds. An app with `subdomains = true` keeps room for one subdomain
-  of up to 63 characters, unless that would leave too little of the
-  name; then only shorter subdomains fit. The stack keeps its full name everywhere
-  else, such as in `CARTE_STACK`. This only happens when the app,
-  stack and project names are all long. How far the name is cut
-  depends on the project's apps, so adding an app with a long name or
-  turning `subdomains` on or off can change the hostnames of every
-  stack with a long name. Bookmarks, cookies and OAuth callback URLs
-  for the old hostname stop working, and it drops out of
-  `RAILS_DEVELOPMENT_HOSTS`.
+  holds. When an app has `subdomains = true`, the name is cut further
+  to keep room for one subdomain of up to 63 characters, but never
+  below 8 characters (a dash and the hash after one character); then
+  only shorter subdomains fit. When even 8 characters don't fit, the
+  name is left whole and a problem is reported. The stack keeps its
+  full name everywhere else, such as in `CARTE_STACK`. This only
+  happens when the app, stack and project names are all long. How far
+  the name is cut depends on the project's apps, so adding an app with
+  a long name or turning `subdomains` on or off can change the
+  hostnames of every stack with a long name. Bookmarks, cookies and
+  OAuth callback URLs for the old hostname stop working, and it drops
+  out of `RAILS_DEVELOPMENT_HOSTS`.
 - A problem is reported when a hostname doesn't fit even with the name
   cut, when an app with `subdomains = true` has room for only shorter
   subdomains, when a cut name is an app's label or the name of another
