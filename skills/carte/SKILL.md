@@ -12,7 +12,9 @@ git worktree gets its own hostname, such as
 `https://billing.feature-x.acme.localhost`. The stack name (`feature-x`) comes
 from the worktree's folder, not its branch; a folder named like the repo
 takes the name of the folder above. Worktrees of different repos with the
-same name form one stack.
+same name form one stack. A request another site's page makes (an image,
+`fetch` or frame) doesn't start a stopped app; it gets a 403 until the app
+is opened directly.
 
 A project file with a `kube` table is a kube project: its apps are a
 Kubernetes cluster's Services and its stacks are namespaces, so

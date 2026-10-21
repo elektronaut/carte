@@ -134,6 +134,7 @@ impl Router for SupervisorRouter {
         Box::pin(async move {
             let world = self.supervisor.world();
             let mut referrer = None;
+            let mut foreign = None;
             let mut checked_authorization = false;
             let mut shared = None;
             let key = if request.kind == ListenerKind::Share {
@@ -146,6 +147,7 @@ impl Router for SupervisorRouter {
                     Err(page) => return Route::Error(page),
                 }
             } else {
+                foreign = foreign_origin(&world, &request);
                 referrer = request
                     .referrer
                     .and_then(|host| naming::resolve_host(&world, host).ok())
@@ -177,7 +179,20 @@ impl Router for SupervisorRouter {
                 }
                 None => {}
             }
-            let ready = self.supervisor.request(key.clone(), request.path, referrer);
+            let ready = async {
+                match &foreign {
+                    Some(_) => {
+                        self.supervisor
+                            .request_running(key.clone(), request.path)
+                            .await
+                    }
+                    None => {
+                        self.supervisor
+                            .request(key.clone(), request.path, referrer)
+                            .await
+                    }
+                }
+            };
             match tokio::time::timeout(self.hold, ready).await {
                 Ok(Ok(_))
                     if shared.as_ref().is_some_and(|credentials| {
@@ -191,6 +206,9 @@ impl Router for SupervisorRouter {
                     guard: Box::new(Guard::new(self.supervisor.clone(), key, shared)),
                     checked_authorization,
                 },
+                Ok(Err(failure)) if failure.is_not_running() => {
+                    Route::Error(not_started(&key, foreign.as_deref().unwrap_or("A page")))
+                }
                 Ok(Err(failure)) => {
                     let status = if failure.transient {
                         StatusCode::SERVICE_UNAVAILABLE
@@ -232,6 +250,18 @@ impl Router for SupervisorRouter {
             }
         }))
     }
+}
+
+/// The page for a request another site made for an instance that isn't running.
+fn not_started(key: &InstanceKey, from: &str) -> ErrorPage {
+    let label = format!("{}@{}", key.app, key.stack.slug());
+    ErrorPage::new(
+        StatusCode::FORBIDDEN,
+        format!("{label} isn't running"),
+        format!(
+            "{from} asked for {label}, which isn't running. carte only starts apps that you open yourself or that local pages ask for, so other sites can't start them. Open the app yourself to start it."
+        ),
+    )
 }
 
 /// The page for a request that waited too long for its instance: why it isn't
