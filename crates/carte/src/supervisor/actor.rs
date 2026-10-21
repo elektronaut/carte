@@ -455,6 +455,7 @@ pub(super) fn start(world: World, paths: Paths, spawner: Spawner, options: Optio
         tunnel: tunnel.as_ref(),
         latest: &BTreeMap::new(),
         warming: &warming,
+        ca_problem: options.ca_problem.as_deref(),
         now: Instant::now(),
     }));
     let (snapshot_tx, snapshot_rx) = watch::channel(initial);
@@ -783,6 +784,7 @@ impl Actor {
             tunnel: self.tunnel.as_ref(),
             latest: self.events.latest(),
             warming: &self.warming,
+            ca_problem: self.options.ca_problem.as_deref(),
             now: Instant::now(),
         });
         self.snapshot_tx.send_replace(Arc::new(snapshot));

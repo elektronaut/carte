@@ -103,6 +103,8 @@ pub struct Options {
     /// The CA files injected as `SSL_CERT_FILE` and friends.
     pub ca_bundle: PathBuf,
     pub ca_cert: PathBuf,
+    /// A problem with the local CA, shown with the configuration's problems.
+    pub ca_problem: Option<String>,
 }
 
 impl Options {
@@ -115,6 +117,7 @@ impl Options {
             crash_window: Duration::from_secs(60),
             ca_bundle: paths.ca_bundle(),
             ca_cert: paths.ca_cert(),
+            ca_problem: None,
         }
     }
 }

@@ -26,6 +26,7 @@ pub(super) struct Input<'a> {
     /// The latest event about each instance.
     pub latest: &'a BTreeMap<InstanceKey, Event>,
     pub warming: &'a Warming,
+    pub ca_problem: Option<&'a str>,
     pub now: Instant,
 }
 
@@ -36,6 +37,7 @@ pub(super) fn build(input: &Input) -> Snapshot {
         shares,
         tunnel,
         now,
+        ca_problem,
         ..
     } = *input;
     let active: Vec<InstanceKey> = instances
@@ -82,6 +84,11 @@ pub(super) fn build(input: &Input) -> Snapshot {
                 app: p.app.clone(),
                 message: p.message.clone(),
             })
+            .chain(ca_problem.map(|message| carte_api::Problem {
+                project: None,
+                app: None,
+                message: message.to_string(),
+            }))
             .collect(),
         running_instances: running,
         memory_bytes: instances

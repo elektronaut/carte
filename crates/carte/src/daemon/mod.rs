@@ -51,22 +51,9 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let machine = world.machine.clone();
 
     let tlds = machine.served_tlds();
-    let ca = CertificateAuthority::load_or_create(
-        &paths.state_dir,
-        &tls::ca::default_common_name(),
-        &tlds,
-    )
-    .context("loading the local CA")?;
-    if let CaOrigin::Created(reason) = ca.origin() {
-        let why = match reason {
-            CreateReason::Missing => "none existed".to_string(),
-            CreateReason::Invalid(err) => format!("the old one was invalid: {err}"),
-            CreateReason::Expiring => "the old one was about to expire".to_string(),
-            CreateReason::TldsChanged { previous } => {
-                format!("the TLD changed from {}", previous.join(", "))
-            }
-        };
-        warn!("created a new local CA because {why}; run `carte setup` to trust it");
+    let (ca, ca_problem) = load_ca(&paths.state_dir, &tls::ca::default_common_name(), &tlds)?;
+    if let Some(problem) = &ca_problem {
+        warn!("{problem}");
     }
     if let Err(err) = tls::bundle::rebuild(&paths.state_dir, &ca) {
         warn!("couldn't build the CA bundle for apps: {err}");
@@ -75,7 +62,8 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         ca,
     ))))?);
 
-    let options = Options::new(&paths);
+    let mut options = Options::new(&paths);
+    options.ca_problem = ca_problem;
     let hold = options.boot_timeout + Duration::from_secs(10);
     let http_sockets = launchd::activate_socket("http")?;
     let https_sockets = launchd::activate_socket("https")?;
@@ -225,6 +213,38 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Loads the local CA, creating one when it is missing, invalid, expiring or doesn't
+/// cover a served TLD. A CA that also covers other TLDs is kept, so a restart doesn't
+/// swap a trusted CA for an untrusted one; the problem it returns asks for `carte setup`.
+fn load_ca(
+    state_dir: &Path,
+    common_name: &str,
+    tlds: &[String],
+) -> anyhow::Result<(CertificateAuthority, Option<String>)> {
+    let ca = CertificateAuthority::load_or_create(state_dir, common_name, tlds)
+        .context("loading the local CA")?;
+    let problem = match ca.origin() {
+        CaOrigin::Loaded => None,
+        CaOrigin::Wider { extra } => Some(format!(
+            "the local CA also covers .{}; run `carte setup` to replace it",
+            extra.join(", .")
+        )),
+        CaOrigin::Created(reason) => {
+            let why = match reason {
+                CreateReason::Missing => "none existed".to_string(),
+                CreateReason::Invalid(err) => format!("the old one was invalid: {err}"),
+                CreateReason::Expiring => "the old one was about to expire".to_string(),
+                CreateReason::TldsChanged { previous } => {
+                    format!("the TLD changed from {}", previous.join(", "))
+                }
+            };
+            warn!("created a new local CA because {why}; run `carte setup` to trust it");
+            None
+        }
+    };
+    Ok((ca, problem))
+}
+
 /// Locks `daemon.lock` in the state directory, creating the directory. The
 /// lock goes with the process, so a crashed daemon doesn't keep the next one
 /// from starting or from killing its leftovers.
@@ -274,6 +294,56 @@ fn bind_api(socket: &Path) -> std::io::Result<UnixListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn served(tlds: &[&str]) -> Vec<String> {
+        tlds.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn keeps_a_wider_ca_on_start_and_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (wide, _) = load_ca(dir.path(), "x", &served(&["dev", "localhost"])).unwrap();
+        let (ca, problem) = load_ca(dir.path(), "x", &served(&["localhost"])).unwrap();
+        assert_eq!(ca.cert_der(), wide.cert_der());
+        assert_eq!(
+            problem.as_deref(),
+            Some("the local CA also covers .dev; run `carte setup` to replace it")
+        );
+        let (_, problem) = load_ca(dir.path(), "x", &served(&["localhost"])).unwrap();
+        assert!(problem.is_some());
+    }
+
+    #[test]
+    fn replaces_a_ca_missing_a_served_tld_on_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, _) = load_ca(dir.path(), "x", &served(&["localhost"])).unwrap();
+        let (ca, problem) = load_ca(dir.path(), "x", &served(&["localhost", "test"])).unwrap();
+        assert_ne!(ca.cert_der(), old.cert_der());
+        assert_eq!(
+            ca.origin(),
+            &CaOrigin::Created(CreateReason::TldsChanged {
+                previous: served(&["localhost"])
+            })
+        );
+        assert_eq!(problem, None);
+    }
+
+    #[test]
+    fn replaces_an_expiring_ca_on_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = CertificateAuthority::create_for(
+            dir.path(),
+            "x",
+            served(&["localhost"]),
+            CreateReason::Missing,
+            time::Duration::days(10),
+        )
+        .unwrap();
+        let (ca, problem) = load_ca(dir.path(), "x", &served(&["localhost"])).unwrap();
+        assert_ne!(ca.cert_der(), old.cert_der());
+        assert_eq!(ca.origin(), &CaOrigin::Created(CreateReason::Expiring));
+        assert_eq!(problem, None);
+    }
 
     /// Retakes the lock after the drop for a while, since a child forked by a
     /// parallel test shares it until that child execs or exits.
