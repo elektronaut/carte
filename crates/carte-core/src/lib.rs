@@ -21,6 +21,7 @@ pub mod node;
 pub mod procfile;
 pub mod prune;
 pub mod slug;
+pub mod spawn;
 pub mod teardown;
 pub mod template;
 pub mod warming;

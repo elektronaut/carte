@@ -3832,7 +3832,7 @@ impl EnvInput {
 }
 
 fn current_branch(path: &Path) -> String {
-    std::process::Command::new("git")
+    carte_core::spawn::command("git")
         .args(["branch", "--show-current"])
         .current_dir(path)
         .output()

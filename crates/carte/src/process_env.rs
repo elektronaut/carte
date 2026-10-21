@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{anyhow, bail};
 use carte_api::{EnvResponse, EnvVar, ProcessState, Snapshot};
@@ -376,7 +375,7 @@ pub fn for_address(
 
 /// The branch checked out in a primary checkout; empty when detached.
 fn current_branch(checkout: &Path) -> String {
-    Command::new("git")
+    carte_core::spawn::command("git")
         .arg("-C")
         .arg(checkout)
         .args(["branch", "--show-current"])
@@ -409,7 +408,7 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         std::fs::write(repo.join("Procfile"), "web: bin/serve\n").unwrap();
         let git = |args: &[&str]| {
-            let status = Command::new("git")
+            let status = std::process::Command::new("git")
                 .arg("-C")
                 .arg(&repo)
                 .args(args)

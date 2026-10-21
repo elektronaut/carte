@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal, Read};
 use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
@@ -84,7 +84,7 @@ impl CommandRunner for SystemRunner {
     }
 
     fn run(&self, spec: &CommandSpec) -> io::Result<CommandOutput> {
-        let mut command = Command::new(&spec.program);
+        let mut command = crate::spawn::command(&spec.program);
         if let Some(env) = &spec.env {
             command.env_clear().envs(env);
         }
@@ -96,14 +96,6 @@ impl CommandRunner for SystemRunner {
             .stderr(Stdio::piped());
         if self.own_group {
             command.process_group(0);
-        }
-        // SAFETY: the closure runs between fork and exec and makes only
-        // async-signal-safe calls.
-        unsafe {
-            command.pre_exec(|| {
-                cloexec_above_stderr();
-                Ok(())
-            });
         }
         let mut child = command.spawn()?;
         let mut stdout = Pipe::new(child.stdout.take().map(OwnedFd::from))?;
@@ -147,38 +139,6 @@ impl CommandRunner for SystemRunner {
             stdout: stdout.buf,
             stderr: String::from_utf8_lossy(&stderr.buf).into_owned(),
         })
-    }
-}
-
-/// Marks every descriptor above stderr close-on-exec.
-/// Runs between fork and exec, so only async-signal-safe calls.
-fn cloexec_above_stderr() {
-    #[cfg(target_os = "linux")]
-    // SAFETY: close_range takes no pointers.
-    if unsafe {
-        libc::syscall(
-            libc::SYS_close_range,
-            3,
-            libc::c_uint::MAX,
-            libc::CLOSE_RANGE_CLOEXEC,
-        )
-    } == 0
-    {
-        return;
-    }
-    let mut limit = libc::rlimit {
-        rlim_cur: 0,
-        rlim_max: 0,
-    };
-    // SAFETY: `limit` outlives the call.
-    let max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
-        limit.rlim_cur.min(65536) as libc::c_int
-    } else {
-        1024
-    };
-    for fd in 3..max {
-        // SAFETY: F_SETFD takes an int argument.
-        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
 }
 

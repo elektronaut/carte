@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 
 use thiserror::Error;
 
@@ -180,7 +179,7 @@ pub fn prunable_worktrees(main_checkout: &Path) -> Result<Vec<PathBuf>, Discover
 }
 
 fn worktree_entries(main_checkout: &Path) -> Result<Vec<WorktreeEntry>, DiscoveryError> {
-    let output = Command::new("git")
+    let output = crate::spawn::command("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(main_checkout)
         .output()
@@ -827,6 +826,8 @@ fn find_elsewhere(
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use proptest::prelude::*;
 
     use super::*;
