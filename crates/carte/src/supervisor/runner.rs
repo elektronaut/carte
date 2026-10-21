@@ -182,6 +182,32 @@ pub enum Event {
     },
 }
 
+/// How long output must be quiet before lines left on the prompt screen end, so a
+/// prompt answered by a process that then stays silent counts as answered. Reline
+/// writes each redraw in one go, so a second of quiet in the middle of one is rare.
+const SCREEN_QUIET: Duration = Duration::from_secs(1);
+
+/// How long output must be quiet before a pause ends whose cursor sits on a blank
+/// line, though no line ended: pry leaves the cursor on a blank row it moved down
+/// to after rewriting an answered prompt, where the screen never settles. A row
+/// with text, like a completion dialog's, keeps the pause.
+/// Longer than Reline's half-second wait for a cursor position before each prompt
+/// and than any stall inside one redraw, short enough not to mislead for long.
+const PROMPT_QUIET: Duration = Duration::from_secs(3);
+
+/// Whether the process waits at a debugger prompt now: it stays at the one it was
+/// at until a line ends on the prompt screen, or, after [`PROMPT_QUIET`], until the
+/// cursor's line is blank.
+fn pause_after(paused: &Option<String>, log: &mut ProcLog, gone_quiet: bool) -> Option<String> {
+    let answered = log.take_answered();
+    match paused {
+        Some(prompt) if !answered && !(gone_quiet && log.pending().trim().is_empty()) => {
+            Some(prompt.clone())
+        }
+        _ => log.prompt(),
+    }
+}
+
 /// Runs a process until it exits or `stop` fires. Every event goes to `events`.
 pub async fn run(
     spawner: Arc<Spawner>,
@@ -220,17 +246,19 @@ pub async fn run(
             let mut buf = vec![0u8; 16 * 1024];
             let mut paused: Option<String> = None;
             let mut quiet_since = tokio::time::Instant::now();
-            let screen_quiet = Duration::from_secs(1);
             loop {
                 let wait = {
                     let log = log.lock().unwrap();
-                    if log.unsettled() {
-                        Some(Duration::from_millis(50))
-                    } else if log.screen_unsettled() {
-                        Some(screen_quiet.saturating_sub(quiet_since.elapsed()))
-                    } else {
-                        None
-                    }
+                    let quiet = quiet_since.elapsed();
+                    [
+                        log.unsettled().then_some(Duration::from_millis(50)),
+                        log.screen_unsettled()
+                            .then(|| SCREEN_QUIET.saturating_sub(quiet)),
+                        (paused.is_some() && quiet < PROMPT_QUIET).then(|| PROMPT_QUIET - quiet),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .min()
                 };
                 let read = match wait {
                     Some(wait) => tokio::time::timeout(wait, output.read(&mut buf)).await.ok(),
@@ -246,24 +274,21 @@ pub async fn run(
                 };
                 let (lines, prompt) = {
                     let mut log = log.lock().unwrap();
+                    let quiet = quiet_since.elapsed();
                     let lines = match data {
                         Some(data) => log.push(data),
                         None => {
-                            if quiet_since.elapsed() >= screen_quiet {
+                            if quiet >= SCREEN_QUIET {
                                 log.settle_screen();
                             }
                             log.settle()
                         }
                     };
-                    let answered = log.take_answered();
                     let prompt = terminal.as_ref().and_then(|terminal| {
                         if let Some(data) = data {
                             terminal.output(data);
                         }
-                        match &paused {
-                            Some(prompt) if !answered => Some(prompt.clone()),
-                            _ => log.prompt(),
-                        }
+                        pause_after(&paused, &mut log, data.is_none() && quiet >= PROMPT_QUIET)
                     });
                     (lines, prompt)
                 };
@@ -495,12 +520,14 @@ mod tests {
     }
 
     /// What reaches the output reader: a read, a short quiet that settles the
-    /// log, or a long one that settles the prompt screen too.
+    /// log, a second's that settles the prompt screen too, or one long enough to
+    /// end a pause whose prompt is gone.
     #[derive(Clone, Copy)]
     enum Step<'a> {
         Read(&'a [u8]),
         Settle,
         Quiet,
+        LongQuiet,
     }
 
     fn replay_with<'a>(steps: impl IntoIterator<Item = Step<'a>>) -> Replayed {
@@ -512,16 +539,12 @@ mod tests {
             let finished = match step {
                 Step::Read(read) => log.push(read),
                 Step::Settle => log.settle(),
-                Step::Quiet => {
+                Step::Quiet | Step::LongQuiet => {
                     log.settle_screen();
                     log.settle()
                 }
             };
-            let answered = log.take_answered();
-            paused = match &paused {
-                Some(prompt) if !answered => Some(prompt.clone()),
-                _ => log.prompt(),
-            };
+            paused = pause_after(&paused, &mut log, matches!(step, Step::LongQuiet));
             if states.last() != Some(&paused) {
                 states.push(paused.clone());
             }
@@ -606,8 +629,32 @@ mod tests {
         }
     }
 
+    /// The reads of a session with `step` at offset `at` of read `i`.
+    fn with_step_at<'a>(
+        chunks: &'a [Vec<u8>],
+        i: usize,
+        at: usize,
+        step: Step<'a>,
+    ) -> Vec<Step<'a>> {
+        let mut steps: Vec<Step> = chunks[..i].iter().map(|c| Step::Read(c)).collect();
+        steps.extend([
+            Step::Read(&chunks[i][..at]),
+            step,
+            Step::Read(&chunks[i][at..]),
+        ]);
+        steps.extend(chunks[i + 1..].iter().map(|c| Step::Read(c)));
+        steps
+    }
+
+    /// Whether `expected` appears in `lines` in order, with other lines between.
+    fn in_order(expected: &[String], lines: &[String]) -> bool {
+        let mut lines = lines.iter();
+        expected.iter().all(|line| lines.any(|l| l == line))
+    }
+
     /// A settle of the log at any point, even in the middle of a redraw, leaves the
-    /// pauses alone and loses no line, though it may split or repeat some.
+    /// pauses alone and loses no line, though it may repeat some or log rows left on
+    /// the screen.
     #[test]
     fn settling_the_log_at_any_point_leaves_the_pauses_alone() {
         for (name, chunks) in sessions() {
@@ -615,29 +662,106 @@ mod tests {
                 continue;
             }
             let whole = normalized(replay(chunks.iter().map(Vec::as_slice)));
-            let last = whole.0.last().cloned();
             for (i, chunk) in chunks.iter().enumerate() {
                 for at in 0..=chunk.len() {
-                    let mut steps: Vec<Step> = chunks[..i].iter().map(|c| Step::Read(c)).collect();
-                    steps.extend([
-                        Step::Read(&chunk[..at]),
-                        Step::Settle,
-                        Step::Read(&chunk[at..]),
-                    ]);
-                    steps.extend(chunks[i + 1..].iter().map(|c| Step::Read(c)));
+                    let steps = with_step_at(&chunks, i, at, Step::Settle);
                     let (lines, states, pending) = normalized(replay_with(steps));
                     assert_eq!(
                         (&states, &pending),
                         (&whole.1, &whole.2),
                         "{name}, settled at {at} of read {i}"
                     );
-                    assert_eq!(
-                        lines.last(),
-                        last.as_ref(),
-                        "{name}, settled at {at} of read {i}"
+                    assert!(
+                        in_order(&whole.0, &lines),
+                        "{name}, settled at {at} of read {i}: {lines:?}"
                     );
                 }
             }
+        }
+    }
+
+    /// A second of quiet at any point leaves the pauses alone, except in the middle
+    /// of irb making room below its prompt at the bottom of the terminal, where
+    /// the newlines it writes first look like an answer: there the pause ends for
+    /// a moment and starts again at the same prompt.
+    #[test]
+    fn a_quiet_second_at_any_point_leaves_the_pauses_alone_but_one() {
+        for (name, chunks) in sessions() {
+            if name == "rdbgfork" {
+                continue;
+            }
+            let whole = normalized(replay(chunks.iter().map(Vec::as_slice)));
+            let mut resumes = 0;
+            for (i, chunk) in chunks.iter().enumerate() {
+                for at in 0..=chunk.len() {
+                    let steps = with_step_at(&chunks, i, at, Step::Quiet);
+                    let (lines, states, pending) = normalized(replay_with(steps));
+                    assert_eq!(pending, whole.2, "{name}, quiet at {at} of read {i}");
+                    assert!(
+                        in_order(&whole.0, &lines),
+                        "{name}, quiet at {at} of read {i}: {lines:?}"
+                    );
+                    if states == whole.1 {
+                        continue;
+                    }
+                    let mut resumed = whole.1.clone();
+                    let at_prompt = whole.1[1].clone();
+                    resumed.splice(2..2, [None, at_prompt]);
+                    assert!(
+                        name == "irbbottom" && i == 6 && states == resumed,
+                        "{name}, quiet at {at} of read {i}: {states:?}"
+                    );
+                    resumes += 1;
+                }
+            }
+            assert_eq!(
+                resumes > 0,
+                name == "irbbottom",
+                "{name}: {resumes} resumes"
+            );
+        }
+    }
+
+    /// pry rewrites an answered prompt and leaves the cursor on a row it moved down
+    /// to, so only a longer quiet ends its pause when nothing follows.
+    #[test]
+    fn a_long_quiet_after_pry_is_answered_ends_the_pause() {
+        let rewrite: &[u8] = b"\x1b[1A\x1b[0G";
+        for (name, chunks) in sessions() {
+            if !name.contains("pry") {
+                continue;
+            }
+            let answered = chunks
+                .iter()
+                .position(|chunk| chunk.windows(rewrite.len()).any(|w| w == rewrite))
+                .unwrap_or_else(|| panic!("{name} rewrites no prompt"));
+            let reads = chunks[..=answered].iter().map(|c| Step::Read(c));
+            let (_, states, _) = replay_with(reads.clone().chain([Step::Quiet]));
+            assert!(
+                states.last().unwrap().is_some(),
+                "{name}: a second isn't enough"
+            );
+            let (_, states, _) = replay_with(reads.chain([Step::LongQuiet]));
+            assert_eq!(states.last(), Some(&None), "{name}: {states:?}");
+        }
+    }
+
+    /// A long quiet after any read ends no pause whose prompt is still there. Not
+    /// after a read that filled the pty's 1024-byte buffer: the rest of that write
+    /// is already waiting, and a quiet there could look like pry's answer.
+    #[test]
+    fn a_long_quiet_at_a_prompt_leaves_it_alone() {
+        for (name, chunks) in sessions() {
+            if name == "rdbgfork" {
+                continue;
+            }
+            let whole = normalized(replay(chunks.iter().map(Vec::as_slice)));
+            let steps = chunks.iter().flat_map(|chunk| {
+                let quiet = (chunk.len() < 1024).then_some(Step::LongQuiet);
+                std::iter::once(Step::Read(chunk)).chain(quiet)
+            });
+            let (_, states, pending) = normalized(replay_with(steps));
+            assert_eq!((&states, &pending), (&whole.1, &whole.2), "{name}");
         }
     }
 
