@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,7 +20,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
@@ -272,6 +272,34 @@ fn get(host: &str, path: &str) -> http::request::Builder {
 async fn body_text(response: Response<Incoming>) -> String {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     String::from_utf8(body.to_vec()).unwrap()
+}
+
+/// A port that refuses connections on both loopback addresses while the
+/// connections live. Each holds the port as its local end, so nothing else can
+/// bind it, and only takes packets from its own peer, so others are refused.
+async fn refusing_port() -> (u16, Vec<TcpStream>, [TcpListener; 2]) {
+    let peers = [
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap(),
+        TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap(),
+    ];
+    loop {
+        let v4 = TcpSocket::new_v4().unwrap();
+        v4.bind(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0))
+            .unwrap();
+        let port = v4.local_addr().unwrap().port();
+        let v6 = TcpSocket::new_v6().unwrap();
+        if v6
+            .bind(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port))
+            .is_err()
+        {
+            continue;
+        }
+        let held = vec![
+            v4.connect(peers[0].local_addr().unwrap()).await.unwrap(),
+            v6.connect(peers[1].local_addr().unwrap()).await.unwrap(),
+        ];
+        return (port, held, peers);
+    }
 }
 
 async fn eventually(what: &str, mut condition: impl FnMut() -> bool) {
@@ -924,9 +952,7 @@ async fn renders_router_error_pages_by_content_type() {
 
 #[tokio::test]
 async fn reports_unreachable_upstreams_through_the_router() {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+    let (port, _held, _peers) = refusing_port().await;
     let router = Arc::new(TestRouter::default().with("app.test", Target::Port(port)));
     let proxy = start(router.clone(), ListenerOptions::local()).await;
 
@@ -940,9 +966,7 @@ async fn reports_unreachable_upstreams_through_the_router() {
 
 #[tokio::test]
 async fn share_visitors_get_pages_without_the_details() {
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = closed.local_addr().unwrap().port();
-    drop(closed);
+    let (port, _held, _peers) = refusing_port().await;
     let crashed = ErrorPage::new(
         StatusCode::BAD_GATEWAY,
         "shop@feature-x crashed",
