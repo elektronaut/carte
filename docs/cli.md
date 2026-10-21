@@ -179,9 +179,11 @@ carte attach shop@feature-x/worker
 
 - It prints the last screen of output, then everything the process
   prints. What you type goes to the process, `ctrl-c` and `ctrl-d`
-  included, and the process follows your terminal's size. The last
-  screen leaves out queries your terminal would answer, like a cursor
-  position or colour query, since the answers would arrive as typing.
+  included, and the process follows your terminal's size. `ctrl-z`
+  reaches the process as a plain character and doesn't suspend it. The
+  last screen leaves out queries your terminal would answer, like a
+  cursor position or colour query, since the answers would arrive as
+  typing.
 - `ctrl-q d` detaches; `ctrl-q ctrl-q` sends a `ctrl-q`. `--detach-keys`
   or [`attach.detach_key`](configuration.md#attach) picks other keys,
   like `"ctrl-] d"`. Detaching leaves the process running, and puts
