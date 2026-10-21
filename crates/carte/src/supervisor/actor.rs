@@ -115,8 +115,8 @@ pub(super) struct Instance {
     warmed_after: Option<String>,
     /// Its HTTP process crashed too often: requests get this until it's started by hand.
     gave_up: Option<BootFailure>,
-    /// Why the latest start crashed.
-    crashed: Option<BootFailure>,
+    /// Why the latest start crashed, or the restart after a stop couldn't begin.
+    failed: Option<BootFailure>,
 }
 
 /// A request waiting for an instance, or one of its processes, to serve it.
@@ -245,7 +245,7 @@ impl Instance {
             opened: false,
             warmed_after: None,
             gave_up: None,
-            crashed: None,
+            failed: None,
         }
     }
 
@@ -887,7 +887,7 @@ impl Actor {
                 let failure = inst
                     .gave_up
                     .clone()
-                    .or_else(|| inst.crashed.clone())
+                    .or_else(|| inst.failed.clone())
                     .unwrap_or_else(|| {
                         BootFailure::new(
                             format!("{label} crashed"),
@@ -897,11 +897,18 @@ impl Actor {
                 let _ = reply.send(Err(failure));
             }
             Lifecycle::Stopping | Lifecycle::Stopped => {
-                let mut failure = BootFailure::new(
-                    format!("{} was stopped", inst.label()),
-                    "It was stopped before it was ready.",
-                );
-                failure.transient = true;
+                let failure = inst
+                    .failed
+                    .clone()
+                    .filter(|_| inst.state == Lifecycle::Stopped)
+                    .unwrap_or_else(|| {
+                        let mut failure = BootFailure::new(
+                            format!("{} was stopped", inst.label()),
+                            "It was stopped before it was ready.",
+                        );
+                        failure.transient = true;
+                        failure
+                    });
                 let _ = reply.send(Err(failure));
             }
         }
@@ -989,7 +996,7 @@ impl Actor {
             Err(failure) => {
                 inst.state = Lifecycle::Crashed;
                 inst.last_error = Some(failure.detail.clone());
-                inst.crashed = Some(failure.clone());
+                inst.failed = Some(failure.clone());
                 let message = failure.detail.clone();
                 self.event(EventKind::Crashed, message, vec![events::instance(key)]);
                 return Err(failure);
@@ -1055,7 +1062,7 @@ impl Actor {
         inst.checkout = Some(checkout.clone());
         inst.boot = boot;
         inst.last_error = None;
-        inst.crashed = None;
+        inst.failed = None;
         inst.env_changed = false;
         inst.last_activity = Instant::now();
         inst.started_at = Instant::now();
@@ -1825,7 +1832,7 @@ impl Actor {
         inst.last_error = Some(message.clone());
         let mut failure = BootFailure::new(format!("{} crashed", inst.label()), message.clone());
         failure.log = log;
-        inst.crashed = Some(failure.clone());
+        inst.failed = Some(failure.clone());
         inst.fail_waiters(failure);
         inst.signal_stop(self.options.grace, false);
         if let Some(proc) = failed.and_then(|idx| inst.procs.get_mut(idx)) {
@@ -2019,6 +2026,7 @@ impl Actor {
             inst.execs.clear();
         }
         inst.forced.clear();
+        inst.failed = None;
         let restart_forced = std::mem::take(&mut inst.restart_forced);
         self.dirty = true;
         if inst.restart_pending {
@@ -2035,6 +2043,9 @@ impl Actor {
                         let _ = waiter.reply.send(Err(failure.clone()));
                     }
                 }
+            }
+            if let Err(failure) = result {
+                inst.failed = Some(failure);
             }
         }
     }
@@ -3510,15 +3521,17 @@ impl Actor {
 }
 
 /// What an instance starts from: its app's configuration in its stack, the
-/// project-wide env, `requires` and env provider, its checkout and the process list
-/// read there.
+/// project-wide env, `requires`, env provider and scheme, the machine's
+/// configuration, its checkout and the process list read there.
 type StartInputs<'a> = (
     &'a App,
     (
         &'a [carte_core::model::EnvTemplate],
         &'a [String],
         Option<carte_core::model::EnvProviderKind>,
+        carte_core::model::Scheme,
     ),
+    &'a carte_core::model::MachineConfig,
     Option<Checkout>,
     Option<&'a Result<procfile::ProcessList, String>>,
 );
@@ -3529,7 +3542,13 @@ fn start_inputs<'a>(world: &'a World, key: &InstanceKey) -> Option<StartInputs<'
     let project = &state.project;
     Some((
         state.app_at(app, &key.stack),
-        (&project.env, &project.requires, project.env_provider),
+        (
+            &project.env,
+            &project.requires,
+            project.env_provider,
+            project.scheme,
+        ),
+        &world.machine,
         state.checkout(app, &key.stack),
         state.process_list(app, &key.stack),
     ))
