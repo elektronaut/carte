@@ -412,9 +412,16 @@ app from being warmed.
 A page on another site can't start an app. A request it makes for an
 app that isn't running, such as an image, a `fetch` or a frame, gets a
 403 page and leaves the app stopped. It doesn't open the app or warm
-others. A request counts as another site's when its `Origin` or
-`Referer` is a page outside carte's TLDs and loopback, its `Origin` is
-hidden (`null`), or the browser marks it cross-site.
+others. A request counts as another site's when the page that made it,
+by its `Origin`, or its `Referer` when the `Origin` is missing or
+hidden (`null`), is outside carte's TLDs and loopback. One with neither
+counts as another site's when its `Origin` is hidden or the browser
+marks it cross-site.
+
+A local page that sends no referrer (`Referrer-Policy: no-referrer` or
+`rel=noreferrer`) looks the same as another site to carte. Its images,
+scripts, frames and form posts can't start an app the browser counts
+as another site; its `fetch` calls send their `Origin` and can.
 
 Opening the app yourself starts it, including by a link from another
 site. So do requests from local pages and from clients like `curl`
@@ -1247,9 +1254,10 @@ opens again on the next request.
 - **The `Host` header** is passed on as received. An app whose own URL
   setting names its public domain may redirect there.
 - **Requests other sites make** are refused with a 403, so a web page
-  can't reach a cluster with your credentials: a request whose `Origin`
-  or `Referer` is a page outside carte's TLDs and loopback, whose
-  `Origin` is hidden (`null`), or that the browser marks cross-site.
+  can't reach a cluster with your credentials: a request whose `Origin`,
+  or `Referer` when the `Origin` is missing or hidden (`null`), is a page
+  outside carte's TLDs and loopback, or one with neither whose `Origin`
+  is hidden or that the browser marks cross-site.
   Opening a page yourself always works, including by a link from
   another site, but another site can't show a Service in a frame or
   have the browser prefetch or prerender it before you click. An

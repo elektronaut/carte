@@ -509,6 +509,32 @@ fn other_sites_reach_running_apps_but_dont_start_them() {
 }
 
 #[test]
+fn local_pages_start_apps_from_another_site() {
+    let daemon = Daemon::start();
+    let image = [
+        ("Sec-Fetch-Site", "cross-site"),
+        ("Sec-Fetch-Mode", "no-cors"),
+        ("Sec-Fetch-Dest", "image"),
+        ("Origin", "null"),
+        ("Referer", "https://web.nova.test/"),
+    ];
+    let response = daemon.request_with("127.0.0.1", "web.acme.test", "/", &image);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+}
+
+#[test]
+fn shared_apps_start_for_requests_from_other_sites() {
+    let daemon = Daemon::start_sharing();
+    daemon.run(&["share", "web"]);
+    let status: carte_api::StatusResponse =
+        serde_json::from_slice(&daemon.run(&["status", "--json", "web"]).stdout).unwrap();
+    assert_eq!(status.instances[0].state, carte_api::InstanceState::Stopped);
+    let head = "GET / HTTP/1.1\r\nHost: web--acme.share.example\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Dest: image\r\nReferer: https://evil.example/\r\n";
+    let response = daemon.public_raw(head);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+}
+
+#[test]
 fn up_and_down_by_address() {
     let daemon = Daemon::start();
     let up = stdout(&daemon.run(&["up", "web"]));
