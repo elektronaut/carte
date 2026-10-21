@@ -366,6 +366,25 @@ async fn a_group_that_suspends_itself_is_resumed() {
 }
 
 #[tokio::test]
+async fn a_group_left_in_the_background_gets_the_terminal_back() {
+    let command = format!(
+        "{}; echo ready; read line; echo got $line",
+        fixture().display()
+    );
+    let mut handle = spawner()
+        .spawn(&SpawnSpec::new(command, std::env::temp_dir()).env("FIXTURE_TAKE_TERMINAL", "1"))
+        .await
+        .unwrap();
+    let mut output = handle.take_output().unwrap();
+    let mut seen = Vec::new();
+    read_until(&mut output, &mut seen, "ready").await;
+    handle.write_input(b"hi\n").await.unwrap();
+    read_until(&mut output, &mut seen, "got hi").await;
+    drain(output);
+    assert!(handle.wait().await.unwrap().success());
+}
+
+#[tokio::test]
 async fn a_group_stopped_with_sigstop_stays_stopped() {
     let dir = tempfile::tempdir().unwrap();
     let mut handle = spawner()

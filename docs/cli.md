@@ -188,7 +188,9 @@ carte attach shop@feature-x/worker
   included, and the process follows your terminal's size. `ctrl-z`
   reaches the process as a plain character. Programs that handle
   `ctrl-z` themselves, like vim, irb or a debugger prompt, python or
-  node, suspend themselves, and carte resumes them at once. The last
+  node, suspend themselves, and carte resumes them at once when they
+  are the command itself; one run under a wrapper, such as node under
+  `npm run`, can still stay stopped. The last
   screen leaves out queries your terminal would answer, like a cursor
   position or colour query, since the answers would arrive as typing.
 - `ctrl-q d` detaches; `ctrl-q ctrl-q` sends a `ctrl-q`. `--detach-keys`

@@ -231,19 +231,22 @@ fn lifeline_closed(fd: RawFd) -> bool {
 
 /// Reaps every exited child, the leader's status going to `leader`; on Linux
 /// the shim also adopts the command's orphaned descendants. A leader stopped by
-/// SIGTSTP, SIGTTIN or SIGTTOU has its group continued.
+/// SIGTSTP, SIGTTIN or SIGTTOU has its group continued, and after SIGTTIN or
+/// SIGTTOU has the terminal back first.
 fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
     loop {
         let mut status = 0;
         match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::WUNTRACED) } {
-            p if p == pid && libc::WIFSTOPPED(status) => {
-                if matches!(
-                    libc::WSTOPSIG(status),
-                    libc::SIGTSTP | libc::SIGTTIN | libc::SIGTTOU
-                ) {
-                    unsafe { libc::killpg(pid, libc::SIGCONT) };
-                }
-            }
+            p if p == pid && libc::WIFSTOPPED(status) => match libc::WSTOPSIG(status) {
+                libc::SIGTSTP => unsafe {
+                    libc::killpg(pid, libc::SIGCONT);
+                },
+                libc::SIGTTIN | libc::SIGTTOU => unsafe {
+                    give_terminal(pid);
+                    libc::killpg(pid, libc::SIGCONT);
+                },
+                _ => {}
+            },
             p if p == pid => *leader = Some(status),
             p if p > 0 => {}
             -1 if Errno::last() == Errno::ECHILD => {
@@ -256,7 +259,23 @@ fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
 }
 
 fn group_alive(pgid: libc::pid_t) -> bool {
-    unsafe { libc::killpg(pgid, 0) == 0 }
+    unsafe { libc::killpg(pgid, 0) == 0 || Errno::last() == Errno::EPERM }
+}
+
+/// Makes `pgid` the terminal's foreground group again, when stdin is one.
+unsafe fn give_terminal(pgid: libc::pid_t) {
+    unsafe {
+        if libc::isatty(0) != 1 {
+            return;
+        }
+        let mut ttou = std::mem::zeroed();
+        let mut old = std::mem::zeroed();
+        libc::sigemptyset(&mut ttou);
+        libc::sigaddset(&mut ttou, libc::SIGTTOU);
+        libc::sigprocmask(libc::SIG_BLOCK, &ttou, &mut old);
+        libc::tcsetpgrp(0, pgid);
+        libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+    }
 }
 
 /// The groups of the shim's descendants other than its own.
