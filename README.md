@@ -57,6 +57,10 @@ Apps are served under `.localhost`, which needs no DNS setup;
 what's in place, and `carte setup --uninstall` undoes it, removing only
 the CAs this install created from the keychain.
 
+If you set carte up before its CA was limited to HTTPS, run `carte
+setup` once after upgrading. It replaces the CA with one trusted for
+HTTPS only, and removes the old one.
+
 ### Coming from puma-dev
 
 `carte setup` will offer to replace any existing puma-dev installation.

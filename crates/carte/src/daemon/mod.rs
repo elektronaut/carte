@@ -234,6 +234,7 @@ fn load_ca(
                 CreateReason::Missing => "none existed".to_string(),
                 CreateReason::Invalid(err) => format!("the old one was invalid: {err}"),
                 CreateReason::Expiring => "the old one was about to expire".to_string(),
+                CreateReason::NotTlsOnly => "the old one could sign more than HTTPS".to_string(),
                 CreateReason::TldsChanged { previous } => {
                     format!("the TLD changed from {}", previous.join(", "))
                 }
