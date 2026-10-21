@@ -6,7 +6,7 @@ mod forward;
 mod lookup;
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -150,11 +150,14 @@ struct Inner {
 struct ClusterEntry {
     project: KubeProject,
     env: BTreeMap<String, String>,
-    /// When each kubeconfig file changed last, as of the last read.
+    /// When each kubeconfig file, then each of `files`, changed last, as of the
+    /// last read.
     stamps: Vec<Option<SystemTime>>,
     /// The stamps of the files when they last couldn't be read, so that this is
     /// logged once per change.
     unread: Option<Vec<Option<SystemTime>>>,
+    /// The files the context names by path, like its client certificate.
+    files: Vec<PathBuf>,
     /// What the project's context resolved to.
     context: [u8; 32],
     cluster: Arc<dyn Cluster>,
@@ -747,9 +750,10 @@ impl Inner {
         Some(dialer)
     }
 
-    /// The project's client. When a kubeconfig file changed, the provider env is
-    /// fetched and the kubeconfig read again, and a new client built only when what
-    /// the project's context resolves to, with its login plugin's env, changed.
+    /// The project's client. When a kubeconfig file or a file it names changed, the
+    /// provider env is fetched and the kubeconfig read again, and a new client built
+    /// only when what the project's context resolves to, with its login plugin's env,
+    /// changed.
     async fn cluster(&self, project: &KubeProject) -> Result<Arc<dyn Cluster>, ErrorPage> {
         let slot = self
             .clusters
@@ -761,7 +765,7 @@ impl Inner {
         let mut slot = slot.lock().await;
         if let Some(entry) = slot.as_ref()
             && entry.project == *project
-            && kubeconfig_stamps(project, &entry.env) == entry.stamps
+            && kubeconfig_stamps(project, &entry.env, &entry.files) == entry.stamps
         {
             return Ok(entry.cluster.clone());
         }
@@ -786,12 +790,14 @@ impl Inner {
         env: BTreeMap<String, String>,
         slot: &mut Option<ClusterEntry>,
     ) -> Result<Arc<dyn Cluster>, ApiError> {
-        let stamps = kubeconfig_stamps(project, &env);
+        let mut stamps = kubeconfig_stamps(project, &env, &[]);
         let read = cluster::read_kubeconfig(project, &env).and_then(|kubeconfig| {
+            let files = cluster::referenced_files(&kubeconfig, &project.context);
+            stamps.extend(files.iter().map(|path| stamp(path)));
             let context = cluster::context_digest(&kubeconfig, &project.context, &env)?;
-            Ok((kubeconfig, context))
+            Ok((kubeconfig, files, context))
         });
-        let (kubeconfig, context) = match read {
+        let (kubeconfig, files, context) = match read {
             Ok(read) => read,
             Err(err) => match slot.as_mut() {
                 Some(entry) if entry.project == *project => {
@@ -815,6 +821,7 @@ impl Inner {
             entry.env = env;
             entry.stamps = stamps;
             entry.unread = None;
+            entry.files = files;
             return Ok(entry.cluster.clone());
         }
         let cluster = tokio::time::timeout(
@@ -832,6 +839,7 @@ impl Inner {
             env,
             stamps,
             unread: None,
+            files,
             context,
             cluster: cluster.clone(),
         });
@@ -1463,15 +1471,21 @@ async fn each_namespace(
         .map(|readable| readable.found)
 }
 
-/// When each kubeconfig file of the project last changed.
+/// When each kubeconfig file of the project, then each of `files`, last changed.
 fn kubeconfig_stamps(
     project: &KubeProject,
     env: &BTreeMap<String, String>,
+    files: &[PathBuf],
 ) -> Vec<Option<SystemTime>> {
     cluster::kubeconfig_paths(project, env)
-        .into_iter()
-        .map(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+        .iter()
+        .chain(files)
+        .map(|path| stamp(path))
         .collect()
+}
+
+fn stamp(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 fn api_page(err: &ApiError) -> ErrorPage {

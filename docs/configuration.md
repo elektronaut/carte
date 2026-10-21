@@ -1125,19 +1125,21 @@ opens again on the next request.
 - **Kubeconfig changes**: carte fetches the provider env and reads the
   kubeconfig again when one of its files changes: `kube.kubeconfig`,
   else each file in `KUBECONFIG` of the provider env, else
-  `~/.kube/config`. It connects again only when what the project's
-  context resolves to changed: the context, its cluster or its user, and
-  for a user with a login plugin, the env the plugin runs with. Switching
-  `current-context` with `kubectx` or `kubectl config use-context`
-  changes nothing. While the kubeconfig can't be read or parsed, or
-  lacks the context, its cluster or its user, as in the middle of a
-  rewrite, carte keeps the connection it has, logs a warning, and reads
-  the file again on the next request. After a change, and after a
-  change to the project file, new connections use the new settings
-  while open ones, websockets included, run until they close. Open
-  connections end only with `carte down`, `carte restart` or `carte
-  stop-all`, the idle timeout, setting the Service to `disabled`, the
-  pod going away, or the daemon stopping.
+  `~/.kube/config`, or when a file the context names by path changes:
+  `certificate-authority`, `client-certificate` or `client-key`. It
+  connects again only when what the project's context resolves to
+  changed: the context, its cluster or its user, the contents of those
+  files, and for a user with a login plugin, the env the plugin runs
+  with. Switching `current-context` with `kubectx` or `kubectl config
+  use-context` changes nothing. While the kubeconfig or a file it names
+  can't be read or parsed, or the kubeconfig lacks the context, its
+  cluster or its user, as in the middle of a rewrite, carte keeps the
+  connection it has, logs a warning, and reads the files again on the
+  next request. After a change, and after a change to the project file,
+  new connections use the new settings while open ones, websockets
+  included, run until they close. Open connections end only with `carte
+  down`, `carte restart` or `carte stop-all`, the idle timeout, setting
+  the Service to `disabled`, the pod going away, or the daemon stopping.
   Idle connections the proxy keeps are closed after 30 seconds.
 
 - **Login plugins**, like `aws eks get-token`, run with the env the
