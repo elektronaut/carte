@@ -1,0 +1,51 @@
+[package]
+name = "carte-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+carte-core = { path = "../crates/carte-core" }
+libfuzzer-sys = "0.4"
+
+# Not a member of the carte workspace, so its tests and clippy stay on stable.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "strip"
+path = "fuzz_targets/strip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "template"
+path = "fuzz_targets/template.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "env_file"
+path = "fuzz_targets/env_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "procfile"
+path = "fuzz_targets/procfile.rs"
+test = false
+doc = false
+bench = false
