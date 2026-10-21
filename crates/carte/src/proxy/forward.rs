@@ -215,6 +215,9 @@ async fn forward(
     if let (Some(downstream), StatusCode::SWITCHING_PROTOCOLS) = (downstream, response.status()) {
         let upstream = hyper::upgrade::on(&mut response);
         strip_hop_by_hop(response.headers_mut(), !h2_websocket);
+        if let Some(domain) = &inbound.share_domain {
+            strip_cookie_domains(response.headers_mut(), domain);
+        }
         if h2_websocket {
             *response.status_mut() = StatusCode::OK;
             response.headers_mut().remove("sec-websocket-accept");

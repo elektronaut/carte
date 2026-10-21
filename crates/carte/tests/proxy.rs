@@ -748,6 +748,52 @@ async fn share_listener_passes_cf_connecting_ip_on_only_from_cloudflare() {
 }
 
 #[tokio::test]
+async fn share_listener_strips_cookie_domains_from_websocket_handshakes() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(stream.read_u8().await.unwrap());
+        }
+        let head = String::from_utf8(head).unwrap();
+        let key = head
+            .lines()
+            .find_map(|line| line.strip_prefix("sec-websocket-key: "))
+            .unwrap();
+        let accept = tokio_tungstenite::tungstenite::handshake::derive_accept_key(key.as_bytes());
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {accept}\r\nSet-Cookie: a=1; Domain=.example; Path=/\r\n\
+             Set-Cookie: b=2; Domain=other.example\r\n\r\n"
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        let mut rest = Vec::new();
+        let _ = stream.read_to_end(&mut rest).await;
+    });
+    let host = "app--feature-x--nova.share.example";
+    let router = Arc::new(TestRouter::default().with(host, Target::Port(port)));
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy = spawn(
+        Proxy::new(router)
+            .listen(listener, ListenerOptions::share("share.example"))
+            .unwrap(),
+    );
+
+    let stream = TcpStream::connect(proxy.addr).await.unwrap();
+    let (_socket, response) = tokio_tungstenite::client_async(format!("ws://{host}/cable"), stream)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(
+        cookies(response.headers()),
+        ["a=1; Path=/", "b=2; Domain=other.example"]
+    );
+}
+
+#[tokio::test]
 async fn local_listener_leaves_cookies_alone() {
     let port = cookie_upstream().await;
     let router = Arc::new(TestRouter::default().with("app.test", Target::Port(port)));

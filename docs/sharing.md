@@ -6,8 +6,8 @@ returns 404.
 
 ## Cloudflare Tunnel
 
-Needs a domain on Cloudflare, with a subdomain or whole domain per
-machine:
+Needs a domain on Cloudflare for each machine, ideally one that nothing
+else uses (see below):
 
 ```sh
 brew install cloudflared
