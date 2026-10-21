@@ -732,6 +732,8 @@ pub enum PruneKind {
     App,
     RunDir,
     Pidfile,
+    /// A folder an earlier prune moved leftovers into but couldn't delete.
+    Trash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

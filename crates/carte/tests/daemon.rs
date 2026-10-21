@@ -1565,6 +1565,11 @@ fn prune_removes_leftovers_of_what_no_longer_exists() {
     for dirs in [&feature, &old_app, &gone, &broken] {
         std::fs::create_dir_all(&dirs.state).unwrap();
         std::fs::create_dir_all(&dirs.run).unwrap();
+        std::fs::write(
+            carte_core::dirs::owner_marker(&dirs.run),
+            roots.data.display().to_string(),
+        )
+        .unwrap();
     }
     std::fs::write(feature.state.join("dump.rdb"), vec![0; 1000]).unwrap();
     let pidfile = paths.pidfile(&key("acme", "acme-old", Stack::Main));

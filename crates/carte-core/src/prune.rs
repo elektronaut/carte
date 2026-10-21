@@ -7,6 +7,23 @@ use std::path::{Path, PathBuf};
 use crate::dirs::DirRoots;
 use crate::model::{InstanceKey, Stack};
 
+/// The name prefix of the folders prune moves leftovers into before deleting them.
+pub const TRASH_PREFIX: &str = ".carte-prune-";
+
+fn is_trash(name: &str) -> bool {
+    name.starts_with(TRASH_PREFIX)
+}
+
+/// The stacks of a project folder and the apps in each, without trash.
+fn stacks_in(
+    stacks: &BTreeMap<String, BTreeSet<String>>,
+) -> impl Iterator<Item = (&String, impl Iterator<Item = &String>)> {
+    stacks
+        .iter()
+        .filter(|(stack, _)| !is_trash(stack))
+        .map(|(stack, apps)| (stack, apps.iter().filter(|app| !is_trash(app))))
+}
+
 /// What exists now, to tell leftovers from directories in use.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Known {
@@ -57,6 +74,8 @@ pub enum OrphanKind {
     App,
     RunDir,
     Pidfile,
+    /// A folder an earlier prune moved leftovers into but couldn't delete.
+    Trash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -127,8 +146,9 @@ fn key(project: &str, stack: &str, app: &str) -> InstanceKey {
 
 /// The leftovers in `listing`: in a project that is gone, a stack that has no
 /// worktree, or an app that isn't in its project. Skipped projects and running
-/// instances are never touched. A run directory no folder or instance names goes
-/// only when its owner marker names this carte and nothing was skipped.
+/// instances are never touched. A run directory goes only when its owner marker
+/// names this carte, and one no folder or instance names only when nothing was
+/// skipped. Folders an earlier prune couldn't delete always go.
 pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known) -> Plan {
     let mut plan = Plan::default();
     let gone = |project: &str| {
@@ -136,13 +156,13 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
             && !known.projects.contains_key(project)
             && !known.skipped.contains_key(project)
     };
-    let mut candidates = Vec::new();
+    let mut candidates = trash(roots, listing);
     let mut owners: BTreeMap<PathBuf, (InstanceKey, bool)> = BTreeMap::new();
 
-    for (project, stacks) in &listing.data {
+    for (project, stacks) in listing.data.iter().filter(|(p, _)| !is_trash(p)) {
         let skipped = known.skipped.contains_key(project);
         let loaded = known.projects.get(project);
-        for (stack, apps) in stacks {
+        for (stack, apps) in stacks_in(stacks) {
             for app in apps {
                 let key = key(project, stack, app);
                 let orphaned = !skipped
@@ -167,7 +187,7 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
             }
             continue;
         };
-        for (stack, apps) in stacks {
+        for (stack, apps) in stacks_in(stacks) {
             if !loaded.has_stack(stack) {
                 candidates.push(Orphan {
                     project: Some(project.clone()),
@@ -178,7 +198,7 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
                 });
                 continue;
             }
-            for app in apps.iter().filter(|app| !loaded.apps.contains(*app)) {
+            for app in apps.filter(|app| !loaded.apps.contains(*app)) {
                 candidates.push(Orphan {
                     project: Some(project.clone()),
                     stack: Some(stack.clone()),
@@ -203,17 +223,17 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
         owners.insert(roots.instance(key).run, (key.clone(), false));
     }
 
-    for name in &listing.run {
+    for name in listing.run.iter().filter(|name| !is_trash(name)) {
         let path = roots.run.join(name);
         match owners.get(&path) {
-            Some((key, true)) => candidates.push(Orphan {
+            Some((key, true)) if listing.run_owned.contains(name) => candidates.push(Orphan {
                 project: Some(key.project.clone()),
                 stack: Some(key.stack.slug().to_string()),
                 kind: OrphanKind::RunDir,
                 app: Some(key.app.clone()),
                 path,
             }),
-            Some((_, false)) => {}
+            Some(_) => {}
             None if known.complete
                 && known.skipped.is_empty()
                 && listing.run_owned.contains(name) =>
@@ -304,6 +324,41 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
         }))
         .collect();
     plan
+}
+
+/// The folders earlier prunes moved leftovers into but couldn't delete, which sit
+/// where those leftovers were.
+fn trash(roots: &DirRoots, listing: &Listing) -> Vec<Orphan> {
+    let mut paths = Vec::new();
+    for (project, stacks) in &listing.data {
+        let project_dir = roots.data.join(project);
+        if is_trash(project) {
+            paths.push(project_dir);
+            continue;
+        }
+        for (stack, apps) in stacks {
+            if is_trash(stack) {
+                paths.push(project_dir.join(stack));
+                continue;
+            }
+            for app in apps.iter().filter(|app| is_trash(app)) {
+                paths.push(project_dir.join(stack).join(app));
+            }
+        }
+    }
+    for name in listing.run.iter().filter(|name| is_trash(name)) {
+        paths.push(roots.run.join(name));
+    }
+    paths
+        .into_iter()
+        .map(|path| Orphan {
+            project: None,
+            stack: None,
+            kind: OrphanKind::Trash,
+            app: None,
+            path,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -438,7 +493,9 @@ mod tests {
         listing
             .run
             .extend([kept, orphaned.clone(), "aaaaaaaa".into(), "bbbbbbbb".into()]);
-        listing.run_owned.insert("aaaaaaaa".into());
+        listing
+            .run_owned
+            .extend([orphaned.clone(), "aaaaaaaa".into()]);
         let known = known(&[("nova", &["nova-web"], &[])]);
         let plan = plan(&roots(), Path::new("/s/run"), &listing, &known);
         assert_eq!(
@@ -452,6 +509,40 @@ mod tests {
         assert_eq!(plan.orphans[1].kind, OrphanKind::RunDir);
         assert_eq!(plan.orphans[1].stack.as_deref(), Some("feature-x"));
         assert_eq!(plan.orphans[2].project, None);
+    }
+
+    #[test]
+    fn run_dirs_another_carte_owns_stay() {
+        let mut listing = listing(&[("nova", "main", "nova-old")]);
+        listing.run.insert(run_name("nova", "main", "nova-old"));
+        let known = known(&[("nova", &["nova-web"], &[])]);
+        let plan = plan(&roots(), Path::new("/s/run"), &listing, &known);
+        assert_eq!(paths(&plan), ["/s/data/nova/main/nova-old"]);
+    }
+
+    #[test]
+    fn trash_of_earlier_prunes_is_listed_on_its_own() {
+        let mut listing = listing(&[
+            ("nova", "main", "nova-web"),
+            ("nova", "main", ".carte-prune-abc"),
+            ("nova", ".carte-prune-def", "nova-web"),
+            (".carte-prune-ghi", "gone", "gone-web"),
+        ]);
+        listing.run.insert(".carte-prune-abc".into());
+        let mut known = known(&[("nova", &["nova-web"], &[])]);
+        known.skipped.insert("other".into(), "broken".into());
+        let plan = plan(&roots(), Path::new("/s/run"), &listing, &known);
+        assert_eq!(
+            paths(&plan),
+            [
+                "/r/.carte-prune-abc",
+                "/s/data/.carte-prune-ghi",
+                "/s/data/nova/.carte-prune-def",
+                "/s/data/nova/main/.carte-prune-abc",
+            ]
+        );
+        assert!(plan.orphans.iter().all(|o| o.kind == OrphanKind::Trash));
+        assert!(plan.stacks.is_empty());
     }
 
     #[test]

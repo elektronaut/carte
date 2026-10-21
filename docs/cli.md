@@ -95,9 +95,13 @@ resources may remain.
 It leaves alone anything of a running instance, and every project whose
 configuration or discovery has a problem (an `include` entry that matches
 nothing, a failing `git worktree list`), and says so. Several cartes
-(with different state directories) can share the run root, so a run
-directory that no project names is only removed when the `.owner` file
-beside it names this carte.
+(with different state directories) can share the run root, and give
+the same instance the same run directory, so a run directory is only
+removed when the `.owner` file beside it names this carte.
+
+prune moves what it removes into a `.carte-prune-*` folder beside it,
+then deletes that. If the delete fails, the next prune lists the folder
+as an unfinished prune and tries again.
 
 | Option | |
 | --- | --- |
@@ -339,9 +343,10 @@ result: { removed: [Candidate], removed_bytes, kept: [{ path, reason }],
           errors: [{ path, reason }] }
 ```
 
-`kind` is `project`, `stack`, `app`, `run-dir` or `pidfile`; `project`,
-`stack` and `app` are null when they don't apply, and a run directory
-nothing names has no project. `stacks` are those whose external resources
+`kind` is `project`, `stack`, `app`, `run-dir`, `pidfile` or `trash`
+(a folder an earlier prune couldn't delete); `project`, `stack` and
+`app` are null when they don't apply, and a run directory nothing names
+has no project. `stacks` are those whose external resources
 may remain. `result` is null with `--dry-run` or when there's nothing to
 remove; `kept` lists what stopped being a leftover or started running
 before it was removed.
