@@ -1,28 +1,17 @@
+mod common;
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitStatus;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use carte::process::{IoMode, Output, ProcessHandle, SpawnSpec, Spawner};
+use common::{fixture, guard, lifeline};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use tokio::io::AsyncReadExt;
-
-fn fixture() -> &'static Path {
-    static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let status = std::process::Command::new(env!("CARGO"))
-            .args(["build", "--quiet", "-p", "fixture-app"])
-            .status()
-            .expect("cargo build fixture-app");
-        assert!(status.success());
-        let exe = std::env::current_exe().unwrap();
-        exe.parent().unwrap().parent().unwrap().join("fixture-app")
-    })
-}
 
 fn spawner() -> Spawner {
     Spawner::new(env!("CARGO_BIN_EXE_carte"))
@@ -30,6 +19,7 @@ fn spawner() -> Spawner {
 
 fn spec() -> SpawnSpec {
     SpawnSpec::new(fixture().display().to_string(), std::env::temp_dir())
+        .env("FIXTURE_LIFELINE_PID", lifeline())
 }
 
 async fn read_until(output: &mut Output, seen: &mut Vec<u8>, needle: &str) {
@@ -364,7 +354,7 @@ async fn fake_daemon() {
     let Some(dir) = std::env::var_os("CARTE_TEST_FAKE_DAEMON") else {
         return;
     };
-    let dir = PathBuf::from(dir);
+    let dir = std::path::PathBuf::from(dir);
     let mut handles = Vec::new();
     for (i, io) in [IoMode::default(), IoMode::Pipes].into_iter().enumerate() {
         let pidfile = dir.join(format!("child{i}.pid"));
@@ -391,9 +381,11 @@ async fn sigkilled_daemon_takes_its_groups_down() {
     let mut daemon = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "fake_daemon", "--nocapture"])
         .env("CARTE_TEST_FAKE_DAEMON", dir.path())
+        .env("FIXTURE_LIFELINE_PID", lifeline())
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    guard(daemon.id());
     let mut pids = Vec::new();
     for i in 0..2 {
         pids.push(read_pidfile(&dir.path().join(format!("leader{i}.pid"))).await);

@@ -7,7 +7,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 
-use common::{fixture, git, repo};
+use common::{fixture, git, guard, lifeline, repo};
 
 struct Daemon {
     _dir: tempfile::TempDir,
@@ -167,6 +167,7 @@ impl Daemon {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        guard(child.id());
         daemon.child = Some(child);
         let socket = carte::paths::Paths::under(&daemon.root).socket();
         let started = Instant::now();
@@ -202,6 +203,7 @@ impl Daemon {
             .env("CARTE_RUNTIME_HOME", self.root.join("tmp"))
             .env("NO_COLOR", "1")
             .env("CARTE_SKILL_REFRESH", "0")
+            .env("FIXTURE_LIFELINE_PID", lifeline())
             .current_dir(&self.root);
         if let Some(bin) = &self.bin {
             let inherited = std::env::var_os("PATH").unwrap_or_default();
@@ -570,6 +572,7 @@ fn a_second_daemon_leaves_a_stopping_daemon_s_processes_alone() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    guard(second.id());
     let started = Instant::now();
     while second.try_wait().unwrap().is_none() {
         if started.elapsed() > Duration::from_secs(15) {
@@ -1847,6 +1850,7 @@ fn attach_stops_on_a_signal_while_the_daemon_doesnt_answer() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    guard(attach.id());
     connected.recv_timeout(Duration::from_secs(10)).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     assert!(attach.try_wait().unwrap().is_none(), "waits for the daemon");
