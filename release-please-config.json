@@ -27,6 +27,11 @@
           "type": "toml",
           "path": "Cargo.lock",
           "jsonpath": "$.package[?(@.name.value==='carte' || @.name.value==='carte-core' || @.name.value==='carte-api' || @.name.value==='fixture-app')].version"
+        },
+        {
+          "type": "toml",
+          "path": "fuzz/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value==='carte-core')].version"
         }
       ]
     }
