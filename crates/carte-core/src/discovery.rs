@@ -432,8 +432,8 @@ fn drop_taken_aliases(world: &mut World) {
             .project
             .config_path
             .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .filter(|stem| *stem != state.project.name);
+            .filter(|_| state.project.from_template)
+            .map(|stem| stem.to_string_lossy().into_owned());
         for app in &state.project.apps {
             for alias in &app.settings.aliases {
                 claims.entry(alias.clone()).or_default().push(AliasClaim {

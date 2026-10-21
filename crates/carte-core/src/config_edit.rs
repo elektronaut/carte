@@ -14,7 +14,7 @@ pub enum EditError {
     #[error("[{0}] in the project file isn't a table")]
     NotATable(String),
     #[error(
-        "{project} is made by the template {}, and saving there would change every project it makes. Give {project} a project file of its own to save its policies",
+        "{project} is made by the template {}, and saving there would change every project it makes. Give {project} a project file of its own to save its policies, or run it without --save",
         template.display()
     )]
     FromTemplate { project: String, template: PathBuf },
@@ -79,7 +79,18 @@ pub fn set_policy(
                 Policy::Auto => "auto",
                 Policy::Disabled => "disabled",
             };
-            table.insert("policy", value(word));
+            match table.get_mut("policy") {
+                Some(item) => {
+                    let decor = item.as_value().map(|v| v.decor().clone());
+                    *item = value(word);
+                    if let (Some(decor), Some(new)) = (decor, item.as_value_mut()) {
+                        *new.decor_mut() = decor;
+                    }
+                }
+                None => {
+                    table.insert("policy", value(word));
+                }
+            }
         }
         None => {
             table.remove("policy");
@@ -105,6 +116,13 @@ mod tests {
         assert!(
             out.contains("[apps.nova-clock.processes.clock]\npolicy = \"disabled\""),
             "{out}"
+        );
+
+        let file = "[apps.shop]\n# keep me\npolicy = \"auto\" # and me\n";
+        let out = set_policy(file, "shop", None, Some(Policy::Pinned)).unwrap();
+        assert_eq!(
+            out,
+            "[apps.shop]\n# keep me\npolicy = \"pinned\" # and me\n"
         );
     }
 
