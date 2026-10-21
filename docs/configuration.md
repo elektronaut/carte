@@ -137,7 +137,7 @@ root = "~/work/shop"
 
 | Key | Default | |
 | --- | --- | --- |
-| `root` | none | The directory `include` entries and app paths are relative to, starting with `/` or `~/`. Without `include`, the root itself is the project's one app. A symlink in it is resolved, so the apps are found from either path |
+| `root` | none | The directory `include` entries and app paths are relative to, starting with `/` or `~/`. Without `include`, the root itself is the project's one app. Symlinks in it, and in absolute `include` entries and app paths, are resolved, so the apps are found from either path |
 | `include` | the root | Where the apps are: a path or glob, or a list of them. See [Finding apps](#finding-apps) |
 | `projects` | none | Makes the file a template for a project per directory. See [Templates](#templates) |
 | `strip_prefix` | none | Removed from directory names to get the short names used in hostnames |

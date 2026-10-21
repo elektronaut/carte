@@ -549,6 +549,10 @@ pub fn parse_project(path: &Path, text: &str) -> Result<ProjectFile, ConfigError
 fn check_absolute(key: &str, value: &str) -> Result<(), String> {
     if value == "~" || value.starts_with("~/") || value.starts_with('/') {
         Ok(())
+    } else if value.starts_with('~') {
+        Err(format!(
+            "`{key}` is {value:?}, but ~user/ isn't supported: start it with / or ~/"
+        ))
     } else {
         Err(format!(
             "`{key}` must start with / or ~/, but {value:?} is relative"
@@ -1369,6 +1373,8 @@ mod tests {
             message.contains("`kube.kubeconfig` must start with"),
             "{message}"
         );
+        let err = project("root = \"~bob/work\"\n").unwrap_err().to_string();
+        assert!(err.contains("~user/ isn't supported"), "{err}");
     }
 
     #[test]

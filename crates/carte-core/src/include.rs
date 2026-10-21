@@ -429,7 +429,7 @@ fn entry(text: &str, name: Option<String>, root: Option<&Path>) -> Result<Entry,
     }
     let path = expand_home(body);
     let pattern = if path.is_absolute() {
-        normalize(&path)
+        physical(&normalize(&path))
     } else {
         match root {
             Some(root) => normalize(&root.join(path)),
@@ -587,14 +587,32 @@ fn nested_git(checkout: &Path, dir: &Path) -> bool {
         .any(|d| d.join(".git").exists())
 }
 
-/// Removes `.` and resolves `..` without touching the disk.
 /// A project's `root` with symlinks resolved, as git and the shell's `pwd -P`
 /// give paths, so a checkout under it is found from either.
 fn physical_root(root: &str) -> PathBuf {
-    let root = normalize(&expand_home(root));
-    root.canonicalize().unwrap_or(root)
+    physical(&normalize(&expand_home(root)))
 }
 
+/// `path` with symlinks resolved in the longest part of it before any wildcard
+/// that exists.
+fn physical(path: &Path) -> PathBuf {
+    let components: Vec<Component> = path.components().collect();
+    let literal = components
+        .iter()
+        .position(|c| has_wildcard(&c.as_os_str().to_string_lossy()))
+        .unwrap_or(components.len());
+    (1..=literal)
+        .rev()
+        .find_map(|n| {
+            let prefix: PathBuf = components[..n].iter().collect();
+            let mut real = prefix.canonicalize().ok()?;
+            real.extend(&components[n..]);
+            Some(real)
+        })
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+/// Removes `.` and resolves `..` without touching the disk.
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
