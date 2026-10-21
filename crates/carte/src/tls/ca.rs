@@ -378,7 +378,8 @@ fn recorded_hashes(record: &str) -> impl Iterator<Item = String> + '_ {
     })
 }
 
-fn current_hash(state_dir: &Path) -> Option<String> {
+/// The SHA-256 hash of the CA certificate in `state_dir`, when it can be read.
+pub fn current_hash(state_dir: &Path) -> Option<String> {
     let pem = fs::read(CertificateAuthority::cert_path_in(state_dir)).ok()?;
     let der = CertificateDer::from_pem_slice(&pem).ok()?;
     Some(sha256_hex(&der))
