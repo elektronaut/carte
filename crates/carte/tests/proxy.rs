@@ -84,6 +84,27 @@ enum Target {
     /// Waits for a permit before routing, like a booting instance, and sets the
     /// flag if the routing future is dropped while waiting.
     Booting(u16, Arc<Semaphore>, Arc<AtomicBool>),
+    /// A port whose route closes when the token is cancelled, like a share that ends.
+    Closable(u16, CancellationToken),
+}
+
+struct ClosableGuard {
+    guard: Guard,
+    closed: CancellationToken,
+}
+
+impl ActivityGuard for ClosableGuard {
+    fn long_lived(&mut self) {
+        self.guard.long_lived();
+    }
+
+    fn closed(&self) -> Option<BoxFuture<'static, ErrorPage>> {
+        let closed = self.closed.clone();
+        Some(Box::pin(async move {
+            closed.cancelled().await;
+            ErrorPage::new(StatusCode::NOT_FOUND, "Closed", "The route closed.")
+        }))
+    }
 }
 
 #[derive(Default)]
@@ -127,6 +148,16 @@ impl Router for TestRouter {
                 }
                 Some(Target::Page(page)) => return Route::Error(page),
                 Some(Target::Port(port)) => port,
+                Some(Target::Closable(port, closed)) => {
+                    return Route::Upstream {
+                        port,
+                        guard: Box::new(ClosableGuard {
+                            guard: Guard::new(self.activity.clone()),
+                            closed,
+                        }),
+                        checked_authorization: false,
+                    };
+                }
                 Some(Target::Dialed(dialer)) => {
                     return Route::Dialed {
                         dialer,
@@ -476,6 +507,45 @@ async fn counts_event_streams_as_connections() {
 
     drop(tx);
     while body.frame().await.is_some() {}
+    eventually("the stream to end", || router.activity.counts() == (0, 0)).await;
+}
+
+#[tokio::test]
+async fn cuts_responses_short_when_their_route_closes() {
+    let (tx, rx) = mpsc::unbounded_channel::<&'static str>();
+    let rx = Arc::new(Mutex::new(Some(rx)));
+    let port = upstream("127.0.0.1:0", move |_| {
+        let rx = rx.lock().unwrap().take().unwrap();
+        let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+            let event = rx.recv().await?;
+            Some((Ok::<_, Infallible>(Frame::data(Bytes::from(event))), rx))
+        });
+        Response::builder()
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(StreamBody::new(stream).boxed_unsync())
+            .unwrap()
+    })
+    .await;
+    let closed = CancellationToken::new();
+    let router =
+        Arc::new(TestRouter::default().with("app.test", Target::Closable(port, closed.clone())));
+    let proxy = start(router.clone(), ListenerOptions::local()).await;
+
+    let response = send(
+        proxy.addr,
+        get("app.test", "/events").body(Empty::new()).unwrap(),
+    )
+    .await;
+    let mut body = response.into_body();
+    tx.send("data: one\n\n").unwrap();
+    let frame = body.frame().await.unwrap().unwrap();
+    assert_eq!(frame.into_data().unwrap(), "data: one\n\n");
+
+    closed.cancel();
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(Ok(_)) = body.frame().await {}
+    });
+    ended.await.expect("the stream to end");
     eventually("the stream to end", || router.activity.counts() == (0, 0)).await;
 }
 

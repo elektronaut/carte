@@ -76,6 +76,15 @@ pub trait ActivityGuard: Send + 'static {
     /// The request became a long-lived connection (an upgraded tunnel or an
     /// event stream); the guard is now held until that connection closes.
     fn long_lived(&mut self);
+
+    /// Resolves once the request may no longer use its route, as when the share it
+    /// came through ends, with the page for a request that has no response yet.
+    /// The proxy then fails the request, or cuts its response or upgraded
+    /// connection short. Each call watches anew; `None` for a route that stays
+    /// open.
+    fn closed(&self) -> Option<BoxFuture<'static, ErrorPage>> {
+        None
+    }
 }
 
 impl ActivityGuard for () {
@@ -164,6 +173,15 @@ pub trait Router: Send + Sync + 'static {
     /// pending, so it must not own the boot: spawn the boot separately and only
     /// await its readiness here.
     fn route<'a>(&'a self, request: RouteRequest<'a>) -> BoxFuture<'a, Route>;
+
+    /// Resolves when a connection opened now on a listener of `kind` should close,
+    /// once its requests in flight are done, because a route it could have used
+    /// closed. `None` keeps connections open until the client or shutdown closes
+    /// them.
+    fn closing(&self, kind: ListenerKind) -> Option<BoxFuture<'static, ()>> {
+        let _ = kind;
+        None
+    }
 
     /// The page shown when the upstream returned by [`Router::route`] can't be
     /// reached or fails before responding.

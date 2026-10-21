@@ -293,6 +293,7 @@ dependencies = [
  "clap",
  "futures-util",
  "gethostname",
+ "getrandom 0.3.4",
  "hickory-proto",
  "http",
  "http-body-util",

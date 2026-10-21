@@ -1,7 +1,6 @@
 //! Shares: apps of a stack exposed through the tunnel.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::Read;
 use std::time::Instant;
 
 use carte_api::{Credentials, ExternalRequest, ShareStatus, SharedApp};
@@ -85,24 +84,30 @@ pub(super) fn status(
     }
 }
 
-/// Credentials for a share: a fixed user and a random password.
-pub(super) fn new_credentials() -> Credentials {
+/// Credentials for a share: a fixed user and a random password from the system's
+/// random source.
+pub(super) fn new_credentials() -> Result<Credentials, String> {
+    credentials_from(getrandom::fill)
+}
+
+fn credentials_from<E: std::fmt::Display>(
+    fill: impl FnOnce(&mut [u8]) -> Result<(), E>,
+) -> Result<Credentials, String> {
     const ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz23456789";
     let mut bytes = [0u8; 16];
-    if let Ok(mut random) = std::fs::File::open("/dev/urandom") {
-        let _ = random.read_exact(&mut bytes);
-    }
+    fill(&mut bytes).map_err(|e| format!("couldn't make a password: {e}"))?;
     let password = bytes
         .iter()
         .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
         .collect();
-    Credentials {
+    Ok(Credentials {
         user: "carte".into(),
         password,
-    }
+    })
 }
 
-/// Checks an `Authorization: Basic …` header against a share's credentials.
+/// Checks an `Authorization: Basic …` header against a share's credentials, in
+/// time that doesn't depend on where they differ.
 pub fn authorized(header: Option<&str>, credentials: &Credentials) -> bool {
     let Some(encoded) = header.and_then(|h| h.strip_prefix("Basic ")) else {
         return false;
@@ -111,7 +116,14 @@ pub fn authorized(header: Option<&str>, credentials: &Credentials) -> bool {
     let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded.trim()) else {
         return false;
     };
-    decoded == format!("{}:{}", credentials.user, credentials.password).as_bytes()
+    let expected = format!("{}:{}", credentials.user, credentials.password);
+    let expected = expected.as_bytes();
+    decoded.len() == expected.len()
+        && decoded
+            .iter()
+            .zip(expected)
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
 }
 
 #[cfg(test)]
@@ -120,21 +132,31 @@ mod tests {
 
     #[test]
     fn credentials_are_random_and_readable() {
-        let a = new_credentials();
-        let b = new_credentials();
+        let a = new_credentials().unwrap();
+        let b = new_credentials().unwrap();
         assert_ne!(a.password, b.password);
         assert_eq!(a.password.len(), 16);
         assert!(a.password.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
     #[test]
+    fn credentials_fail_without_randomness() {
+        let failed = credentials_from(|_| Err("no entropy")).unwrap_err();
+        assert_eq!(failed, "couldn't make a password: no entropy");
+    }
+
+    #[test]
     fn checks_basic_auth() {
         let credentials = Credentials {
             user: "carte".into(),
-            password: "secret".into(),
+            password: "detail".into(),
         };
-        assert!(authorized(Some("Basic Y2FydGU6c2VjcmV0"), &credentials));
+        assert!(authorized(Some("Basic Y2FydGU6ZGV0YWls"), &credentials));
         assert!(!authorized(Some("Basic Y2FydGU6d3Jvbmc="), &credentials));
+        assert!(!authorized(
+            Some("Basic Y2FydGU6ZGV0YWlseA=="),
+            &credentials
+        ));
         assert!(!authorized(Some("Bearer x"), &credentials));
         assert!(!authorized(None, &credentials));
     }

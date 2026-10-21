@@ -2676,6 +2676,8 @@ impl Actor {
         if apps.is_empty() {
             return Err("name the apps to share: an app address, or --apps".into());
         }
+        let entry = (target.project.clone(), stack.clone());
+        let new_credentials = request.auth.then(share::new_credentials).transpose()?;
         let before = share::routes(&self.shares);
         let mut replaced = Vec::new();
         if config.single_host() {
@@ -2710,7 +2712,6 @@ impl Actor {
         }
 
         let now = Instant::now();
-        let entry = (target.project.clone(), stack.clone());
         let share = self
             .shares
             .entry(entry.clone())
@@ -2724,9 +2725,11 @@ impl Actor {
             });
         share.apps.extend(apps);
         share.pin |= request.pin;
-        share.expires = request.ttl_secs.map(|secs| now + Duration::from_secs(secs));
-        if request.auth && share.credentials.is_none() {
-            share.credentials = Some(share::new_credentials());
+        if let Some(secs) = request.ttl_secs {
+            share.expires = Some(now + Duration::from_secs(secs));
+        }
+        if share.credentials.is_none() {
+            share.credentials = new_credentials;
         }
         let credentials = share.credentials.clone();
         let mut messages = Vec::new();

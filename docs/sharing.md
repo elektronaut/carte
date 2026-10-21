@@ -49,6 +49,12 @@ running so visitors never wait for a boot. With ngrok, `--replace` ends
 the current share instead of refusing. Shares end when the daemon
 restarts.
 
+Sharing more apps of a stack that is already shared keeps the time the
+share ends; give `--ttl` again to change it for the whole stack. When a
+share ends, by `carte unshare` or its `--ttl`, carte closes the
+connections that came in through it, WebSockets and event streams
+included, and requests still waiting get a 404.
+
 While an app is shared, `CARTE_PUBLIC_URL` holds its public URL, and the
 share domain is added to `RAILS_DEVELOPMENT_HOSTS`.
 

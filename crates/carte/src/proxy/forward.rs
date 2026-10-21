@@ -15,11 +15,12 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use super::body::{GuardedBody, ProxyBody, boxed};
+use super::body::{ClosingBody, GuardedBody, ProxyBody, boxed};
 use super::cookies::strip_cookie_domains;
 use super::upstream::{DialConnector, LoopbackConnector};
 use super::{
-    ActivityGuard, Dialer, ErrorPage, ListenerKind, Route, RouteRequest, Router, UpstreamError,
+    ActivityGuard, BoxFuture, Dialer, ErrorPage, ListenerKind, Route, RouteRequest, Router,
+    UpstreamError,
 };
 
 pub(crate) struct Shared {
@@ -148,7 +149,10 @@ pub(crate) async fn handle(
             forward(&shared, &inbound, route_request, upstream, guard, request).await
         }
         Route::File { path, guard } => {
-            super::files::respond(&path, request.method(), request.headers(), guard).await
+            let closed = guard.closed();
+            let response =
+                super::files::respond(&path, request.method(), request.headers(), guard).await;
+            closing(response, closed)
         }
     })
 }
@@ -194,7 +198,21 @@ async fn forward(
         }
     };
 
-    let mut response = match sent.await {
+    let closed = guard.closed();
+    let sent = async {
+        match closed {
+            Some(closed) => tokio::select! {
+                sent = sent => Ok(sent),
+                page = closed => Err(page),
+            },
+            None => Ok(sent.await),
+        }
+    };
+    let sent = match sent.await {
+        Ok(sent) => sent,
+        Err(page) => return render(&page, inbound.kind, &request_headers),
+    };
+    let mut response = match sent {
         Ok(response) => response,
         Err(error) => {
             let error = if error.is_connect() {
@@ -224,20 +242,34 @@ async fn forward(
         }
         guard.long_lived();
         let shutdown = inbound.shutdown.clone();
+        let closed = guard.closed();
         inbound.tracker.spawn(async move {
             let _guard = guard;
-            let (downstream, upstream) = match tokio::try_join!(downstream, upstream) {
-                Ok(pair) => pair,
-                Err(error) => {
-                    tracing::debug!(%error, "upgrade failed");
-                    return;
+            let closed = async {
+                match closed {
+                    Some(closed) => {
+                        closed.await;
+                    }
+                    None => std::future::pending().await,
                 }
+            };
+            tokio::pin!(closed);
+            let (downstream, upstream) = tokio::select! {
+                pair = async { tokio::try_join!(downstream, upstream) } => match pair {
+                    Ok(pair) => pair,
+                    Err(error) => {
+                        tracing::debug!(%error, "upgrade failed");
+                        return;
+                    }
+                },
+                () = &mut closed => return,
             };
             let mut downstream = TokioIo::new(downstream);
             let mut upstream = TokioIo::new(upstream);
             tokio::select! {
                 _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream) => {}
                 () = shutdown.cancelled() => {}
+                () = &mut closed => {}
             }
         });
         return response.map(|_| boxed(Empty::new()));
@@ -267,7 +299,22 @@ async fn forward(
         }
         return Response::from_parts(parts, boxed(GuardedBody::new(Full::new(bytes), guard)));
     }
-    response.map(|body| boxed(GuardedBody::new(body, guard)))
+    let closed = guard.closed();
+    closing(
+        response.map(|body| boxed(GuardedBody::new(body, guard))),
+        closed,
+    )
+}
+
+/// Ends the response's body with an error once `closed` resolves.
+fn closing(
+    response: Response<ProxyBody>,
+    closed: Option<BoxFuture<'static, ErrorPage>>,
+) -> Response<ProxyBody> {
+    match closed {
+        Some(closed) => response.map(|body| boxed(ClosingBody::new(body, closed))),
+        None => response,
+    }
 }
 
 /// carte's page for a dev server's refusal of the request's hostname, saying which
