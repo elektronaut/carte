@@ -228,14 +228,38 @@ pub fn detect_provider(
     if let Some(kind) = configured {
         return kind;
     }
-    let has_mise_config = ["mise.toml", ".mise.toml", ".tool-versions"]
-        .iter()
-        .any(|name| checkout.join(name).is_file());
-    if has_mise_config && runner.find_program("mise").is_some() {
+    if has_mise_config(checkout) && runner.find_program("mise").is_some() {
         EnvProviderKind::Mise
     } else {
         EnvProviderKind::Shell
     }
+}
+
+/// Whether mise has config for `dir`: in it or a directory above it, up to its
+/// repo's root.
+fn has_mise_config(dir: &Path) -> bool {
+    let mut done = false;
+    dir.ancestors()
+        .take_while(|d| {
+            let take = !done;
+            done = done || d.join(".git").exists();
+            take
+        })
+        .any(|d| {
+            [
+                "mise.toml",
+                "mise.local.toml",
+                ".mise.toml",
+                ".mise.local.toml",
+                ".tool-versions",
+                ".config/mise.toml",
+                ".config/mise/config.toml",
+                "mise/config.toml",
+                ".mise/config.toml",
+            ]
+            .iter()
+            .any(|name| d.join(name).is_file())
+        })
 }
 
 pub fn provider_name(kind: EnvProviderKind) -> &'static str {
@@ -529,13 +553,47 @@ pub(crate) mod tests {
             programs: vec!["mise"],
             ..Default::default()
         };
-        for file in ["mise.toml", ".mise.toml", ".tool-versions"] {
-            let dir = checkout_with(&[file]);
+        for file in [
+            "mise.toml",
+            ".mise.toml",
+            "mise.local.toml",
+            ".tool-versions",
+            ".config/mise.toml",
+            ".mise/config.toml",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
             assert_eq!(
                 detect_provider(None, dir.path(), &runner),
-                EnvProviderKind::Mise
+                EnvProviderKind::Mise,
+                "{file}"
             );
         }
+    }
+
+    #[test]
+    fn detects_mise_from_the_repo_above_the_app() {
+        let runner = FakeRunner {
+            programs: vec!["mise"],
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mono = dir.path().join("mono");
+        let web = mono.join("apps/web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::create_dir_all(mono.join(".git")).unwrap();
+        assert_eq!(detect_provider(None, &web, &runner), EnvProviderKind::Shell);
+
+        std::fs::write(dir.path().join("mise.toml"), "").unwrap();
+        assert_eq!(
+            detect_provider(None, &web, &runner),
+            EnvProviderKind::Shell,
+            "stops at the repo's root"
+        );
+        std::fs::write(mono.join("mise.toml"), "").unwrap();
+        assert_eq!(detect_provider(None, &web, &runner), EnvProviderKind::Mise);
     }
 
     #[test]

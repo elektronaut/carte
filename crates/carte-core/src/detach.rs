@@ -110,11 +110,14 @@ impl DetachFilter {
                 self.matched = 0;
                 continue;
             }
-            out.extend_from_slice(&self.keys[..self.matched]);
-            self.matched = usize::from(b == self.keys[0]);
-            if self.matched == 0 {
-                out.push(b);
-            }
+            let mut seen = self.keys[..self.matched].to_vec();
+            seen.push(b);
+            let keep = (0..seen.len())
+                .rev()
+                .find(|&k| seen.ends_with(&self.keys[..k]))
+                .unwrap_or(0);
+            out.extend_from_slice(&seen[..seen.len() - keep]);
+            self.matched = keep;
         }
         (out, false)
     }
@@ -177,6 +180,65 @@ mod tests {
             filter.feed(b"\x01\x02\x01\x02\x03"),
             (b"\x01\x02".to_vec(), true)
         );
+    }
+
+    #[test]
+    fn a_sequence_that_overlaps_itself_detaches_after_a_false_start() {
+        let mut filter = keys("ctrl-q ctrl-q d").filter();
+        assert_eq!(filter.feed(b"\x11\x11\x11d"), (b"\x11".to_vec(), true));
+        let mut filter = keys("ctrl-a ctrl-b ctrl-a ctrl-c").filter();
+        assert_eq!(
+            filter.feed(b"\x01\x02\x01\x02\x01\x03"),
+            (b"\x01\x02".to_vec(), true)
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2000))]
+
+        #[test]
+        fn detaches_exactly_when_the_input_has_the_keys(
+            keys in proptest::collection::vec(b'a'..=b'b', 1..5),
+            pieces in proptest::collection::vec((0usize..5, b'a'..=b'b'), 0..8),
+            cuts in proptest::collection::vec(0usize..48, 0..4),
+        ) {
+            let mut input = Vec::new();
+            for (prefix, byte) in pieces {
+                input.extend_from_slice(&keys[..prefix.min(keys.len())]);
+                input.push(byte);
+            }
+            // Typing the first key twice sends it once, unless it is also the second.
+            let escapes = keys.len() > 1 && keys[1] != keys[0];
+            proptest::prop_assume!(
+                !escapes || !input.windows(2).any(|w| w == [keys[0], keys[0]])
+            );
+            let mut cuts: Vec<usize> = cuts.into_iter().filter(|&c| c <= input.len()).collect();
+            cuts.sort_unstable();
+            cuts.push(input.len());
+            let mut filter = DetachKeys(keys.clone()).filter();
+            let mut out = Vec::new();
+            let mut detached = false;
+            let mut start = 0;
+            for cut in cuts {
+                let (sent, done) = filter.feed(&input[start..cut]);
+                out.extend(sent);
+                start = cut;
+                if done {
+                    detached = true;
+                    break;
+                }
+            }
+            let found = input.windows(keys.len()).position(|w| w == keys.as_slice());
+            proptest::prop_assert_eq!(detached, found.is_some());
+            match found {
+                Some(at) => proptest::prop_assert_eq!(&out, &input[..at]),
+                None => {
+                    proptest::prop_assert!(input.starts_with(&out));
+                    let held = &input[out.len()..];
+                    proptest::prop_assert!(held.len() < keys.len() && keys.starts_with(held));
+                }
+            }
+        }
     }
 
     #[test]

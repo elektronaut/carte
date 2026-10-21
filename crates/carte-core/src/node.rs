@@ -87,9 +87,31 @@ pub fn package_manager(dir: &Path) -> &'static str {
 /// Flags for the dev server a script starts: `--port $PORT` for those that ignore
 /// `PORT`, `--strictPort` where Vite would move to another port when it's busy, and
 /// `-H 127.0.0.1` for `next dev`, which otherwise listens on every interface. None
-/// when the script sets its own port.
+/// when the script sets its own port, or runs more than one command, since the
+/// package manager appends flags to the whole script.
 pub fn dev_server_flags(script: &str) -> &'static str {
-    let first = script.split(['&', ';', '|']).next().unwrap_or_default();
+    if is_compound(script) {
+        ""
+    } else {
+        first_command_flags(script)
+    }
+}
+
+/// The flags the first command of a script that runs more than one would need,
+/// which carte can't pass to it.
+pub fn missing_dev_server_flags(script: &str) -> Option<&'static str> {
+    Some(first_command_flags(script)).filter(|flags| is_compound(script) && !flags.is_empty())
+}
+
+fn is_compound(script: &str) -> bool {
+    script.contains(['&', ';', '|', '\n'])
+}
+
+fn first_command_flags(script: &str) -> &'static str {
+    let first = script
+        .split(['&', ';', '|', '\n'])
+        .next()
+        .unwrap_or_default();
     let mut words = first
         .split_whitespace()
         .skip_while(|w| w.contains('=') || matches!(*w, "cross-env" | "npx" | "bunx"));
@@ -142,10 +164,18 @@ mod tests {
             ("next dev -p 3000", ""),
             ("tsup --watch", ""),
             ("turbo dev", ""),
-            ("vite && echo done", "--port $PORT --strictPort"),
+            ("vite && echo done", ""),
+            ("vite & tsc --watch", ""),
         ] {
             assert_eq!(dev_server_flags(script), flags, "{script}");
         }
+        assert_eq!(
+            missing_dev_server_flags("vite & tsc --watch"),
+            Some("--port $PORT --strictPort")
+        );
+        assert_eq!(missing_dev_server_flags("vite"), None);
+        assert_eq!(missing_dev_server_flags("tsc --watch & vite"), None);
+        assert_eq!(missing_dev_server_flags("vite --port 3000 && echo"), None);
     }
 
     fn package(dir: &Path, json: &str) {
