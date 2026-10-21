@@ -3545,6 +3545,29 @@ async fn cursor_position_queries_are_answered_while_no_terminal_is_attached() {
 }
 
 #[tokio::test]
+async fn a_process_that_asks_for_the_cursor_without_reading_still_stops() {
+    let setup = Setup::new();
+    setup.app(
+        "acme-web",
+        "ask: stty raw -echo; q=$(printf '\\033[6n\\033[6n\\033[6n\\033[6n'); while :; do printf %s%s%s%s \"$q\" \"$q\" \"$q\" \"$q\"; echo; sleep 0.01; done\n",
+    );
+    setup.project("");
+    let handle = setup.start();
+    handle.control(waiting("web", Action::Up)).await.unwrap();
+    let (_, terminal) = handle.attach(here("web"), None).await.unwrap();
+    let mut watcher = terminal.join(None, false);
+    for _ in 0..100 {
+        read_until(&mut watcher, "\x1b[6n").await;
+    }
+    handle.control(control("web", Action::Down)).await.unwrap();
+    wait_for(&handle, "the process to stop", |s| {
+        status(s, "acme-web", "main").state == InstanceState::Stopped
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn attaching_needs_a_running_process_with_a_pty() {
     let setup = Setup::new();
     setup.app(
