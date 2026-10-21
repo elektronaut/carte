@@ -140,7 +140,9 @@ pub fn marker_rule(at_ms: u64, width: usize) -> String {
 pub fn strip(data: &[u8]) -> String {
     let mut stripper = Stripper::default();
     let mut out = String::new();
-    for line in stripper.feed(data) {
+    let mut lines = stripper.feed(data);
+    lines.extend(stripper.settle());
+    for line in lines {
         out.push_str(&line);
         out.push('\n');
     }
@@ -168,16 +170,20 @@ const MAX_COLUMN: usize = 4096;
 /// CSI, OSC and other escape sequences are dropped; a carriage return moves
 /// back to the start of the line so later text overwrites it, backspace and
 /// `ESC [ n D` move back, `ESC [ n C` forward and `ESC [ n G` to a column, and
-/// `ESC [ K` erases to the end of the line. Within one chunk of output, the rows
-/// it writes are kept as a small screen that `ESC [ A`, `ESC [ B` and newlines move
-/// around in; at the end of the chunk the rows above the cursor are lines, the
-/// cursor's row is the unfinished line, and rows below it are dropped. So Reline
-/// making room below its prompt, or drawing a completion dialog there, leaves the
-/// prompt line unfinished. Rows of earlier chunks can't be changed: text written
-/// after moving up into them is dropped until the cursor is back, so redraws of
-/// earlier rows, like a multi-line progress bar, don't reach the log, and a move up
-/// of more than a screen counts as one. Other control characters except tab are
-/// dropped. Invalid UTF-8 becomes U+FFFD.
+/// `ESC [ K` erases to the end of the line.
+///
+/// Rows a newline leaves stay open, as a small screen that `ESC [ A`, `ESC [ B`
+/// and newlines move around in, until text is written on a row the cursor
+/// reached by a newline: then the rows above it are lines. Text written on rows
+/// reached by `ESC [ B`, like a completion dialog, finishes nothing. So Reline
+/// making room below its prompt, or drawing a dialog there, leaves the prompt line
+/// unfinished however its output is split into reads. [`Stripper::settle`] ends
+/// the open rows above the cursor, for when output has gone quiet, and more than a
+/// screen of them ends the oldest. Text written after moving up past the open rows
+/// is dropped until the cursor is back, so redraws of earlier rows, like a
+/// multi-line progress bar, don't reach the log, and a move up of more than a
+/// screen counts as one. Other control characters except tab are dropped. Invalid
+/// UTF-8 becomes U+FFFD.
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
     state: State,
@@ -185,13 +191,17 @@ pub struct Stripper {
     line: Vec<char>,
     cursor: usize,
     utf8: Vec<u8>,
-    /// Rows the cursor is above the first row of the chunk being fed, in lines
-    /// already ended. Text written there is dropped.
+    /// Rows the cursor is above the open rows, in lines already ended. Text
+    /// written there is dropped.
     row: isize,
-    /// Rows of the chunk being fed above the cursor's, top first.
+    /// Open rows above the cursor's, top first.
     above: Vec<Vec<char>>,
-    /// Rows of the chunk being fed below the cursor's, nearest first.
+    /// Open rows below the cursor's, nearest first.
     below: std::collections::VecDeque<Vec<char>>,
+    /// The cursor reached its row by `ESC [ A` or `ESC [ B` rather than a newline.
+    moved: bool,
+    /// Lines ended since the last feed returned.
+    ended: Vec<String>,
 }
 
 /// The farthest a move up reaches into lines already ended.
@@ -204,12 +214,31 @@ impl Stripper {
         for &b in data {
             self.byte(b, &mut lines);
         }
-        lines.extend(self.above.drain(..).map(|line| line.into_iter().collect()));
-        self.below.clear();
+        lines.append(&mut self.ended);
         lines
     }
 
+    /// Ends the open rows above the cursor and returns them as lines.
+    pub fn settle(&mut self) -> Vec<String> {
+        self.above
+            .drain(..)
+            .map(|line| line.into_iter().collect())
+            .collect()
+    }
+
+    /// Whether there are open rows above the cursor that [`Stripper::settle`] would
+    /// end.
+    pub fn unsettled(&self) -> bool {
+        !self.above.is_empty()
+    }
+
+    fn end_above(&mut self) {
+        let rows = self.above.drain(..).map(|line| line.into_iter().collect());
+        self.ended.extend(rows);
+    }
+
     fn up(&mut self, mut n: usize) {
+        self.moved = true;
         if self.row == 0 {
             while n > 0
                 && let Some(line) = self.above.pop()
@@ -222,7 +251,8 @@ impl Stripper {
         self.row = (self.row - n as isize).max(-ROWS_UP);
     }
 
-    fn down(&mut self, mut n: usize) {
+    fn down(&mut self, mut n: usize, newline: bool) {
+        self.moved = !newline;
         let back = n.min(self.row.unsigned_abs());
         self.row += back as isize;
         n -= back;
@@ -230,6 +260,12 @@ impl Stripper {
             let next = self.below.pop_front().unwrap_or_default();
             self.above.push(std::mem::replace(&mut self.line, next));
         }
+        let over = self.above.len().saturating_sub(ROWS_UP as usize);
+        let rows = self
+            .above
+            .drain(..over)
+            .map(|line| line.into_iter().collect());
+        self.ended.extend(rows);
     }
 
     /// The current incomplete line.
@@ -265,7 +301,7 @@ impl Stripper {
                 0x40..=0x7e => {
                     match b {
                         b'A' => self.up(self.count()),
-                        b'B' => self.down(self.count()),
+                        b'B' => self.down(self.count(), false),
                         _ if self.row != 0 => {}
                         b'K' => self.erase_line(),
                         b'G' => self.cursor = self.count().saturating_sub(1).min(MAX_COLUMN),
@@ -310,7 +346,7 @@ impl Stripper {
                 if self.row == 0 {
                     self.cursor = 0;
                 }
-                self.down(1);
+                self.down(1, true);
             }
             _ if self.row != 0 && matches!(b, b'\r' | 0x08) => {}
             b'\r' => self.cursor = 0,
@@ -361,6 +397,9 @@ impl Stripper {
     fn put(&mut self, c: char) {
         if self.row != 0 {
             return;
+        }
+        if !self.moved {
+            self.end_above();
         }
         while self.line.len() < self.cursor {
             self.line.push(' ');
@@ -540,10 +579,11 @@ mod tests {
         let mut s = Stripper::default();
         s.feed(b"irb(main):001> Str\x1b[1B\x1b[1G\x1b[KString\x1b[1B\x1b[1G\x1b[KStruct\x1b[2A\x1b[18G");
         assert_eq!(s.pending(), "irb(main):001> Str");
+        assert!(s.feed(b"\x1b[3B\rnext\n").is_empty());
         assert_eq!(
-            s.feed(b"\x1b[3B\rnext\n"),
-            ["irb(main):001> Str", "", "", "next"],
-            "moving below it ends it"
+            s.settle(),
+            ["irb(main):001> Str", "String", "Struct", "next"],
+            "writing over the rows below and settling ends them"
         );
     }
 
@@ -563,18 +603,27 @@ mod tests {
     #[test]
     fn a_move_up_reaches_a_screen_at_most() {
         let mut s = Stripper::default();
-        assert_eq!(s.feed(b"top\n"), ["top"]);
+        s.feed(b"top\n");
+        assert_eq!(s.settle(), ["top"]);
         s.feed(b"\x1b[999A");
-        let lines = s.feed(&b"redrawn\n".repeat(30));
+        let mut lines = s.feed(&b"redrawn\n".repeat(30));
+        lines.extend(s.settle());
         assert_eq!(lines.len(), 30 - 24, "{lines:?}");
+        let lines = s.feed(&b"\n".repeat(30));
+        assert_eq!(lines.len(), 30 - 24, "a screen of open rows at most");
     }
 
     #[test]
-    fn a_line_ends_when_its_chunk_does() {
+    fn a_line_ends_with_text_after_it_or_when_settled() {
         let mut s = Stripper::default();
-        assert_eq!(s.feed(b"one\r\n"), ["one"]);
-        assert_eq!(s.feed(b"\x1b[1Atwo\n"), Vec::<String>::new());
-        assert_eq!(s.feed(b"three\n"), ["three"]);
+        assert!(s.feed(b"one\r\n").is_empty());
+        assert!(s.unsettled());
+        assert_eq!(s.settle(), ["one"]);
+        assert!(!s.unsettled());
+        assert!(s.feed(b"\x1b[1Atwo\n").is_empty(), "a settled line stays");
+        assert!(s.settle().is_empty());
+        assert!(s.feed(b"three\n").is_empty());
+        assert_eq!(s.feed(b"four"), ["three"]);
     }
 
     #[test]
@@ -593,6 +642,7 @@ mod tests {
         let bytes = "blåbær\n".as_bytes();
         let mut lines = s.feed(&bytes[..3]);
         lines.extend(s.feed(&bytes[3..]));
+        lines.extend(s.settle());
         assert_eq!(lines, ["blåbær"]);
     }
 
@@ -600,7 +650,8 @@ mod tests {
     fn escape_split_across_feeds() {
         let mut s = Stripper::default();
         assert!(s.feed(b"a\x1b[3").is_empty());
-        assert_eq!(s.feed(b"1mb\n"), ["ab"]);
+        assert!(s.feed(b"1mb\n").is_empty());
+        assert_eq!(s.settle(), ["ab"]);
     }
 
     #[test]

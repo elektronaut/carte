@@ -42,29 +42,40 @@ impl ProcLog {
     /// Adds output and returns the complete lines it finished.
     pub fn push(&mut self, data: &[u8]) -> Vec<(u64, String)> {
         self.raw.push(data);
+        let lines = self.stripper.feed(data);
+        self.add(lines)
+    }
+
+    /// Ends the lines the output has left behind, for when it has gone quiet; see
+    /// [`Stripper::settle`].
+    pub fn settle(&mut self) -> Vec<(u64, String)> {
+        let lines = self.stripper.settle();
+        self.add(lines)
+    }
+
+    /// Lines [`ProcLog::settle`] would end.
+    pub fn unsettled(&self) -> bool {
+        self.stripper.unsettled()
+    }
+
+    /// Ends every line, a partial last one too, as when the process exits.
+    pub fn flush(&mut self) -> Vec<(u64, String)> {
+        let mut lines = self.stripper.settle();
+        let pending = self.stripper.pending();
+        if !pending.is_empty() {
+            lines.push(pending);
+        }
+        self.stripper = Stripper::default();
+        self.add(lines)
+    }
+
+    fn add(&mut self, lines: Vec<String>) -> Vec<(u64, String)> {
         let at = now_ms();
-        let lines: Vec<(u64, String)> = self
-            .stripper
-            .feed(data)
-            .into_iter()
-            .map(|line| (at, line))
-            .collect();
+        let lines: Vec<(u64, String)> = lines.into_iter().map(|line| (at, line)).collect();
         for line in &lines {
             self.append(line.clone());
         }
         lines
-    }
-
-    /// Ends a partial last line, as when the process exits.
-    pub fn flush(&mut self) -> Option<(u64, String)> {
-        let pending = self.stripper.pending();
-        if pending.is_empty() {
-            return None;
-        }
-        self.stripper = Stripper::default();
-        let line = (now_ms(), pending);
-        self.append(line.clone());
-        Some(line)
     }
 
     fn append(&mut self, line: (u64, String)) {
@@ -181,27 +192,40 @@ pub async fn run(
             let mut buf = vec![0u8; 16 * 1024];
             let mut paused: Option<String> = None;
             loop {
-                match output.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let (lines, prompt) = {
-                            let mut log = log.lock().unwrap();
-                            let lines = log.push(&buf[..n]);
-                            let prompt = terminal.as_ref().and_then(|terminal| {
-                                terminal.output(&buf[..n]);
-                                match &paused {
-                                    Some(prompt) if lines.is_empty() => Some(prompt.clone()),
-                                    _ => log.prompt(),
-                                }
-                            });
-                            (lines, prompt)
-                        };
-                        broadcast_lines(&log_tx, &label, lines);
-                        if prompt.is_some() != paused.is_some() {
-                            paused = prompt.clone();
-                            let _ = events.send(Event::Paused(prompt));
+                let unsettled = log.lock().unwrap().unsettled();
+                let read = if unsettled {
+                    tokio::time::timeout(Duration::from_millis(50), output.read(&mut buf))
+                        .await
+                        .ok()
+                } else {
+                    Some(output.read(&mut buf).await)
+                };
+                let data = match read {
+                    Some(Ok(0) | Err(_)) => break,
+                    Some(Ok(n)) => Some(&buf[..n]),
+                    None => None,
+                };
+                let (lines, prompt) = {
+                    let mut log = log.lock().unwrap();
+                    let lines = match data {
+                        Some(data) => log.push(data),
+                        None => log.settle(),
+                    };
+                    let prompt = terminal.as_ref().and_then(|terminal| {
+                        if let Some(data) = data {
+                            terminal.output(data);
                         }
-                    }
+                        match &paused {
+                            Some(prompt) if lines.is_empty() => Some(prompt.clone()),
+                            _ => log.prompt(),
+                        }
+                    });
+                    (lines, prompt)
+                };
+                broadcast_lines(&log_tx, &label, lines);
+                if prompt.is_some() != paused.is_some() {
+                    paused = prompt.clone();
+                    let _ = events.send(Event::Paused(prompt));
                 }
             }
         })
@@ -223,7 +247,7 @@ pub async fn run(
         }
     }
     let flushed = log.lock().unwrap().flush();
-    broadcast_lines(&log_tx, &label, flushed.into_iter().collect());
+    broadcast_lines(&log_tx, &label, flushed);
 
     let event = match status {
         Ok(status) => {
@@ -345,7 +369,8 @@ mod tests {
         let lines = log.push(b"one\ntwo\nthree\nfour\nfive\nsix");
         assert_eq!(lines.len(), 5);
         assert_eq!(log.tail(10), vec!["two", "three", "four", "five"]);
-        assert_eq!(log.flush().map(|l| l.1), Some("six".into()));
+        let flushed: Vec<String> = log.flush().into_iter().map(|l| l.1).collect();
+        assert_eq!(flushed, ["six"]);
         assert_eq!(log.tail(10), vec!["three", "four", "five", "six"]);
     }
 
@@ -365,8 +390,9 @@ mod tests {
             Some("(rdbg)"),
             "after reline's width probe"
         );
-        let lines = log.push(b"\x1b[?25l\x1b[1G\x1b[K\x1b[?25h\x1b[1G(rdbg) \x1b[36m\x1b[4mc\x1b[0m\x1b[2m    # continue command\x1b[0m \r\r\n\x1b[1G\x1b[?2004l");
-        assert_eq!(lines.len(), 1, "answering ends the line");
+        let mut lines = log.push(b"\x1b[?25l\x1b[1G\x1b[K\x1b[?25h\x1b[1G(rdbg) \x1b[36m\x1b[4mc\x1b[0m\x1b[2m    # continue command\x1b[0m \r\r\n\x1b[1G\x1b[?2004l");
+        lines.extend(log.settle());
+        assert_eq!(lines.len(), 1, "answering ends the line once settled");
         assert_eq!(log.prompt(), None);
         log.push(b"irb:rdbg(#<Order:0x01>):002> ");
         assert_eq!(
@@ -389,6 +415,175 @@ mod tests {
         assert_eq!(log.prompt().as_deref(), Some("irb(main):002>"));
     }
 
+    /// Captured debugger sessions (irb, pry, rdbg, with Reline), each as the reads a
+    /// pty gave, at most 1024 bytes each.
+    fn sessions() -> Vec<(String, Vec<Vec<u8>>)> {
+        let json: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/reline-sessions.json")).unwrap();
+        let hex = |text: &str| -> Vec<u8> {
+            (0..text.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+                .collect()
+        };
+        json.as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, chunks)| {
+                let chunks = chunks
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|chunk| hex(chunk.as_str().unwrap()))
+                    .collect();
+                (name.clone(), chunks)
+            })
+            .collect()
+    }
+
+    /// What the output reader makes of the reads: the lines, whether it is paused
+    /// and at which prompt, each change in turn, and the unfinished line at the end.
+    type Replayed = (Vec<String>, Vec<Option<String>>, String);
+
+    fn replay<'a>(reads: impl IntoIterator<Item = &'a [u8]>) -> Replayed {
+        let mut log = ProcLog::new(1024 * 1024);
+        let mut lines = Vec::new();
+        let mut paused: Option<String> = None;
+        let mut states = vec![None];
+        for read in reads {
+            let finished = log.push(read);
+            paused = match &paused {
+                Some(prompt) if finished.is_empty() => Some(prompt.clone()),
+                _ => log.prompt(),
+            };
+            if states.last() != Some(&paused) {
+                states.push(paused.clone());
+            }
+            lines.extend(finished.into_iter().map(|(_, text)| text));
+        }
+        lines.extend(log.settle().into_iter().map(|(_, text)| text));
+        (lines, states, log.pending())
+    }
+
+    /// The pauses without a resume between two different prompts, which shows when
+    /// a result and the next prompt arrive in different reads but not in one.
+    fn normalized((lines, states, pending): Replayed) -> Replayed {
+        let mut kept: Vec<Option<String>> = Vec::new();
+        for (i, state) in states.iter().enumerate() {
+            let between = state.is_none()
+                && matches!(
+                    (kept.last(), states.get(i + 1)),
+                    (Some(Some(before)), Some(Some(after))) if before != after
+                );
+            if !between && kept.last() != Some(state) {
+                kept.push(state.clone());
+            }
+        }
+        (lines, kept, pending)
+    }
+
+    /// Except `rdbgfork`, whose prompt is wider than its pty, where detection
+    /// depends on where reads end.
+    #[test]
+    fn captured_sessions_read_the_same_however_their_reads_are_split() {
+        let mut seed: u64 = 0x5eed;
+        let mut random = move |below: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % below
+        };
+        for (name, chunks) in sessions() {
+            if name == "rdbgfork" {
+                continue;
+            }
+            let whole = normalized(replay(chunks.iter().map(Vec::as_slice)));
+            let bytes = chunks.iter().flat_map(|chunk| chunk.chunks(1));
+            assert_eq!(normalized(replay(bytes)), whole, "{name}, a byte at a time");
+            for _ in 0..50 {
+                let mut reads = Vec::new();
+                for chunk in &chunks {
+                    let mut at = 0;
+                    while at < chunk.len() {
+                        let n = (1 + random(64)).min(chunk.len() - at);
+                        reads.push(&chunk[at..at + n]);
+                        at += n;
+                    }
+                }
+                assert_eq!(normalized(replay(reads)), whole, "{name}, split at random");
+            }
+        }
+    }
+
+    #[test]
+    fn captured_sessions_pause_at_each_prompt_and_resume_on_answers() {
+        let sessions: std::collections::BTreeMap<_, _> = sessions().into_iter().collect();
+        let irb = |id: &str, n: &str| Some(format!("irb(#<Foo:0x0000000{id}>):00{n}>"));
+        let pry = |n: &str| Some(format!("[{n}] pry(#<Foo>)>"));
+        let rdbg = || Some("(rdbg)".to_string());
+        let expected: [(&str, Vec<Option<String>>, &str); 13] = [
+            (
+                "dsr-irb-answer",
+                vec![None, irb("1242c4960", "1"), irb("1242c4960", "2")],
+                "=> 1",
+            ),
+            (
+                "dsr-irb-silent",
+                vec![None, irb("124cd4b08", "1"), irb("124cd4b08", "2")],
+                "=> 1",
+            ),
+            ("dsr-pry-answer", vec![None, pry("1"), pry("2")], "=> 1"),
+            ("dsr-pry-silent", vec![None, pry("1"), pry("2")], "=> 1"),
+            ("dsr-rdbg-answer", vec![None, rdbg(), None, rdbg()], "1"),
+            ("dsr-rdbg-silent", vec![None, rdbg(), None, rdbg()], "1"),
+            (
+                "irbbottom",
+                vec![None, irb("1244349d0", "1"), irb("1244349d0", "2")],
+                "=> String",
+            ),
+            (
+                "irbcomp",
+                vec![None, irb("124be49f0", "1"), irb("124be49f0", "2")],
+                "=> String",
+            ),
+            (
+                "irbconsole",
+                vec![
+                    None,
+                    Some("irb:rdbg(#<Foo:0x000000011f2f53a8>):002>".into()),
+                    None,
+                ],
+                "done",
+            ),
+            (
+                "irbdebug",
+                vec![
+                    None,
+                    irb("124fb49e0", "1"),
+                    Some("irb:rdbg(#<Foo:0x0000000124fb49e0>):002>".into()),
+                    None,
+                ],
+                "done",
+            ),
+            ("pry-v1", vec![None, pry("1"), None], "done"),
+            ("prybottom", vec![None, pry("1"), pry("2")], "=> String"),
+            ("prycolor", vec![None, pry("1"), pry("2")], "=> 1"),
+        ];
+        assert!(
+            sessions["irbcomp"].iter().any(|read| read.len() == 1024),
+            "the completion dialog arrives split across reads"
+        );
+        for (name, states, last) in expected {
+            let (lines, got, _) = normalized(replay(sessions[name].iter().map(Vec::as_slice)));
+            assert_eq!(got, states, "{name}");
+            assert_eq!(
+                lines.last().map(String::as_str),
+                Some(last),
+                "{name}: {lines:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_long_unfinished_line_is_never_a_prompt() {
         let mut log = ProcLog::new(64 * 1024);
@@ -401,6 +596,7 @@ mod tests {
     fn log_strips_escape_codes() {
         let mut log = ProcLog::new(1024);
         log.push(b"\x1b[32mgreen\x1b[0m\n");
+        log.settle();
         assert_eq!(log.tail(1), vec!["green"]);
     }
 
