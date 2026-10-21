@@ -502,3 +502,100 @@ async fn sigkilled_daemon_takes_its_groups_down() {
         wait_dead(pid).await;
     }
 }
+
+/// The descriptors above stderr that `pid` has open.
+fn open_fds(pid: u32) -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        return std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .map(|dir| {
+                dir.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().parse::<u32>().unwrap_or(0) > 2)
+                    .map(|e| {
+                        std::fs::read_link(e.path())
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    let lsof = std::process::Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-F", "fn"])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&lsof.stdout).into_owned();
+    let mut fds = Vec::new();
+    let mut open = false;
+    for line in text.lines() {
+        if let Some(fd) = line.strip_prefix('f') {
+            open = fd.parse::<u32>().is_ok_and(|fd| fd > 2);
+        } else if let Some(name) = line.strip_prefix('n')
+            && open
+        {
+            fds.push(name.to_string());
+        }
+    }
+    fds
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_descriptors_dont_leak_into_provider_commands() {
+    use carte_core::env::{CommandRunner, CommandSpec, SystemRunner};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let done = Arc::new(AtomicBool::new(false));
+    let provider = std::thread::spawn({
+        let done = done.clone();
+        move || {
+            let runner = SystemRunner {
+                search_path: Vec::new(),
+                own_group: true,
+            };
+            let spec = CommandSpec {
+                program: "/bin/sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "sleep 5 </dev/null >/dev/null 2>&1 & echo $!".into(),
+                ],
+                cwd: "/".into(),
+                env: None,
+                timeout: Duration::from_secs(10),
+            };
+            let mut pids = Vec::new();
+            while !done.load(Ordering::Relaxed) {
+                let output = runner.run(&spec).unwrap();
+                pids.extend(
+                    String::from_utf8_lossy(&output.stdout)
+                        .trim()
+                        .parse::<u32>(),
+                );
+            }
+            pids
+        }
+    });
+    for io in [IoMode::default(), IoMode::Pipes].repeat(25) {
+        let mut handle = spawner()
+            .spawn(&SpawnSpec::new("true", "/").io(io))
+            .await
+            .unwrap();
+        run_to_end(&mut handle).await;
+    }
+    done.store(true, Ordering::Relaxed);
+    let pids = provider.join().unwrap();
+    let leaked: Vec<(u32, Vec<String>)> = pids
+        .iter()
+        .map(|&pid| (pid, open_fds(pid)))
+        .filter(|(_, fds)| !fds.is_empty())
+        .collect();
+    for &pid in &pids {
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+    }
+    assert!(!pids.is_empty());
+    assert!(
+        leaked.is_empty(),
+        "{} of {}: {leaked:?}",
+        leaked.len(),
+        pids.len()
+    );
+}
