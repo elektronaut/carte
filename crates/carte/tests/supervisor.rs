@@ -429,6 +429,41 @@ async fn an_instance_over_the_instance_target_isnt_evicted_while_it_starts_or_ju
 }
 
 #[tokio::test]
+async fn an_answered_request_counts_as_in_flight_until_it_starts() {
+    let setup = Setup::new();
+    setup.app("acme-web", WEB);
+    setup.project("");
+    let handle = setup.start();
+    let web = key("acme-web", Stack::Main);
+    let holds = |s: &carte_api::Snapshot| status(s, "acme-web", "main").holds.clone();
+    let one = vec![carte_api::Hold::Requests { count: 1 }];
+
+    handle.ensure_ready(web.clone()).await.unwrap();
+    assert!(holds(&handle.snapshot()).is_empty());
+    let upstream = handle.request(web.clone(), "/", None).await.unwrap();
+    wait_for(&handle, "the answered request", |s| holds(s) == one).await;
+    handle.activity(
+        web.clone(),
+        Some(upstream.boot),
+        supervisor::Activity::RequestStarted,
+    );
+    handle.activity(
+        web.clone(),
+        Some(upstream.boot),
+        supervisor::Activity::RequestEnded,
+    );
+    wait_for(&handle, "the request to end", |s| holds(s).is_empty()).await;
+
+    handle.request(web, "/", None).await.unwrap();
+    wait_for(&handle, "the answered request", |s| holds(s) == one).await;
+    wait_for(&handle, "a request never started to stop counting", |s| {
+        holds(s).is_empty()
+    })
+    .await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn connections_keep_an_instance_alive() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);

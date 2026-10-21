@@ -196,10 +196,9 @@ fn stack_status(
             if pinned {
                 holds.push(Hold::Pinned);
             }
-            if inst.in_flight > 0 {
-                holds.push(Hold::Requests {
-                    count: inst.in_flight,
-                });
+            let requests = inst.requests();
+            if requests > 0 {
+                holds.push(Hold::Requests { count: requests });
             }
             if inst.connections > 0 {
                 holds.push(Hold::Connections {
