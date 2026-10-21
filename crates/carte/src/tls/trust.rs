@@ -66,8 +66,15 @@ pub fn trust_command(ca_cert: &Path) -> CommandLine {
 
 pub const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
 
-/// The SHA-256 hashes of carte's CAs in the system keychain, old ones included.
-pub fn keychain_cas() -> Vec<String> {
+/// A carte CA in the system keychain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeychainCa {
+    pub hash: String,
+    pub label: String,
+}
+
+/// carte's CAs in the system keychain, every user's and old ones included.
+pub fn keychain_cas() -> Vec<KeychainCa> {
     CommandLine::new(
         "security",
         &[
@@ -83,15 +90,40 @@ pub fn keychain_cas() -> Vec<String> {
     .stdin(Stdio::null())
     .stderr(Stdio::null())
     .output()
-    .map(|output| sha256_hashes(&String::from_utf8_lossy(&output.stdout)))
+    .map(|output| parse_listing(&String::from_utf8_lossy(&output.stdout)))
     .unwrap_or_default()
 }
 
-fn sha256_hashes(listing: &str) -> Vec<String> {
-    listing
-        .lines()
-        .filter_map(|line| line.strip_prefix("SHA-256 hash: "))
-        .map(|hash| hash.trim().to_owned())
+fn parse_listing(listing: &str) -> Vec<KeychainCa> {
+    let mut cas: Vec<KeychainCa> = Vec::new();
+    for line in listing.lines() {
+        if let Some(hash) = line.strip_prefix("SHA-256 hash: ") {
+            cas.push(KeychainCa {
+                hash: hash.trim().to_ascii_uppercase(),
+                label: String::new(),
+            });
+        } else if let Some(label) = line.trim_start().strip_prefix("\"labl\"<blob>=")
+            && let Some(ca) = cas.last_mut()
+        {
+            ca.label = label.trim().trim_matches('"').to_owned();
+        }
+    }
+    cas
+}
+
+/// The keychain CAs this install created: those whose hashes `created` lists, or, when
+/// the state dir has no record yet, those named exactly `common_name`.
+pub fn own_cas(
+    listed: Vec<KeychainCa>,
+    created: Option<&[String]>,
+    common_name: &str,
+) -> Vec<KeychainCa> {
+    listed
+        .into_iter()
+        .filter(|ca| match created {
+            Some(hashes) => hashes.contains(&ca.hash),
+            None => ca.label == common_name,
+        })
         .collect()
 }
 
@@ -188,9 +220,37 @@ mod tests {
         assert!(!verify_leaf(&ca, "example.com", root).unwrap());
     }
 
+    const LISTING: &str = "SHA-256 hash: 1D2D\nSHA-1 hash: 34FB\nkeychain: \"/Library/Keychains/System.keychain\"\nattributes:\n    \"alis\"<blob>=\"carte local CA (alice@mac)\"\n    \"labl\"<blob>=\"carte local CA (alice@Mac)\"\nSHA-256 hash: c544\nSHA-1 hash: 0112\nattributes:\n    \"labl\"<blob>=\"carte local CA (bob@Mac)\"\n";
+
+    fn ca(hash: &str, user: &str) -> KeychainCa {
+        KeychainCa {
+            hash: hash.into(),
+            label: format!("carte local CA ({user}@Mac)"),
+        }
+    }
+
     #[test]
-    fn reads_hashes_from_a_keychain_listing() {
-        let listing = "SHA-256 hash: 1D2D\nSHA-1 hash: 34FB\nkeychain: \"/Library/Keychains/System.keychain\"\n    \"labl\"<blob>=\"carte local CA (me@host)\"\nSHA-256 hash: C544\nSHA-1 hash: 0112\n";
-        assert_eq!(sha256_hashes(listing), ["1D2D", "C544"]);
+    fn reads_hashes_and_labels_from_a_keychain_listing() {
+        assert_eq!(
+            parse_listing(LISTING),
+            [ca("1D2D", "alice"), ca("C544", "bob")]
+        );
+    }
+
+    #[test]
+    fn keeps_only_the_cas_this_install_created() {
+        let listed = parse_listing(LISTING);
+        let alice = "carte local CA (alice@Mac)";
+        let created = ["1D2D".to_string(), "9F00".to_string()];
+        assert_eq!(
+            own_cas(listed.clone(), Some(&created), alice),
+            [ca("1D2D", "alice")]
+        );
+        assert_eq!(
+            own_cas(listed.clone(), Some(&["C544".to_string()]), alice),
+            [ca("C544", "bob")]
+        );
+        assert_eq!(own_cas(listed.clone(), None, alice), [ca("1D2D", "alice")]);
+        assert!(own_cas(listed, None, "carte local CA (alice@Ma").is_empty());
     }
 }
