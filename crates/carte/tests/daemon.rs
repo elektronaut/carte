@@ -965,6 +965,35 @@ fn exec_keeps_the_app_from_idling_out_until_the_command_ends() {
 }
 
 #[test]
+fn a_request_the_daemon_cant_read_gets_a_json_error_and_its_version() {
+    let daemon = Daemon::start();
+    let socket = carte::paths::Paths::under(&daemon.root).socket();
+    let body = r#"{"target":{"address":"web","cwd":null},"action":{"action":"nap"}}"#;
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    write!(
+        stream,
+        "POST {} HTTP/1.1\r\nHost: carte\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        carte_api::paths::CONTROL,
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 422"), "{response}");
+    assert!(
+        head.to_ascii_lowercase().contains(&format!(
+            "\r\ncarte-version: {}\r\n",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{response}"
+    );
+    let error: carte_api::ErrorBody = serde_json::from_str(body).unwrap();
+    assert!(error.error.contains("unknown variant `nap`"), "{error:?}");
+}
+
+#[test]
 fn the_daemon_renders_a_process_env() {
     let daemon = Daemon::start();
     let socket = carte::paths::Paths::under(&daemon.root).socket();

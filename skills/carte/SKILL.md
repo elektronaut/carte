@@ -175,7 +175,9 @@ Every command takes `--json`. Exit codes:
 | 4 | the address matches nothing, or there's no app in this directory |
 | 5 | the app failed to start or didn't get ready |
 
-On 3, tell the user; don't start the daemon or a server yourself.
+On 3, tell the user; don't start the daemon or a server yourself. The
+same goes for a warning or error that the daemon runs another carte:
+tell the user it asks for `carte daemon restart`.
 
 ## What you may do
 

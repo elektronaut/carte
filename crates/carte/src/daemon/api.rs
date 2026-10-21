@@ -3,8 +3,8 @@
 use std::convert::Infallible;
 
 use axum::body::{Body, Bytes};
-use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::extract::{FromRequest, State};
+use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -17,6 +17,7 @@ use carte_api::{Event, KubeServicesRequest, KubeServicesResponse, Snapshot};
 use carte_core::address;
 use carte_core::kube::{self, KubeAddress};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -53,7 +54,33 @@ pub fn router(api: Api) -> Router {
         .route(paths::HOLD, post(hold))
         .route(paths::KUBE_SERVICES, post(kube_services))
         .route(paths::ATTACH, post(attach))
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(axum::middleware::map_response(with_version))
         .with_state(api)
+}
+
+/// Tells clients which carte answers, so they can tell an outdated daemon apart.
+async fn with_version(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        HeaderName::from_static(carte_api::VERSION_HEADER),
+        HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+    );
+    response
+}
+
+/// A JSON request body; one that can't be read is answered with an `ErrorBody`
+/// saying why, as every other error is.
+struct JsonBody<T>(T);
+
+impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for JsonBody<T> {
+    type Rejection = Response;
+
+    async fn from_request(request: axum::extract::Request, state: &S) -> Result<Self, Response> {
+        match Json::<T>::from_request(request, state).await {
+            Ok(Json(value)) => Ok(JsonBody(value)),
+            Err(rejection) => Err(error(rejection.status(), rejection.body_text())),
+        }
+    }
 }
 
 fn error(status: StatusCode, message: impl Into<String>) -> Response {
@@ -156,7 +183,7 @@ async fn watch(State(api): State<Api>) -> Response {
     stream(rx)
 }
 
-async fn control(State(api): State<Api>, Json(request): Json<ControlRequest>) -> Response {
+async fn control(State(api): State<Api>, JsonBody(request): JsonBody<ControlRequest>) -> Response {
     if let Some(address) = kube_address(&api, &request.target) {
         let result = match address {
             Ok(address) => api.kube.control(address, request.action).await,
@@ -176,7 +203,7 @@ async fn control(State(api): State<Api>, Json(request): Json<ControlRequest>) ->
     }
 }
 
-async fn stop_all(State(api): State<Api>, Json(request): Json<StopAllRequest>) -> Response {
+async fn stop_all(State(api): State<Api>, JsonBody(request): JsonBody<StopAllRequest>) -> Response {
     let mut response = api.supervisor.stop_all(request.idle_only).await;
     response
         .affected
@@ -184,7 +211,7 @@ async fn stop_all(State(api): State<Api>, Json(request): Json<StopAllRequest>) -
     Json(response).into_response()
 }
 
-async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Response {
+async fn logs(State(api): State<Api>, JsonBody(request): JsonBody<LogsRequest>) -> Response {
     if let Some(address) = kube_address(&api, &request.target) {
         let lines = match address {
             Ok(address) => api.kube.logs(address, &request).await,
@@ -235,7 +262,7 @@ async fn logs(State(api): State<Api>, Json(request): Json<LogsRequest>) -> Respo
     stream(rx)
 }
 
-async fn mark(State(api): State<Api>, Json(request): Json<MarkRequest>) -> Response {
+async fn mark(State(api): State<Api>, JsonBody(request): JsonBody<MarkRequest>) -> Response {
     if let Some(response) = not_for_kube(&api, &request.target, "log markers") {
         return response;
     }
@@ -248,7 +275,7 @@ async fn mark(State(api): State<Api>, Json(request): Json<MarkRequest>) -> Respo
     }
 }
 
-async fn events(State(api): State<Api>, Json(request): Json<EventsRequest>) -> Response {
+async fn events(State(api): State<Api>, JsonBody(request): JsonBody<EventsRequest>) -> Response {
     if let Some(address) = request
         .target
         .as_ref()
@@ -328,7 +355,7 @@ async fn kube_events(
     stream(rx)
 }
 
-async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Response {
+async fn share(State(api): State<Api>, JsonBody(request): JsonBody<ShareRequest>) -> Response {
     if kube_address(&api, &request.target).is_some() {
         return error(
             StatusCode::BAD_REQUEST,
@@ -344,7 +371,7 @@ async fn share(State(api): State<Api>, Json(request): Json<ShareRequest>) -> Res
     }
 }
 
-async fn unshare(State(api): State<Api>, Json(request): Json<UnshareRequest>) -> Response {
+async fn unshare(State(api): State<Api>, JsonBody(request): JsonBody<UnshareRequest>) -> Response {
     if let Some(response) = not_for_kube(&api, &request.target, "shares") {
         return response;
     }
@@ -358,7 +385,7 @@ async fn unshare(State(api): State<Api>, Json(request): Json<UnshareRequest>) ->
 }
 
 /// Holds the instance until the client goes away, which drops the response body.
-async fn hold(State(api): State<Api>, Json(target): Json<Address>) -> Response {
+async fn hold(State(api): State<Api>, JsonBody(target): JsonBody<Address>) -> Response {
     if let Some(response) = not_for_kube(&api, &target, "processes to run commands beside") {
         return response;
     }
@@ -462,7 +489,7 @@ async fn prune_list(State(api): State<Api>) -> Response {
 
 /// Removes the asked-for leftovers that still are leftovers once the configuration is
 /// read again, and that no running instance owns when the supervisor gets to them.
-async fn prune(State(api): State<Api>, Json(request): Json<PruneRequest>) -> Response {
+async fn prune(State(api): State<Api>, JsonBody(request): JsonBody<PruneRequest>) -> Response {
     let in_use = api.supervisor.in_use().await;
     let paths = api.paths.clone();
     let selected =
@@ -496,7 +523,7 @@ async fn daemon_env(State(api): State<Api>) -> Response {
     .into_response()
 }
 
-async fn process_env(State(api): State<Api>, Json(target): Json<Address>) -> Response {
+async fn process_env(State(api): State<Api>, JsonBody(target): JsonBody<Address>) -> Response {
     if let Some(response) = not_for_kube(&api, &target, "env") {
         return response;
     }

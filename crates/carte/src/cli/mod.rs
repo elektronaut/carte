@@ -383,6 +383,14 @@ pub fn run(cli: Cli) -> ExitCode {
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
         refresh_skill();
     }
+    if !matches!(
+        cli.command,
+        None | Some(
+            Command::Shim { .. } | Command::Daemon { .. } | Command::Mcp { .. } | Command::Tui
+        )
+    ) {
+        crate::client::warn_about_version();
+    }
     let Some(command) = cli.command else {
         if !std::io::stdout().is_terminal() {
             let _ = <Cli as clap::CommandFactory>::command().print_help();
