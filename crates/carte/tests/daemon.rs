@@ -69,12 +69,21 @@ impl Daemon {
     }
 
     fn start_sharing_with(provider: &str, domain: &str) -> Self {
+        Self::start_sharing_prepared(provider, domain, |_| {})
+    }
+
+    /// Sharing, after `prepare` has set up more files under `work`.
+    fn start_sharing_prepared(
+        provider: &str,
+        domain: &str,
+        prepare: impl FnOnce(&std::path::Path),
+    ) -> Self {
         let share = free_port();
         let share_port = share.number;
         let mut daemon = Self::start_configured(
             false,
             "",
-            |_| {},
+            prepare,
             &format!(
                 "\n[share]\nprovider = \"{provider}\"\ndomain = \"{domain}\"\nport = {share_port}\n"
             ),
@@ -1005,6 +1014,48 @@ fn shares_reach_only_shared_apps_and_carry_the_public_url() {
         daemon
             .request("web.acme.test", "/")
             .starts_with("HTTP/1.1 200")
+    );
+}
+
+#[test]
+fn shared_apps_that_fail_to_boot_show_visitors_a_plain_page() {
+    let daemon = Daemon::start_sharing_prepared("none", "share.example", |work| {
+        let fixture = fixture().display().to_string();
+        repo(
+            &work.join("acme-broken"),
+            &format!(
+                "web: echo \"boot-marker on $PORT in $PWD\"; FIXTURE_CRASH=3 exec {fixture}\n"
+            ),
+        );
+    });
+    daemon.run(&["share", "broken"]);
+
+    let public = daemon.public_request("broken--acme.share.example", None);
+    let local = daemon.request("broken.acme.test", "/");
+    assert!(local.starts_with("HTTP/1.1 502"), "{local}");
+    let line = local
+        .lines()
+        .find(|line| line.starts_with("boot-marker on "))
+        .unwrap_or_else(|| panic!("no boot line in {local}"));
+    let port = line["boot-marker on ".len()..].split(' ').next().unwrap();
+    assert!(port.parse::<u16>().is_ok(), "{line}");
+    let checkout = daemon.root.join("work/acme-broken").display().to_string();
+    assert!(local.contains(&checkout), "{local}");
+
+    assert!(public.starts_with("HTTP/1.1 502"), "{public}");
+    for detail in [
+        "boot-marker",
+        port,
+        &checkout,
+        "crashing with",
+        "broken",
+        "carte ",
+    ] {
+        assert!(!public.contains(detail), "{detail} in {public}");
+    }
+    assert!(
+        public.contains("This app isn't available right now"),
+        "{public}"
     );
 }
 
