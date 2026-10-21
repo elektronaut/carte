@@ -26,6 +26,7 @@
 //! On start it prints `tty: true` or `tty: false` for stdout, then `ready` once listening.
 
 use std::env;
+use std::ffi::CString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -54,6 +55,9 @@ fn main() {
     }
 
     if env::var_os("FIXTURE_SLEEPER").is_some() {
+        if let Ok(path) = env::var("FIXTURE_SLEEPER_PIDFILE") {
+            fs::write(path, process::id().to_string()).expect("write sleeper pidfile");
+        }
         sleep_forever();
     }
 
@@ -72,6 +76,7 @@ fn main() {
     }
 
     if env::var("FIXTURE_IGNORE_TERM").as_deref() == Ok("1") {
+        // SAFETY: SIG_IGN installs no handler.
         unsafe { libc::signal(libc::SIGTERM, libc::SIG_IGN) };
     }
 
@@ -129,6 +134,7 @@ fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
 }
 
 fn alive(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
     let found = unsafe { libc::kill(pid, 0) } == 0;
     found || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
@@ -136,6 +142,7 @@ fn alive(pid: libc::pid_t) -> bool {
 fn guard(lifeline: libc::pid_t, guarded: libc::pid_t) -> ! {
     while alive(guarded) {
         if !alive(lifeline) {
+            // SAFETY: kill takes no pointers.
             unsafe { libc::kill(guarded, libc::SIGKILL) };
             break;
         }
@@ -145,6 +152,7 @@ fn guard(lifeline: libc::pid_t, guarded: libc::pid_t) -> ! {
 }
 
 fn take_terminal() -> ! {
+    // SAFETY: SIG_IGN installs no handler; setpgid and tcsetpgrp take no pointers.
     unsafe {
         libc::signal(libc::SIGTTOU, libc::SIG_IGN);
         libc::setpgid(0, 0);
@@ -184,18 +192,33 @@ fn spawn_child(pidfile: &str, own_group: bool) {
 
 fn spawn_daemon(pidfile: &str) {
     let exe = env::current_exe().expect("current_exe");
-    let exe = std::ffi::CString::new(exe.into_os_string().into_encoded_bytes()).expect("exe path");
-    let pidfile = pidfile.to_owned();
+    let exe = CString::new(exe.into_os_string().into_encoded_bytes()).expect("exe path");
+    let mut vars: Vec<CString> = env::vars_os()
+        .filter(|(k, _)| !k.as_encoded_bytes().starts_with(b"FIXTURE_SLEEPER"))
+        .filter_map(|(k, v)| {
+            let mut pair = k.into_encoded_bytes();
+            pair.push(b'=');
+            pair.extend(v.into_encoded_bytes());
+            CString::new(pair).ok()
+        })
+        .collect();
+    vars.push(c"FIXTURE_SLEEPER=1".to_owned());
+    vars.push(CString::new(format!("FIXTURE_SLEEPER_PIDFILE={pidfile}")).expect("pidfile path"));
+    let envp: Vec<*const libc::c_char> = vars
+        .iter()
+        .map(|e| e.as_ptr())
+        .chain([std::ptr::null()])
+        .collect();
+    let argv = [exe.as_ptr(), std::ptr::null()];
+    // SAFETY: the children call only async-signal-safe functions (setsid,
+    // fork, execve, _exit) on data built before the first fork.
     unsafe {
         match libc::fork() {
             -1 => eprintln!("fork: {}", io::Error::last_os_error()),
             0 => {
                 libc::setsid();
                 if libc::fork() == 0 {
-                    let _ = fs::write(&pidfile, libc::getpid().to_string());
-                    libc::setenv(c"FIXTURE_SLEEPER".as_ptr(), c"1".as_ptr(), 1);
-                    let argv = [exe.as_ptr(), std::ptr::null()];
-                    libc::execv(exe.as_ptr(), argv.as_ptr());
+                    libc::execve(exe.as_ptr(), argv.as_ptr(), envp.as_ptr());
                 }
                 libc::_exit(0);
             }
