@@ -338,8 +338,9 @@ fn boots_an_app_on_the_first_request_and_stops_it_on_sigterm() {
         .collect();
     assert!(!pids.is_empty());
 
-    eventually("the worker's first line", || {
-        stdout(&daemon.run(&["logs", "web", "-n", "50"])).contains("acme-web@main/worker line 1")
+    eventually("both processes' ready lines", || {
+        let logs = stdout(&daemon.run(&["logs", "web", "-n", "50"]));
+        logs.contains("acme-web@main/web ready") && logs.contains("acme-web@main/worker ready")
     });
 
     let marker = stdout(&daemon.run(&["logs", "web", "--mark"]));
