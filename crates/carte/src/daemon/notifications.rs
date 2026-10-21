@@ -310,7 +310,7 @@ async fn deliver(n: Notification) {
         debug!("no display for a notification: {}", n.subtitle);
         return;
     };
-    let child = Command::new(&program)
+    let child = Command::from(carte_core::spawn::command(&program))
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
