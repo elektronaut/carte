@@ -606,6 +606,44 @@ async fn naming_the_main_stack_starts_every_app_on_main() {
 }
 
 #[tokio::test]
+async fn shutting_down_during_a_restart_doesnt_start_it_again() {
+    let setup = Setup::new();
+    let starts = setup.root.join("starts.log");
+    let trapped = setup.root.join("trapped");
+    setup.app(
+        "acme-web",
+        &format!(
+            "web: echo web >> {starts}; exec {{fixture}}\n",
+            starts = starts.display()
+        ),
+    );
+    setup.app(
+        "acme-api",
+        &format!(
+            "web: echo api >> {starts}; exec {{fixture}}\nworker: trap 'sleep 0.5; exit 0' TERM; touch {trapped}; while :; do sleep 0.05; done\n",
+            starts = starts.display(),
+            trapped = trapped.display()
+        ),
+    );
+    setup.project("");
+    let handle = setup.start_with(|options| options.grace = Duration::from_secs(5));
+    for app in ["acme-web", "acme-api"] {
+        handle.ensure_ready(key(app, Stack::Main)).await.unwrap();
+    }
+    wait_for_file(&trapped).await;
+
+    let mut restart = control("@main", Action::Restart);
+    restart.target.project = Some("acme".into());
+    handle.control(restart).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+        .await
+        .expect("the shutdown finishes");
+    let mut started = lines(&starts);
+    started.sort();
+    assert_eq!(started, ["api", "web"]);
+}
+
+#[tokio::test]
 async fn disabled_processes_stay_down_until_started_by_hand() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);
