@@ -1,0 +1,54 @@
+name: Fuzz
+# Fuzzes carte-core's parsers once a week, a few minutes per target. Pull
+# requests that change the fuzz crate run each target briefly, to check it
+# builds and runs. The corpus carries over between runs in the Actions cache.
+# A crash fails the run and uploads its input; turn it into an issue and a
+# regression test.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds to fuzz each target"
+        required: false
+        default: "300"
+  pull_request:
+    paths:
+      - fuzz/**
+      - .github/workflows/fuzz.yml
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [strip, template, config, env_file, procfile]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-01
+      - run: cargo install cargo-fuzz@0.13.2 --locked
+      - uses: actions/cache@v6.1.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Fuzz
+        run: |
+          cargo fuzz run "$TARGET" -- -max_total_time="$SECONDS_PER_TARGET" -max_len=4096 -rss_limit_mb=1024 -timeout=10
+        env:
+          TARGET: ${{ matrix.target }}
+          SECONDS_PER_TARGET: ${{ github.event_name == 'pull_request' && '30' || inputs.seconds || '300' }}
+      - uses: actions/upload-artifact@v7.0.1
+        if: failure()
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
