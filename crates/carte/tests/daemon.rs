@@ -1739,6 +1739,27 @@ fn teardown_event(
     })
 }
 
+/// Waits for the teardown of the feature-x stack to finish, failing with the events
+/// seen so far once it can no longer be on time. The daemon checks for removed
+/// stacks on its 1s tick and tears one down `delay` after finding it; a check that
+/// can't tell yet is repeated by the full check every 30s. So the wait allows the
+/// delay, a full check, two ticks, `runs_for` for the teardown command, and some
+/// slack.
+fn wait_for_teardown(daemon: &Daemon, delay: Duration, runs_for: Duration) {
+    let deadline = delay + Duration::from_secs(30 + 2 + 5) + runs_for;
+    let started = Instant::now();
+    while teardown_event(daemon, carte_api::EventKind::TeardownFinished, false).is_none() {
+        if started.elapsed() > deadline {
+            let lines: Vec<String> = events(daemon)
+                .iter()
+                .map(|e| format!("{} {}", e.subject_label(), e.summary()))
+                .collect();
+            panic!("the teardown didn't finish within {deadline:?}: {lines:#?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Adds the feature-x worktree and starts acme-web in it.
 fn run_in_feature_x(daemon: &Daemon) -> carte_core::dirs::InstanceDirs {
     git(
@@ -1800,9 +1821,7 @@ fn teardown_runs_once_the_worktree_is_gone_and_removes_the_folders() {
     assert!(!marker.exists(), "teardown ran with the instance");
 
     remove_feature_x(&daemon);
-    eventually("the teardown", || {
-        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
-    });
+    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::ZERO);
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap(),
         format!(
@@ -1966,16 +1985,13 @@ fn prune_keeps_a_stack_whose_teardown_is_pending() {
     );
     daemon.run(&["prune", "--yes"]);
     assert!(stack_dir.join("stack.toml").is_file());
-    eventually("the teardown", || {
-        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
-    });
+    wait_for_teardown(&daemon, Duration::from_secs(3), Duration::ZERO);
     assert!(marker.exists());
     assert!(!stack_dir.exists());
 }
 
 #[test]
 fn a_teardown_cut_short_by_a_shutdown_runs_again_on_the_next_start() {
-    use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let runs = marker.path().join("runs");
     let mut daemon = start_with_teardown("1s", &format!("echo run >> {}; sleep 3", runs.display()));
@@ -1988,9 +2004,7 @@ fn a_teardown_cut_short_by_a_shutdown_runs_again_on_the_next_start() {
     assert!(stack_dir.join("stack.toml").is_file());
 
     daemon.launch();
-    eventually("the teardown", || {
-        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
-    });
+    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::from_secs(3));
     assert_eq!(std::fs::read_to_string(&runs).unwrap(), "run\nrun\n");
     assert!(!stack_dir.exists());
     daemon.stop();
@@ -2046,16 +2060,13 @@ fn a_worktree_git_still_lists_keeps_its_stack_until_pruned() {
     git(&daemon.root.join("work/acme-web"), &["worktree", "prune"]);
     daemon.stop();
     daemon.launch();
-    eventually("the teardown", || {
-        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
-    });
+    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::ZERO);
     assert!(marker.exists());
     daemon.stop();
 }
 
 #[test]
 fn an_app_outside_git_leaves_the_teardown_of_the_others_alone() {
-    use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
     let daemon = Daemon::start_prepared(
@@ -2083,9 +2094,7 @@ fn an_app_outside_git_leaves_the_teardown_of_the_others_alone() {
     run_in_feature_x(&daemon);
 
     remove_feature_x(&daemon);
-    eventually("the teardown", || {
-        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
-    });
+    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::ZERO);
     assert!(marker.exists());
 }
 
@@ -2212,9 +2221,7 @@ fn a_worktree_named_main_doesnt_pause_other_teardowns() {
     });
 
     remove_feature_x(&daemon);
-    eventually("the teardown", || {
-        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
-    });
+    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::ZERO);
     assert!(marker.exists());
     assert!(teardown_event(&daemon, EventKind::TeardownPaused, false).is_none());
     assert!(!dirs.state.exists());
