@@ -143,6 +143,7 @@ impl Router for TestRouter {
             Route::Upstream {
                 port,
                 guard: Box::new(Guard::new(self.activity.clone())),
+                checked_authorization: false,
             }
         })
     }

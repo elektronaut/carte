@@ -49,10 +49,13 @@ pub struct RouteRequest<'a> {
 
 pub enum Route {
     /// Forward to `port` on loopback. `guard` lives as long as the request is in
-    /// flight, or as long as the connection if it becomes long-lived.
+    /// flight, or as long as the connection if it becomes long-lived. With
+    /// `checked_authorization`, the router took the `Authorization` header as its own
+    /// credentials, and the app doesn't get it.
     Upstream {
         port: u16,
         guard: Box<dyn ActivityGuard>,
+        checked_authorization: bool,
     },
     /// Forward over connections `dialer` opens inside the daemon, for an upstream with
     /// no listener of its own.

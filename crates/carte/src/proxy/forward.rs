@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::error::Error as _;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -80,7 +80,7 @@ const HOP_BY_HOP: [&str; 9] = [
 pub(crate) async fn handle(
     shared: Arc<Shared>,
     inbound: Arc<Inbound>,
-    request: Request<Incoming>,
+    mut request: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
     let Some(host) = request_host(&request) else {
         let page = ErrorPage::new(
@@ -130,7 +130,14 @@ pub(crate) async fn handle(
     let route = shared.router.route(route_request).await;
     Ok(match route {
         Route::Error(page) => render(&page, inbound.kind, request.headers()),
-        Route::Upstream { port, guard } => {
+        Route::Upstream {
+            port,
+            guard,
+            checked_authorization,
+        } => {
+            if checked_authorization {
+                request.headers_mut().remove(http::header::AUTHORIZATION);
+            }
             let upstream = Upstream::Port(port);
             forward(&shared, &inbound, route_request, upstream, guard, request).await
         }
@@ -171,9 +178,7 @@ async fn forward(
         *request.version_mut() = Version::HTTP_11;
     }
     add_forwarded_headers(request.headers_mut(), inbound, route_request);
-    if !request.headers().contains_key(HOST)
-        && let Ok(host) = HeaderValue::from_str(route_request.host)
-    {
+    if let Ok(host) = HeaderValue::from_str(route_request.host) {
         request.headers_mut().insert(HOST, host);
     }
     let sent = match upstream {
@@ -426,15 +431,36 @@ fn strip_hop_by_hop(headers: &mut HeaderMap, keep_upgrade: bool) {
     }
 }
 
+/// Forwarding headers that carte doesn't set, removed from requests through a share.
+const VISITOR_FORWARDING: [&str; 7] = [
+    "forwarded",
+    "x-forwarded-port",
+    "x-forwarded-prefix",
+    "x-forwarded-scheme",
+    "x-forwarded-ssl",
+    "x-real-ip",
+    "client-ip",
+];
+
 fn add_forwarded_headers(headers: &mut HeaderMap, inbound: &Inbound, request: RouteRequest<'_>) {
-    let peer = inbound.peer.ip().to_canonical().to_string();
-    let forwarded_for = headers
-        .get_all("x-forwarded-for")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .chain([peer.as_str()])
-        .collect::<Vec<_>>()
-        .join(", ");
+    let forwarded_for = match inbound.kind {
+        ListenerKind::Local => {
+            let peer = inbound.peer.ip().to_canonical().to_string();
+            headers
+                .get_all("x-forwarded-for")
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .chain([peer.as_str()])
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        ListenerKind::Share => {
+            for name in VISITOR_FORWARDING {
+                headers.remove(name);
+            }
+            visitor_chain(headers)
+        }
+    };
     let proto = match (inbound.kind, inbound.tls) {
         (ListenerKind::Share, _) | (ListenerKind::Local, true) => "https",
         (ListenerKind::Local, false) => "http",
@@ -445,6 +471,26 @@ fn add_forwarded_headers(headers: &mut HeaderMap, inbound: &Inbound, request: Ro
     headers.insert("x-forwarded-proto", HeaderValue::from_static(proto));
     if let Ok(value) = HeaderValue::from_str(request.host) {
         headers.insert("x-forwarded-host", value);
+    }
+}
+
+/// The `X-Forwarded-For` addresses a tunnel sent, without loopback, unspecified or
+/// malformed ones; `192.0.2.1` (TEST-NET-1) stands in for the visitor when none are
+/// left.
+fn visitor_chain(headers: &HeaderMap) -> String {
+    let addresses: Vec<String> = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|address| address.trim().parse::<IpAddr>().ok())
+        .filter(|ip| !ip.to_canonical().is_loopback() && !ip.is_unspecified())
+        .map(|ip| ip.to_string())
+        .collect();
+    if addresses.is_empty() {
+        "192.0.2.1".into()
+    } else {
+        addresses.join(", ")
     }
 }
 
@@ -680,6 +726,27 @@ mod tests {
         let key = request.headers()["sec-websocket-key"].to_str().unwrap();
         assert_eq!(key.len(), 24);
         assert_ne!(key, websocket_key().to_str().unwrap());
+    }
+
+    #[test]
+    fn keeps_only_visitor_addresses_from_the_tunnel() {
+        let chain = |pairs: &[(&'static str, &'static str)]| visitor_chain(&headers(pairs));
+        assert_eq!(chain(&[]), "192.0.2.1");
+        assert_eq!(
+            chain(&[("x-forwarded-for", "127.0.0.1, ::1, localhost, 0.0.0.0")]),
+            "192.0.2.1"
+        );
+        assert_eq!(
+            chain(&[("x-forwarded-for", "::ffff:127.0.0.2, 10.0.0.7")]),
+            "10.0.0.7"
+        );
+        assert_eq!(
+            chain(&[
+                ("x-forwarded-for", "127.0.0.1, 198.51.100.4"),
+                ("x-forwarded-for", "2001:db8::1")
+            ]),
+            "198.51.100.4, 2001:db8::1"
+        );
     }
 
     #[test]

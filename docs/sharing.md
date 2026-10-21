@@ -50,5 +50,29 @@ get a plain page with the status and a short message, such as "This app
 isn't available right now". The error page with the log and the carte
 commands to run only shows at the app's local address.
 
+## What a shared app sees
+
+Requests through a share reach the app from carte on `127.0.0.1`, like
+local ones, with these headers:
+
+- `Host` and `X-Forwarded-Host` are the shared hostname, and
+  `X-Forwarded-Proto` is `https`.
+- `X-Forwarded-For` holds the addresses the tunnel passed on, without
+  loopback ones. When none are left, as with a tunnel that sets no
+  `X-Forwarded-For`, it is `192.0.2.1`, a placeholder that is never a real
+  visitor.
+- `Forwarded`, `X-Forwarded-Port`, `X-Forwarded-Prefix`,
+  `X-Forwarded-Scheme`, `X-Forwarded-Ssl`, `X-Real-IP` and `Client-IP` are
+  removed.
+- With `--auth`, carte takes the `Authorization` header for its password
+  and removes it, so the app can't use that header itself.
+
+Since the connection comes from loopback, a dev tool that trusts local
+requests by their connection address, such as Django Debug Toolbar with
+`127.0.0.1` in `INTERNAL_IPS`, treats every visitor as local. Tools that
+read `X-Forwarded-For`, such as Rails' web-console, see the visitor.
+Turn such tools off, or limit them to addresses other than loopback,
+before sharing an app that runs them.
+
 The `[share]` section of the machine config holds the provider and
 domain; see [Configuration](configuration.md#share).
