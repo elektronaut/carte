@@ -303,8 +303,16 @@ branches:
   holds. An app with `subdomains = true` keeps room for one subdomain
   of up to 63 characters. The stack keeps its full name everywhere
   else, such as in `CARTE_STACK`. This only happens when the app,
-  stack and project names are all long. When even a cut name doesn't
-  fit, a problem is reported.
+  stack and project names are all long. How far the name is cut
+  depends on the project's apps, so adding an app with a long name or
+  turning `subdomains` on or off can change the hostnames of every
+  stack with a long name. Bookmarks, cookies and OAuth callback URLs
+  for the old hostname stop working, and it drops out of
+  `RAILS_DEVELOPMENT_HOSTS`.
+- A problem is reported when a hostname doesn't fit even with the name
+  cut, when an app with `subdomains = true` has room for only shorter
+  subdomains, when a cut name is the name of another stack or an app,
+  and when a label of the `tld` is longer than 63 characters.
 - A folder with the repo's own name gives way to the folder above it.
 - Worktrees of different repos with the same name form one stack.
 - Worktrees with a detached HEAD count like any other.
