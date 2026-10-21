@@ -32,6 +32,8 @@ struct FakeState {
     pods: HashMap<String, u16>,
     gone: HashSet<String>,
     auth_fails: bool,
+    /// Why the connector fails to build a client, while it does.
+    connect_fails: Option<String>,
     connects: usize,
     /// Listing Services across namespaces is forbidden.
     forbid_all: bool,
@@ -432,6 +434,9 @@ impl Connector for FakeConnector {
     ) -> BoxFuture<'a, Result<Arc<dyn Cluster>, ApiError>> {
         Box::pin(async move {
             self.0.hang("login").await;
+            if let Some(message) = self.0.state().connect_fails.clone() {
+                return Err(ApiError::Other(message));
+            }
             let client = {
                 let mut state = self.0.state();
                 state.clients += 1;
@@ -1644,22 +1649,7 @@ async fn a_kubeconfig_caught_mid_rewrite_keeps_the_client() {
 #[tokio::test]
 async fn a_certificate_rotated_in_place_gives_new_connections_a_new_client() {
     let setup = Setup::new(PROJECT);
-    setup
-        .cluster
-        .add_service("monitoring", "grafana", &["grafana-a"])
-        .await;
-    let dir = setup.kubeconfig.parent().unwrap();
-    let certificate = dir.join("client.crt");
-    let key = dir.join("client.key");
-    std::fs::write(&certificate, "one").unwrap();
-    std::fs::write(&key, "one").unwrap();
-    rewrite(
-        &setup.kubeconfig,
-        &kubeconfig("prod", SERVER, "one").replace(
-            "    token: one\n",
-            "    client-certificate: client.crt\n    client-key: client.key\n",
-        ),
-    );
+    let (certificate, key) = with_client_certificate(&setup).await;
     let route = || setup.kube.route(target("grafana", Some("monitoring")));
     let dialer = upstream(route().await).unwrap();
     upstream(route().await).unwrap();
@@ -1684,6 +1674,97 @@ async fn a_certificate_rotated_in_place_gives_new_connections_a_new_client() {
     rewrite(&key, "three");
     upstream(route().await).unwrap();
     assert_eq!(setup.cluster.state().clients, 3);
+}
+
+/// A setup whose user names `client.crt` and `client.key` next to the kubeconfig,
+/// with a route to grafana; returns the paths of the two files.
+async fn with_client_certificate(setup: &Setup) -> (PathBuf, PathBuf) {
+    setup
+        .cluster
+        .add_service("monitoring", "grafana", &["grafana-a"])
+        .await;
+    let dir = setup.kubeconfig.parent().unwrap();
+    let certificate = dir.join("client.crt");
+    let key = dir.join("client.key");
+    std::fs::write(&certificate, "one").unwrap();
+    std::fs::write(&key, "one").unwrap();
+    rewrite(
+        &setup.kubeconfig,
+        &kubeconfig("prod", SERVER, "one").replace(
+            "    token: one\n",
+            "    client-certificate: client.crt\n    client-key: client.key\n",
+        ),
+    );
+    (certificate, key)
+}
+
+#[tokio::test]
+async fn a_rotation_that_keeps_the_modification_time_is_noticed() {
+    let setup = Setup::new(PROJECT);
+    let (_, key) = with_client_certificate(&setup).await;
+    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    upstream(route().await).unwrap();
+    let modified = std::fs::metadata(&key).unwrap().modified().unwrap();
+    let keep_time = |path: &Path| {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(modified).unwrap();
+    };
+
+    std::fs::write(&key, "longer").unwrap();
+    keep_time(&key);
+    upstream(route().await).unwrap();
+    assert_eq!(setup.cluster.state().clients, 2, "by its size");
+
+    let renamed = key.with_extension("new");
+    std::fs::write(&renamed, "change").unwrap();
+    keep_time(&renamed);
+    std::fs::rename(&renamed, &key).unwrap();
+    upstream(route().await).unwrap();
+    assert_eq!(setup.cluster.state().clients, 3, "by its inode");
+}
+
+#[tokio::test]
+async fn a_rotation_caught_halfway_keeps_the_client() {
+    let setup = Setup::new(PROJECT);
+    let (certificate, key) = with_client_certificate(&setup).await;
+    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let dialer = upstream(route().await).unwrap();
+    assert_eq!(setup.cluster.state().clients, 1);
+
+    setup.cluster.state().connect_fails = Some("the key doesn't match".into());
+    rewrite(&certificate, "two");
+    for _ in 0..2 {
+        assert_eq!(upstream(route().await).unwrap(), dialer);
+        assert_eq!(get(&dialer).await, "grafana-a");
+    }
+    assert_eq!(setup.cluster.state().clients, 1);
+    let events = setup.events().await;
+    assert!(
+        events.iter().all(|e| e.kind != EventKind::Failed),
+        "{events:?}"
+    );
+
+    setup.cluster.state().connect_fails = None;
+    rewrite(&key, "two");
+    assert_eq!(upstream(route().await).unwrap(), dialer);
+    assert_eq!(setup.cluster.state().clients, 2);
+}
+
+#[tokio::test]
+async fn a_context_switched_to_a_cluster_that_fails_isnt_kept() {
+    let setup = Setup::new(PROJECT);
+    with_client_certificate(&setup).await;
+    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    upstream(route().await).unwrap();
+    setup.cluster.state().connect_fails = Some("no route to host".into());
+    let text = std::fs::read_to_string(&setup.kubeconfig).unwrap();
+    rewrite(
+        &setup.kubeconfig,
+        &text.replace(SERVER, "https://new.example:6443"),
+    );
+    let (status, page) = upstream(route().await).unwrap_err();
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(page.contains("no route to host"), "{page}");
 }
 
 #[tokio::test]
