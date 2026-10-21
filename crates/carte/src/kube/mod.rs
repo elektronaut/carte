@@ -6,6 +6,7 @@ mod forward;
 mod lookup;
 
 use std::collections::{BTreeMap, HashMap};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -152,14 +153,16 @@ struct ClusterEntry {
     env: BTreeMap<String, String>,
     /// When each kubeconfig file, then each of `files`, changed last, as of the
     /// last read.
-    stamps: Vec<Option<SystemTime>>,
-    /// The stamps of the files when they last couldn't be read, so that this is
-    /// logged once per change.
-    unread: Option<Vec<Option<SystemTime>>>,
+    stamps: Vec<Option<Stamp>>,
+    /// The stamps of the files when they last couldn't be read or connected with,
+    /// so that this is logged once per change.
+    unread: Option<Vec<Option<Stamp>>>,
     /// The files the context names by path, like its client certificate.
     files: Vec<PathBuf>,
     /// What the project's context resolved to.
     context: [u8; 32],
+    /// The contents of `files`.
+    contents: [u8; 32],
     cluster: Arc<dyn Cluster>,
 }
 
@@ -783,7 +786,9 @@ impl Inner {
     /// Reads the kubeconfig and keeps the slot's client while what the context
     /// resolves to, with its login plugin's env, is the same, else connects again.
     /// A kubeconfig that can't be read, as while a tool rewrites it, keeps the
-    /// client and its stamps, so that it's read again on the next request.
+    /// client and its stamps, so that it's read again on the next request. So do files
+    /// it names that can't be read or connected with, while the context resolves to
+    /// the same, as while a certificate and its key are rotated one after the other.
     async fn reconnect(
         &self,
         project: &KubeProject,
@@ -792,31 +797,32 @@ impl Inner {
     ) -> Result<Arc<dyn Cluster>, ApiError> {
         let mut stamps = kubeconfig_stamps(project, &env, &[]);
         let read = cluster::read_kubeconfig(project, &env).and_then(|kubeconfig| {
-            let files = cluster::referenced_files(&kubeconfig, &project.context);
-            stamps.extend(files.iter().map(|path| stamp(path)));
             let context = cluster::context_digest(&kubeconfig, &project.context, &env)?;
-            Ok((kubeconfig, files, context))
+            Ok((kubeconfig, context))
         });
-        let (kubeconfig, files, context) = match read {
+        let (kubeconfig, context) = match read {
             Ok(read) => read,
-            Err(err) => match slot.as_mut() {
-                Some(entry) if entry.project == *project => {
-                    if entry.unread.as_ref() != Some(&stamps) {
-                        warn!(
-                            "{}: kept the kube client, as the kubeconfig can't be read: {}",
-                            project.name,
-                            err.summary()
-                        );
-                        entry.unread = Some(stamps);
-                    }
-                    return Ok(entry.cluster.clone());
-                }
-                _ => return Err(err),
-            },
+            Err(err) => {
+                let why = format!("the kubeconfig can't be read: {}", err.summary());
+                return keep(project, slot, stamps, err, why);
+            }
+        };
+        let files = cluster::referenced_files(&kubeconfig, &project.context);
+        stamps.extend(files.iter().map(|path| stamp(path)));
+        let same = slot
+            .as_ref()
+            .is_some_and(|entry| entry.project == *project && entry.context == context);
+        let contents = match cluster::files_digest(&files) {
+            Ok(contents) => contents,
+            Err(err) if same => {
+                let why = err.summary();
+                return keep(project, slot, stamps, err, why);
+            }
+            Err(err) => return Err(err),
         };
         if let Some(entry) = slot.as_mut()
-            && entry.project == *project
-            && entry.context == context
+            && same
+            && entry.contents == contents
         {
             entry.env = env;
             entry.stamps = stamps;
@@ -824,12 +830,23 @@ impl Inner {
             entry.files = files;
             return Ok(entry.cluster.clone());
         }
-        let cluster = tokio::time::timeout(
+        let connected = tokio::time::timeout(
             self.timeout,
             self.connector.connect(project, kubeconfig, &env),
         )
         .await
-        .unwrap_or(Err(ApiError::Timeout(self.timeout)))?;
+        .unwrap_or(Err(ApiError::Timeout(self.timeout)));
+        let cluster = match connected {
+            Ok(cluster) => cluster,
+            Err(err) if same => {
+                let why = format!(
+                    "connecting with the changed files the kubeconfig names failed: {}",
+                    err.summary()
+                );
+                return keep(project, slot, stamps, err, why);
+            }
+            Err(err) => return Err(err),
+        };
         let cluster: Arc<dyn Cluster> = Arc::new(Bounded {
             cluster,
             timeout: self.timeout,
@@ -841,6 +858,7 @@ impl Inner {
             unread: None,
             files,
             context,
+            contents,
             cluster: cluster.clone(),
         });
         Ok(cluster)
@@ -1476,7 +1494,7 @@ fn kubeconfig_stamps(
     project: &KubeProject,
     env: &BTreeMap<String, String>,
     files: &[PathBuf],
-) -> Vec<Option<SystemTime>> {
+) -> Vec<Option<Stamp>> {
     cluster::kubeconfig_paths(project, env)
         .iter()
         .chain(files)
@@ -1484,8 +1502,43 @@ fn kubeconfig_stamps(
         .collect()
 }
 
-fn stamp(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+/// What tells a file's change: its modification time, size and inode, so that a
+/// copy or rename keeping the time is noticed too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: SystemTime,
+    len: u64,
+    inode: u64,
+}
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(Stamp {
+        modified: metadata.modified().ok()?,
+        len: metadata.len(),
+        inode: metadata.ino(),
+    })
+}
+
+/// Keeps the slot's client of `project`, logging `why` once per change of the
+/// files, else fails with `err`.
+fn keep(
+    project: &KubeProject,
+    slot: &mut Option<ClusterEntry>,
+    stamps: Vec<Option<Stamp>>,
+    err: ApiError,
+    why: String,
+) -> Result<Arc<dyn Cluster>, ApiError> {
+    match slot.as_mut() {
+        Some(entry) if entry.project == *project => {
+            if entry.unread.as_ref() != Some(&stamps) {
+                warn!("{}: kept the kube client, as {why}", project.name);
+                entry.unread = Some(stamps);
+            }
+            Ok(entry.cluster.clone())
+        }
+        _ => Err(err),
+    }
 }
 
 fn api_page(err: &ApiError) -> ErrorPage {

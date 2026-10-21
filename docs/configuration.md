@@ -1131,11 +1131,16 @@ opens again on the next request.
   changed: the context, its cluster or its user, the contents of those
   files, and for a user with a login plugin, the env the plugin runs
   with. Switching `current-context` with `kubectx` or `kubectl config
-  use-context` changes nothing. While the kubeconfig or a file it names
-  can't be read or parsed, or the kubeconfig lacks the context, its
-  cluster or its user, as in the middle of a rewrite, carte keeps the
-  connection it has, logs a warning, and reads the files again on the
-  next request. After a change, and after a change to the project file,
+  use-context` changes nothing. While the kubeconfig can't be read or
+  parsed, or lacks the context, its cluster or its user, as in the
+  middle of a rewrite, carte keeps the connection it has, logs a
+  warning, and reads the files again on the next request. It does the
+  same while a file the context names can't be read or connecting with
+  it fails, as when a certificate was replaced but its key not yet, as
+  long as the context, its cluster and its user are otherwise the same.
+  When they changed and connecting fails, carte reports the error. A
+  file counts as changed when its modification time, size or inode
+  changes. After a change, and after a change to the project file,
   new connections use the new settings while open ones, websockets
   included, run until they close. Open connections end only with `carte
   down`, `carte restart` or `carte stop-all`, the idle timeout, setting

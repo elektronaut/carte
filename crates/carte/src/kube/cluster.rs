@@ -487,10 +487,9 @@ pub fn referenced_files(kubeconfig: &Kubeconfig, context: &str) -> Vec<PathBuf> 
 }
 
 /// A digest of what `context` resolves to: its entry, its cluster's and its user's,
-/// the contents of their [`referenced_files`], and the env its login plugin runs
-/// with. Other contexts, `current-context` and, without a login plugin, the env leave
-/// it be. Fails when the context, its cluster or its named user is missing, as in a
-/// file cut off mid-rewrite, or when a referenced file can't be read.
+/// with the env its login plugin runs with. Other contexts, `current-context` and,
+/// without a login plugin, the env leave it be. Fails when the context, its cluster
+/// or its named user is missing, as in a file cut off mid-rewrite.
 pub fn context_digest(
     kubeconfig: &Kubeconfig,
     context: &str,
@@ -525,11 +524,19 @@ pub fn context_digest(
         .transpose()?;
     let json = serde_json::to_vec(&(named, cluster, user))
         .map_err(|err| ApiError::Other(err.to_string()))?;
+    Ok(Sha256::digest(json).into())
+}
+
+/// A digest of the contents of `files`, as [`referenced_files`] lists them.
+pub fn files_digest(files: &[PathBuf]) -> Result<[u8; 32], ApiError> {
     let mut digest = Sha256::new();
-    digest.update(json);
-    for path in referenced_files(&kubeconfig, context) {
-        let contents = std::fs::read(&path)
-            .map_err(|err| ApiError::Other(format!("can't read {}: {err}", path.display())))?;
+    for path in files {
+        let contents = std::fs::read(path).map_err(|err| {
+            ApiError::Other(format!(
+                "{}, which the kubeconfig names, can't be read: {err}",
+                path.display()
+            ))
+        })?;
         digest.update((contents.len() as u64).to_le_bytes());
         digest.update(contents);
     }
@@ -1081,7 +1088,8 @@ users:
             Vec::<PathBuf>::new()
         );
 
-        let digest = || context_digest(&kubeconfig, "prod", &BTreeMap::new());
+        let files = referenced_files(&kubeconfig, "prod");
+        let digest = || files_digest(&files);
         let before = digest().unwrap();
         assert_eq!(digest().unwrap(), before);
         for name in ["ca.crt", "certs/client.crt", "certs/client.key"] {
