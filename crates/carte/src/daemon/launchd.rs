@@ -45,7 +45,7 @@ pub async fn proxy_listeners(
 #[cfg(target_os = "macos")]
 pub fn activate_socket(name: &str) -> io::Result<Vec<TcpListener>> {
     use std::ffi::CString;
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
 
     use libc::{c_char, c_int, size_t};
 
@@ -75,11 +75,15 @@ pub fn activate_socket(name: &str) -> io::Result<Vec<TcpListener>> {
     let raw = unsafe { std::slice::from_raw_parts(fds, count) }.to_vec();
     // SAFETY: `fds` came from malloc in launchd and is freed exactly once.
     unsafe { libc::free(fds.cast()) };
-    Ok(raw
+    let listeners: Vec<TcpListener> = raw
         .into_iter()
         // SAFETY: each descriptor is an open listening socket now owned by us alone.
         .map(|fd| unsafe { TcpListener::from_raw_fd(fd) })
-        .collect())
+        .collect();
+    for listener in &listeners {
+        crate::process::set_cloexec(listener.as_raw_fd(), true)?;
+    }
+    Ok(listeners)
 }
 
 #[cfg(not(target_os = "macos"))]

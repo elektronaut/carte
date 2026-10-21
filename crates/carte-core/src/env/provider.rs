@@ -97,6 +97,12 @@ impl CommandRunner for SystemRunner {
         if self.own_group {
             command.process_group(0);
         }
+        unsafe {
+            command.pre_exec(|| {
+                cloexec_above_stderr();
+                Ok(())
+            });
+        }
         let mut child = command.spawn()?;
         let mut stdout = Pipe::new(child.stdout.take().map(OwnedFd::from))?;
         let mut stderr = Pipe::new(child.stderr.take().map(OwnedFd::from))?;
@@ -139,6 +145,35 @@ impl CommandRunner for SystemRunner {
             stdout: stdout.buf,
             stderr: String::from_utf8_lossy(&stderr.buf).into_owned(),
         })
+    }
+}
+
+/// Marks every descriptor above stderr close-on-exec.
+/// Runs between fork and exec, so only async-signal-safe calls.
+fn cloexec_above_stderr() {
+    #[cfg(target_os = "linux")]
+    if unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    } == 0
+    {
+        return;
+    }
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        limit.rlim_cur.min(65536) as libc::c_int
+    } else {
+        1024
+    };
+    for fd in 3..max {
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
 }
 
@@ -1162,6 +1197,31 @@ pub(crate) mod tests {
         assert_eq!(output.stdout, b"/\n");
         assert_eq!(output.stderr, "oops\n");
         assert!(runner.find_program("definitely-not-a-program").is_none());
+    }
+
+    #[test]
+    fn system_runner_passes_on_no_descriptors_above_stderr() {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let runner = SystemRunner {
+            search_path: vec!["/bin".into()],
+            own_group: true,
+        };
+        let output = runner.run(&CommandSpec {
+            program: runner.find_program("sh").unwrap(),
+            args: vec![
+                "-c".into(),
+                format!("test -e /dev/fd/{} && echo open || echo closed", fds[1]),
+            ],
+            cwd: "/".into(),
+            env: None,
+            timeout: Duration::from_secs(10),
+        });
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        assert_eq!(output.unwrap().stdout, b"closed\n");
     }
 
     #[test]

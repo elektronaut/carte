@@ -13,7 +13,6 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use nix::errno::Errno;
-use nix::pty::{Winsize, openpty};
 use nix::sys::signal::{Signal, killpg};
 use nix::sys::termios::{self, InputFlags, SetArg, SpecialCharacterIndices};
 use nix::unistd::Pid;
@@ -95,19 +94,13 @@ impl Spawner {
 
     pub async fn spawn(&self, spec: &SpawnSpec) -> io::Result<ProcessHandle> {
         let (daemon_end, shim_end) = StdUnixStream::pair()?;
-        set_cloexec(daemon_end.as_raw_fd(), true)?;
-        set_cloexec(shim_end.as_raw_fd(), false)?;
+        let shim_fd = shim_end.as_raw_fd();
 
         let (output_fd, stdio, pty) = match spec.io {
             IoMode::Pty { cols, rows } => {
-                let size = Winsize {
-                    ws_row: rows,
-                    ws_col: cols,
-                    ws_xpixel: 0,
-                    ws_ypixel: 0,
-                };
-                let pty = openpty(Some(&size), None).map_err(io::Error::from)?;
-                let mut modes = termios::tcgetattr(&pty.slave).map_err(io::Error::from)?;
+                let (master, slave) = open_pty()?;
+                Pty::resize_fd(master.as_raw_fd(), cols, rows)?;
+                let mut modes = termios::tcgetattr(&slave).map_err(io::Error::from)?;
                 modes.input_flags.remove(InputFlags::IXON);
                 modes.control_chars[SpecialCharacterIndices::VSUSP as usize] =
                     libc::_POSIX_VDISABLE;
@@ -116,11 +109,9 @@ impl Spawner {
                     modes.control_chars[SpecialCharacterIndices::VDSUSP as usize] =
                         libc::_POSIX_VDISABLE;
                 }
-                termios::tcsetattr(&pty.slave, SetArg::TCSANOW, &modes).map_err(io::Error::from)?;
-                set_cloexec(pty.master.as_raw_fd(), true)?;
-                set_cloexec(pty.slave.as_raw_fd(), true)?;
-                let stdio = [pty.slave.try_clone()?, pty.slave.try_clone()?, pty.slave];
-                (pty.master, stdio, true)
+                termios::tcsetattr(&slave, SetArg::TCSANOW, &modes).map_err(io::Error::from)?;
+                let stdio = [slave.try_clone()?, slave.try_clone()?, slave];
+                (master, stdio, true)
             }
             IoMode::Pipes => {
                 let (read, write) = pipe_cloexec()?;
@@ -135,7 +126,7 @@ impl Spawner {
         command
             .arg("__shim")
             .arg("--fd")
-            .arg(shim_end.as_raw_fd().to_string())
+            .arg(shim_fd.to_string())
             .arg("--")
             .arg(&spec.command)
             .current_dir(&spec.cwd)
@@ -147,6 +138,9 @@ impl Spawner {
             .kill_on_drop(false);
         unsafe {
             command.pre_exec(move || {
+                if libc::fcntl(shim_fd, libc::F_SETFD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -356,13 +350,17 @@ impl Pty {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
+        Pty::resize_fd(self.master.as_raw_fd(), cols, rows)
+    }
+
+    fn resize_fd(fd: RawFd, cols: u16, rows: u16) -> io::Result<()> {
         let size = libc::winsize {
             ws_row: rows,
             ws_col: cols,
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        if unsafe { libc::ioctl(self.master.as_raw_fd(), libc::TIOCSWINSZ, &size) } < 0 {
+        if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &size) } < 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -429,15 +427,56 @@ fn ignore_esrch(result: io::Result<()>) -> io::Result<()> {
     }
 }
 
+/// A pty's master and slave, both opened close-on-exec.
+fn open_pty() -> io::Result<(OwnedFd, OwnedFd)> {
+    let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
+    let master = cvt(unsafe { libc::posix_openpt(flags) })?;
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    cvt(unsafe { libc::grantpt(master.as_raw_fd()) })?;
+    cvt(unsafe { libc::unlockpt(master.as_raw_fd()) })?;
+    let mut name = [0 as libc::c_char; 128];
+    #[cfg(target_os = "macos")]
+    cvt(unsafe {
+        libc::ioctl(
+            master.as_raw_fd(),
+            libc::TIOCPTYGNAME as _,
+            name.as_mut_ptr(),
+        )
+    })?;
+    #[cfg(target_os = "linux")]
+    {
+        let err = unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) };
+        if err != 0 {
+            return Err(io::Error::from_raw_os_error(err));
+        }
+    }
+    let slave = cvt(unsafe { libc::open(name.as_ptr(), flags) })?;
+    Ok((master, unsafe { OwnedFd::from_raw_fd(slave) }))
+}
+
+#[cfg(target_os = "linux")]
 fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    cvt(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) })?;
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0; 2];
+    cvt(unsafe { libc::pipe(fds.as_mut_ptr()) })?;
     let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
     set_cloexec(read.as_raw_fd(), true)?;
     set_cloexec(write.as_raw_fd(), true)?;
     Ok((read, write))
+}
+
+fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
+    if ret < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(ret)
+    }
 }
 
 pub(crate) fn set_cloexec(fd: RawFd, on: bool) -> io::Result<()> {
