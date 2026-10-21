@@ -92,7 +92,8 @@ pub fn select(
 }
 
 /// A stack's folder, and the run directories and pidfiles of its instances: those of
-/// `apps` and of every app with a folder in it.
+/// `apps` and of every app with a folder in it. Only run directories whose owner
+/// marker names this carte count.
 pub fn stack_leftovers(
     paths: &Paths,
     project: &str,
@@ -117,11 +118,10 @@ pub fn stack_leftovers(
             app: app.clone(),
             stack: Stack::Branch(stack.to_string()),
         };
-        orphans.push(orphan(
-            OrphanKind::RunDir,
-            Some(app),
-            roots.instance(&key).run,
-        ));
+        let run = roots.instance(&key).run;
+        if owns_run_dir(&roots, &run) {
+            orphans.push(orphan(OrphanKind::RunDir, Some(app), run));
+        }
         orphans.push(orphan(OrphanKind::Pidfile, Some(app), paths.pidfile(&key)));
     }
     orphans
@@ -474,14 +474,10 @@ fn listing(roots: &DirRoots, pidfiles: &Path) -> Listing {
         listing.data.insert(project, stacks);
     }
     listing.run = dirs_in(&roots.run);
-    let owner = roots.data.display().to_string();
     listing.run_owned = listing
         .run
         .iter()
-        .filter(|name| {
-            fs::read_to_string(dirs::owner_marker(&roots.run.join(name)))
-                .is_ok_and(|text| text.trim_end() == owner)
-        })
+        .filter(|name| owns_run_dir(roots, &roots.run.join(name)))
         .cloned()
         .collect();
     for project in dirs_in(pidfiles) {
@@ -491,6 +487,12 @@ fn listing(roots: &DirRoots, pidfiles: &Path) -> Listing {
         }
     }
     listing
+}
+
+/// Whether the owner marker beside a run directory names this carte's data root.
+fn owns_run_dir(roots: &DirRoots, run_dir: &Path) -> bool {
+    let owner = roots.data.display().to_string();
+    fs::read_to_string(dirs::owner_marker(run_dir)).is_ok_and(|text| text.trim_end() == owner)
 }
 
 fn dirs_in(dir: &Path) -> BTreeSet<String> {
@@ -565,6 +567,36 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn stack_leftovers_take_only_run_directories_this_carte_owns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path());
+        let roots = paths.dir_roots();
+        let run = |app: &str| {
+            roots
+                .instance(&InstanceKey {
+                    project: "acme".into(),
+                    app: app.into(),
+                    stack: Stack::Branch("x".into()),
+                })
+                .run
+        };
+        for app in ["acme-web", "acme-api", "acme-docs"] {
+            fs::create_dir_all(run(app)).unwrap();
+        }
+        let owner = roots.data.display().to_string();
+        fs::write(dirs::owner_marker(&run("acme-web")), &owner).unwrap();
+        fs::write(dirs::owner_marker(&run("acme-api")), "/elsewhere/data").unwrap();
+
+        let apps = ["acme-web", "acme-api", "acme-docs"].map(String::from);
+        let run_dirs: Vec<PathBuf> = stack_leftovers(&paths, "acme", "x", apps)
+            .into_iter()
+            .filter(|o| matches!(o.kind, OrphanKind::RunDir))
+            .map(|o| o.path)
+            .collect();
+        assert_eq!(run_dirs, [run("acme-web")]);
     }
 
     fn leftovers(paths: &Paths) -> Vec<String> {

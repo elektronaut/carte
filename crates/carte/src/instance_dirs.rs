@@ -8,9 +8,9 @@ use std::path::Path;
 use carte_core::dirs::{DirRoots, InstanceDirs, STACK_RECORD, StackRecord, owner_marker};
 use carte_core::model::{InstanceKey, ProjectState};
 
-/// Creates `key`'s directories, marks the run directory as this carte's, and records
-/// the stack's current worktrees in its folder. Creates nothing inside the
-/// instance's directories.
+/// Creates `key`'s directories, marks a run directory without an owner as this
+/// carte's, and records the stack's current worktrees in its folder. Creates
+/// nothing inside the instance's directories.
 pub fn prepare(
     roots: &DirRoots,
     key: &InstanceKey,
@@ -20,9 +20,8 @@ pub fn prepare(
     create_run_root(&roots.run)?;
     private_dir(&dirs.run)?;
     let marker = owner_marker(&dirs.run);
-    let owner = roots.data.display().to_string();
-    if fs::read_to_string(&marker).ok().as_deref() != Some(owner.as_str()) {
-        fs::write(&marker, owner)?;
+    if !fs::exists(&marker)? {
+        fs::write(&marker, roots.data.display().to_string())?;
     }
     fs::create_dir_all(&dirs.state)?;
 
@@ -213,6 +212,21 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, &dirs.run).unwrap();
         let err = prepare(&run, &key, &state).unwrap_err();
         assert!(err.to_string().contains("isn't a directory"), "{err}");
+    }
+
+    #[test]
+    fn an_owner_marker_already_there_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = DirRoots {
+            data: tmp.path().join("state/data"),
+            run: tmp.path().join("tmp"),
+        };
+        let key = key("web", Stack::Branch("x".into()));
+        let marker = owner_marker(&roots.instance(&key).run);
+        fs::create_dir_all(&roots.run).unwrap();
+        fs::write(&marker, "/elsewhere/data").unwrap();
+        prepare(&roots, &key, &project_state(&[("web", "x")])).unwrap();
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "/elsewhere/data");
     }
 
     #[test]
