@@ -411,16 +411,22 @@ pub fn load_world(config_dir: &Path) -> World {
         expand_template(&mut world, &mut generated, file, folder);
     }
     resolve_elsewhere(&mut world);
-    drop_taken_kube_aliases(&mut world);
+    drop_taken_aliases(&mut world);
     world
 }
 
-/// Leaves out aliases that would shadow a name: a local alias equal to a kube
-/// project's name, and a kube alias equal to a project's name, a local alias or an
-/// alias of another kube project. Project names win, then local aliases, then the
-/// kube project loaded first.
-fn drop_taken_kube_aliases(world: &mut World) {
+/// Leaves out aliases that would shadow a name: a local alias equal to a project's
+/// name or an alias of a project loaded earlier, and a kube alias equal to a
+/// project's name, a local alias or an alias of another kube project. Project names
+/// win, then local aliases in load order, then the kube project loaded first.
+fn drop_taken_aliases(world: &mut World) {
     let kube_names: BTreeSet<String> = world.kube_projects.iter().map(|p| p.name.clone()).collect();
+    let project_names: BTreeSet<String> = world
+        .projects
+        .iter()
+        .map(|state| state.project.name.clone())
+        .collect();
+    let mut local_aliases = BTreeSet::new();
     let skipped = |project: &str, app: &str, alias: &str| Problem {
         project: Some(project.to_string()),
         app: Some(app.to_string()),
@@ -432,7 +438,9 @@ fn drop_taken_kube_aliases(world: &mut World) {
         let project = state.project.name.clone();
         for app in &mut state.project.apps {
             app.settings.aliases.retain(|alias| {
-                let free = !kube_names.contains(alias);
+                let free = !kube_names.contains(alias)
+                    && !project_names.contains(alias)
+                    && local_aliases.insert(alias.clone());
                 if !free {
                     problems.push(skipped(&project, &app.name, alias));
                 }
@@ -1347,6 +1355,89 @@ prunable gitdir file points to non-existent location
                 "{messages:?}"
             );
         }
+    }
+
+    #[test]
+    fn project_names_beat_local_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for name in ["nova", "shop"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let projects = root.join("config/projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(
+            projects.join("nova.toml"),
+            format!(
+                "root = \"{}\"\n[apps.nova]\naliases = [\"shop\", \"orders\"]\n",
+                root.join("nova").display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join("shop.toml"),
+            format!("root = \"{}\"\n", root.join("shop").display()),
+        )
+        .unwrap();
+
+        let world = load_world(&root.join("config"));
+        let nova = world.project("nova").unwrap();
+        assert_eq!(nova.project.apps[0].settings.aliases, ["orders"]);
+        let messages: Vec<_> = world.problems.iter().map(|p| p.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["alias \"shop\" is skipped: a project or another app already uses it"]
+        );
+        assert_eq!(world.problems[0].project.as_deref(), Some("nova"));
+        let resolved = crate::naming::resolve_host(&world, "shop.localhost").unwrap();
+        assert_eq!(resolved.key.project, "shop");
+    }
+
+    #[test]
+    fn projects_from_a_template_dont_share_an_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let sites = root.join("sites");
+        for name in ["acme", "nova"] {
+            let dir = sites.join(name);
+            repo(&dir);
+            std::fs::create_dir_all(dir.join("apps/web")).unwrap();
+            std::fs::write(dir.join("apps/web/Procfile"), "web: x\n").unwrap();
+        }
+        let projects = root.join("config/projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(
+            projects.join("sites.toml"),
+            format!(
+                "root = \"{}\"\nprojects = \"*\"\ninclude = \"apps/*\"\n\n[apps.web]\naliases = [\"store\"]\n",
+                sites.display()
+            ),
+        )
+        .unwrap();
+
+        let world = load_world(&root.join("config"));
+        let aliases = |project: &str| {
+            world
+                .project(project)
+                .unwrap()
+                .project
+                .app("web")
+                .unwrap()
+                .settings
+                .aliases
+                .clone()
+        };
+        assert_eq!(aliases("acme"), ["store"]);
+        assert!(aliases("nova").is_empty());
+        assert_eq!(world.problems.len(), 1, "{:?}", world.problems);
+        assert_eq!(world.problems[0].project.as_deref(), Some("nova"));
+        assert!(
+            world.problems[0]
+                .message
+                .contains("alias \"store\" is skipped")
+        );
+        let resolved = crate::naming::resolve_host(&world, "store.localhost").unwrap();
+        assert_eq!(resolved.key.project, "acme");
     }
 
     #[test]

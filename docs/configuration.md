@@ -341,7 +341,7 @@ TZ = "Europe/Oslo"
 | `env` | none | Env templates for this app, over the project's |
 | `env_files` | none | Files of `KEY=VALUE` lines, relative to the checkout, read in order |
 | `depends_on` | none | Apps this app calls. See below |
-| `aliases` | none | Extra hostnames routed to the app on main. An alias is one label without the TLD: `shop` serves `shop.localhost`. `carte import puma-dev` sets the old puma-dev names. Rails apps: see `CARTE_TLD_LENGTH` under [Environment](#environment) |
+| `aliases` | none | Extra hostnames routed to the app on main. An alias is one label without the TLD: `shop` serves `shop.localhost`. An alias equal to a project's name, or to an alias of a project loaded earlier, is skipped and reported, so an alias in a template applies to only one of its projects. `carte import puma-dev` sets the old puma-dev names. Rails apps: see `CARTE_TLD_LENGTH` under [Environment](#environment) |
 | `subdomains` | `false` | Pass extra labels on the left (`oslo.events.acme.localhost`) through to the app instead of returning 404 |
 | `policy` | `"auto"` | Default policy for the app's processes. See [Policies](#policies) |
 | `port` | none | Route to a fixed port instead of running processes, for an app you start yourself |
