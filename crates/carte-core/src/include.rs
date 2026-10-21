@@ -84,7 +84,7 @@ pub fn expand(
     named: &[(String, String)],
 ) -> Expanded {
     let mut out = Expanded::default();
-    let root = root.map(|r| normalize(&expand_home(r)));
+    let root = root.map(physical_root);
     let implied = include.is_empty() && named.is_empty();
     if implied && root.is_none() {
         out.problems.push(Issue::new(
@@ -297,7 +297,7 @@ pub fn expand_projects(
     root: Option<&str>,
     projects: &[String],
 ) -> (Vec<(PathBuf, bool)>, BTreeSet<PathBuf>, Vec<String>) {
-    let root = root.map(|r| normalize(&expand_home(r)));
+    let root = root.map(physical_root);
     let mut problems = Vec::new();
     let mut entries = Vec::new();
     for text in projects {
@@ -588,6 +588,13 @@ fn nested_git(checkout: &Path, dir: &Path) -> bool {
 }
 
 /// Removes `.` and resolves `..` without touching the disk.
+/// A project's `root` with symlinks resolved, as git and the shell's `pwd -P`
+/// give paths, so a checkout under it is found from either.
+fn physical_root(root: &str) -> PathBuf {
+    let root = normalize(&expand_home(root));
+    root.canonicalize().unwrap_or(root)
+}
+
 fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {

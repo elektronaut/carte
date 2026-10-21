@@ -38,19 +38,28 @@ pub fn expand_home(path: &str) -> PathBuf {
 }
 
 /// Whether a directory is a primary git checkout: it has a `.git` directory, or a
-/// `.git` file that does not point into another repo's `worktrees/`.
+/// `.git` file that points at a git dir of its own, such as a submodule's, rather
+/// than at a linked worktree's: one with a `commondir` file, in a repo's
+/// `worktrees/`.
 pub fn is_primary_checkout(dir: &Path) -> bool {
     let dot_git = dir.join(".git");
     if dot_git.is_dir() {
         return true;
     }
-    match std::fs::read_to_string(&dot_git) {
-        Ok(contents) => !contents
-            .trim()
-            .strip_prefix("gitdir:")
-            .is_some_and(|gitdir| gitdir.trim().contains("/worktrees/")),
-        Err(_) => false,
-    }
+    let Ok(contents) = std::fs::read_to_string(&dot_git) else {
+        return false;
+    };
+    let Some(gitdir) = contents.trim().strip_prefix("gitdir:") else {
+        return true;
+    };
+    let gitdir = dir.join(gitdir.trim());
+    let in_worktrees = gitdir.parent().is_some_and(|parent| {
+        parent.file_name().is_some_and(|name| name == "worktrees")
+            && parent
+                .parent()
+                .is_some_and(|repo| repo.join("HEAD").is_file())
+    });
+    !(gitdir.join("commondir").is_file() || in_worktrees)
 }
 
 /// One entry of `git worktree list --porcelain`.
@@ -925,6 +934,54 @@ prunable gitdir file points to non-existent location
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].branch.as_deref(), Some("x"));
         assert_eq!(worktrees[0].slug, "app-x");
+    }
+
+    #[test]
+    fn checkouts_with_a_git_dir_of_their_own_are_primary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let shop = root.join("shop");
+        repo(&shop);
+        git(
+            &shop,
+            &["worktree", "add", "-q", "-b", "feature", "../shop-feature"],
+        );
+        assert!(is_primary_checkout(&shop));
+        assert!(!is_primary_checkout(&root.join("shop-feature")));
+
+        let modules = root.join("worktrees/x/.git/modules/web");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(modules.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let web = root.join("worktrees/x/web");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join(".git"), format!("gitdir: {}\n", modules.display())).unwrap();
+        assert!(is_primary_checkout(&web));
+        std::fs::write(web.join(".git"), "gitdir: ../.git/modules/web\n").unwrap();
+        assert!(is_primary_checkout(&web));
+    }
+
+    #[test]
+    fn checkouts_under_a_symlinked_root_are_found_from_their_physical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().canonicalize().unwrap().join("real");
+        repo(&real.join("shop"));
+        std::fs::create_dir_all(real.join("shop/app")).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let config_dir = real.join("config");
+        std::fs::create_dir_all(config_dir.join("projects")).unwrap();
+        std::fs::write(
+            config_dir.join("projects/shop.toml"),
+            format!("root = \"{}\"\n", link.join("shop").display()),
+        )
+        .unwrap();
+
+        let world = load_world(&config_dir);
+        assert!(world.problems.is_empty(), "{:?}", world.problems);
+        let location = crate::address::locate(&world, &real.join("shop/app")).unwrap();
+        assert_eq!(location.project, "shop");
+        assert_eq!(location.app.as_deref(), Some("shop"));
+        assert_eq!(location.stack, Stack::Main);
     }
 
     fn names(repo: &str, paths: &[&str]) -> Vec<String> {

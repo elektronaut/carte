@@ -137,7 +137,7 @@ root = "~/work/shop"
 
 | Key | Default | |
 | --- | --- | --- |
-| `root` | none | The directory `include` entries and app paths are relative to. Without `include`, the root itself is the project's one app |
+| `root` | none | The directory `include` entries and app paths are relative to, starting with `/` or `~/`. Without `include`, the root itself is the project's one app. A symlink in it is resolved, so the apps are found from either path |
 | `include` | the root | Where the apps are: a path or glob, or a list of them. See [Finding apps](#finding-apps) |
 | `projects` | none | Makes the file a template for a project per directory. See [Templates](#templates) |
 | `strip_prefix` | none | Removed from directory names to get the short names used in hostnames |
@@ -1134,7 +1134,7 @@ reachable through [sharing](sharing.md).
 | Key | Default | |
 | --- | --- | --- |
 | `kube.context` | required | The kubeconfig context |
-| `kube.kubeconfig` | `$KUBECONFIG`, then `~/.kube/config` | The kubeconfig file |
+| `kube.kubeconfig` | `$KUBECONFIG`, then `~/.kube/config` | The kubeconfig file, starting with `/` or `~/` |
 | `namespaces` | all | The namespaces carte looks in |
 | `env_provider` | detected | `mise`, `direnv`, `shell` or `none`: the env kubeconfig login plugins like `aws` or `gke-gcloud-auth-plugin` run with. Detected as for apps, in your home directory. See [Environment](#environment) |
 | `idle_timeout` | machine's | How long a Service stays connected without requests |
