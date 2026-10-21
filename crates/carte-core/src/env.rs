@@ -14,7 +14,7 @@ pub(crate) use file::is_valid_key;
 pub use file::{EnvFile, EnvFileEntry, EnvFileError, parse_env_file, read_env_files};
 pub use provider::{
     CommandOutput, CommandRunner, CommandSpec, ProviderError, SystemRunner, detect_provider,
-    load_provider, provider_name,
+    is_mise_config_name, load_provider, provider_name,
 };
 
 use crate::dirs::InstanceDirs;

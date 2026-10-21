@@ -958,8 +958,10 @@ Each process's environment is built in layers, later ones winning:
 
 1. **The provider.** The default is `mise` when mise is installed and
    mise has config for the app: `mise.toml`, `.tool-versions` or another
-   of mise's config files, such as `.config/mise.toml`, in the app's
-   directory or one above it up to the repo's root;
+   of mise's config files, such as `mise.local.toml` or
+   `.config/mise/config.toml`, in the app's directory or one above it up
+   to the repo's root (outside a repo, only the app's own directory; never
+   your home directory's global config);
    otherwise `shell`, the environment of a login shell in the checkout.
    When that shell's `PATH` has mise's shims, carte adds `mise env` on
    top, since a shim would otherwise apply mise's `[env]` over carte's
@@ -994,9 +996,13 @@ Each process's environment is built in layers, later ones winning:
 | `NODE_EXTRA_CA_CERTS` | carte's CA |
 | `DISABLE_SPRING` | `1` |
 
-When `mise.toml`, `.tool-versions` or a version file (`.node-version`,
-`.nvmrc`, `.ruby-version`, `.python-version`) changes, running apps are marked
-"env changed" rather than restarted. `carte env <app>` prints the result
+When a mise config file (`mise.toml`, `mise.local.toml`, `.tool-versions`
+and the like) or a version file (`.node-version`, `.nvmrc`,
+`.ruby-version`, `.python-version`) changes in an app's checkout or its
+repo's root, running apps are marked "env changed" rather than
+restarted. Changes in other directories, such as `.config/mise/` or a
+folder between the repo's root and the app, aren't watched: restart the
+app after them. `carte env <app>` prints the result
 with where each value came from.
 
 ### Instance directories

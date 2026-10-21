@@ -104,7 +104,7 @@ pub fn missing_dev_server_flags(script: &str) -> Option<&'static str> {
 }
 
 fn is_compound(script: &str) -> bool {
-    script.contains(['&', ';', '|', '\n'])
+    script.trim().contains(['&', ';', '|', '\n'])
 }
 
 fn first_command_flags(script: &str) -> &'static str {
@@ -166,6 +166,7 @@ mod tests {
             ("turbo dev", ""),
             ("vite && echo done", ""),
             ("vite & tsc --watch", ""),
+            ("vite\n", "--port $PORT --strictPort"),
         ] {
             assert_eq!(dev_server_flags(script), flags, "{script}");
         }

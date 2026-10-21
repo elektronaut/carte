@@ -13,15 +13,14 @@ use tracing::{debug, warn};
 
 use crate::supervisor::Handle;
 
-const TOOL_FILES: [&str; 7] = [
-    "mise.toml",
-    ".mise.toml",
-    ".tool-versions",
-    ".node-version",
-    ".nvmrc",
-    ".ruby-version",
-    ".python-version",
-];
+/// Files in a checkout's root that change the env its processes get.
+fn is_tool_file(name: &str) -> bool {
+    carte_core::env::is_mise_config_name(name)
+        || matches!(
+            name,
+            ".node-version" | ".nvmrc" | ".ruby-version" | ".python-version"
+        )
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Change {
@@ -127,7 +126,7 @@ pub fn classify(
         let checkout = checkouts.get(parent.parent()?)?;
         return Some(Change::Restart(checkout.clone()));
     }
-    if TOOL_FILES.contains(&name) {
+    if is_tool_file(name) {
         return checkouts
             .get(parent)
             .map(|checkout| Change::EnvChanged(checkout.clone()));
@@ -421,6 +420,18 @@ mod tests {
             ),
             Some(Change::EnvChanged(PathBuf::from("/work/acme-web")))
         );
+        for name in ["mise.local.toml", "mise.dev.toml", ".mise.toml"] {
+            assert_eq!(
+                classify(
+                    &Path::new("/work/acme-web").join(name),
+                    config,
+                    &c,
+                    &scans()
+                ),
+                Some(Change::EnvChanged(PathBuf::from("/work/acme-web"))),
+                "{name}"
+            );
+        }
         assert_eq!(
             classify(
                 Path::new("/work/acme-web/.node-version"),
