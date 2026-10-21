@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use carte_core::discovery;
 use carte_core::model::World;
+use notify::event::ModifyKind;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -225,13 +226,9 @@ pub fn run(
 ) -> Option<impl Future<Output = ()>> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut watcher = match RecommendedWatcher::new(
-        move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event
-                && !matches!(event.kind, EventKind::Access(_))
-            {
-                for path in event.paths {
-                    let _ = tx.send(path);
-                }
+        move |event| {
+            for change in changed_paths(event) {
+                let _ = tx.send(change);
             }
         },
         notify::Config::default(),
@@ -258,10 +255,16 @@ pub fn run(
         loop {
             let mut changes = BTreeSet::new();
             tokio::select! {
-                Some(path) = rx.recv() => {
+                Some((path, gone)) = rx.recv() => {
+                    if gone {
+                        forget(&mut watcher, &mut watched, &path);
+                    }
                     changes.extend(classify(&path, &config_dirs, &known, &scans));
                     tokio::time::sleep(Duration::from_millis(300)).await;
-                    while let Ok(path) = rx.try_recv() {
+                    while let Ok((path, gone)) = rx.try_recv() {
+                        if gone {
+                            forget(&mut watcher, &mut watched, &path);
+                        }
                         changes.extend(classify(&path, &config_dirs, &known, &scans));
                     }
                 }
@@ -311,14 +314,44 @@ pub fn run(
     })
 }
 
-/// Returns whether it watches anything new. A path whose watch fails, such as a
-/// checkout that isn't cloned yet, isn't recorded, so the next update tries it again.
+/// The paths an event is about, each with whether a watch on it went away: inotify
+/// drops the watch of a deleted path and follows a renamed one to where it went.
+fn changed_paths(event: notify::Result<notify::Event>) -> Vec<(PathBuf, bool)> {
+    let Ok(event) = event else {
+        return Vec::new();
+    };
+    let gone = match event.kind {
+        EventKind::Access(_) => return Vec::new(),
+        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_)) => true,
+        _ => false,
+    };
+    event.paths.into_iter().map(|path| (path, gone)).collect()
+}
+
+/// Stops watching a path that was deleted or moved away, so the next update
+/// watches whatever is at the path then.
+fn forget(watcher: &mut RecommendedWatcher, watched: &mut BTreeSet<(PathBuf, bool)>, path: &Path) {
+    let before = watched.len();
+    watched.retain(|(watched, _)| watched != path);
+    if watched.len() != before {
+        let _ = watcher.unwatch(path);
+    }
+}
+
+/// Returns whether it watches anything new. A path that doesn't exist, such as a
+/// checkout that isn't cloned yet, or whose watch fails isn't recorded, so the next
+/// update tries it again.
 fn update_watches(
     watcher: &mut RecommendedWatcher,
     watched: &mut BTreeSet<(PathBuf, bool)>,
     wanted: BTreeSet<(PathBuf, bool)>,
 ) -> bool {
-    let gone: Vec<_> = watched.difference(&wanted).cloned().collect();
+    static LIMIT_REACHED: std::sync::Once = std::sync::Once::new();
+    let gone: Vec<_> = watched
+        .iter()
+        .filter(|entry| !wanted.contains(*entry) || !entry.0.exists())
+        .cloned()
+        .collect();
     for entry in gone {
         let _ = watcher.unwatch(&entry.0);
         watched.remove(&entry);
@@ -326,6 +359,10 @@ fn update_watches(
     let mut added = false;
     for (path, recursive) in wanted {
         if watched.contains(&(path.clone(), recursive)) {
+            continue;
+        }
+        if !path.exists() {
+            debug!("not watching {}: it doesn't exist", path.display());
             continue;
         }
         let mode = if recursive {
@@ -337,6 +374,14 @@ fn update_watches(
             Ok(()) => {
                 watched.insert((path, recursive));
                 added = true;
+            }
+            Err(err) if matches!(err.kind, notify::ErrorKind::MaxFilesWatch) => {
+                LIMIT_REACHED.call_once(|| {
+                    warn!(
+                        "file watching is off for {} and other paths: the system's limit on file watches is reached (on Linux, raise fs.inotify.max_user_watches)",
+                        path.display()
+                    );
+                });
             }
             Err(err) => debug!("not watching {}: {err}", path.display()),
         }
@@ -522,22 +567,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_directory_that_appears_later_is_watched_on_the_next_update() {
-        let dir = tempfile::tempdir().unwrap();
-        let app = dir.path().canonicalize().unwrap().join("acme-api");
+    fn watcher() -> (
+        RecommendedWatcher,
+        std::sync::mpsc::Receiver<(PathBuf, bool)>,
+    ) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut watcher = RecommendedWatcher::new(
-            move |event: notify::Result<notify::Event>| {
-                if let Ok(event) = event {
-                    for path in event.paths {
-                        let _ = tx.send(path);
-                    }
+        let watcher = RecommendedWatcher::new(
+            move |event| {
+                for change in changed_paths(event) {
+                    let _ = tx.send(change);
                 }
             },
             notify::Config::default(),
         )
         .unwrap();
+        (watcher, rx)
+    }
+
+    fn wait_for(rx: &std::sync::mpsc::Receiver<(PathBuf, bool)>, want: &Path, gone: bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok((path, was_gone)) if path == want && was_gone == gone => return,
+                Ok(_) => {}
+                Err(err) => panic!("no event for {}: {err}", want.display()),
+            }
+        }
+    }
+
+    #[test]
+    fn a_directory_that_appears_later_is_watched_on_the_next_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().canonicalize().unwrap().join("acme-api");
+        let (mut watcher, rx) = watcher();
         let mut watched = BTreeSet::new();
         let wanted = BTreeSet::from([(app.clone(), false)]);
         assert!(!update_watches(&mut watcher, &mut watched, wanted.clone()));
@@ -548,15 +611,45 @@ mod tests {
 
         let file = app.join(".ruby-version");
         std::fs::write(&file, "3.4.1\n").unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            match rx.recv_timeout(left) {
-                Ok(path) if canonical(&path) == file => break,
-                Ok(_) => {}
-                Err(err) => panic!("no event for {}: {err}", file.display()),
-            }
-        }
+        wait_for(&rx, &file, false);
+    }
+
+    #[test]
+    fn a_checkout_deleted_and_cloned_again_is_watched_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().canonicalize().unwrap().join("acme-api");
+        std::fs::create_dir(&app).unwrap();
+        let (mut watcher, rx) = watcher();
+        let mut watched = BTreeSet::new();
+        let wanted = BTreeSet::from([(app.clone(), false)]);
+        assert!(update_watches(&mut watcher, &mut watched, wanted.clone()));
+
+        std::fs::remove_dir(&app).unwrap();
+        wait_for(&rx, &app, true);
+        forget(&mut watcher, &mut watched, &app);
+        std::fs::create_dir(&app).unwrap();
+        assert!(update_watches(&mut watcher, &mut watched, wanted.clone()));
+
+        let file = app.join(".ruby-version");
+        std::fs::write(&file, "3.4.1\n").unwrap();
+        wait_for(&rx, &file, false);
+    }
+
+    #[test]
+    fn a_checkout_deleted_between_updates_is_watched_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().canonicalize().unwrap().join("acme-api");
+        std::fs::create_dir(&app).unwrap();
+        let (mut watcher, _rx) = watcher();
+        let mut watched = BTreeSet::new();
+        let wanted = BTreeSet::from([(app.clone(), false)]);
+        assert!(update_watches(&mut watcher, &mut watched, wanted.clone()));
+
+        std::fs::remove_dir(&app).unwrap();
+        assert!(!update_watches(&mut watcher, &mut watched, wanted.clone()));
+        assert!(watched.is_empty());
+        std::fs::create_dir(&app).unwrap();
+        assert!(update_watches(&mut watcher, &mut watched, wanted));
     }
 
     fn set_mtime(path: &Path, secs: u64) {
