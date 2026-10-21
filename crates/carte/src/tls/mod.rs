@@ -66,19 +66,34 @@ pub(crate) fn ensure_private_dir(dir: &Path) -> Result<(), TlsError> {
 }
 
 pub(crate) fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), TlsError> {
+    let dir = path.parent().unwrap_or(Path::new("."));
     let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = path.with_file_name(format!(".{file_name}.tmp"));
-    let _ = fs::remove_file(&tmp);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(mode)
-        .open(&tmp)
-        .map_err(TlsError::io("create", &tmp))?;
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!(".{file_name}."))
+        .permissions(fs::Permissions::from_mode(mode))
+        .tempfile_in(dir)
+        .map_err(TlsError::io("create a temporary file in", dir))?;
     file.write_all(contents)
-        .and_then(|()| file.sync_all())
-        .map_err(TlsError::io("write", &tmp))?;
-    fs::rename(&tmp, path).map_err(TlsError::io("replace", path))
+        .and_then(|()| file.as_file().sync_all())
+        .map_err(TlsError::io("write", file.path()))?;
+    file.persist(path)
+        .map(drop)
+        .map_err(|e| TlsError::io("replace", path)(e.error))
+}
+
+/// Takes `ca.lock` in the state dir until the file is dropped, so one process at a time
+/// loads or creates the CA.
+pub(crate) fn lock_ca(state_dir: &Path) -> Result<fs::File, TlsError> {
+    let path = state_dir.join("ca.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(TlsError::io("open", &path))?;
+    file.lock().map_err(TlsError::io("lock", &path))?;
+    Ok(file)
 }
 
 pub(crate) fn normalize_tlds<S: AsRef<str>>(tlds: &[S]) -> Result<Vec<String>, TlsError> {

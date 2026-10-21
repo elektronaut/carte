@@ -16,7 +16,7 @@ use time::{Duration, OffsetDateTime};
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use super::{TlsError, ensure_private_dir, is_within, normalize_tlds, write_atomic};
+use super::{TlsError, ensure_private_dir, is_within, lock_ca, normalize_tlds, write_atomic};
 
 /// The local CA, constrained to the TLDs it was created for.
 pub struct CertificateAuthority {
@@ -59,6 +59,7 @@ impl CertificateAuthority {
     ) -> Result<Self, TlsError> {
         let tlds = normalize_tlds(tlds)?;
         ensure_private_dir(state_dir)?;
+        let _lock = lock_ca(state_dir)?;
         let reason = match Self::load(state_dir, &tlds) {
             Ok(ca) => return Ok(ca),
             Err(reason) => reason,
@@ -491,6 +492,33 @@ mod tests {
             sha256_hex(b"carte"),
             "D2C12420B9815E07B29B1256FDD6E39A94B69ED192009F0C5D7AFFFC99DE44E9"
         );
+    }
+
+    #[test]
+    fn concurrent_creators_leave_a_usable_ca() {
+        use nix::sys::wait::{WaitStatus, waitpid};
+        use nix::unistd::{ForkResult, fork};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs: Vec<PathBuf> = (0..40).map(|i| tmp.path().join(i.to_string())).collect();
+        let children: Vec<_> = (0..2)
+            .map(|_| match unsafe { fork() }.unwrap() {
+                ForkResult::Child => {
+                    let failed = dirs.iter().any(|dir| {
+                        CertificateAuthority::load_or_create(dir, "x", &["test"]).is_err()
+                    });
+                    unsafe { libc::_exit(i32::from(failed)) }
+                }
+                ForkResult::Parent { child } => child,
+            })
+            .collect();
+        for child in children {
+            assert_eq!(waitpid(child, None).unwrap(), WaitStatus::Exited(child, 0));
+        }
+        for dir in &dirs {
+            let loaded = CertificateAuthority::load_existing(dir, &["test"]);
+            assert!(loaded.is_ok(), "{}: {:?}", dir.display(), loaded.err());
+        }
     }
 
     #[test]
