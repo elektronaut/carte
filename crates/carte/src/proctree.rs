@@ -5,23 +5,56 @@ struct Proc {
     pid: u32,
     ppid: u32,
     pgid: u32,
+    sid: u32,
 }
 
-/// The process groups of `root`'s living descendants, apart from the group
-/// `root` leads.
+/// The process groups of `root`'s living descendants and of the other
+/// processes in the session `root` leads, apart from the group `root` leads.
 pub fn descendant_groups(root: u32) -> Vec<u32> {
+    groups_of(root, &processes())
+}
+
+/// The groups to SIGKILL once a grace is over: those `descendant_groups`
+/// finds now, and those of `earlier` that still have a member in the session
+/// `root` leads.
+pub fn remaining_groups(root: u32, earlier: &[u32]) -> Vec<u32> {
     let procs = processes();
-    let mut parents = vec![root];
-    let mut groups = Vec::new();
-    while let Some(parent) = parents.pop() {
-        for proc in procs.iter().filter(|p| p.ppid == parent && p.pid != root) {
-            parents.push(proc.pid);
-            if proc.pgid != root && !groups.contains(&proc.pgid) {
-                groups.push(proc.pgid);
-            }
+    let mut groups: Vec<u32> = earlier
+        .iter()
+        .copied()
+        .filter(|&pgid| procs.iter().any(|p| p.pgid == pgid && p.sid == root))
+        .collect();
+    for pgid in groups_of(root, &procs) {
+        if !groups.contains(&pgid) {
+            groups.push(pgid);
         }
     }
     groups
+}
+
+fn groups_of(root: u32, procs: &[Proc]) -> Vec<u32> {
+    let mut groups = Vec::new();
+    let mut add = |pgid: u32| {
+        if pgid != root && !groups.contains(&pgid) {
+            groups.push(pgid);
+        }
+    };
+    for proc in procs.iter().filter(|p| p.sid == root && p.pid != root) {
+        add(proc.pgid);
+    }
+    let mut parents = vec![root];
+    while let Some(parent) = parents.pop() {
+        for proc in procs.iter().filter(|p| p.ppid == parent && p.pid != root) {
+            parents.push(proc.pid);
+            add(proc.pgid);
+        }
+    }
+    groups
+}
+
+/// Whether a living member of process group `pgid` is in session `sid`.
+pub fn group_in_session(pgid: u32, sid: u32) -> bool {
+    processes().iter().any(|p| p.pgid == pgid && p.sid == sid)
 }
 
 #[cfg(target_os = "macos")]
@@ -49,10 +82,11 @@ fn processes() -> Vec<Proc> {
                     size,
                 )
             };
-            (n == size && info.pbi_status != libc::SZOMB).then_some(Proc {
+            (n == size && info.pbi_status != libc::SZOMB).then(|| Proc {
                 pid: pid as u32,
                 ppid: info.pbi_ppid,
                 pgid: info.pbi_pgid,
+                sid: unsafe { libc::getsid(pid) }.max(0) as u32,
             })
         })
         .collect()
@@ -75,6 +109,7 @@ fn processes() -> Vec<Proc> {
                 pid,
                 ppid: fields.next()?.parse().ok()?,
                 pgid: fields.next()?.parse().ok()?,
+                sid: fields.next()?.parse().ok()?,
             })
         })
         .collect()
