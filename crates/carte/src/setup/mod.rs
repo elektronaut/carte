@@ -420,26 +420,39 @@ pub fn set_tld(plan: &mut Plan, env: &SetupEnv, facts: &Facts) -> anyhow::Result
             action: Action::WriteFile { path, contents },
         },
     );
-    let bootstraps = plan
+    restart_daemon(
+        plan,
+        env,
+        facts,
+        "Restart the daemon so it serves the new TLD",
+    );
+    Ok(())
+}
+
+/// Restarts a running daemon before the plan verifies, unless the plan already starts
+/// or restarts it.
+fn restart_daemon(plan: &mut Plan, env: &SetupEnv, facts: &Facts, description: &str) {
+    let starts = plan.steps.iter().any(|s| {
+        matches!(&s.action, Action::Run { command, .. }
+            if command.program == "launchctl"
+                && command.args.first().is_some_and(|a| a == "bootstrap" || a == "kickstart"))
+    });
+    if !facts.agent_loaded || starts {
+        return;
+    }
+    let verify = plan
         .steps
         .iter()
-        .any(|s| matches!(&s.action, Action::Run { command, .. } if command.args.first().is_some_and(|a| a == "bootstrap")));
-    if facts.agent_loaded && !bootstraps {
-        let verify = plan
-            .steps
-            .iter()
-            .position(|s| s.action == Action::Verify)
-            .unwrap_or(plan.steps.len());
-        plan.steps.insert(
-            verify,
-            Step::run(
-                "Restart the daemon so it serves the new TLD",
-                "launchctl",
-                &["kickstart", "-k", &env.service(LABEL)],
-            ),
-        );
-    }
-    Ok(())
+        .position(|s| s.action == Action::Verify)
+        .unwrap_or(plan.steps.len());
+    plan.steps.insert(
+        verify,
+        Step::run(
+            description,
+            "launchctl",
+            &["kickstart", "-k", &env.service(LABEL)],
+        ),
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -734,6 +747,14 @@ pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
         description: "Check that carte answers".into(),
         action: Action::Verify,
     });
+    if matches!(facts.ca, CaState::Missing | CaState::Replace(_)) {
+        restart_daemon(
+            &mut plan,
+            env,
+            facts,
+            "Restart the daemon so it uses the new CA",
+        );
+    }
 
     if facts.daemon_running && !facts.agent_loaded && !facts.old_agent.loaded {
         plan.notes.push(format!(
@@ -1273,6 +1294,54 @@ mod tests {
                 "launchctl kickstart -k gui/501/no.elektronaut.carte".to_string(),
                 "verify".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn restarts_a_running_daemon_after_replacing_its_ca() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = with_test_tld(env(dir.path()));
+        let facts = Facts {
+            resolvers: resolvers(&[("test", "nameserver 127.0.0.1\nport 9253\n")]),
+            ca: CaState::Replace("it was made for .nova, .localhost".into()),
+            agent_plist: Some(env.agent().to_plist()),
+            agent_loaded: true,
+            ..fresh()
+        };
+        let mut plan = plan_install(&env, &facts);
+        set_tld(&mut plan, &env, &facts).unwrap();
+        let root = dir.path().display();
+        let planned = commands(&plan);
+        assert_eq!(
+            planned[planned.len() - 2..],
+            [
+                "launchctl kickstart -k gui/501/no.elektronaut.carte".to_string(),
+                "verify".to_string(),
+            ]
+        );
+        assert_eq!(
+            planned.iter().filter(|c| c.contains("kickstart")).count(),
+            1
+        );
+        assert_eq!(planned[0], format!("write {root}/config/config.toml"));
+
+        let stopped = Facts {
+            agent_loaded: false,
+            ..facts.clone()
+        };
+        assert!(
+            !commands(&plan_install(&env, &stopped))
+                .iter()
+                .any(|c| c.contains("kickstart"))
+        );
+        let replaced_plist = Facts {
+            agent_plist: Some("old".into()),
+            ..facts
+        };
+        assert!(
+            !commands(&plan_install(&env, &replaced_plist))
+                .iter()
+                .any(|c| c.contains("kickstart"))
         );
     }
 
