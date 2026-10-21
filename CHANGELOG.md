@@ -1,5 +1,57 @@
 # Changelog
 
+## [0.4.0](https://github.com/elektronaut/carte/compare/v0.3.0...v0.4.0) (2026-10-21)
+
+
+### Features
+
+* **cli:** add carte import kube ([c792e4c](https://github.com/elektronaut/carte/commit/c792e4ccf3354a281fca19266d1c2dd9abb6a66d))
+* **cli:** show and control kube projects' Services ([e49da79](https://github.com/elektronaut/carte/commit/e49da79d357fff4825d871bfc4e9b0aabcbd0916))
+* **core:** add kube projects ([f4dae31](https://github.com/elektronaut/carte/commit/f4dae31f32b65dfcd19ee815a5f0882c7cadb616))
+* **daemon:** forward requests to kube projects' Services ([ad68bc1](https://github.com/elektronaut/carte/commit/ad68bc128761e19298a9c485d67777da7384eb70))
+* **daemon:** notify about crashes ([94ec5f9](https://github.com/elektronaut/carte/commit/94ec5f9bce94b3421f17ff842d881a0d45ed7a13))
+* **daemon:** record a give-up as its own gave-up event ([4d49822](https://github.com/elektronaut/carte/commit/4d49822bb45b91dae9cbad4a7f808bc7c11a1d80))
+* **daemon:** restart a crashed web process on its own ([57925e7](https://github.com/elektronaut/carte/commit/57925e762d79f2307897c30b29bddf27f29ef709))
+* **daemon:** route paths to a dev server next to the web process ([b692ded](https://github.com/elektronaut/carte/commit/b692ded393f86bbb71dd59332e1c8b66950f7cac))
+* **daemon:** show the logs of a Service's pod ([fe7bce4](https://github.com/elektronaut/carte/commit/fe7bce45da4e3405e644a3d44f746dbba9a0a629))
+* **daemon:** show when an instance's web process is restarting ([ca27514](https://github.com/elektronaut/carte/commit/ca275140d069489a1261ac736b39e7d6a9c99482))
+* **tui:** browse a kube project's Services ([340e251](https://github.com/elektronaut/carte/commit/340e251a4b1dde501cac42eb101885f5eeccdc4c))
+* **tui:** show kube projects' Services ([72362e6](https://github.com/elektronaut/carte/commit/72362e6d3f62700ff735dcf1b353975300f789f4))
+
+
+### Bug Fixes
+
+* **api:** read states a newer daemon sends as unknown ([a582cc2](https://github.com/elektronaut/carte/commit/a582cc292abba1751dd969b0208791ea760b50a7))
+* **cli:** say a refusing socket may belong to a crashed daemon ([fcd7a7d](https://github.com/elektronaut/carte/commit/fcd7a7d5b0096ca3cb4f1815e42a6d53f2359563))
+* **core:** check kube hostname labels before asking the cluster ([9badbb7](https://github.com/elektronaut/carte/commit/9badbb75a3a907e0b656442c6f0b07a8f61531cb))
+* **daemon:** check readiness only once a process has started ([e340af8](https://github.com/elektronaut/carte/commit/e340af8b4302879f6f43a4ebd6f8b633ac1e30e1))
+* **daemon:** clear a give-up when the instance is stopped by hand ([2da38f4](https://github.com/elektronaut/carte/commit/2da38f4604f9a3ffb1194ef838b1f86278431dfa))
+* **daemon:** count a web restart that never becomes ready as a crash ([fc4f5bd](https://github.com/elektronaut/carte/commit/fc4f5bd95eb115a42d458d9bcf373fafd8aa232d))
+* **daemon:** create the API socket only once it listens ([e02346f](https://github.com/elektronaut/carte/commit/e02346f565fd226c119469a4aee6dc1714a1af53))
+* **daemon:** don't count a probe's connection to itself as ready ([50db439](https://github.com/elektronaut/carte/commit/50db439f35ae008ee582845f2c9b860fc0b61ebe))
+* **daemon:** don't let another site's prefetch open a port-forward ([2c1ff26](https://github.com/elektronaut/carte/commit/2c1ff265bbfd5bd7e9e1df02cb3cb5010a63b678))
+* **daemon:** hold a lock so a second daemon can't kill a stopping one's processes ([4d55fb4](https://github.com/elektronaut/carte/commit/4d55fb416afb174797d6cb9dbf3fdb7a216f6dc2))
+* **daemon:** notice worktrees git is still creating ([7977840](https://github.com/elektronaut/carte/commit/7977840765eaefa467ec2f65d9406cda5a622be1))
+* **daemon:** processes carte stops after a crash show as stopped ([ee63271](https://github.com/elektronaut/carte/commit/ee63271b31e93f58069a85210864cc18febe01e9))
+* **daemon:** refuse kube requests from other sites' frames ([51068e3](https://github.com/elektronaut/carte/commit/51068e3ef4ae0025c6d25e4c0567c1199245d824))
+* **daemon:** remove the API socket as soon as the daemon stops ([cebc14b](https://github.com/elektronaut/carte/commit/cebc14ba83cdc9bff752ff47aba6ebfd874b24ce))
+* **daemon:** reset connections to themselves, and guard requires and the proxy ([0de1730](https://github.com/elektronaut/carte/commit/0de1730cb181ec7a0b95e5014590b4d3315faaa2))
+* **daemon:** say whether TCP or UDP failed when binding DNS ([ff7a26b](https://github.com/elektronaut/carte/commit/ff7a26bdfd23b0dd34de4e2491a16bf87707f5a5))
+* **daemon:** skip crash throttling while notifications are disabled ([b07f421](https://github.com/elektronaut/carte/commit/b07f421aa9e0442bdc636524c8b2b2a6ac35f58b))
+* **daemon:** start nothing while shutting down ([e6c1387](https://github.com/elektronaut/carte/commit/e6c1387c2bea25f01cab86d05939e90d8f21b585))
+* **daemon:** word the stop message for any restarting process ([ed7ae47](https://github.com/elektronaut/carte/commit/ed7ae4700c01d5541ec8f810215b159f8719ccf0))
+* **kube:** follow kube logs without gaps or repeats ([4f0916e](https://github.com/elektronaut/carte/commit/4f0916e99811f6d50950699840eb6597ff572507))
+* **kube:** name the namespaces a short hostname couldn't read ([bf55770](https://github.com/elektronaut/carte/commit/bf5577007292829e52166a62d16aabf07f18beec))
+* **kube:** reach kube forwards in-process and keep them across kubeconfig rewrites ([c51a4f9](https://github.com/elektronaut/carte/commit/c51a4f95d2ec9e2102af23a01fd608a600851b15))
+* **kube:** read kubernetes.io/ appProtocol values ([62aa391](https://github.com/elektronaut/carte/commit/62aa391b8afe481997ade8fcd67624a11901083b))
+* **kube:** show why a port-forward failed ([50b52bd](https://github.com/elektronaut/carte/commit/50b52bdb36ae80f6df90c3d51a8ce59af384bd2c))
+* **kube:** skip missing files in KUBECONFIG ([a7e473a](https://github.com/elektronaut/carte/commit/a7e473a8b0aee8a5dff9a2e12d899dbe4f58d96e))
+* **kube:** skip namespaces that refuse access for short hostnames ([5631ee7](https://github.com/elektronaut/carte/commit/5631ee7d1e9b74d8758ae41acba0006468f2b1f1))
+* **kube:** time out kube cluster calls outside route lookups ([cf4d1b0](https://github.com/elektronaut/carte/commit/cf4d1b06ca510a9379a64b772184f75288e02c31))
+* **kube:** treat ports named wss as TLS ([33e3280](https://github.com/elektronaut/carte/commit/33e328047494a27ae81466fbfad7c82a931a0b85))
+* **tui:** size the details pane by its wrapped lines ([cbdbff2](https://github.com/elektronaut/carte/commit/cbdbff278c2f55120b8426fe443c0ab8ef146692))
+* **tui:** wrap long log lines ([3aba30f](https://github.com/elektronaut/carte/commit/3aba30ff06764f6146323e468c1e717b82c61e73))
+
 ## [0.3.0](https://github.com/elektronaut/carte/compare/v0.2.0...v0.3.0) (2026-10-19)
 
 
