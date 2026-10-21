@@ -153,6 +153,10 @@ pub fn detach(
             if orphan.is_running(running, roots) {
                 return (orphan, Detached::Running);
             }
+            if orphan.kind == OrphanKind::RunDir && !owns_run_dir(roots, &orphan.path) {
+                let reason = "its owner marker doesn't name this carte, or a socket in it answers";
+                return (orphan, Detached::Kept(reason.into()));
+            }
             let detached = match detach_one(&orphan) {
                 Ok(trash) => Detached::Done(trash),
                 Err(err) => Detached::Failed(err.to_string()),
@@ -489,10 +493,46 @@ fn listing(roots: &DirRoots, pidfiles: &Path) -> Listing {
     listing
 }
 
-/// Whether the owner marker beside a run directory names this carte's data root.
+/// Whether a run directory is provably this carte's: its owner marker names this
+/// carte's data root in the current format, or in the older one, from when cartes
+/// shared run directories, and no socket in it answers.
 fn owns_run_dir(roots: &DirRoots, run_dir: &Path) -> bool {
-    let owner = roots.data.display().to_string();
-    fs::read_to_string(dirs::owner_marker(run_dir)).is_ok_and(|text| text.trim_end() == owner)
+    let Ok(text) = fs::read_to_string(dirs::owner_marker(run_dir)) else {
+        return false;
+    };
+    let owner = dirs::Owner::parse(&text);
+    owner.is(&roots.data) && (owner.current || !serves(run_dir, 4))
+}
+
+/// Whether a Unix socket in `dir`, or in its folders up to `depth` deep, takes a
+/// connection, or part of it can't be read. Symlinks aren't followed.
+fn serves(dir: &Path, depth: usize) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+
+    let Ok(read) = fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in read {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let Ok(kind) = entry.file_type() else {
+            return true;
+        };
+        if kind.is_socket() {
+            match std::os::unix::net::UnixStream::connect(entry.path()) {
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+                    ) => {}
+                _ => return true,
+            }
+        } else if kind.is_dir() && (depth == 0 || serves(&entry.path(), depth - 1)) {
+            return true;
+        }
+    }
+    false
 }
 
 fn dirs_in(dir: &Path) -> BTreeSet<String> {
@@ -928,6 +968,73 @@ mod tests {
     }
 
     #[test]
+    fn old_format_run_directories_go_only_when_no_socket_answers() {
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, bind, socket};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = DirRoots {
+            data: tmp.path().join("data"),
+            run: tmp.path().join("run"),
+        };
+        let pidfiles = tmp.path().join("pids");
+        let owner = roots.data.display().to_string();
+        let dir = |name: &str, marker: &str| {
+            let run = roots.run.join(name);
+            fs::create_dir_all(run.join("sub")).unwrap();
+            fs::write(dirs::owner_marker(&run), marker).unwrap();
+            run
+        };
+        let in_use = dir("aaaaaaaa", &owner);
+        let _listener = std::os::unix::net::UnixListener::bind(in_use.join("sub/s")).unwrap();
+        let unused = dir("bbbbbbbb", &owner);
+        let bound = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+        bind(
+            std::os::fd::AsRawFd::as_raw_fd(&bound),
+            &UnixAddr::new(&unused.join("s")).unwrap(),
+        )
+        .unwrap();
+        drop(bound);
+        let current = dir("cccccccc", &dirs::owner_marker_text(&roots.data));
+        let _current_listener = std::os::unix::net::UnixListener::bind(current.join("s")).unwrap();
+
+        let listing = listing(&roots, &pidfiles);
+        assert_eq!(
+            listing.run_owned,
+            BTreeSet::from(["bbbbbbbb", "cccccccc"].map(String::from))
+        );
+        let known = Known {
+            complete: true,
+            ..Known::default()
+        };
+        let plan = prune::plan(&roots, &pidfiles, &listing, &known);
+        let planned: Vec<&Path> = plan.orphans.iter().map(|o| o.path.as_path()).collect();
+        assert_eq!(planned, [unused.as_path(), current.as_path()]);
+
+        let mut orphans = plan.orphans;
+        orphans.push(Orphan {
+            project: None,
+            stack: None,
+            kind: OrphanKind::RunDir,
+            app: None,
+            path: in_use.clone(),
+        });
+        let detached = detach(orphans, &BTreeSet::new(), &roots);
+        let result = finish(detached, &BTreeMap::new(), Vec::new());
+        assert_eq!(result.removed.len(), 2, "{result:?}");
+        assert!(
+            in_use.is_dir(),
+            "a run directory in use is kept at detach too"
+        );
+        assert!(!unused.exists() && !current.exists());
+    }
+
+    #[test]
     fn detaching_a_run_directory_removes_its_owner_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let roots = DirRoots {
@@ -936,7 +1043,11 @@ mod tests {
         };
         let run = roots.run.join("abcdefgh");
         fs::create_dir_all(&run).unwrap();
-        fs::write(dirs::owner_marker(&run), "x").unwrap();
+        fs::write(
+            dirs::owner_marker(&run),
+            dirs::owner_marker_text(&roots.data),
+        )
+        .unwrap();
         let orphan = Orphan {
             project: None,
             stack: None,

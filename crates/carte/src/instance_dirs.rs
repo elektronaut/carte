@@ -5,12 +5,15 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 
-use carte_core::dirs::{DirRoots, InstanceDirs, STACK_RECORD, StackRecord, owner_marker};
+use carte_core::dirs::{
+    DirRoots, InstanceDirs, Owner, STACK_RECORD, StackRecord, owner_marker, owner_marker_text,
+};
 use carte_core::model::{InstanceKey, ProjectState};
 
 /// Creates `key`'s directories, marks a run directory without an owner as this
-/// carte's, and records the stack's current worktrees in its folder. Creates
-/// nothing inside the instance's directories.
+/// carte's, and records the stack's current worktrees in its folder. Refuses a run
+/// directory another carte's marker names. Creates nothing inside the instance's
+/// directories.
 pub fn prepare(
     roots: &DirRoots,
     key: &InstanceKey,
@@ -20,8 +23,26 @@ pub fn prepare(
     create_run_root(&roots.run)?;
     private_dir(&dirs.run)?;
     let marker = owner_marker(&dirs.run);
-    if !fs::exists(&marker)? {
-        fs::write(&marker, roots.data.display().to_string())?;
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(mut file) => io::Write::write_all(&mut file, owner_marker_text(&roots.data).as_bytes())?,
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+            let owner = Owner::parse(&fs::read_to_string(&marker)?);
+            if !owner.is(&roots.data) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!(
+                        "{} belongs to the carte whose state is in {}",
+                        dirs.run.display(),
+                        owner.data
+                    ),
+                ));
+            }
+        }
+        Err(err) => return Err(err),
     }
     fs::create_dir_all(&dirs.state)?;
 
@@ -170,7 +191,7 @@ mod tests {
         assert_eq!(fs::read_dir(&dirs.run).unwrap().count(), 0);
         assert_eq!(
             fs::read_to_string(owner_marker(&dirs.run)).unwrap(),
-            roots.data.display().to_string()
+            owner_marker_text(&roots.data)
         );
         let mode = fs::metadata(&roots.run).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
@@ -215,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn an_owner_marker_already_there_is_kept() {
+    fn a_run_directory_another_carte_marked_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let roots = DirRoots {
             data: tmp.path().join("state/data"),
@@ -225,8 +246,17 @@ mod tests {
         let marker = owner_marker(&roots.instance(&key).run);
         fs::create_dir_all(&roots.run).unwrap();
         fs::write(&marker, "/elsewhere/data").unwrap();
-        prepare(&roots, &key, &project_state(&[("web", "x")])).unwrap();
+        let err = prepare(&roots, &key, &project_state(&[("web", "x")])).unwrap_err();
+        assert!(err.to_string().contains("/elsewhere/data"), "{err}");
         assert_eq!(fs::read_to_string(&marker).unwrap(), "/elsewhere/data");
+
+        fs::remove_file(&marker).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("nowhere"), &marker).unwrap();
+        assert!(prepare(&roots, &key, &project_state(&[("web", "x")])).is_err());
+        assert!(
+            !tmp.path().join("nowhere").exists(),
+            "a dangling link isn't followed"
+        );
     }
 
     #[test]
