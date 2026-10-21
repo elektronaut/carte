@@ -74,7 +74,8 @@ address inside it when given one.
 | `carte daemon restart` | Restart the daemon launchd runs, after installing a new build or changing `[share]`. Running apps stop and start again on their next request |
 
 `pin`, `disable` and their opposites last until the daemon restarts;
-`--save` writes them to the project file.
+`--save` writes them to the project file. It refuses for a project a
+template made, since the template's file applies to all its projects.
 
 `up` and `restart` print `ready <app@stack>` per instance once it answers.
 When one fails, they print why with its last log lines and exit with 5.

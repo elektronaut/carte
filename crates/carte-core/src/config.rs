@@ -974,6 +974,7 @@ pub fn assemble_project(
         scheme,
         idle_timeout,
         teardown_delay,
+        from_template,
         apps,
     };
     (project, problems)
