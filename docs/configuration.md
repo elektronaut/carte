@@ -1128,11 +1128,14 @@ opens again on the next request.
   context resolves to changed: the context, its cluster or its user, and
   for a user with a login plugin, the env the plugin runs with. Switching
   `current-context` with `kubectx` or `kubectl config use-context`
-  changes nothing. After a change, and after a change to the project
-  file, new connections use the new settings while open ones, websockets
-  included, run until they close. Open connections end only with `carte
-  down`, `carte restart` or `carte stop-all`, the idle timeout, setting
-  the Service to `disabled`, the pod going away, or the daemon stopping.
+  changes nothing. While a kubeconfig file can't be read or parsed, as
+  in the middle of a rewrite, carte keeps the client it has and reads
+  the file again on the next request. After a change, and after a
+  change to the project file, new connections use the new settings
+  while open ones, websockets included, run until they close. Open
+  connections end only with `carte down`, `carte restart` or `carte
+  stop-all`, the idle timeout, setting the Service to `disabled`, the
+  pod going away, or the daemon stopping.
   Idle connections the proxy keeps are closed after 30 seconds.
 
 - **Login plugins**, like `aws eks get-token`, run with the env the
