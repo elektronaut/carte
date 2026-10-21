@@ -195,6 +195,7 @@ mod tests {
         use nix::unistd::{ForkResult, fork};
 
         let addr = UnixAddr::new(path).unwrap();
+        // SAFETY: the child makes only async-signal-safe calls, on `addr` built before the fork.
         match unsafe { fork() }.unwrap() {
             ForkResult::Child => {
                 let bound = socket(
@@ -204,6 +205,7 @@ mod tests {
                     None,
                 )
                 .and_then(|fd| bind(std::os::fd::AsRawFd::as_raw_fd(&fd), &addr));
+                // SAFETY: _exit takes no pointers.
                 unsafe { libc::_exit(i32::from(bound.is_err())) }
             }
             ForkResult::Parent { child } => {

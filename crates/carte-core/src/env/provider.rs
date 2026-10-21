@@ -97,6 +97,8 @@ impl CommandRunner for SystemRunner {
         if self.own_group {
             command.process_group(0);
         }
+        // SAFETY: the closure runs between fork and exec and makes only
+        // async-signal-safe calls.
         unsafe {
             command.pre_exec(|| {
                 cloexec_above_stderr();
@@ -152,6 +154,7 @@ impl CommandRunner for SystemRunner {
 /// Runs between fork and exec, so only async-signal-safe calls.
 fn cloexec_above_stderr() {
     #[cfg(target_os = "linux")]
+    // SAFETY: close_range takes no pointers.
     if unsafe {
         libc::syscall(
             libc::SYS_close_range,
@@ -167,12 +170,14 @@ fn cloexec_above_stderr() {
         rlim_cur: 0,
         rlim_max: 0,
     };
+    // SAFETY: `limit` outlives the call.
     let max = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
         limit.rlim_cur.min(65536) as libc::c_int
     } else {
         1024
     };
     for fd in 3..max {
+        // SAFETY: F_SETFD takes an int argument.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
 }
@@ -1202,6 +1207,7 @@ pub(crate) mod tests {
     #[test]
     fn system_runner_passes_on_no_descriptors_above_stderr() {
         let mut fds = [0; 2];
+        // SAFETY: `fds` has room for the two fds pipe writes.
         assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
         let runner = SystemRunner {
             search_path: vec!["/bin".into()],
@@ -1217,6 +1223,7 @@ pub(crate) mod tests {
             env: None,
             timeout: Duration::from_secs(10),
         });
+        // SAFETY: both fds are ours and not used again.
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);

@@ -136,6 +136,8 @@ impl Spawner {
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr))
             .kill_on_drop(false);
+        // SAFETY: the closure runs between fork and exec and makes only
+        // async-signal-safe calls; `last_os_error` doesn't allocate.
         unsafe {
             command.pre_exec(move || {
                 if libc::fcntl(shim_fd, libc::F_SETFD, 0) < 0 {
@@ -167,6 +169,7 @@ impl Spawner {
             status: None,
         };
 
+        // SAFETY: the AsyncFd owns `output_fd`, which stays open until it is dropped.
         let fd = unsafe { AsyncFd::register(output_fd) }.map_err(|e| e.into_parts().1)?;
         let fd = Arc::new(fd);
         if pty {
@@ -360,6 +363,7 @@ impl Pty {
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
+        // SAFETY: TIOCSWINSZ reads a winsize, and `size` outlives the call.
         if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &size) } < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -397,6 +401,7 @@ impl AsyncRead for Output {
 }
 
 fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: reads at most `buf.len()` bytes into `buf`.
     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
     if n < 0 {
         Err(io::Error::last_os_error())
@@ -406,6 +411,7 @@ fn read_fd(fd: RawFd, buf: &mut [u8]) -> io::Result<usize> {
 }
 
 fn write_fd(fd: RawFd, buf: &[u8]) -> io::Result<usize> {
+    // SAFETY: writes at most `buf.len()` bytes from `buf`.
     let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
     if n < 0 {
         Err(io::Error::last_os_error())
@@ -430,12 +436,17 @@ fn ignore_esrch(result: io::Result<()>) -> io::Result<()> {
 /// A pty's master and slave, both opened close-on-exec.
 fn open_pty() -> io::Result<(OwnedFd, OwnedFd)> {
     let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
+    // SAFETY: posix_openpt takes no pointers.
     let master = cvt(unsafe { libc::posix_openpt(flags) })?;
+    // SAFETY: `master` is a new fd that nothing else owns.
     let master = unsafe { OwnedFd::from_raw_fd(master) };
+    // SAFETY: grantpt and unlockpt take no pointers.
     cvt(unsafe { libc::grantpt(master.as_raw_fd()) })?;
+    // SAFETY: as above.
     cvt(unsafe { libc::unlockpt(master.as_raw_fd()) })?;
     let mut name = [0 as libc::c_char; 128];
     #[cfg(target_os = "macos")]
+    // SAFETY: TIOCPTYGNAME writes a NUL-terminated name of at most 128 bytes into `name`.
     cvt(unsafe {
         libc::ioctl(
             master.as_raw_fd(),
@@ -445,26 +456,33 @@ fn open_pty() -> io::Result<(OwnedFd, OwnedFd)> {
     })?;
     #[cfg(target_os = "linux")]
     {
+        // SAFETY: ptsname_r writes at most `name.len()` bytes into `name`.
         let err = unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) };
         if err != 0 {
             return Err(io::Error::from_raw_os_error(err));
         }
     }
+    // SAFETY: `name` holds a NUL-terminated path.
     let slave = cvt(unsafe { libc::open(name.as_ptr(), flags) })?;
+    // SAFETY: `slave` is a new fd that nothing else owns.
     Ok((master, unsafe { OwnedFd::from_raw_fd(slave) }))
 }
 
 #[cfg(target_os = "linux")]
 fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
+    // SAFETY: `fds` has room for the two fds pipe2 writes.
     cvt(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) })?;
+    // SAFETY: both are new fds that nothing else owns.
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
 #[cfg(not(target_os = "linux"))]
 fn pipe_cloexec() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0; 2];
+    // SAFETY: `fds` has room for the two fds pipe writes.
     cvt(unsafe { libc::pipe(fds.as_mut_ptr()) })?;
+    // SAFETY: both are new fds that nothing else owns.
     let (read, write) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
     set_cloexec(read.as_raw_fd(), true)?;
     set_cloexec(write.as_raw_fd(), true)?;
@@ -481,6 +499,7 @@ fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
 
 pub(crate) fn set_cloexec(fd: RawFd, on: bool) -> io::Result<()> {
     let flags = if on { libc::FD_CLOEXEC } else { 0 };
+    // SAFETY: F_SETFD takes an int argument.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -488,7 +507,9 @@ pub(crate) fn set_cloexec(fd: RawFd, on: bool) -> io::Result<()> {
 }
 
 fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: F_GETFL takes no argument.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    // SAFETY: F_SETFL takes an int argument.
     if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
     }

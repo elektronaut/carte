@@ -35,6 +35,7 @@ static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
 extern "C" fn on_signal(sig: libc::c_int) {
     let saved = Errno::last_raw();
     let byte = sig as u8;
+    // SAFETY: write is async-signal-safe and `byte` outlives the call.
     unsafe {
         libc::write(
             SIGNAL_PIPE.load(Ordering::Relaxed),
@@ -61,15 +62,18 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
     close_stray_fds(lifeline);
     set_cloexec(lifeline)?;
     #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_CHILD_SUBREAPER takes no pointers.
     unsafe {
         libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
     }
 
     let mut fds = [0; 2];
+    // SAFETY: `fds` has room for the two fds pipe writes.
     cvt(unsafe { libc::pipe(fds.as_mut_ptr()) })?;
     let [sig_read, sig_write] = fds;
     for fd in fds {
         set_cloexec(fd)?;
+        // SAFETY: F_SETFL takes an int argument.
         cvt(unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) })?;
     }
     SIGNAL_PIPE.store(sig_write, Ordering::Relaxed);
@@ -83,6 +87,7 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
         unsafe { std::env::set_var(crate::proctree::SHIM_MARKER, format!("{me}.{started}")) };
     }
 
+    // SAFETY: isatty takes no pointers.
     let tty = unsafe { libc::isatty(0) } == 1;
     let (sh, arg0) = shell();
     let command =
@@ -94,11 +99,14 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
         std::ptr::null(),
     ];
 
+    // SAFETY: the shim has no other threads, and the child only calls exec_child.
     let pid = cvt(unsafe { libc::fork() })?;
     if pid == 0 {
+        // SAFETY: `sh` and `argv` are NUL-terminated and were built before the fork.
         unsafe { exec_child(tty, sh.as_ptr(), argv.as_ptr()) }
     }
 
+    // SAFETY: setpgid and tcsetpgrp take no pointers.
     unsafe {
         libc::setpgid(pid, pid);
         if tty {
@@ -117,6 +125,7 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
 
     if libc::WIFSIGNALED(status) {
         let sig = libc::WTERMSIG(status);
+        // SAFETY: `set` is initialised by sigemptyset before use and outlives the calls.
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
             let mut set = std::mem::zeroed();
@@ -131,6 +140,7 @@ fn run_inner(lifeline: RawFd, command: &str) -> io::Result<i32> {
 }
 
 fn poll(fds: &mut [libc::pollfd]) -> libc::c_int {
+    // SAFETY: the pointer and length come from one live slice.
     unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) }
 }
 
@@ -168,9 +178,11 @@ fn supervise(
 
         if pfds[1].revents != 0 {
             let mut sigs = [0u8; 64];
+            // SAFETY: reads at most `sigs.len()` bytes into `sigs`.
             let n = unsafe { libc::read(sig_read, sigs.as_mut_ptr().cast(), sigs.len()) };
             for &sig in &sigs[..n.max(0) as usize] {
                 if FORWARDED.contains(&libc::c_int::from(sig)) {
+                    // SAFETY: killpg takes no pointers.
                     unsafe { libc::killpg(pid, sig.into()) };
                 }
             }
@@ -186,7 +198,6 @@ fn supervise(
     Ok(status)
 }
 
-/// Runs in the forked child; only async-signal-safe calls.
 /// The shell that runs commands, and its `argv[0]`: bash in POSIX mode, as macOS's
 /// `/bin/sh` is, wherever Linux has bash.
 fn shell() -> (&'static CStr, &'static CStr) {
@@ -197,7 +208,15 @@ fn shell() -> (&'static CStr, &'static CStr) {
     }
 }
 
+/// Runs in the forked child; only async-signal-safe calls.
+///
+/// # Safety
+///
+/// Call only in a child just forked, with `path` a NUL-terminated string and
+/// `argv` a null-terminated array of them, all allocated before the fork.
+/// Nothing here may allocate or take a lock.
 unsafe fn exec_child(tty: bool, path: *const libc::c_char, argv: *const *const libc::c_char) -> ! {
+    // SAFETY: only async-signal-safe calls, on stack values and the caller's pointers.
     unsafe {
         libc::setpgid(0, 0);
         let mut set = std::mem::zeroed();
@@ -228,6 +247,7 @@ unsafe fn exec_child(tty: bool, path: *const libc::c_char, argv: *const *const l
 
 fn lifeline_closed(fd: RawFd) -> bool {
     let mut buf = [0u8; 64];
+    // SAFETY: reads at most `buf.len()` bytes into `buf`.
     let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
     if n > 0 {
         return false;
@@ -242,11 +262,14 @@ fn lifeline_closed(fd: RawFd) -> bool {
 fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
     loop {
         let mut status = 0;
+        // SAFETY: `status` outlives the call.
         match unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG | libc::WUNTRACED) } {
             p if p == pid && libc::WIFSTOPPED(status) => match libc::WSTOPSIG(status) {
+                // SAFETY: killpg takes no pointers.
                 libc::SIGTSTP => unsafe {
                     libc::killpg(pid, libc::SIGCONT);
                 },
+                // SAFETY: give_terminal has no preconditions; killpg takes no pointers.
                 libc::SIGTTIN | libc::SIGTTOU => unsafe {
                     give_terminal(pid);
                     libc::killpg(pid, libc::SIGCONT);
@@ -265,11 +288,17 @@ fn reap(pid: libc::pid_t, leader: &mut Option<libc::c_int>) {
 }
 
 fn group_alive(pgid: libc::pid_t) -> bool {
+    // SAFETY: killpg takes no pointers.
     unsafe { libc::killpg(pgid, 0) == 0 || Errno::last() == Errno::EPERM }
 }
 
 /// Makes `pgid` the terminal's foreground group again, when stdin is one.
+///
+/// # Safety
+///
+/// Async-signal-safe, with no preconditions of its own.
 unsafe fn give_terminal(pgid: libc::pid_t) {
+    // SAFETY: the signal sets are initialised by sigemptyset or sigprocmask before use.
     unsafe {
         if libc::isatty(0) != 1 {
             return;
@@ -294,6 +323,7 @@ fn descendant_groups() -> Vec<libc::pid_t> {
 
 fn signal_groups(groups: &[libc::pid_t], sig: libc::c_int) {
     for &pgid in groups {
+        // SAFETY: killpg takes no pointers.
         unsafe { libc::killpg(pgid, sig) };
     }
 }
@@ -326,12 +356,14 @@ fn terminate_group(pgid: libc::pid_t, reaped: &mut Option<libc::c_int>) {
     signal_groups(&groups, libc::SIGKILL);
     if reaped.is_none() {
         let mut status = 0;
+        // SAFETY: `status` outlives the call.
         unsafe { libc::waitpid(pgid, &mut status, 0) };
         *reaped = Some(status);
     }
 }
 
 fn install_handler(sig: libc::c_int) -> io::Result<()> {
+    // SAFETY: a zeroed sigaction is valid, and on_signal is async-signal-safe.
     unsafe {
         let mut action: libc::sigaction = std::mem::zeroed();
         action.sa_sigaction = on_signal as *const () as libc::sighandler_t;
@@ -353,17 +385,20 @@ fn close_stray_fds(keep: RawFd) {
         .unwrap_or_default();
     for fd in fds {
         if fd > 2 && fd != keep {
+            // SAFETY: at startup nothing in this process owns fds above stderr but the lifeline.
             unsafe { libc::close(fd) };
         }
     }
 }
 
 fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    // SAFETY: F_SETFD takes an int argument.
     cvt(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }).map(drop)
 }
 
 fn write_all(fd: RawFd, mut buf: &[u8]) -> io::Result<()> {
     while !buf.is_empty() {
+        // SAFETY: writes at most `buf.len()` bytes from `buf`.
         let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
         if n < 0 {
             if Errno::last() == Errno::EINTR {

@@ -106,13 +106,16 @@ mod tests {
 
     #[test]
     fn handed_over_sockets_are_closed_on_exec() {
+        // SAFETY: socket takes no pointers.
         let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
         assert!(fd >= 0);
         assert_eq!(
+            // SAFETY: F_GETFD takes no argument.
             unsafe { libc::fcntl(fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
             0
         );
         let listeners = listeners(vec![fd]).unwrap();
+        // SAFETY: F_GETFD takes no argument.
         let flags = unsafe { libc::fcntl(listeners[0].as_raw_fd(), libc::F_GETFD) };
         assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
     }
