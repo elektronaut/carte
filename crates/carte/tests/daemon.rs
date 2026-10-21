@@ -215,6 +215,11 @@ impl Daemon {
             .env("NO_COLOR", "1")
             .env("CARTE_SKILL_REFRESH", "0")
             .env("CARTE_TEST_PORTS", "1")
+            .env(
+                "CARTE_TEST_TEARDOWN_RECHECK",
+                carte_core::duration::format(TEARDOWN_RECHECK),
+            )
+            .env("CARTE_LOG", "info,carte::supervisor=debug")
             .env("FIXTURE_LIFELINE_PID", lifeline())
             .current_dir(&self.root);
         if let Some(bin) = &self.bin {
@@ -1711,10 +1716,18 @@ fn prune_removes_leftovers_of_what_no_longer_exists() {
     assert!(again.contains("Skipped broken: "), "{again}");
 }
 
+/// The `teardown_delay` most teardown tests configure.
+const TEARDOWN_DELAY: Duration = Duration::from_secs(1);
+/// The `teardown_delay` for tests that act while a teardown is pending.
+const PENDING_TEARDOWN_DELAY: Duration = Duration::from_secs(3);
+/// How often test daemons check every stack without a worktree again.
+const TEARDOWN_RECHECK: Duration = Duration::from_secs(1);
+
 /// The acme project with a teardown process for acme-web that runs `command`.
-fn start_with_teardown(delay: &str, command: &str) -> Daemon {
+fn start_with_teardown(delay: Duration, command: &str) -> Daemon {
     Daemon::start_with_project(&format!(
-        "teardown_delay = \"{delay}\"\n\n[apps.acme-web.processes.drop]\nkind = \"teardown\"\ncommand = '{command}'\n\n[apps.acme-web.processes.drop.env]\nDB = \"acme_{{{{stack | snake}}}}\"\n"
+        "teardown_delay = \"{}\"\n\n[apps.acme-web.processes.drop]\nkind = \"teardown\"\ncommand = '{command}'\n\n[apps.acme-web.processes.drop.env]\nDB = \"acme_{{{{stack | snake}}}}\"\n",
+        carte_core::duration::format(delay)
     ))
 }
 
@@ -1740,13 +1753,13 @@ fn teardown_event(
 }
 
 /// Waits for the teardown of the feature-x stack to finish, failing with the events
-/// seen so far once it can no longer be on time. The daemon checks for removed
-/// stacks on its 1s tick and tears one down `delay` after finding it; a check that
-/// can't tell yet is repeated by the full check every 30s. So the wait allows the
-/// delay, a full check, two ticks, `runs_for` for the teardown command, and some
-/// slack.
-fn wait_for_teardown(daemon: &Daemon, delay: Duration, runs_for: Duration) {
-    let deadline = delay + Duration::from_secs(30 + 2 + 5) + runs_for;
+/// and the daemon's log once it can no longer be on time. The daemon checks for
+/// removed stacks on its 1s tick and tears one down `delay` after finding it; a
+/// check that can't tell yet is repeated after `TEARDOWN_RECHECK`. So the wait
+/// allows the delay, a recheck, two ticks, `runs_for` for the teardown command, and
+/// some slack.
+fn wait_for_teardown(daemon: &mut Daemon, delay: Duration, runs_for: Duration) {
+    let deadline = delay + TEARDOWN_RECHECK + Duration::from_secs(2 + 5) + runs_for;
     let started = Instant::now();
     while teardown_event(daemon, carte_api::EventKind::TeardownFinished, false).is_none() {
         if started.elapsed() > deadline {
@@ -1754,7 +1767,8 @@ fn wait_for_teardown(daemon: &Daemon, delay: Duration, runs_for: Duration) {
                 .iter()
                 .map(|e| format!("{} {}", e.subject_label(), e.summary()))
                 .collect();
-            panic!("the teardown didn't finish within {deadline:?}: {lines:#?}");
+            let log = daemon.stop();
+            panic!("the teardown didn't finish within {deadline:?}: {lines:#?}\n{log}");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1804,8 +1818,8 @@ fn teardown_runs_once_the_worktree_is_gone_and_removes_the_folders() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let daemon = start_with_teardown(
-        "1s",
+    let mut daemon = start_with_teardown(
+        TEARDOWN_DELAY,
         &format!(
             "printf \"%s|%s|%s|%s|%s\\n\" \"$CARTE_STACK\" \"$CARTE_STATE_DIR\" \"$DB\" \"$CARTE_BRANCH\" \"$(pwd)\" >> {}",
             marker.display()
@@ -1821,7 +1835,7 @@ fn teardown_runs_once_the_worktree_is_gone_and_removes_the_folders() {
     assert!(!marker.exists(), "teardown ran with the instance");
 
     remove_feature_x(&daemon);
-    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::ZERO);
+    wait_for_teardown(&mut daemon, TEARDOWN_DELAY, Duration::ZERO);
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap(),
         format!(
@@ -1845,7 +1859,7 @@ fn teardown_runs_once_the_worktree_is_gone_and_removes_the_folders() {
 #[test]
 fn a_failed_teardown_keeps_the_folders() {
     use carte_api::EventKind;
-    let daemon = start_with_teardown("1s", "echo boom; exit 3");
+    let daemon = start_with_teardown(TEARDOWN_DELAY, "echo boom; exit 3");
     let dirs = run_in_feature_x(&daemon);
 
     remove_feature_x(&daemon);
@@ -1867,7 +1881,10 @@ fn a_worktree_that_comes_back_cancels_the_teardown() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let daemon = start_with_teardown("3s", &format!("touch {}", marker.display()));
+    let daemon = start_with_teardown(
+        PENDING_TEARDOWN_DELAY,
+        &format!("touch {}", marker.display()),
+    );
     let dirs = run_in_feature_x(&daemon);
 
     remove_feature_x(&daemon);
@@ -1903,7 +1920,8 @@ fn a_worktree_that_comes_back_during_the_teardown_keeps_the_folders() {
     );
     let mut daemon = Daemon::start_prepared(
         &format!(
-            "teardown_delay = \"1s\"\n\n[apps.acme-web.processes.drop]\n{teardown}\n[apps.acme-api.processes.drop]\n{teardown}"
+            "teardown_delay = \"{delay}\"\n\n[apps.acme-web.processes.drop]\n{teardown}\n[apps.acme-api.processes.drop]\n{teardown}",
+            delay = carte_core::duration::format(TEARDOWN_DELAY)
         ),
         |work| repo(&work.join("acme-api"), "web: exec sleep 60\n"),
     );
@@ -1959,7 +1977,10 @@ fn prune_keeps_a_stack_whose_teardown_is_pending() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let daemon = start_with_teardown("3s", &format!("touch {}", marker.display()));
+    let mut daemon = start_with_teardown(
+        PENDING_TEARDOWN_DELAY,
+        &format!("touch {}", marker.display()),
+    );
     let dirs = run_in_feature_x(&daemon);
     let stack_dir = dirs.state.parent().unwrap().to_path_buf();
 
@@ -1985,7 +2006,7 @@ fn prune_keeps_a_stack_whose_teardown_is_pending() {
     );
     daemon.run(&["prune", "--yes"]);
     assert!(stack_dir.join("stack.toml").is_file());
-    wait_for_teardown(&daemon, Duration::from_secs(3), Duration::ZERO);
+    wait_for_teardown(&mut daemon, PENDING_TEARDOWN_DELAY, Duration::ZERO);
     assert!(marker.exists());
     assert!(!stack_dir.exists());
 }
@@ -1994,7 +2015,15 @@ fn prune_keeps_a_stack_whose_teardown_is_pending() {
 fn a_teardown_cut_short_by_a_shutdown_runs_again_on_the_next_start() {
     let marker = tempfile::tempdir().unwrap();
     let runs = marker.path().join("runs");
-    let mut daemon = start_with_teardown("1s", &format!("echo run >> {}; sleep 3", runs.display()));
+    let runs_for = Duration::from_secs(3);
+    let mut daemon = start_with_teardown(
+        TEARDOWN_DELAY,
+        &format!(
+            "echo run >> {}; sleep {}",
+            runs.display(),
+            runs_for.as_secs()
+        ),
+    );
     let dirs = run_in_feature_x(&daemon);
     let stack_dir = dirs.state.parent().unwrap().to_path_buf();
 
@@ -2004,7 +2033,7 @@ fn a_teardown_cut_short_by_a_shutdown_runs_again_on_the_next_start() {
     assert!(stack_dir.join("stack.toml").is_file());
 
     daemon.launch();
-    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::from_secs(3));
+    wait_for_teardown(&mut daemon, TEARDOWN_DELAY, runs_for);
     assert_eq!(std::fs::read_to_string(&runs).unwrap(), "run\nrun\n");
     assert!(!stack_dir.exists());
     daemon.stop();
@@ -2015,7 +2044,7 @@ fn a_worktree_git_still_lists_keeps_its_stack_until_pruned() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let mut daemon = start_with_teardown("1s", &format!("touch {}", marker.display()));
+    let mut daemon = start_with_teardown(TEARDOWN_DELAY, &format!("touch {}", marker.display()));
     let dirs = run_in_feature_x(&daemon);
     let stack_dir = dirs.state.parent().unwrap().to_path_buf();
 
@@ -2060,7 +2089,7 @@ fn a_worktree_git_still_lists_keeps_its_stack_until_pruned() {
     git(&daemon.root.join("work/acme-web"), &["worktree", "prune"]);
     daemon.stop();
     daemon.launch();
-    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::ZERO);
+    wait_for_teardown(&mut daemon, TEARDOWN_DELAY, Duration::ZERO);
     assert!(marker.exists());
     daemon.stop();
 }
@@ -2069,10 +2098,11 @@ fn a_worktree_git_still_lists_keeps_its_stack_until_pruned() {
 fn an_app_outside_git_leaves_the_teardown_of_the_others_alone() {
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let daemon = Daemon::start_prepared(
+    let mut daemon = Daemon::start_prepared(
         &format!(
-            "teardown_delay = \"1s\"\n\n[apps.acme-web.processes.drop]\nkind = \"teardown\"\ncommand = 'touch {}'\n",
-            marker.display()
+            "teardown_delay = \"{delay}\"\n\n[apps.acme-web.processes.drop]\nkind = \"teardown\"\ncommand = 'touch {}'\n",
+            marker.display(),
+            delay = carte_core::duration::format(TEARDOWN_DELAY)
         ),
         |work| {
             std::fs::create_dir_all(work.join("acme-static")).unwrap();
@@ -2094,7 +2124,7 @@ fn an_app_outside_git_leaves_the_teardown_of_the_others_alone() {
     run_in_feature_x(&daemon);
 
     remove_feature_x(&daemon);
-    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::ZERO);
+    wait_for_teardown(&mut daemon, TEARDOWN_DELAY, Duration::ZERO);
     assert!(marker.exists());
 }
 
@@ -2103,7 +2133,10 @@ fn a_worktree_that_comes_back_while_carte_is_stopped_keeps_its_stack() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let mut daemon = start_with_teardown("2s", &format!("touch {}", marker.display()));
+    let mut daemon = start_with_teardown(
+        PENDING_TEARDOWN_DELAY,
+        &format!("touch {}", marker.display()),
+    );
     let dirs = run_in_feature_x(&daemon);
 
     remove_feature_x(&daemon);
@@ -2134,7 +2167,10 @@ fn an_unreadable_stack_record_pauses_the_teardown() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let daemon = start_with_teardown("2s", &format!("touch {}", marker.display()));
+    let daemon = start_with_teardown(
+        PENDING_TEARDOWN_DELAY,
+        &format!("touch {}", marker.display()),
+    );
     let dirs = run_in_feature_x(&daemon);
     let stack_dir = dirs.state.parent().unwrap().to_path_buf();
 
@@ -2168,7 +2204,10 @@ fn a_problem_with_the_project_pauses_the_teardown_and_names_it() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let daemon = start_with_teardown("2s", &format!("touch {}", marker.display()));
+    let daemon = start_with_teardown(
+        PENDING_TEARDOWN_DELAY,
+        &format!("touch {}", marker.display()),
+    );
     let dirs = run_in_feature_x(&daemon);
 
     remove_feature_x(&daemon);
@@ -2207,7 +2246,7 @@ fn a_worktree_named_main_doesnt_pause_other_teardowns() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
     let marker = marker.path().join("teardown");
-    let daemon = start_with_teardown("1s", &format!("touch {}", marker.display()));
+    let mut daemon = start_with_teardown(TEARDOWN_DELAY, &format!("touch {}", marker.display()));
     let dirs = run_in_feature_x(&daemon);
     git(
         &daemon.root.join("work/acme-web"),
@@ -2221,7 +2260,7 @@ fn a_worktree_named_main_doesnt_pause_other_teardowns() {
     });
 
     remove_feature_x(&daemon);
-    wait_for_teardown(&daemon, Duration::from_secs(1), Duration::ZERO);
+    wait_for_teardown(&mut daemon, TEARDOWN_DELAY, Duration::ZERO);
     assert!(marker.exists());
     assert!(teardown_event(&daemon, EventKind::TeardownPaused, false).is_none());
     assert!(!dirs.state.exists());
@@ -2229,7 +2268,7 @@ fn a_worktree_named_main_doesnt_pause_other_teardowns() {
 
 #[test]
 fn switching_or_detaching_inside_a_worktree_keeps_its_stack() {
-    let daemon = start_with_teardown("1s", "true");
+    let daemon = start_with_teardown(TEARDOWN_DELAY, "true");
     run_in_feature_x(&daemon);
     let worktree = daemon.root.join("work/feature-x/acme-web");
     let branch = |daemon: &Daemon| {
