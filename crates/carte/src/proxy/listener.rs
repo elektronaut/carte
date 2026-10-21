@@ -21,6 +21,7 @@ use super::forward::{Inbound, Shared, handle};
 pub struct ListenerOptions {
     kind: ListenerKind,
     share_domain: Option<Arc<str>>,
+    cloudflare: bool,
     tls: Option<Arc<ServerConfig>>,
 }
 
@@ -30,6 +31,7 @@ impl ListenerOptions {
         Self {
             kind: ListenerKind::Local,
             share_domain: None,
+            cloudflare: false,
             tls: None,
         }
     }
@@ -40,8 +42,16 @@ impl ListenerOptions {
         Self {
             kind: ListenerKind::Share,
             share_domain: Some(share_domain.into().into()),
+            cloudflare: false,
             tls: None,
         }
+    }
+
+    /// The tunnel is Cloudflare's, which sets `CF-Connecting-IP` itself, so that
+    /// header is passed on.
+    pub fn cloudflare(mut self) -> Self {
+        self.cloudflare = true;
+        self
     }
 
     /// Terminates TLS with `config`, offering HTTP/2 and HTTP/1.1 through ALPN in
@@ -106,6 +116,7 @@ impl Listener {
                 tls: acceptor.is_some(),
                 kind: self.options.kind,
                 share_domain: self.options.share_domain.clone(),
+                cloudflare: self.options.cloudflare,
                 shutdown: shutdown.clone(),
                 tracker: tracker.clone(),
             });

@@ -722,6 +722,30 @@ async fn share_listener_forwards_as_https_and_strips_cookie_domains() {
 }
 
 #[tokio::test]
+async fn share_listener_passes_cf_connecting_ip_on_only_from_cloudflare() {
+    let port = echo_upstream("127.0.0.1:0").await;
+    let host = "app--feature-x--nova.share.example";
+    for (options, kept) in [
+        (ListenerOptions::share("share.example"), false),
+        (ListenerOptions::share("share.example").cloudflare(), true),
+    ] {
+        let router = Arc::new(TestRouter::default().with(host, Target::Port(port)));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy = spawn(Proxy::new(router).listen(listener, options).unwrap());
+        let request = get(host, "/")
+            .header("cf-connecting-ip", "203.0.113.9")
+            .body(Empty::new())
+            .unwrap();
+        let echoed = body_text(send(proxy.addr, request).await).await;
+        assert_eq!(
+            echoed.contains("\ncf-connecting-ip: 203.0.113.9\n"),
+            kept,
+            "{echoed}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn local_listener_leaves_cookies_alone() {
     let port = cookie_upstream().await;
     let router = Arc::new(TestRouter::default().with("app.test", Target::Port(port)));
