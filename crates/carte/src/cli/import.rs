@@ -339,7 +339,7 @@ impl<'a> Importer<'a> {
     fn build(&mut self, draft: &Draft) -> anyhow::Result<Built> {
         let file = self.paths.project_file(&draft.name);
         let text = project_text(draft, &BTreeMap::new());
-        let (state, _) = project::discover(&file, &text)?;
+        let (state, _) = project::discover(&self.machine.tld, &file, &text)?;
         let tld = &self.machine.tld;
         let mut aliases: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut rows = Vec::new();
@@ -382,7 +382,7 @@ impl<'a> Importer<'a> {
             }
         }
         let text = project_text(draft, &aliases);
-        let (state, problems) = project::discover(&file, &text)?;
+        let (state, problems) = project::discover(&self.machine.tld, &file, &text)?;
         Ok(Built {
             file,
             text,

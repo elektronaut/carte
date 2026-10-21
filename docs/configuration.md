@@ -301,7 +301,8 @@ branches:
 - In hostnames, a long name is cut the same way when the project's
   longest hostname would pass 253 characters, the most a hostname
   holds. An app with `subdomains = true` keeps room for one subdomain
-  of up to 63 characters. The stack keeps its full name everywhere
+  of up to 63 characters, unless that would leave too little of the
+  name; then only shorter subdomains fit. The stack keeps its full name everywhere
   else, such as in `CARTE_STACK`. This only happens when the app,
   stack and project names are all long. How far the name is cut
   depends on the project's apps, so adding an app with a long name or
@@ -311,8 +312,9 @@ branches:
   `RAILS_DEVELOPMENT_HOSTS`.
 - A problem is reported when a hostname doesn't fit even with the name
   cut, when an app with `subdomains = true` has room for only shorter
-  subdomains, when a cut name is the name of another stack or an app,
-  and when a label of the `tld` is longer than 63 characters.
+  subdomains, when a cut name is an app's label or the name of another
+  stack (the app wins over a stack, and a stack over the cut name), and
+  when a label of the `tld` is longer than 63 characters.
 - A folder with the repo's own name gives way to the folder above it.
 - Worktrees of different repos with the same name form one stack.
 - Worktrees with a detached HEAD count like any other.
@@ -322,8 +324,8 @@ branches:
 
 Problems are reported when two worktrees of a repo have the same name,
 and when a worktree's name is `main` (it's skipped). A stack can't be
-named like an app of its project either: the app wins, and the stack is
-reported as unreachable.
+named like an app of its project either, in full or cut: the app wins,
+and the stack is reported as unreachable.
 
 ## Apps
 

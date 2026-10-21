@@ -43,15 +43,19 @@ pub fn local_labels<'a>(project: &'a Project, app: &'a App, stack: &'a Stack) ->
 }
 
 /// The characters a project's longest hostname takes besides the stack label and
-/// its dot: an app label, the project, the longest served TLD, and a full label in
-/// front for an app that takes subdomains.
-fn longest_host_without_stack(tld: &str, project: &Project) -> usize {
+/// its dot: an app label, the project, the longest served TLD, and with `reserve`,
+/// a full label in front for an app that takes subdomains.
+fn longest_host_without_stack(tld: &str, project: &Project, reserve: bool) -> usize {
     let app = project
         .apps
         .iter()
         .map(|app| {
             app_label(project, app).map_or(0, |label| label.len() + 1)
-                + if app.settings.subdomains { 64 } else { 0 }
+                + if reserve && app.settings.subdomains {
+                    64
+                } else {
+                    0
+                }
         })
         .max()
         .unwrap_or(0);
@@ -59,10 +63,15 @@ fn longest_host_without_stack(tld: &str, project: &Project) -> usize {
 }
 
 /// A stack's label in local hostnames: its name, cut and given a hash of the whole
-/// name when the project's longest hostname would pass 253 characters.
+/// name when the project's longest hostname would pass 253 characters. Room for a
+/// subdomain label is kept when the cut leaves enough of the name, and given up
+/// when it doesn't.
 pub fn stack_label<'a>(tld: &str, project: &Project, slug: &'a str) -> Cow<'a, str> {
-    let budget = 253usize.saturating_sub(longest_host_without_stack(tld, project) + 1);
-    match crate::slug::shorten(slug, budget) {
+    let budget =
+        |reserve| 253usize.saturating_sub(longest_host_without_stack(tld, project, reserve) + 1);
+    let label = crate::slug::shorten(slug, budget(true))
+        .or_else(|| crate::slug::shorten(slug, budget(false)));
+    match label {
         Some(label) if label.len() < slug.len() => Cow::Owned(label),
         _ => Cow::Borrowed(slug),
     }
@@ -489,47 +498,18 @@ pub fn long_hosts(tld: &str, state: &ProjectState) -> Vec<Problem> {
                 .into_iter()
                 .filter(|(app, len)| app.settings.subdomains && len + 64 > 253)
                 .max_by_key(|(_, len)| *len)?;
+            let room = match 253usize.saturating_sub(len + 1) {
+                0 => "no room for subdomains".to_string(),
+                n => format!("room for subdomains of only {n} characters"),
+            };
             Some(problem(
                 Some(app),
                 format!(
-                    "{} in stack {name} leaves room for subdomains of only {} characters \
-                     before its hostname passes 253; longer ones can't be reached",
-                    app.name,
-                    253usize.saturating_sub(len + 1)
+                    "{} in stack {name} leaves {room} before its hostname passes 253; \
+                     longer ones can't be reached",
+                    app.name
                 ),
             ))
-        })
-        .collect()
-}
-
-/// Stacks whose shortened hostname label is the name of another stack or an app's
-/// label: the other wins, so the stack is unreachable by hostname.
-pub fn label_collisions(tld: &str, state: &ProjectState) -> Vec<Problem> {
-    let project = &state.project;
-    state
-        .stacks()
-        .into_iter()
-        .filter_map(|slug| {
-            let label = stack_label(tld, project, &slug);
-            if *label == *slug {
-                return None;
-            }
-            let other = if state.has_stack(&label) {
-                format!("stack {label}")
-            } else {
-                format!("app {}", labelled_app(project, &label)?.name)
-            };
-            Some(Problem {
-                project: Some(project.name.clone()),
-                app: None,
-                stack: Some(slug.clone()),
-                message: format!(
-                    "stack {slug} is shortened to {label} in hostnames, the name of {other}: \
-                     {label}.{} goes to {other}, so the stack is unreachable by hostname; \
-                     rename its worktree folders",
-                    project.name
-                ),
-            })
         })
         .collect()
 }
@@ -549,23 +529,41 @@ pub fn long_tld_label(tld: &str) -> Option<Problem> {
     })
 }
 
-/// Stacks whose slug equals an app's label: the app wins, so the stack is unreachable there.
-pub fn collisions(state: &ProjectState) -> Vec<Problem> {
+/// Stacks whose hostname label is an app's label or, once shortened, another
+/// stack's name. An app wins, then a stack with that name, so the stack is
+/// unreachable by hostname.
+pub fn collisions(tld: &str, state: &ProjectState) -> Vec<Problem> {
     let project = &state.project;
     state
         .stacks()
         .into_iter()
         .filter_map(|slug| {
-            let app = labelled_app(project, &slug)?;
+            let label = stack_label(tld, project, &slug);
+            let shortened = *label != *slug;
+            let (app, other) = match labelled_app(project, &label) {
+                Some(app) => (Some(app.name.clone()), format!("app {}", app.name)),
+                None if shortened && state.has_stack(&label) => (None, format!("stack {label}")),
+                None => return None,
+            };
+            let message = if shortened {
+                format!(
+                    "stack {slug} is shortened to {label} in hostnames, the name of {other}: \
+                     {label}.{} goes to {other}, so the stack is unreachable by hostname; \
+                     rename its worktree folders",
+                    project.name
+                )
+            } else {
+                format!(
+                    "stack {slug} has the same name as {other}: {slug}.{} goes to the app, \
+                     so the stack is unreachable by hostname; rename its worktree folders",
+                    project.name
+                )
+            };
             Some(Problem {
                 project: Some(project.name.clone()),
-                app: Some(app.name.clone()),
+                app,
                 stack: Some(slug.clone()),
-                message: format!(
-                    "stack {slug} has the same name as app {}: {slug}.{} goes to the app, \
-                     so the stack is unreachable by hostname; rename its worktree folders",
-                    app.name, project.name
-                ),
+                message,
             })
         })
         .collect()
@@ -913,7 +911,19 @@ mod tests {
                 .contains("room for subdomains of only 54 characters"),
             "{problems:?}"
         );
-        assert!(problems[1].message.contains("can't reach"), "{problems:?}");
+        assert_eq!(problems[1].stack.as_deref(), Some("s".repeat(63).as_str()));
+        assert!(
+            problems[1].message.contains("room for subdomains"),
+            "the stack is cut without the room for subdomains: {problems:?}"
+        );
+        let state = &world.projects[0];
+        let stack = branch(&"s".repeat(63));
+        let host = local_host(&tld, &state.project, &state.project.apps[0], &stack);
+        assert!(host.len() <= 253, "{host}");
+        assert_eq!(
+            resolve_host(&world, &host),
+            Ok(resolved(&state.project.name, "shop", stack, &[]))
+        );
     }
 
     #[test]
@@ -921,18 +931,38 @@ mod tests {
         let mut world = long_world("test", true);
         let long = "s".repeat(63);
         let label = stack_label("test", &world.projects[0].project, &long).into_owned();
-        assert!(label_collisions("test", &world.projects[0]).is_empty());
+        assert!(collisions("test", &world.projects[0]).is_empty());
         world.projects[0]
             .worktrees
             .get_mut("shop")
             .unwrap()
             .push(worktree(&label, "/z"));
-        let problems = label_collisions("test", &world.projects[0]);
+        let problems = collisions("test", &world.projects[0]);
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert_eq!(problems[0].stack.as_deref(), Some(long.as_str()));
         assert!(
             problems[0].message.contains(&format!("stack {label}")),
             "{problems:?}"
+        );
+
+        world.projects[0]
+            .project
+            .apps
+            .push(app("docs", &label, "/d"));
+        let problems = collisions("test", &world.projects[0]);
+        let long_stack = problems
+            .iter()
+            .find(|p| p.stack.as_deref() == Some(long.as_str()))
+            .unwrap();
+        assert_eq!(long_stack.app.as_deref(), Some("docs"), "{problems:?}");
+        assert!(
+            long_stack.message.contains("the name of app docs"),
+            "an app wins over a stack: {problems:?}"
+        );
+        let host = format!("{label}.{}.test", world.projects[0].project.name);
+        assert_eq!(
+            resolve_host(&world, &host).map(|r| r.key.app),
+            Ok("docs".to_string())
         );
     }
 
@@ -1363,7 +1393,7 @@ mod tests {
 
     #[test]
     fn finds_stacks_named_like_apps() {
-        assert!(collisions(&test_support::nova()).is_empty());
+        assert!(collisions("test", &test_support::nova()).is_empty());
         let mut nova = test_support::nova();
         nova.worktrees
             .get_mut("nova-postcard-api")
@@ -1372,7 +1402,7 @@ mod tests {
                 "Billing",
                 "/Users/dev/work/billing/nova-postcard-api",
             ));
-        let problems = collisions(&nova);
+        let problems = collisions("test", &nova);
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].project.as_deref(), Some("nova"));
         assert_eq!(problems[0].app.as_deref(), Some("nova-billing"));
@@ -1390,7 +1420,7 @@ mod tests {
             .get_mut("acme-api")
             .unwrap()
             .push(worktree("acme", "/Users/dev/clients/acme/acme-api"));
-        assert!(collisions(&acme).is_empty());
+        assert!(collisions("test", &acme).is_empty());
     }
 
     #[test]
