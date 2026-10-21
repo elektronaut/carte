@@ -18,6 +18,13 @@ carte setup --share dev.example.com
 Apps get hostnames like `billing--feature-x--acme.dev.example.com`, and
 any number of apps can be shared at once.
 
+Browsers send a domain's cookies to every name under it, so cookies that
+a site under `example.com` sets for the whole domain also reach apps
+shared under `dev.example.com`. Prefer a registered domain that nothing
+else uses. carte removes a `Domain` naming the share domain or a parent
+of it from the cookies a shared app sets, so they stay with the app's
+own hostname.
+
 ## ngrok
 
 Works with ngrok's free plan and its free static domain, one app at a

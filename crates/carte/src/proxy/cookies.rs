@@ -1,8 +1,8 @@
 use http::HeaderValue;
 use http::header::{HeaderMap, SET_COOKIE};
 
-/// Removes `Domain=<domain>` (with or without a leading dot) from every
-/// `Set-Cookie` header, leaving the cookies host-only.
+/// Removes `Domain=<domain>` or a parent of it (with or without a leading dot)
+/// from every `Set-Cookie` header, leaving the cookies host-only.
 pub(crate) fn strip_cookie_domains(headers: &mut HeaderMap, domain: &str) {
     if let http::header::Entry::Occupied(mut entry) = headers.entry(SET_COOKIE) {
         for value in entry.iter_mut() {
@@ -15,19 +15,19 @@ pub(crate) fn strip_cookie_domains(headers: &mut HeaderMap, domain: &str) {
     }
 }
 
-/// The cookie without a matching `Domain` attribute, or `None` if it had none.
+/// The cookie without a `Domain` attribute for `domain` or a parent of it, or `None`
+/// if it had none.
 fn strip_domain(cookie: &str, domain: &str) -> Option<String> {
-    let domain = domain.trim_start_matches('.');
+    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
     let mut parts = cookie.split(';');
     let mut kept = vec![parts.next()?];
     let mut stripped = false;
     for attribute in parts {
         let (name, value) = attribute.split_once('=').unwrap_or((attribute, ""));
+        let value = value.trim().trim_start_matches('.').to_ascii_lowercase();
         let matches = name.trim().eq_ignore_ascii_case("domain")
-            && value
-                .trim()
-                .trim_start_matches('.')
-                .eq_ignore_ascii_case(domain);
+            && !value.is_empty()
+            && (domain == value || domain.ends_with(&format!(".{value}")));
         if matches {
             stripped = true;
         } else {
@@ -85,10 +85,21 @@ mod tests {
     }
 
     #[test]
+    fn strips_parents_of_the_share_domain() {
+        assert_eq!(
+            strip_domain("session=abc; Domain=example.com; Path=/", "dev.example.com").as_deref(),
+            Some("session=abc; Path=/")
+        );
+        assert_eq!(strip("a=1; Domain=.Example"), "a=1");
+    }
+
+    #[test]
     fn keeps_other_domains() {
         for cookie in [
             "a=1; Domain=app--feature-x--nova.share.example",
-            "a=1; Domain=example",
+            "a=1; Domain=ample",
+            "a=1; Domain=e.example",
+            "a=1; Domain=",
             "a=1; Domain=notshare.example",
             "a=1; Domain=share.example.evil",
             "a=1",

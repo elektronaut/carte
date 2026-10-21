@@ -679,6 +679,7 @@ async fn cookie_upstream() -> u16 {
             .header(SET_COOKIE, "a=1; Domain=share.example; Path=/; HttpOnly")
             .header(SET_COOKIE, "b=2; domain=.SHARE.example")
             .header(SET_COOKIE, "c=3; Domain=other.example; Secure")
+            .header(SET_COOKIE, "d=4; Domain=.example")
             .body(text(forwarded))
             .unwrap()
     })
@@ -711,7 +712,8 @@ async fn share_listener_forwards_as_https_and_strips_cookie_domains() {
         [
             "a=1; Path=/; HttpOnly",
             "b=2",
-            "c=3; Domain=other.example; Secure"
+            "c=3; Domain=other.example; Secure",
+            "d=4"
         ]
     );
     assert_eq!(body_text(response).await, format!("https {host}"));
@@ -757,7 +759,8 @@ async fn local_listener_leaves_cookies_alone() {
         [
             "a=1; Domain=share.example; Path=/; HttpOnly",
             "b=2; domain=.SHARE.example",
-            "c=3; Domain=other.example; Secure"
+            "c=3; Domain=other.example; Secure",
+            "d=4; Domain=.example"
         ]
     );
 }
