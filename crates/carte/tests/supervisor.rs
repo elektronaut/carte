@@ -1048,6 +1048,60 @@ async fn missing_infrastructure_fails_with_one_clear_message() {
 }
 
 #[tokio::test]
+async fn missing_infrastructure_when_a_worker_restarts_leaves_the_rest_running() {
+    let setup = Setup::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    setup.app("acme-web", WEB);
+    setup.project(&format!("requires = [\"tcp://127.0.0.1:{port}\"]\n"));
+    let handle = setup.start();
+
+    handle
+        .ensure_ready(key("acme-web", Stack::Main))
+        .await
+        .unwrap();
+    wait_for(&handle, "the worker to run", |s| {
+        process(s, "acme-web", "worker").state == ProcessState::Running
+    })
+    .await;
+    let web = process(&handle.snapshot(), "acme-web", "web").pid;
+    drop(listener);
+    let closed = tokio::time::timeout(Duration::from_secs(10), async {
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the listener stayed open");
+    let worker = process(&handle.snapshot(), "acme-web", "worker")
+        .pid
+        .unwrap();
+    kill(
+        Pid::from_raw(worker as i32),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    wait_for(&handle, "carte to give up on the worker", |s| {
+        process(s, "acme-web", "worker").gave_up
+    })
+    .await;
+    let snapshot = handle.snapshot();
+    assert_eq!(
+        status(&snapshot, "acme-web", "main").state,
+        InstanceState::Ready
+    );
+    let after = process(&snapshot, "acme-web", "web");
+    assert_eq!(after.state, ProcessState::Running);
+    assert_eq!(after.pid, web);
+    let (lines, _) = handle.logs(request(&here("web/worker"))).await.unwrap();
+    assert!(
+        lines.iter().any(|l| l.text.contains("isn't reachable")),
+        "{lines:#?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn running_processes_report_memory() {
     let setup = Setup::new();
     setup.app("acme-web", WEB);
