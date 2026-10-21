@@ -82,18 +82,25 @@ fn marked(procs: &[Proc], pgid: u32, marker: &str) -> bool {
         .any(|p| environ_var(p.pid, SHIM_MARKER).as_deref() == Some(marker))
 }
 
+/// `id` as a pid, process group or session to signal: `None` for 0, 1 and
+/// anything that isn't a positive `pid_t`.
+pub fn signal_target(id: u32) -> Option<libc::pid_t> {
+    libc::pid_t::try_from(id).ok().filter(|&id| id > 1)
+}
+
 /// Whether process `pid` may exist: only a definite "no such process" counts
-/// as gone, and a pid at or below 1 always counts as existing.
+/// as gone, and a pid that isn't a `signal_target` always counts as existing.
 pub fn exists(pid: u32) -> bool {
-    if pid <= 1 {
+    let Some(pid) = signal_target(pid) else {
         return true;
-    }
-    let found = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+    };
+    let found = unsafe { libc::kill(pid, 0) } == 0;
     found || nix::errno::Errno::last() != nix::errno::Errno::ESRCH
 }
 
-/// The value of `name` in the environment process `pid` started with; `None`
-/// when it isn't set or can't be read.
+/// The value of `name` in process `pid`'s environment as its program was
+/// exec'd; `None` when it isn't set or can't be read. Changes the process made
+/// since aren't seen.
 pub fn environ_var(pid: u32, name: &str) -> Option<String> {
     let environ = environ(pid)?;
     let prefix = format!("{name}=");
@@ -103,13 +110,13 @@ pub fn environ_var(pid: u32, name: &str) -> Option<String> {
         .map(|value| String::from_utf8_lossy(value).into_owned())
 }
 
-/// The NUL-separated environment process `pid` started with.
+/// The NUL-separated environment area of process `pid`, as set up at exec.
 #[cfg(target_os = "linux")]
 fn environ(pid: u32) -> Option<Vec<u8>> {
     std::fs::read(format!("/proc/{pid}/environ")).ok()
 }
 
-/// The NUL-separated environment process `pid` started with, from
+/// The NUL-separated environment area of process `pid`, as set up at exec, from
 /// `KERN_PROCARGS2`: argc, the executable's path, padding, the arguments, then
 /// the environment.
 #[cfg(target_os = "macos")]
@@ -247,6 +254,16 @@ fn processes() -> Vec<Proc> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn signal_targets_leave_out_everything_but_positive_pids_above_1() {
+        assert_eq!(signal_target(0), None);
+        assert_eq!(signal_target(1), None);
+        assert_eq!(signal_target(2), Some(2));
+        assert_eq!(signal_target(i32::MAX as u32), Some(i32::MAX));
+        assert_eq!(signal_target(i32::MAX as u32 + 1), None);
+        assert_eq!(signal_target(u32::MAX), None);
+    }
 
     #[test]
     fn reads_its_own_environment() {

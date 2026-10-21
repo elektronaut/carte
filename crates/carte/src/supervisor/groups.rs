@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 
-use crate::proctree::{boot_id, exists, group_in_session, session_groups};
+use crate::proctree::{boot_id, exists, group_in_session, session_groups, signal_target};
 
 pub struct GroupRecord {
     path: PathBuf,
@@ -132,8 +132,8 @@ pub fn kill_leftovers(path: &Path) -> io::Result<usize> {
                     .filter(|&group| group > 1 && group != pgid),
             );
         }
-        for group in groups {
-            if killpg(Pid::from_raw(group as i32), Signal::SIGKILL).is_ok() {
+        for group in groups.into_iter().filter_map(signal_target) {
+            if killpg(Pid::from_raw(group), Signal::SIGKILL).is_ok() {
                 killed += 1;
             }
         }
