@@ -83,8 +83,7 @@ impl Terminal {
                 return;
             }
             if !self.pty.reads_keys() {
-                self.clients.lock().unwrap().answers.stop();
-                return;
+                continue;
             }
             if self.write(&CURSOR_ANSWER.repeat(pending)).await.is_err() {
                 self.clients.lock().unwrap().answers.stop();
@@ -285,15 +284,19 @@ fn without_queries(data: &[u8]) -> Vec<u8> {
         match data[at] {
             0x05 => at += 1,
             0x1b => match escape(&data[at..]) {
-                Some((len, query)) => {
+                Escape::Sequence { len, query } => {
                     if !query {
                         out.extend_from_slice(&data[at..at + len]);
                     }
                     at += len;
                 }
-                None => {
+                Escape::Not => {
                     out.push(0x1b);
                     at += 1;
+                }
+                Escape::Unterminated => {
+                    out.extend_from_slice(&data[at..]);
+                    break;
                 }
             },
             b => {
@@ -305,10 +308,26 @@ fn without_queries(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// The length of the CSI sequence or string `data` starts with, and whether a
-/// terminal answers it; `None` when it doesn't start with a complete one.
-fn escape(data: &[u8]) -> Option<(usize, bool)> {
-    match *data.get(1)? {
+/// What an ESC at the start of some data starts.
+enum Escape {
+    /// A complete CSI sequence, string or DECID, `len` bytes long, which a
+    /// terminal answers when `query`.
+    Sequence { len: usize, query: bool },
+    /// Nothing this recognizes.
+    Not,
+    /// A string with no end in the data, so no later string has one either.
+    Unterminated,
+}
+
+fn escape(data: &[u8]) -> Escape {
+    let Some(&kind) = data.get(1) else {
+        return Escape::Not;
+    };
+    match kind {
+        b'Z' => Escape::Sequence {
+            len: 2,
+            query: true,
+        },
         b'[' => {
             let params = data[2..]
                 .iter()
@@ -319,17 +338,23 @@ fn escape(data: &[u8]) -> Option<(usize, bool)> {
                 .take_while(|b| (0x20..=0x2f).contains(*b))
                 .count();
             let end = 2 + params + between;
-            let last = *data.get(end).filter(|b| (0x40..=0x7e).contains(*b))?;
-            let query = csi_query(&data[2..2 + params], &data[2 + params..end], last);
-            Some((end + 1, query))
+            match data.get(end) {
+                Some(&last @ 0x40..=0x7e) => Escape::Sequence {
+                    len: end + 1,
+                    query: csi_query(&data[2..2 + params], &data[2 + params..end], last),
+                },
+                _ => Escape::Not,
+            }
         }
         kind @ (b']' | b'P' | b'_' | b'^' | b'X') => {
             let body = &data[2..];
-            let (len, end) = body.iter().enumerate().find_map(|(i, &b)| match b {
+            let Some((len, end)) = body.iter().enumerate().find_map(|(i, &b)| match b {
                 0x07 | 0x18 | 0x1a => Some((i, i + 1)),
                 0x1b if body.get(i + 1) == Some(&b'\\') => Some((i, i + 2)),
                 _ => None,
-            })?;
+            }) else {
+                return Escape::Unterminated;
+            };
             let body = &body[..len];
             let query = match kind {
                 b']' => body
@@ -339,9 +364,12 @@ fn escape(data: &[u8]) -> Option<(usize, bool)> {
                 b'P' => body.starts_with(b"$q") || body.starts_with(b"+q"),
                 _ => true,
             };
-            Some((2 + end, query))
+            Escape::Sequence {
+                len: 2 + end,
+                query,
+            }
         }
-        _ => None,
+        _ => Escape::Not,
     }
 }
 
@@ -352,7 +380,7 @@ fn csi_query(params: &[u8], between: &[u8], last: u8) -> bool {
     let private = params.first().copied();
     match (last, between) {
         (b'n' | b'c' | b'x', b"") => true,
-        (b'p' | b'w', b"$") | (b'y', b"*") | (b'|', b"#") => true,
+        (b'p' | b'w' | b'u', b"$") | (b'u', b"&") | (b'y', b"*") | (b'|', b"#") => true,
         (b'q', b"") => private == Some(b'>'),
         (b'u' | b'm' | b'S', b"") => private == Some(b'?'),
         (b't', b"") => {
@@ -520,6 +548,9 @@ mod tests {
             b"\x1bP+q544e\x1b\\",
             b"\x1b_Gi=1,a=q;AAAA\x1b\\",
             b"\x05",
+            b"\x1bZ",
+            b"\x1b[1$u",
+            b"\x1b[&u",
         ];
         for query in queries {
             let data = [b"a".as_slice(), query, b"b"].concat();
@@ -556,6 +587,24 @@ mod tests {
                 String::from_utf8_lossy(seq)
             );
         }
+    }
+
+    #[test]
+    fn strings_without_an_end_strip_in_linear_time() {
+        for introducer in [b"\x1b]", b"\x1bP", b"\x1b_", b"\x1b^", b"\x1bX"] {
+            let data = introducer.repeat(512 * 1024);
+            let started = std::time::Instant::now();
+            assert_eq!(replayable(&data), data);
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+        assert_eq!(
+            replayable(b"a\x1b[c\x1b]0;open \x1b[c"),
+            b"a\x1b]0;open \x1b[c"
+        );
     }
 
     #[test]
