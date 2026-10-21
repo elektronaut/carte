@@ -496,6 +496,36 @@ fn lists_processes_before_the_first_start_and_follows_the_procfile() {
 }
 
 #[test]
+fn the_socket_goes_away_as_soon_as_the_daemon_stops() {
+    let marker = tempfile::tempdir().unwrap();
+    let trapped = marker.path().join("trapped");
+    let mut daemon = Daemon::start_with_project(&format!(
+        "\n[apps.acme-web.processes.slow]\ncommand = \"trap 'sleep 3; exit 0' TERM; touch {}; while :; do sleep 0.05; done\"\n",
+        trapped.display()
+    ));
+    assert!(
+        daemon
+            .request("web.acme.test", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+    eventually("the trap", || trapped.exists());
+
+    let socket = carte::paths::Paths::under(&daemon.root).socket();
+    let child = daemon.child.as_mut().unwrap();
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    )
+    .unwrap();
+    eventually("the socket to go", || !socket.exists());
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the daemon already exited"
+    );
+    daemon.stop();
+}
+
+#[test]
 fn a_second_daemon_refuses_to_start() {
     let daemon = Daemon::start();
     let output = daemon.command(&["daemon"]).output().unwrap();

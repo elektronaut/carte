@@ -251,6 +251,6 @@ before it was removed.
 | 0 | Success |
 | 1 | Any other error |
 | 2 | Invalid arguments |
-| 3 | The daemon isn't running |
+| 3 | The daemon isn't running, or is starting or stopping |
 | 4 | The address names nothing or more than one thing, there's no app in the current directory, or a process or env key doesn't exist |
 | 5 | An app failed to start or didn't get ready in time, or `exec` found a process that provides env not running |

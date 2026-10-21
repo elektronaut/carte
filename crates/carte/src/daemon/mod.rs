@@ -200,6 +200,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         _ = int.recv() => info!("stopping on SIGINT"),
     }
 
+    let _ = std::fs::remove_file(&socket);
     shutdown.cancel();
     let grace = Options::new(&paths).grace * 2 + Duration::from_secs(5);
     if tokio::time::timeout(grace, supervisor.shutdown())
@@ -215,12 +216,12 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         let _ = api_task.await;
     })
     .await;
-    let _ = std::fs::remove_file(&socket);
     Ok(())
 }
 
 /// Binds the API socket under a temporary name and moves it into place once it
-/// listens, so a client that sees the socket can connect to it.
+/// listens, so the socket doesn't appear before the daemon accepts connections.
+/// The daemon removes it as soon as it starts stopping.
 fn bind_api(socket: &Path) -> std::io::Result<UnixListener> {
     let mut pending = socket.as_os_str().to_owned();
     pending.push(".new");
