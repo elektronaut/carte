@@ -417,6 +417,7 @@ fn find_stack(state: &ProjectState, name: &str) -> Result<Stack, AddressError> {
     }
     let stacks = state.stacks();
     let slug = slugify(name);
+    let slug = crate::slug::shorten(&slug, 63).unwrap_or(slug);
     if stacks.contains(&slug) {
         return Ok(Stack::Branch(slug));
     }
@@ -833,6 +834,29 @@ mod tests {
                 "nova",
                 Some("nova-billing"),
                 Some(branch("feature-x")),
+                None
+            ))
+        );
+    }
+
+    #[test]
+    fn a_long_folder_name_finds_its_shortened_stack() {
+        let folder = format!("newsletter-{}", "x".repeat(60));
+        let stack = crate::slug::shorten(&folder, 63).unwrap();
+        let mut world = world();
+        world.projects[0].worktrees.insert(
+            "nova-billing".into(),
+            vec![crate::model::Worktree {
+                slug: stack.clone(),
+                ..worktree("long", "/Users/dev/work/long/nova-billing")
+            }],
+        );
+        assert_eq!(
+            resolve(&world, &parse(&format!("billing@{folder}")), None),
+            Ok(target(
+                "nova",
+                Some("nova-billing"),
+                Some(branch(&stack)),
                 None
             ))
         );
