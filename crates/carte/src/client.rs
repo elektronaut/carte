@@ -1,11 +1,12 @@
 //! Talks to the daemon over its Unix socket.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, bail};
 use bytes::{Bytes, BytesMut};
 use carte_api::ErrorBody;
-use http::{Method, Request, StatusCode, header};
+use http::{HeaderMap, Method, Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::upgrade::Upgraded;
@@ -18,6 +19,41 @@ use crate::exit::{Exit, Failure};
 
 pub struct Client {
     socket: PathBuf,
+}
+
+static WARN_ABOUT_VERSION: AtomicBool = AtomicBool::new(false);
+
+/// Has the first answer from a daemon that runs another carte print a warning to
+/// stderr. Off unless called, for the TUI and the MCP server.
+pub fn warn_about_version() {
+    WARN_ABOUT_VERSION.store(true, Ordering::Relaxed);
+}
+
+/// What to tell the user when the daemon runs another carte than this one: the
+/// version from the daemon's `carte-version` header, which daemons before it lack.
+fn version_hint(headers: &HeaderMap) -> Option<String> {
+    let this = env!("CARGO_PKG_VERSION");
+    let daemon = headers
+        .get(carte_api::VERSION_HEADER)
+        .and_then(|value| value.to_str().ok());
+    match daemon {
+        Some(daemon) if daemon == this => None,
+        Some(daemon) => Some(format!(
+            "the daemon runs carte {daemon}, this is {this}; run `carte daemon restart`"
+        )),
+        None => Some(format!(
+            "the daemon runs an older carte than this one ({this}); run `carte daemon restart`"
+        )),
+    }
+}
+
+/// Warns once, when asked to, that the daemon runs another carte.
+fn check_version(headers: &HeaderMap) {
+    if WARN_ABOUT_VERSION.swap(false, Ordering::Relaxed)
+        && let Some(hint) = version_hint(headers)
+    {
+        eprintln!("warning: {hint}");
+    }
 }
 
 impl Client {
@@ -60,6 +96,7 @@ impl Client {
         if !response.status().is_success() {
             return decode::<serde_json::Value>(response).await.map(|_| ());
         }
+        check_version(response.headers());
         let mut body = response.into_body();
         let mut buf = BytesMut::new();
         while let Some(frame) = body.frame().await {
@@ -100,6 +137,7 @@ impl Client {
                 bail!("the daemon didn't switch to {protocol}");
             });
         }
+        check_version(response.headers());
         Ok(TokioIo::new(hyper::upgrade::on(response).await?))
     }
 
@@ -148,17 +186,34 @@ fn unreachable(socket: &Path, err: &std::io::Error) -> Failure {
 
 async fn decode<T: DeserializeOwned>(response: http::Response<Incoming>) -> anyhow::Result<T> {
     let status = response.status();
+    let headers = response.headers().clone();
     let bytes = response.into_body().collect().await?.to_bytes();
-    if status != StatusCode::OK {
-        if let Ok(error) = serde_json::from_slice::<ErrorBody>(&bytes) {
-            if status == StatusCode::NOT_FOUND {
-                return Err(Failure::new(Exit::NotFound, error.error).into());
-            }
-            bail!("{}", error.error);
-        }
-        bail!("the daemon answered {status}");
+    if status == StatusCode::OK {
+        check_version(&headers);
+        return serde_json::from_slice(&bytes).context("reading the daemon's answer");
     }
-    serde_json::from_slice(&bytes).context("reading the daemon's answer")
+    let error = serde_json::from_slice::<ErrorBody>(&bytes).ok();
+    let outdated = matches!(
+        status,
+        StatusCode::METHOD_NOT_ALLOWED
+            | StatusCode::UNSUPPORTED_MEDIA_TYPE
+            | StatusCode::UNPROCESSABLE_ENTITY
+    ) || (status == StatusCode::NOT_FOUND && error.is_none());
+    let found = error.is_some();
+    let mut message = match error {
+        Some(error) => error.error,
+        None => match String::from_utf8_lossy(&bytes).trim() {
+            "" => format!("the daemon answered {status}"),
+            text => format!("the daemon answered {status}: {text}"),
+        },
+    };
+    if outdated && let Some(hint) = version_hint(&headers) {
+        message = format!("{message}; {hint}");
+    }
+    if status == StatusCode::NOT_FOUND && found {
+        return Err(Failure::new(Exit::NotFound, message).into());
+    }
+    bail!("{message}")
 }
 
 #[cfg(test)]
@@ -210,6 +265,109 @@ mod tests {
                 assert_eq!(waitpid(child, None).unwrap(), WaitStatus::Exited(child, 0));
             }
         }
+    }
+
+    /// Serves `app` on a socket in `dir`, answering as carte `version` when given.
+    fn stub(dir: &Path, version: Option<&'static str>, app: axum::Router) -> Client {
+        let socket = dir.join("test.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let app = app.layer(axum::middleware::map_response(
+            move |mut response: axum::response::Response| async move {
+                if let Some(version) = version {
+                    response.headers_mut().insert(
+                        carte_api::VERSION_HEADER,
+                        http::HeaderValue::from_static(version),
+                    );
+                }
+                response
+            },
+        ));
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Client::new(&socket)
+    }
+
+    #[tokio::test]
+    async fn a_daemon_without_a_route_is_named_as_another_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = axum::Router::new()
+            .route("/v1/snapshot", axum::routing::get(|| async { "{}" }))
+            .fallback(|| async { StatusCode::NOT_FOUND });
+        let client = stub(dir.path(), Some("0.0.1"), app);
+        let err = client
+            .upgrade(
+                carte_api::paths::ATTACH,
+                carte_api::attach::PROTOCOL,
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        let this = env!("CARGO_PKG_VERSION");
+        assert!(
+            err.contains(&format!(
+                "the daemon runs carte 0.0.1, this is {this}; run `carte daemon restart`"
+            )),
+            "{err}"
+        );
+        assert!(
+            err.starts_with("the daemon answered 404 Not Found"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_daemon_without_the_version_header_is_older() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = axum::Router::new().route(
+            "/v1/control",
+            axum::routing::post(|| async {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "Failed to deserialize the JSON body: unknown variant `nap`",
+                )
+            }),
+        );
+        let client = stub(dir.path(), None, app);
+        let err = client
+            .post::<_, serde_json::Value>("/v1/control", &serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown variant `nap`"), "{err}");
+        assert!(
+            err.contains("the daemon runs an older carte than this one"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn errors_from_the_same_version_have_no_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = axum::Router::new()
+            .route(
+                "/v1/control",
+                axum::routing::post(|| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        axum::Json(ErrorBody {
+                            error: "no app nova".into(),
+                        }),
+                    )
+                }),
+            )
+            .fallback(|| async { StatusCode::NOT_FOUND });
+        let client = stub(dir.path(), Some(env!("CARGO_PKG_VERSION")), app);
+        let err = client
+            .post::<_, serde_json::Value>("/v1/control", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.downcast_ref::<Failure>().unwrap().exit, Exit::NotFound);
+        assert_eq!(err.to_string(), "no app nova");
+        let err = client
+            .post::<_, serde_json::Value>("/v1/attach", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "the daemon answered 404 Not Found");
     }
 
     #[tokio::test]

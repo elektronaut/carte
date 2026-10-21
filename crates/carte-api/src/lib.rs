@@ -780,6 +780,9 @@ pub struct PruneOutput {
     pub result: Option<PruneResult>,
 }
 
+/// The response header that carries the daemon's carte version.
+pub const VERSION_HEADER: &str = "carte-version";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub error: String,

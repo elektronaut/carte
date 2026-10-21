@@ -73,6 +73,11 @@ address inside it when given one.
 | `carte daemon` | Run the daemon in the foreground. It refuses to start while another daemon with the same state directory is running or still stopping |
 | `carte daemon restart` | Restart the daemon launchd runs, after installing a new build or changing `[share]`. Running apps stop and start again on their next request |
 
+After an upgrade, launchd keeps running the old daemon until it restarts.
+Commands keep working against it, but print a warning that names both
+versions and asks for `carte daemon restart`. A request the old daemon
+doesn't know, such as a command added since, fails with the same advice.
+
 `pin`, `disable` and their opposites last until the daemon restarts;
 `--save` writes them to the project file. It refuses for a project a
 template made, since the template's file applies to all its projects.
