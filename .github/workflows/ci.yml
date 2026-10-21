@@ -50,6 +50,19 @@ jobs:
       # that runs for three minutes, and the rest still run.
       - run: cargo nextest run --workspace --locked --profile ci
 
+  # The fuzz crate is outside the workspace and only fuzzed weekly, so check
+  # here that carte-core changes still build its targets.
+  fuzz-targets:
+    name: Check the fuzz targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --manifest-path fuzz/Cargo.toml --locked
+
   # The `rust-version` in Cargo.toml, which `cargo install` checks.
   msrv:
     name: Build on the MSRV
