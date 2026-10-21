@@ -78,11 +78,13 @@ fn kind_label(kind: PruneKind) -> &'static str {
         PruneKind::App => "app folder",
         PruneKind::RunDir => "run dir",
         PruneKind::Pidfile => "pidfile",
+        PruneKind::Trash => "unfinished prune",
     }
 }
 
 fn group_label(candidate: &PruneCandidate) -> String {
     match (&candidate.project, &candidate.stack) {
+        _ if candidate.kind == PruneKind::Trash => "left by earlier prunes".into(),
         (None, _) => "run dirs of unknown instances".into(),
         (Some(project), None) => format!("{project} (project file gone)"),
         (Some(project), Some(stack)) => format!("{project} @{stack}"),

@@ -177,9 +177,12 @@ fn detach_path(orphan: &Orphan) -> io::Result<Option<PathBuf>> {
     if !meta.is_dir() {
         return Err(io::Error::other("not a directory"));
     }
+    if orphan.kind == OrphanKind::Trash {
+        return Ok(Some(orphan.path.clone()));
+    }
     let name = orphan.path.file_name().ok_or(io::ErrorKind::InvalidInput)?;
     let trash = tempfile::Builder::new()
-        .prefix(".carte-prune-")
+        .prefix(prune::TRASH_PREFIX)
         .tempdir_in(parent)?
         .keep();
     if let Err(err) = fs::rename(&orphan.path, trash.join(name)) {
@@ -210,6 +213,7 @@ pub fn finish(
             Detached::Done(None) => None,
             Detached::Done(Some(trash)) => fs::remove_dir_all(&trash)
                 .err()
+                .filter(|err| err.kind() != io::ErrorKind::NotFound)
                 .map(|err| format!("moved to {} but couldn't delete it: {err}", trash.display())),
         };
         match failure {
@@ -239,6 +243,7 @@ fn candidate(orphan: &Orphan, bytes: u64) -> PruneCandidate {
             OrphanKind::App => PruneKind::App,
             OrphanKind::RunDir => PruneKind::RunDir,
             OrphanKind::Pidfile => PruneKind::Pidfile,
+            OrphanKind::Trash => PruneKind::Trash,
         },
         project: orphan.project.clone(),
         stack: orphan.stack.clone(),
@@ -524,6 +529,32 @@ mod tests {
         assert!(result.errors.is_empty());
         assert_eq!(fs::read_dir(roots.data.join("nova")).unwrap().count(), 0);
         assert!(outside.join("keep").exists());
+    }
+
+    #[test]
+    fn trash_an_earlier_prune_left_is_found_and_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = DirRoots {
+            data: tmp.path().join("data"),
+            run: tmp.path().join("run"),
+        };
+        fs::create_dir_all(roots.run.join(".carte-prune-abc/x")).unwrap();
+        fs::write(roots.run.join(".carte-prune-abc/x/file"), "12345").unwrap();
+        let pidfiles = tmp.path().join("pids");
+        let known = Known {
+            complete: true,
+            ..Known::default()
+        };
+        let plan = prune::plan(&roots, &pidfiles, &listing(&roots, &pidfiles), &known);
+        assert_eq!(plan.orphans.len(), 1, "{plan:?}");
+        assert_eq!(plan.orphans[0].kind, OrphanKind::Trash);
+        assert_eq!(plan.orphans[0].path, roots.run.join(".carte-prune-abc"));
+
+        let detached = detach(plan.orphans, &BTreeSet::new(), &roots);
+        let result = finish(detached, &BTreeMap::new(), Vec::new());
+        assert_eq!(result.removed.len(), 1, "{result:?}");
+        assert_eq!(result.removed[0].kind, PruneKind::Trash);
+        assert_eq!(fs::read_dir(&roots.run).unwrap().count(), 0);
     }
 
     #[test]
