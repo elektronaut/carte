@@ -133,14 +133,7 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
 fn choose_tld(env: &SetupEnv, facts: &Facts, args: &SetupArgs) -> anyhow::Result<Option<String>> {
     if let Some(tld) = &args.tld {
         let tld = tld.trim().trim_matches('.').to_ascii_lowercase();
-        if tld.is_empty()
-            || !tld.split('.').all(|label| {
-                !label.is_empty()
-                    && !label.starts_with('-')
-                    && !label.ends_with('-')
-                    && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            })
-        {
+        if !setup::is_tld(&tld) {
             bail!("{tld:?} isn't a TLD; try `localhost` or `test`");
         }
         return Ok(Some(tld));

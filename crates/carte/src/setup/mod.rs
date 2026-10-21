@@ -46,6 +46,13 @@ pub struct SetupEnv {
 impl SetupEnv {
     pub fn from_system(paths: &Paths) -> anyhow::Result<Self> {
         let machine = config::load_machine_config(&paths.machine_config())?;
+        if !is_tld(&machine.tld) {
+            bail!(
+                "{} sets tld = {:?}, which isn't a TLD; try `localhost` or `test`",
+                tilde(&paths.machine_config()),
+                machine.tld
+            );
+        }
         let tld_configured = fs::read_to_string(paths.machine_config())
             .ok()
             .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
@@ -315,9 +322,21 @@ pub fn puma_dev_domains(plist: &str) -> Vec<String> {
     value
         .split(':')
         .map(str::trim)
-        .filter(|d| !d.is_empty())
+        .filter(|d| is_tld(d))
         .map(str::to_string)
         .collect()
+}
+
+/// Whether `tld` is dot-separated letters, digits and inner hyphens, safe to name a
+/// resolver file after.
+pub fn is_tld(tld: &str) -> bool {
+    !tld.is_empty()
+        && tld.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
 }
 
 /// The program a LaunchAgent runs: the first of its `ProgramArguments`.
@@ -1149,6 +1168,40 @@ mod tests {
         assert_eq!(puma_dev_domains(plist), ["test", "localhost"]);
         assert_eq!(puma_dev_domains("<string>-d=dev</string>"), ["dev"]);
         assert_eq!(puma_dev_domains("<string>puma-dev</string>"), ["test"]);
+        assert_eq!(
+            puma_dev_domains("<string>-d=../hosts:/etc/x:.test:dev</string>"),
+            ["dev"]
+        );
+    }
+
+    #[test]
+    fn tells_tlds_from_paths() {
+        for tld in ["test", "localhost", "nova.test", "x-1"] {
+            assert!(is_tld(tld), "{tld}");
+        }
+        for tld in [
+            "", "../x", "/etc/x", ".test", "test.", "a/b", "-x", "x-", "a..b", "a b",
+        ] {
+            assert!(!is_tld(tld), "{tld}");
+        }
+    }
+
+    #[test]
+    fn refuses_a_configured_tld_that_isnt_one() {
+        for tld in ["../x", "/etc/x", ".test"] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = Paths::under(dir.path());
+            fs::create_dir_all(&paths.config_dir).unwrap();
+            fs::write(paths.machine_config(), format!("tld = {tld:?}\n")).unwrap();
+            let err = SetupEnv::from_system(&paths).unwrap_err().to_string();
+            assert!(err.contains("isn't a TLD"), "{tld}: {err}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(paths.machine_config(), "tld = \"test\"\n").unwrap();
+        let env = SetupEnv::from_system(&paths).unwrap();
+        assert_eq!(env.resolver_file(), Path::new("/etc/resolver/test"));
     }
 
     #[test]

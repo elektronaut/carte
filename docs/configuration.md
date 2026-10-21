@@ -50,7 +50,7 @@ detach_key = "ctrl-q d"
 
 | Key | Default | |
 | --- | --- | --- |
-| `tld` | `"localhost"` | The top-level domain apps are served under. Any other (like `"test"`) needs `/etc/resolver/<tld>`, which `carte setup` writes; apps answer under `.localhost` too |
+| `tld` | `"localhost"` | The top-level domain apps are served under. `carte setup` refuses one that isn't dot-separated letters, digits and hyphens, such as `".test"` or a path. Any other (like `"test"`) needs `/etc/resolver/<tld>`, which `carte setup` writes; apps answer under `.localhost` too |
 | `http_port` | `80` | Plain HTTP |
 | `https_port` | `443` | HTTPS |
 | `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` points to for a `tld` other than `localhost` |
