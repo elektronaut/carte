@@ -607,12 +607,15 @@ pub fn is_watcher(name: &str, command: &str) -> bool {
 }
 
 /// Replaces a hardcoded `-p NNNN`, `-pNNNN`, `--port NNNN` or `--port=NNNN` with `$PORT`,
-/// and drops a leading `unset PORT &&` or `unset PORT;`.
+/// and drops leading `unset PORT &&` or `unset PORT;`.
 pub fn rewrite_port(command: &str) -> Option<String> {
-    let unset = ["unset PORT &&", "unset PORT;"]
+    let mut unset = None;
+    while let Some(rest) = ["unset PORT &&", "unset PORT;"]
         .iter()
-        .find_map(|prefix| command.trim_start().strip_prefix(prefix))
-        .map(str::trim_start);
+        .find_map(|prefix| unset.unwrap_or(command).trim_start().strip_prefix(prefix))
+    {
+        unset = Some(rest.trim_start());
+    }
     let rewritten = rewrite_port_flag(unset.unwrap_or(command));
     match (unset, rewritten) {
         (_, Some(out)) => Some(out),
@@ -676,6 +679,8 @@ fn tokens_with_offsets(s: &str) -> Vec<(usize, &str)> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    use proptest::prelude::*;
 
     use super::*;
     use crate::model::{EnvTemplate, Policy, ProcessConfig, ProcessOverride};
@@ -1544,5 +1549,70 @@ mod tests {
         let teardowns = teardowns(dir.path(), &s).unwrap();
         assert_eq!(teardowns.len(), 1);
         assert_eq!(teardowns[0].command, "dropdb x");
+    }
+
+    fn joined(pieces: &[&'static str]) -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            prop_oneof![
+                proptest::sample::select(pieces.to_vec()).prop_map(str::to_string),
+                "\\PC{0,3}",
+            ],
+            0..10,
+        )
+        .prop_map(|pieces| pieces.concat())
+    }
+
+    /// Whether `after` is `before` with its port number replaced by `$PORT`.
+    fn port_replaced(before: &str, after: &str, previous: Option<&str>) -> bool {
+        let digits = before.trim_start_matches(|c: char| !c.is_ascii_digit());
+        let prefix = &before[..before.len() - digits.len()];
+        let flag = match prefix {
+            "" => matches!(previous, Some("-p" | "--port")),
+            prefix => ["-p", "-p=", "--port="].contains(&prefix),
+        };
+        flag && is_port_number(digits) && after == format!("{prefix}$PORT")
+    }
+
+    proptest! {
+        #[test]
+        fn procfile_lines_are_entries_or_ignored(
+            text in joined(&["web", "worker_1", "a-b", ":", " ", "\n", "#", "bin/dev", "\r\n"]),
+        ) {
+            let parsed = parse_procfile(&text);
+            let lines = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .count();
+            prop_assert_eq!(parsed.entries.len() + parsed.ignored.len(), lines);
+            let mut names: Vec<&str> = parsed.entries.iter().map(|(n, _)| n.as_str()).collect();
+            names.sort_unstable();
+            names.dedup();
+            prop_assert_eq!(names.len(), parsed.entries.len());
+        }
+
+        #[test]
+        fn rewrite_port_changes_only_port_tokens(
+            command in joined(&[" ", "-p", "--port", "--port=", "-p=", "3000", "65536", "x"]),
+        ) {
+            if let Some(out) = rewrite_port(&command) {
+                let before = tokens_with_offsets(&command);
+                let after = tokens_with_offsets(&out);
+                prop_assert_eq!(before.len(), after.len());
+                for (i, (&(_, b), &(_, a))) in before.iter().zip(&after).enumerate() {
+                    let previous = i.checked_sub(1).map(|i| before[i].1);
+                    prop_assert!(a == b || port_replaced(b, a, previous), "{b:?} -> {a:?}");
+                }
+            }
+        }
+
+        #[test]
+        fn rewrite_port_is_idempotent(
+            command in joined(&[" ", "-p", "--port", "--port=", "3000", "unset PORT &&", "unset PORT;", "x"]),
+        ) {
+            if let Some(once) = rewrite_port(&command) {
+                prop_assert!(rewrite_port(&once).is_none_or(|twice| twice == once), "{once:?}");
+            }
+        }
     }
 }
