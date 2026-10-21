@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.5.0](https://github.com/elektronaut/carte/compare/v0.4.0...v0.5.0) (2026-10-21)
+
+
+### Features
+
+* **cli:** add carte attach to type into a running process ([c316370](https://github.com/elektronaut/carte/commit/c3163704a38cde5d305699cda055c2129250e8e5))
+* **daemon:** hold the idle and readiness timers while paused ([0ca9ebe](https://github.com/elektronaut/carte/commit/0ca9ebe5df5e2464b12af94e78567325b448af35))
+* **daemon:** show when a process is paused at a breakpoint ([058d7ca](https://github.com/elektronaut/carte/commit/058d7ca8486adcbf340ef083c87c7cddd0eab4b4))
+
+
+### Bug Fixes
+
+* **cli:** cap how far right cursor movements reach in the stripper ([fb429bc](https://github.com/elektronaut/carte/commit/fb429bc2d626b2cf976a99365a550f6453f7bc24))
+* **cli:** keep attach sessions responsive and restore the terminal ([88990b3](https://github.com/elektronaut/carte/commit/88990b32550ffbcb8d3e5195f8e44655b381416d))
+* **cli:** let attach stop while connecting and wait longer when asked ([0d65471](https://github.com/elektronaut/carte/commit/0d65471235d31f1f60da4757d61c2791392e59ef))
+* **cli:** never move the cursor back when clamping its column ([1a069ec](https://github.com/elektronaut/carte/commit/1a069ec976a99bb413ec5dbb9958c192443115ac))
+* **cli:** take durations for attach --quiet and skip unknown frames ([8c79650](https://github.com/elektronaut/carte/commit/8c79650eb9fa150222855ef2f494c87481fafb51))
+* **cli:** wait a second of quiet in the MCP type tool by default ([e786c8b](https://github.com/elektronaut/carte/commit/e786c8b585ed4c283b5f68fd693ab62db390be9e))
+* **core:** format durations with seconds and milliseconds faithfully ([b04c597](https://github.com/elektronaut/carte/commit/b04c5977d7ac8a1a441c17d421f47524dfaa9571))
+* **core:** show sub-second durations and refuse ones that overflow ([27ab1ae](https://github.com/elektronaut/carte/commit/27ab1aec0ce0f9448c9b45d9371d6ef5e3bdcee9))
+* **daemon:** answer Reline's cursor-position query while no terminal is attached ([02daee8](https://github.com/elektronaut/carte/commit/02daee8078db68e9cd39caf9c7a24e803c016eb7))
+* **daemon:** clear a give-up on carte stop-all ([c39a3e8](https://github.com/elektronaut/carte/commit/c39a3e82bf56b5846e106db7141e13b45bc051ee))
+* **daemon:** don't settle the log in the middle of a redraw ([753f36f](https://github.com/elektronaut/carte/commit/753f36fd99a28da20e3fb9d98ee8bd635ed9532b))
+* **daemon:** end a pry pause once its answer has gone quiet ([7f73520](https://github.com/elektronaut/carte/commit/7f735203be6aba717f11386fd0f98a5db4326d81))
+* **daemon:** find prompts on a screen the log's settling can't touch ([4e6bbf6](https://github.com/elektronaut/carte/commit/4e6bbf697c7a75f36a910cf7519c4b1144e0bd9c))
+* **daemon:** follow Reline's redraws within a chunk of output ([172b3f7](https://github.com/elektronaut/carte/commit/172b3f75ff17996293b2494d7d1b6d30fb48c0b0))
+* **daemon:** keep the kube client through a rotation caught halfway ([81743c1](https://github.com/elektronaut/carte/commit/81743c13aaefe26d84cd342c05c8c2fc18f4ebb9))
+* **daemon:** keep the kube client when the kubeconfig can't be read ([9817874](https://github.com/elektronaut/carte/commit/98178747cf2eef83b5af2490f48c56b1eee6c32e))
+* **daemon:** keep the stripper's open rows across reads ([65c09a6](https://github.com/elektronaut/carte/commit/65c09a65dd3dd4ad83bead2df289368a9b85c203))
+* **daemon:** make breakpoint detection cheaper and steadier ([f8ad5bb](https://github.com/elektronaut/carte/commit/f8ad5bbe6c3697a0769aac6795a6a5687ba94537))
+* **daemon:** name a process paused during the boot on the waiting page ([31df17f](https://github.com/elektronaut/carte/commit/31df17f1d5461dc4f375a7652a798e2d42be080b))
+* **daemon:** name the process a waiting request is paused on ([c8897d8](https://github.com/elektronaut/carte/commit/c8897d8826d8d7eaed4fd9c9e1c863b4f5c22915))
+* **daemon:** reconnect when a kubeconfig's certificate files change ([16810d6](https://github.com/elektronaut/carte/commit/16810d68503206af84d3cce86844c40ba09d7e67))
+* **daemon:** restart the idle timer when a pause ends ([3f32ab4](https://github.com/elektronaut/carte/commit/3f32ab45d5fa0c55e65fba6a394ae1aa9f03dad3))
+* **daemon:** stop spinning on a pty that refuses input ([b51fe6d](https://github.com/elektronaut/carte/commit/b51fe6d4e04677f705cc62414ed9232e264abee0))
+* **daemon:** tell a booting instance by its boot progress on the waiting page ([416eb85](https://github.com/elektronaut/carte/commit/416eb8570ee85b095285365d2871e6b231d1df8e))
+* **daemon:** treat a kubeconfig cut off before its user as unreadable ([bcbdd23](https://github.com/elektronaut/carte/commit/bcbdd23d5f92ffb1c7afc1a1e939081a15b57e93))
+* **daemon:** write cursor-position answers from one task, a few at most ([78643b5](https://github.com/elektronaut/carte/commit/78643b594c24f7e151cbe17ac8547ca87f2fa1f9))
+* **mcp:** wrap events and errors, and escape lookalike tags ([841caa7](https://github.com/elektronaut/carte/commit/841caa784a7379d66643738893b21c539e98a0c0))
+* **mcp:** wrap the app's output in &lt;app-output&gt; tags ([d297c5f](https://github.com/elektronaut/carte/commit/d297c5f587d8731ef6e78c6a8c649f4011fb4f43))
+* **share:** drop cookie domains that are parents of the share domain ([cc7c2a7](https://github.com/elektronaut/carte/commit/cc7c2a7cae3fed54067c071f80444c44ba98edb0))
+* **share:** end a share's connections and keep its end time ([49c99aa](https://github.com/elektronaut/carte/commit/49c99aaa865a7539f5353b724206388a49f692a1))
+* **share:** forward shared requests with the visitor's address ([4fbf95c](https://github.com/elektronaut/carte/commit/4fbf95cd2cfd1c22ca7bba6b7c5d60bfb9c353f4))
+* **share:** remove more forwarding headers from shared requests ([e1f156b](https://github.com/elektronaut/carte/commit/e1f156be25bf970e1b1b16bbc7a0c043abb1b3bf))
+* **share:** show share visitors a plain page instead of carte's error page ([816a321](https://github.com/elektronaut/carte/commit/816a321f36b498d96f8480dc57af319129453d1b))
+* **share:** strip cookie domains from upgrade responses too ([6d96b57](https://github.com/elektronaut/carte/commit/6d96b57759989952052515139de4d4acc536eff0))
+* **share:** watch a share's end while files and small responses are prepared ([894ee29](https://github.com/elektronaut/carte/commit/894ee2991dec7e3b7c5c0186126560c2b0ec8891))
+
 ## [0.4.0](https://github.com/elektronaut/carte/compare/v0.3.0...v0.4.0) (2026-10-21)
 
 
