@@ -32,20 +32,19 @@ pub fn connected_to_itself(
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, TcpListener};
+    use std::time::Duration;
 
     use super::*;
 
     /// Connects a socket bound to a free port to that same port. Linux allows it;
     /// macOS refuses, and then there is nothing to test.
     async fn self_connection() -> Option<(u16, tokio::net::TcpStream)> {
-        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
-        socket.bind(addr).unwrap();
+        socket
+            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .unwrap();
+        let addr = socket.local_addr().unwrap();
+        let port = addr.port();
         let stream = socket.connect(addr).await;
         if cfg!(not(target_os = "linux")) && stream.is_err() {
             return None;
@@ -76,12 +75,24 @@ mod tests {
             stream.peer_addr()
         ));
         drop(stream);
-        let socket = tokio::net::TcpSocket::new_v4().unwrap();
-        socket.set_reuseaddr(true).unwrap();
-        socket
-            .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
-            .unwrap();
-        socket.listen(1).unwrap();
+        // A child forked by a parallel test can hold the socket for a few
+        // milliseconds; a port left in TIME_WAIT would stay taken for a minute.
+        let started = std::time::Instant::now();
+        loop {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_reuseaddr(true).unwrap();
+            let bound = socket
+                .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+                .and_then(|()| socket.listen(1));
+            match bound {
+                Ok(_) => break,
+                Err(err) if started.elapsed() < Duration::from_secs(2) => {
+                    assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse, "{err}");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("port {port} still taken: {err}"),
+            }
+        }
     }
 
     #[test]
