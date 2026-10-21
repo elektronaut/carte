@@ -166,6 +166,20 @@ pub fn stack_names(repo: &str, paths: &[&Path]) -> Vec<String> {
 
 /// Runs `git worktree list --porcelain` in a main checkout.
 pub fn list_worktrees(main_checkout: &Path) -> Result<Vec<Worktree>, DiscoveryError> {
+    Ok(linked_worktrees(&worktree_entries(main_checkout)?))
+}
+
+/// The worktrees git still lists for a repo although their directory is missing,
+/// such as on a volume that isn't mounted, or moved without `git worktree prune`.
+pub fn prunable_worktrees(main_checkout: &Path) -> Result<Vec<PathBuf>, DiscoveryError> {
+    Ok(worktree_entries(main_checkout)?
+        .into_iter()
+        .filter(|e| e.prunable)
+        .map(|e| e.path)
+        .collect())
+}
+
+fn worktree_entries(main_checkout: &Path) -> Result<Vec<WorktreeEntry>, DiscoveryError> {
     let output = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(main_checkout)
@@ -181,7 +195,7 @@ pub fn list_worktrees(main_checkout: &Path) -> Result<Vec<Worktree>, DiscoveryEr
         });
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(linked_worktrees(&parse_worktree_list(&stdout)))
+    Ok(parse_worktree_list(&stdout))
 }
 
 /// Finds a project's apps in each checkout, reads each app's `carte.toml` and

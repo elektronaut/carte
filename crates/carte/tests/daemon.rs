@@ -1938,6 +1938,77 @@ fn a_teardown_cut_short_by_a_shutdown_runs_again_on_the_next_start() {
 }
 
 #[test]
+fn a_worktree_git_still_lists_keeps_its_stack_until_pruned() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let mut daemon = start_with_teardown("1s", &format!("touch {}", marker.display()));
+    let dirs = run_in_feature_x(&daemon);
+    let stack_dir = dirs.state.parent().unwrap().to_path_buf();
+
+    std::fs::rename(
+        daemon.root.join("work/feature-x"),
+        daemon.root.join("unmounted"),
+    )
+    .unwrap();
+    eventually("the feature-x stack to go", || {
+        !snapshot(&daemon).projects[0]
+            .stacks
+            .iter()
+            .any(|s| s.name == "feature-x")
+    });
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(!marker.exists(), "the teardown ran");
+    assert!(teardown_event(&daemon, EventKind::TeardownScheduled, false).is_none());
+    assert!(stack_dir.is_dir());
+
+    daemon.stop();
+    daemon.launch();
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(!marker.exists(), "the teardown ran after a restart");
+
+    git(&daemon.root.join("work/acme-web"), &["worktree", "prune"]);
+    daemon.stop();
+    daemon.launch();
+    eventually("the teardown", || {
+        teardown_event(&daemon, EventKind::TeardownFinished, false).is_some()
+    });
+    assert!(marker.exists());
+    daemon.stop();
+}
+
+#[test]
+fn a_worktree_that_comes_back_while_carte_is_stopped_keeps_its_stack() {
+    use carte_api::EventKind;
+    let marker = tempfile::tempdir().unwrap();
+    let marker = marker.path().join("teardown");
+    let mut daemon = start_with_teardown("2s", &format!("touch {}", marker.display()));
+    let dirs = run_in_feature_x(&daemon);
+
+    remove_feature_x(&daemon);
+    eventually("the scheduled teardown", || {
+        teardown_event(&daemon, EventKind::TeardownScheduled, false).is_some()
+    });
+    daemon.stop();
+    git(
+        &daemon.root.join("work/acme-web"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "../feature-x/acme-web",
+            "feature-x",
+        ],
+    );
+    daemon.launch();
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(!marker.exists(), "the teardown ran");
+    assert!(teardown_event(&daemon, EventKind::TeardownScheduled, false).is_none());
+    assert!(dirs.state.is_dir());
+    daemon.stop();
+}
+
+#[test]
 fn an_unreadable_stack_record_pauses_the_teardown() {
     use carte_api::EventKind;
     let marker = tempfile::tempdir().unwrap();
