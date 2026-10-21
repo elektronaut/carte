@@ -75,8 +75,9 @@ never block a start.
 | `log_buffer` | `"1MB"` | Log kept per process |
 | `log_budget` | `"256MB"` | Log kept in total; stopped apps' logs go first |
 
-Apps that are starting, pinned, handling requests, running a `carte exec`
-command, kept running by an app that depends on them, or waiting at a
+Apps that are starting or became ready in the last 10 seconds, pinned,
+handling requests, running a `carte exec` command, kept running by an
+app that depends on them, or waiting at a
 [debugger prompt](cli.md#attach) are never stopped to meet a target.
 
 ### `[share]`

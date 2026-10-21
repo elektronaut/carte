@@ -107,6 +107,8 @@ pub(super) struct Instance {
     restart_forced: BTreeSet<String>,
     /// When the latest start began.
     pub started_at: Instant,
+    /// When the latest start became ready.
+    ready_at: Instant,
     /// It had a proxied request since it started.
     opened: bool,
     /// The app whose open warmed it.
@@ -239,6 +241,7 @@ impl Instance {
             forced: BTreeSet::new(),
             restart_forced: BTreeSet::new(),
             started_at: Instant::now(),
+            ready_at: Instant::now(),
             opened: false,
             warmed_after: None,
             gave_up: None,
@@ -375,6 +378,10 @@ impl Instance {
         }
     }
 }
+
+/// How long a newly ready instance counts as starting, so it isn't evicted between
+/// the response that started it and the requests that follow.
+const JUST_READY: Duration = Duration::from_secs(10);
 
 /// Temporary policies from `pin`/`disable`, per instance and process (`None` = all).
 pub(super) type Overrides = BTreeMap<(InstanceKey, Option<String>), Policy>;
@@ -1063,6 +1070,7 @@ impl Actor {
         if let Some(port) = route_port {
             inst.route_port = Some(port);
             inst.state = Lifecycle::Ready;
+            inst.ready_at = Instant::now();
             self.started_event(key, &why);
             return Ok(());
         }
@@ -1417,6 +1425,7 @@ impl Actor {
             return;
         }
         inst.state = Lifecycle::Ready;
+        inst.ready_at = Instant::now();
         inst.last_activity = Instant::now();
         inst.release_waiters();
         self.ready_event(key);
@@ -2181,6 +2190,8 @@ impl Actor {
                     key: key.clone(),
                     pinned,
                     starting: inst.state == Lifecycle::Starting,
+                    just_ready: inst.state == Lifecycle::Ready
+                        && inst.ready_at.elapsed() < JUST_READY,
                     requests_in_flight: inst.in_flight,
                     waiting: inst.waiters.len() as u32,
                     connections: inst.connections,
