@@ -730,8 +730,9 @@ it has `restart = "never"`:
   process, the instance stops, and requests get the error page with
   its log instead of starting it, until you start it by hand
   (`carte up` or `carte restart`). Stopping it with `carte down` or
-  `carte stop-all` clears that too, so the next request starts it as
-  usual. `carte stop-all --idle` leaves it.
+  `carte stop-all`, touching `tmp/restart.txt`, or a change to its
+  configuration, Procfile or checkout clears that too, so the next
+  request starts it as usual. `carte stop-all --idle` leaves it.
 - A process with [`paths`](#paths) takes no `restart` either: it's
   restarted whenever it exits, like the HTTP process. Requests for its
   paths wait while it restarts, until it's ready again; other paths

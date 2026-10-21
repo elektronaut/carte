@@ -3339,6 +3339,17 @@ impl Actor {
     }
 
     fn restart_checkout(&mut self, path: &Path) {
+        let given_up: Vec<InstanceKey> = self
+            .instances
+            .values()
+            .filter(|i| {
+                i.gave_up.is_some() && i.checkout.as_ref().is_some_and(|c| c.path() == path)
+            })
+            .map(|i| i.key.clone())
+            .collect();
+        for key in given_up {
+            self.forget_give_up(&key, "tmp/restart.txt");
+        }
         let keys: Vec<InstanceKey> = self
             .instances
             .values()
@@ -3354,7 +3365,8 @@ impl Actor {
     }
 
     /// Takes a new view of config and disk. Instances whose app is gone, or whose
-    /// checkout moved (a removed or added worktree), are stopped; the next request
+    /// checkout moved (a removed or added worktree), are stopped, and carte forgets
+    /// giving up on those whose configuration or checkout changed; the next request
     /// starts them from the right place. A branch switch inside a worktree isn't a move.
     fn reload(&mut self, world: World) {
         if *self.world == world {
@@ -3363,9 +3375,21 @@ impl Actor {
         for (kind, message, subjects) in world_changes(&self.world, &world) {
             self.events.push(kind, message, subjects);
         }
-        self.world = Arc::new(world);
+        let old = std::mem::replace(&mut self.world, Arc::new(world));
         self.world_tx.send_replace(self.world.clone());
         self.providers.clear();
+        let changed: Vec<InstanceKey> = self
+            .instances
+            .values()
+            .filter(|inst| {
+                inst.gave_up.is_some()
+                    && start_inputs(&old, &inst.key) != start_inputs(&self.world, &inst.key)
+            })
+            .map(|inst| inst.key.clone())
+            .collect();
+        for key in changed {
+            self.forget_give_up(&key, "its configuration changed");
+        }
         let gone: Vec<(InstanceKey, &'static str)> = self
             .instances
             .values()
@@ -3400,6 +3424,24 @@ impl Actor {
         self.check_teardowns();
         self.dirty = true;
     }
+}
+
+/// What an instance starts from: its project's configuration, its checkout and the
+/// process list read there.
+type StartInputs<'a> = (
+    &'a carte_core::model::Project,
+    Option<Checkout>,
+    Option<&'a Result<procfile::ProcessList, String>>,
+);
+
+fn start_inputs<'a>(world: &'a World, key: &InstanceKey) -> Option<StartInputs<'a>> {
+    let state = world.project(&key.project)?;
+    let app = state.project.app(&key.app);
+    Some((
+        &state.project,
+        app.and_then(|app| state.checkout(app, &key.stack)),
+        app.and_then(|app| state.process_list(app, &key.stack)),
+    ))
 }
 
 /// Events for what changed between two views of config and disk: config files,
