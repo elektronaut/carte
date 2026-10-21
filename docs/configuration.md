@@ -471,7 +471,7 @@ three tiers, each once the one before is done:
 
 ```toml
 [apps.acme-billing.processes.redis]
-command = "redis-server --port $PORT --unixsocket $CARTE_RUN_DIR/redis.sock --save ''"
+command = "redis-server --port $PORT --save ''"
 kind = "service"
 
 [apps.acme-billing.processes.migrate]
@@ -479,12 +479,6 @@ command = "bin/rails db:prepare"
 kind = "task"
 ```
 
-- A service is ready once it accepts connections on `$PORT`, or, with
-  `ready = "/path"`, once a GET of that path on `$PORT` answers without a
-  5xx. A service must listen on `$PORT` even when the app talks to it
-  through a socket: one that only listens on a unix socket never becomes
-  ready, and fails the start at the boot timeout. Redis can do both, as
-  above.
 - A service that exits or isn't ready within the boot timeout, or a task
   that exits non-zero or doesn't finish within it, fails the start like a
   crashing web process: the later tiers don't start, and the error and

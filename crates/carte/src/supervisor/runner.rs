@@ -26,6 +26,11 @@ pub struct ProcLog {
     line_bytes: usize,
     cap: usize,
     stripper: Stripper,
+    /// The same output on a screen that only settles after a longer quiet, and
+    /// never in the middle of a redraw, for finding debugger prompts.
+    screen: Stripper,
+    /// A line ended on `screen` since [`ProcLog::take_answered`].
+    answered: bool,
 }
 
 impl ProcLog {
@@ -36,14 +41,36 @@ impl ProcLog {
             line_bytes: 0,
             cap,
             stripper: Stripper::default(),
+            screen: Stripper::default(),
+            answered: false,
         }
     }
 
     /// Adds output and returns the complete lines it finished.
     pub fn push(&mut self, data: &[u8]) -> Vec<(u64, String)> {
         self.raw.push(data);
+        self.answered |= !self.screen.feed(data).is_empty();
         let lines = self.stripper.feed(data);
         self.add(lines)
+    }
+
+    /// Ends the lines left behind on the prompt screen, after a longer quiet, so
+    /// a prompt answered by a process that then stays silent counts as answered.
+    /// Nothing ends in the middle of a redraw.
+    pub fn settle_screen(&mut self) {
+        if self.screen.at_rest() {
+            self.answered |= !self.screen.settle().is_empty();
+        }
+    }
+
+    /// Lines [`ProcLog::settle_screen`] would end.
+    pub fn screen_unsettled(&self) -> bool {
+        self.screen.at_rest() && self.screen.unsettled()
+    }
+
+    /// Whether a line ended since the last call, which answers a prompt.
+    pub fn take_answered(&mut self) -> bool {
+        std::mem::take(&mut self.answered)
     }
 
     /// Ends the lines the output has left behind, for when it has gone quiet; see
@@ -66,6 +93,7 @@ impl ProcLog {
             lines.push(pending);
         }
         self.stripper = Stripper::default();
+        self.screen = Stripper::default();
         self.add(lines)
     }
 
@@ -95,16 +123,16 @@ impl ProcLog {
 
     /// The unfinished last line, without escape codes.
     pub fn pending(&self) -> String {
-        self.stripper.pending()
+        self.screen.pending()
     }
 
     /// The debugger prompt the unfinished last line starts with, if it's short
     /// enough to be one.
     pub fn prompt(&self) -> Option<String> {
-        if self.stripper.pending_len() > 512 {
+        if self.screen.pending_len() > 512 {
             return None;
         }
-        carte_core::debugger::prompt(&self.stripper.pending()).map(str::to_string)
+        carte_core::debugger::prompt(&self.screen.pending()).map(str::to_string)
     }
 
     pub fn tail(&self, n: usize) -> Vec<String> {
@@ -191,32 +219,49 @@ pub async fn run(
         tokio::spawn(async move {
             let mut buf = vec![0u8; 16 * 1024];
             let mut paused: Option<String> = None;
+            let mut quiet_since = tokio::time::Instant::now();
+            let screen_quiet = Duration::from_secs(1);
             loop {
-                let unsettled = log.lock().unwrap().unsettled();
-                let read = if unsettled {
-                    tokio::time::timeout(Duration::from_millis(50), output.read(&mut buf))
-                        .await
-                        .ok()
-                } else {
-                    Some(output.read(&mut buf).await)
+                let wait = {
+                    let log = log.lock().unwrap();
+                    if log.unsettled() {
+                        Some(Duration::from_millis(50))
+                    } else if log.screen_unsettled() {
+                        Some(screen_quiet.saturating_sub(quiet_since.elapsed()))
+                    } else {
+                        None
+                    }
+                };
+                let read = match wait {
+                    Some(wait) => tokio::time::timeout(wait, output.read(&mut buf)).await.ok(),
+                    None => Some(output.read(&mut buf).await),
                 };
                 let data = match read {
                     Some(Ok(0) | Err(_)) => break,
-                    Some(Ok(n)) => Some(&buf[..n]),
+                    Some(Ok(n)) => {
+                        quiet_since = tokio::time::Instant::now();
+                        Some(&buf[..n])
+                    }
                     None => None,
                 };
                 let (lines, prompt) = {
                     let mut log = log.lock().unwrap();
                     let lines = match data {
                         Some(data) => log.push(data),
-                        None => log.settle(),
+                        None => {
+                            if quiet_since.elapsed() >= screen_quiet {
+                                log.settle_screen();
+                            }
+                            log.settle()
+                        }
                     };
+                    let answered = log.take_answered();
                     let prompt = terminal.as_ref().and_then(|terminal| {
                         if let Some(data) = data {
                             terminal.output(data);
                         }
                         match &paused {
-                            Some(prompt) if lines.is_empty() => Some(prompt.clone()),
+                            Some(prompt) if !answered => Some(prompt.clone()),
                             _ => log.prompt(),
                         }
                     });
@@ -446,23 +491,35 @@ mod tests {
     type Replayed = (Vec<String>, Vec<Option<String>>, String);
 
     fn replay<'a>(reads: impl IntoIterator<Item = &'a [u8]>) -> Replayed {
-        replay_settling(reads.into_iter().map(Some))
+        replay_with(reads.into_iter().map(Step::Read))
     }
 
-    /// Like [`replay`], with `None` where the output went quiet and the reader
-    /// settled it.
-    fn replay_settling<'a>(reads: impl IntoIterator<Item = Option<&'a [u8]>>) -> Replayed {
+    /// What reaches the output reader: a read, a short quiet that settles the
+    /// log, or a long one that settles the prompt screen too.
+    #[derive(Clone, Copy)]
+    enum Step<'a> {
+        Read(&'a [u8]),
+        Settle,
+        Quiet,
+    }
+
+    fn replay_with<'a>(steps: impl IntoIterator<Item = Step<'a>>) -> Replayed {
         let mut log = ProcLog::new(1024 * 1024);
         let mut lines = Vec::new();
         let mut paused: Option<String> = None;
         let mut states = vec![None];
-        for read in reads {
-            let finished = match read {
-                Some(read) => log.push(read),
-                None => log.settle(),
+        for step in steps {
+            let finished = match step {
+                Step::Read(read) => log.push(read),
+                Step::Settle => log.settle(),
+                Step::Quiet => {
+                    log.settle_screen();
+                    log.settle()
+                }
             };
+            let answered = log.take_answered();
             paused = match &paused {
-                Some(prompt) if finished.is_empty() => Some(prompt.clone()),
+                Some(prompt) if !answered => Some(prompt.clone()),
                 _ => log.prompt(),
             };
             if states.last() != Some(&paused) {
@@ -537,27 +594,69 @@ mod tests {
                 (&whole.0, &whole.2),
                 "{name}, reads merged"
             );
-            let settled = chunks
+            let quiet = chunks
                 .iter()
-                .flat_map(|chunk| [Some(chunk.as_slice()), None]);
+                .flat_map(|chunk| [Step::Read(chunk), Step::Quiet]);
+            let (_, states, pending) = normalized(replay_with(quiet));
             assert_eq!(
-                normalized(replay_settling(settled)),
-                whole,
-                "{name}, settled after each read"
+                (&states, &pending),
+                (&whole.1, &whole.2),
+                "{name}, quiet after each read"
             );
-            for _ in 0..20 {
-                let mut reads = Vec::new();
-                for chunk in &chunks {
-                    let at = random(chunk.len() + 1);
-                    reads.extend([Some(&chunk[..at]), None, Some(&chunk[at..])]);
+        }
+    }
+
+    /// A settle of the log at any point, even in the middle of a redraw, leaves the
+    /// pauses alone and loses no line, though it may split or repeat some.
+    #[test]
+    fn settling_the_log_at_any_point_leaves_the_pauses_alone() {
+        for (name, chunks) in sessions() {
+            if name == "rdbgfork" {
+                continue;
+            }
+            let whole = normalized(replay(chunks.iter().map(Vec::as_slice)));
+            let last = whole.0.last().cloned();
+            for (i, chunk) in chunks.iter().enumerate() {
+                for at in 0..=chunk.len() {
+                    let mut steps: Vec<Step> = chunks[..i].iter().map(|c| Step::Read(c)).collect();
+                    steps.extend([
+                        Step::Read(&chunk[..at]),
+                        Step::Settle,
+                        Step::Read(&chunk[at..]),
+                    ]);
+                    steps.extend(chunks[i + 1..].iter().map(|c| Step::Read(c)));
+                    let (lines, states, pending) = normalized(replay_with(steps));
+                    assert_eq!(
+                        (&states, &pending),
+                        (&whole.1, &whole.2),
+                        "{name}, settled at {at} of read {i}"
+                    );
+                    assert_eq!(
+                        lines.last(),
+                        last.as_ref(),
+                        "{name}, settled at {at} of read {i}"
+                    );
                 }
-                assert_eq!(
-                    normalized(replay_settling(reads)),
-                    whole,
-                    "{name}, settled inside reads"
-                );
             }
         }
+    }
+
+    #[test]
+    fn a_prompt_answered_by_a_process_that_then_stays_silent_ends_the_pause() {
+        let steps = [
+            Step::Read(b"\x1b[?2004h\x1b[1G(rdbg) \x1b[8G"),
+            Step::Read(b"\x1b[1G(rdbg) c\r\r\n\x1b[1G\x1b[?2004l"),
+            Step::Settle,
+        ];
+        let (_, states, _) = replay_with(steps);
+        assert_eq!(
+            states,
+            [None, Some("(rdbg)".to_string())],
+            "a short quiet isn't enough"
+        );
+        let (lines, states, _) = replay_with(steps.into_iter().chain([Step::Quiet]));
+        assert_eq!(states, [None, Some("(rdbg)".to_string()), None]);
+        assert_eq!(lines, ["(rdbg) c"]);
     }
 
     #[test]

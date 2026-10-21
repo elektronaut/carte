@@ -178,11 +178,11 @@ const MAX_COLUMN: usize = 4096;
 /// reached by `ESC [ B`, like a completion dialog, finishes nothing. So Reline
 /// making room below its prompt, or drawing a dialog there, leaves the prompt line
 /// unfinished however its output is split into reads. [`Stripper::settle`] ends
-/// the open rows above the cursor, for when output has gone quiet, and more than a
-/// screen of them ends the oldest. Text written after moving up past the open rows
-/// is dropped until the cursor is back, so redraws of earlier rows, like a
-/// multi-line progress bar, don't reach the log, and a move up of more than a
-/// screen counts as one. Other control characters except tab are dropped. Invalid
+/// the open rows above the cursor, for when output has gone quiet, but a move up
+/// opens them again; more than a screen of open rows ends the oldest. Text
+/// written after moving up past those rows is dropped until the cursor is back,
+/// so redraws of earlier rows, like a multi-line progress bar, don't reach the
+/// log, and a move up or down of more than a screen counts as one. Other control characters except tab are dropped. Invalid
 /// UTF-8 becomes U+FFFD.
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
@@ -202,6 +202,8 @@ pub struct Stripper {
     moved: bool,
     /// Lines ended since the last feed returned.
     ended: Vec<String>,
+    /// Rows [`Stripper::settle`] ended, nearest last, which a move up opens again.
+    settled: Vec<Vec<char>>,
 }
 
 /// The farthest a move up reaches into lines already ended.
@@ -218,19 +220,26 @@ impl Stripper {
         lines
     }
 
-    /// Ends the open rows above the cursor and returns them as lines, unless the
-    /// cursor reached its row by `ESC [ A` or `ESC [ B`: then a redraw, like a
-    /// completion dialog, may be under way, and they stay open.
+    /// Ends the open rows above the cursor and returns them as lines, for when the
+    /// output has gone quiet. A move up still reaches them: they open again, and
+    /// end again as more lines, so a settle in the middle of a redraw repeats
+    /// lines rather than losing them.
     pub fn settle(&mut self) -> Vec<String> {
-        if self.moved {
-            return Vec::new();
-        }
+        self.settled.extend(self.above.iter().cloned());
+        let over = self.settled.len().saturating_sub(ROWS_UP as usize);
+        self.settled.drain(..over);
         self.close()
     }
 
     /// Whether there are open rows that [`Stripper::settle`] would end.
     pub fn unsettled(&self) -> bool {
-        !self.moved && !self.above.is_empty()
+        !self.above.is_empty()
+    }
+
+    /// Whether the cursor reached its row by a newline, not by moving up or down,
+    /// as it does in the middle of a redraw.
+    pub fn at_rest(&self) -> bool {
+        !self.moved
     }
 
     /// Ends the open rows above the cursor and returns them as lines, as when the
@@ -245,14 +254,17 @@ impl Stripper {
     fn end_above(&mut self) {
         let rows = self.above.drain(..).map(|line| line.into_iter().collect());
         self.ended.extend(rows);
+        self.settled.clear();
     }
 
-    fn up(&mut self, mut n: usize) {
+    fn up(&mut self, n: usize) {
         self.moved = true;
+        let mut n = n.min(ROWS_UP as usize * 2);
         if self.row == 0 {
-            while n > 0
-                && let Some(line) = self.above.pop()
-            {
+            while n > 0 {
+                let Some(line) = self.above.pop().or_else(|| self.settled.pop()) else {
+                    break;
+                };
                 self.below
                     .push_front(std::mem::replace(&mut self.line, line));
                 n -= 1;
@@ -261,8 +273,9 @@ impl Stripper {
         self.row = (self.row - n as isize).max(-ROWS_UP);
     }
 
-    fn down(&mut self, mut n: usize, newline: bool) {
+    fn down(&mut self, n: usize, newline: bool) {
         self.moved = !newline;
+        let mut n = n.min(ROWS_UP as usize);
         let back = n.min(self.row.unsigned_abs());
         self.row += back as isize;
         n -= back;
@@ -271,11 +284,14 @@ impl Stripper {
             self.above.push(std::mem::replace(&mut self.line, next));
         }
         let over = self.above.len().saturating_sub(ROWS_UP as usize);
-        let rows = self
-            .above
-            .drain(..over)
-            .map(|line| line.into_iter().collect());
-        self.ended.extend(rows);
+        if over > 0 {
+            let rows = self
+                .above
+                .drain(..over)
+                .map(|line| line.into_iter().collect());
+            self.ended.extend(rows);
+            self.settled.clear();
+        }
     }
 
     /// The current incomplete line.
@@ -611,6 +627,15 @@ mod tests {
     }
 
     #[test]
+    fn huge_moves_up_and_down_count_as_a_screen() {
+        let mut s = Stripper::default();
+        s.feed(b"top\n\x1b[99999999999999999999999A\x1b[999999999Bx");
+        assert!(s.pending().starts_with('x'));
+        let lines = s.settle();
+        assert!(lines.len() <= ROWS_UP as usize + 1, "{}", lines.len());
+    }
+
+    #[test]
     fn a_move_up_reaches_a_screen_at_most() {
         let mut s = Stripper::default();
         s.feed(b"top\n");
@@ -630,10 +655,15 @@ mod tests {
         assert!(s.unsettled());
         assert_eq!(s.settle(), ["one"]);
         assert!(!s.unsettled());
-        assert!(s.feed(b"\x1b[1Atwo\n").is_empty(), "a settled line stays");
-        assert!(s.settle().is_empty());
+        assert!(s.feed(b"\x1b[1Atwo\n").is_empty());
+        assert_eq!(s.settle(), ["two"], "a move up opens a settled row again");
         assert!(s.feed(b"three\n").is_empty());
         assert_eq!(s.feed(b"four"), ["three"]);
+        assert!(s.feed(b"\x1b[2A\x1b[2Agone\n").is_empty());
+        assert!(
+            s.settle().is_empty(),
+            "rows ended by text after them stay ended"
+        );
     }
 
     #[test]
