@@ -204,6 +204,9 @@ pub struct Facts {
     pub ca_files: Vec<PathBuf>,
     /// The CAs in the system keychain that this install created.
     pub keychain_cas: Vec<KeychainCa>,
+    /// Other carte CAs in the system keychain under this install's name, which may be
+    /// another install's.
+    pub unknown_keychain_cas: Vec<KeychainCa>,
     pub agent_plist: Option<String>,
     pub agent_loaded: bool,
     /// The agent under its old label.
@@ -244,15 +247,17 @@ impl Facts {
                 Some((entry.file_name().to_string_lossy().into_owned(), text))
             })
             .collect();
+        let (keychain_cas, unknown_keychain_cas) = trust::own_cas(
+            trust::keychain_cas(),
+            &CertificateAuthority::created_hashes(&env.paths.state_dir),
+            &crate::tls::ca::default_common_name(),
+        );
         Facts {
             resolvers,
             ca,
             ca_files: env.ca_files().into_iter().filter(|f| f.exists()).collect(),
-            keychain_cas: trust::own_cas(
-                trust::keychain_cas(),
-                CertificateAuthority::created_hashes(&env.paths.state_dir).as_deref(),
-                &crate::tls::ca::default_common_name(),
-            ),
+            keychain_cas,
+            unknown_keychain_cas,
             agent_plist: fs::read_to_string(env.agent_plist()).ok(),
             agent_loaded: check::launchd_loaded(&env.service(LABEL)),
             old_agent: OldAgent {
@@ -831,7 +836,7 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
 
     for ca in &facts.keychain_cas {
         plan.steps.push(Step::sudo(
-            format!("Remove {} from the system keychain", ca.label),
+            format!("Remove {} from the system keychain", ca.name()),
             "security",
             &["delete-certificate", "-Z", &ca.hash, trust::SYSTEM_KEYCHAIN],
         ));
@@ -868,6 +873,15 @@ pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
         config = tilde(&env.paths.config_dir),
         state = tilde(&env.paths.state_dir),
     ));
+    for ca in &facts.unknown_keychain_cas {
+        plan.notes.push(format!(
+            "{name} is left in the system keychain; it isn't known to be this install's. \
+             If it is, remove it with `sudo security delete-certificate -Z {hash} {keychain}`.",
+            name = ca.name(),
+            hash = ca.hash,
+            keychain = trust::SYSTEM_KEYCHAIN,
+        ));
+    }
     plan
 }
 
@@ -1011,6 +1025,7 @@ mod tests {
             ca: CaState::Missing,
             ca_files: Vec::new(),
             keychain_cas: Vec::new(),
+            unknown_keychain_cas: Vec::new(),
             agent_plist: None,
             agent_loaded: false,
             old_agent: OldAgent::default(),
@@ -1303,9 +1318,13 @@ mod tests {
                 },
                 KeychainCa {
                     hash: "C544".into(),
-                    label: "carte local CA (alice@mac)".into(),
+                    label: String::new(),
                 },
             ],
+            unknown_keychain_cas: vec![KeychainCa {
+                hash: "7E7E".into(),
+                label: "carte local CA (alice@mac)".into(),
+            }],
             agent_plist: Some("x".into()),
             agent_loaded: true,
             ..fresh()
@@ -1314,6 +1333,16 @@ mod tests {
         assert_eq!(
             plan.steps[5].description,
             "Remove carte local CA (alice@mac) from the system keychain"
+        );
+        assert_eq!(
+            plan.steps[6].description,
+            "Remove the carte CA with SHA-256 C544 from the system keychain"
+        );
+        assert_eq!(
+            plan.notes[1],
+            "carte local CA (alice@mac) is left in the system keychain; it isn't known to be \
+             this install's. If it is, remove it with \
+             `sudo security delete-certificate -Z 7E7E /Library/Keychains/System.keychain`."
         );
         let root = dir.path().display();
         assert_eq!(

@@ -84,24 +84,22 @@ impl CertificateAuthority {
         state_dir.join("ca-key.pem")
     }
 
-    /// The SHA-256 hashes of the CAs created in the state dir, one per line.
+    /// The CAs this state dir has had, one `<kind> <SHA-256>` line each: `created` for one
+    /// made here, `replaced` for one found here and replaced.
     pub fn created_path_in(state_dir: &Path) -> PathBuf {
         state_dir.join("ca-created")
     }
 
-    /// The uppercase SHA-256 hashes of the CAs created in `state_dir` and of the one in it
-    /// now, or `None` when nothing was recorded, as before carte kept the record.
-    pub fn created_hashes(state_dir: &Path) -> Option<Vec<String>> {
-        let recorded = fs::read_to_string(Self::created_path_in(state_dir)).ok()?;
-        let mut hashes: Vec<String> = recorded
-            .lines()
-            .map(|line| line.trim().to_ascii_uppercase())
-            .filter(|line| !line.is_empty())
+    /// The uppercase SHA-256 hashes of the CAs recorded in `state_dir` and of the one in
+    /// it now, which covers a CA made before carte kept the record.
+    pub fn created_hashes(state_dir: &Path) -> Vec<String> {
+        let recorded = fs::read_to_string(Self::created_path_in(state_dir)).unwrap_or_default();
+        let mut hashes: Vec<String> = recorded_hashes(&recorded)
             .chain(current_hash(state_dir))
             .collect();
         hashes.sort();
         hashes.dedup();
-        Some(hashes)
+        hashes
     }
 
     pub fn cert_pem(&self) -> &str {
@@ -220,10 +218,9 @@ impl CertificateAuthority {
 
         let cert_path = Self::cert_path_in(state_dir);
         let mut record = current_hash(state_dir)
-            .map(|old| format!("{old}\n"))
+            .map(|old| format!("replaced {old}\n"))
             .unwrap_or_default();
-        record.push_str(&sha256_hex(cert.der()));
-        record.push('\n');
+        record.push_str(&format!("created {}\n", sha256_hex(cert.der())));
         let created = Self::created_path_in(state_dir);
         fs::OpenOptions::new()
             .append(true)
@@ -311,6 +308,18 @@ pub fn sha256_hex(der: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02X}"))
         .collect()
+}
+
+/// The hashes on `created` and `replaced` lines; lines of other kinds are skipped.
+fn recorded_hashes(record: &str) -> impl Iterator<Item = String> + '_ {
+    record.lines().filter_map(|line| {
+        let (kind, hash) = line.trim().split_once(' ')?;
+        let hash = hash.trim();
+        let known = matches!(kind, "created" | "replaced")
+            && !hash.is_empty()
+            && hash.chars().all(|c| c.is_ascii_hexdigit());
+        known.then(|| hash.to_ascii_uppercase())
+    })
 }
 
 fn current_hash(state_dir: &Path) -> Option<String> {
@@ -432,18 +441,18 @@ mod tests {
     #[test]
     fn records_the_hash_of_every_ca_it_creates() {
         let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(CertificateAuthority::created_hashes(tmp.path()), None);
+        assert!(CertificateAuthority::created_hashes(tmp.path()).is_empty());
         let first = sha256_hex(create(tmp.path()).cert_der());
         assert_eq!(
             CertificateAuthority::created_hashes(tmp.path()),
-            Some(vec![first.clone()])
+            std::slice::from_ref(&first)
         );
         create(tmp.path());
         fs::write(tmp.path().join("ca-key.pem"), "garbage").unwrap();
         let second = sha256_hex(create(tmp.path()).cert_der());
         let mut both = vec![first, second];
         both.sort();
-        assert_eq!(CertificateAuthority::created_hashes(tmp.path()), Some(both));
+        assert_eq!(CertificateAuthority::created_hashes(tmp.path()), both);
     }
 
     #[test]
@@ -453,8 +462,27 @@ mod tests {
         fs::remove_file(CertificateAuthority::created_path_in(tmp.path())).unwrap();
         fs::write(tmp.path().join("ca-key.pem"), "garbage").unwrap();
         let new = sha256_hex(create(tmp.path()).cert_der());
-        let hashes = CertificateAuthority::created_hashes(tmp.path()).unwrap();
+        let hashes = CertificateAuthority::created_hashes(tmp.path());
         assert!(hashes.contains(&old) && hashes.contains(&new), "{hashes:?}");
+        let record = fs::read_to_string(CertificateAuthority::created_path_in(tmp.path())).unwrap();
+        assert_eq!(record, format!("replaced {old}\ncreated {new}\n"));
+    }
+
+    #[test]
+    fn without_a_record_only_the_ca_in_the_state_dir_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = sha256_hex(create(tmp.path()).cert_der());
+        fs::remove_file(CertificateAuthority::created_path_in(tmp.path())).unwrap();
+        assert_eq!(CertificateAuthority::created_hashes(tmp.path()), [current]);
+    }
+
+    #[test]
+    fn reads_only_the_record_lines_it_knows() {
+        let record = "created 1d2d\nreplaced C544\nsigned 9F00\nlegacy\ncreated not-hex\n\n";
+        assert_eq!(
+            recorded_hashes(record).collect::<Vec<_>>(),
+            ["1D2D", "C544"]
+        );
     }
 
     #[test]
