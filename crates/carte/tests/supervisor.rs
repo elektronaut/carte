@@ -1462,6 +1462,61 @@ async fn checkout_watchers_run_once_and_move_to_another_instance() {
     handle.shutdown().await;
 }
 
+#[tokio::test]
+async fn a_checkout_watcher_is_taken_over_only_once_its_owner_has_stopped_it() {
+    let setup = Setup::new();
+    let log = setup.root.join("css.log");
+    let web = setup.app("acme-web", WEB);
+    setup.app(
+        "acme-api",
+        &format!(
+            "web: FIXTURE_NAME=api exec {{fixture}}\ncss: trap 'sleep 1; echo stop >> {log}; exit 0' TERM; echo start >> {log}; while :; do sleep 0.05; done\n",
+            log = log.display()
+        ),
+    );
+    git(
+        &web,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature-x",
+            "../feature-x/acme-web",
+        ],
+    );
+    setup.project("");
+    let handle = setup.start_with(|options| options.grace = Duration::from_secs(5));
+    let css_running = |s: &carte_api::Snapshot, stack: &str| {
+        status(s, "acme-api", stack)
+            .processes
+            .iter()
+            .any(|p| p.name == "css" && p.state == ProcessState::Running)
+    };
+
+    handle
+        .ensure_ready(key("acme-api", Stack::Main))
+        .await
+        .unwrap();
+    handle
+        .ensure_ready(key("acme-api", Stack::Branch("feature-x".into())))
+        .await
+        .unwrap();
+    wait_for(&handle, "css in main", |s| css_running(s, "main")).await;
+    wait_for(&handle, "css to start", |_| lines(&log) == ["start"]).await;
+
+    handle
+        .control(control("api@main", Action::Down))
+        .await
+        .unwrap();
+    wait_for(&handle, "css moved to feature-x", |s| {
+        css_running(s, "feature-x") && lines(&log).len() == 3
+    })
+    .await;
+    assert_eq!(lines(&log), ["start", "stop", "start"]);
+    handle.shutdown().await;
+}
+
 fn share_config(setup: &Setup) {
     std::fs::write(
         setup.paths.machine_config(),
