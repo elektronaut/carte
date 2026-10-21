@@ -181,8 +181,12 @@ carte attach shop@feature-x/worker
 - It prints the last screen of output, then everything the process
   prints. What you type goes to the process, `ctrl-c` and `ctrl-d`
   included, and the process follows your terminal's size. `ctrl-z`
-  reaches the process as a plain character and doesn't suspend it. The
-  last screen leaves out queries your terminal would answer, like a
+  reaches the process as a plain character and doesn't suspend a
+  process reading plain input. Programs that handle `ctrl-z`
+  themselves, like vim, irb or a debugger prompt, python or node, still
+  stop, and stay stopped until the app is stopped or restarted. An app
+  that runs an interactive shell can get job control back with
+  `stty susp ^Z`. The last screen leaves out queries your terminal would answer, like a
   cursor position or colour query, since the answers would arrive as
   typing.
 - `ctrl-q d` detaches; `ctrl-q ctrl-q` sends a `ctrl-q`. `--detach-keys`
