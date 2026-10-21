@@ -47,7 +47,8 @@ carte setup
 
 Setup does this once per machine, asking for your password where needed:
 
-- creates a local certificate authority and trusts it
+- creates a local certificate authority that can sign only names under
+  the TLDs carte serves, and trusts it for HTTPS only
 - installs a LaunchAgent that runs the daemon on ports 80 and 443, on
   127.0.0.1 and ::1
 

@@ -165,7 +165,7 @@ impl CertificateAuthority {
             return Err(CreateReason::Expiring);
         }
         let previous = permitted_dns_names(&x509);
-        if !tlds.iter().all(|tld| previous.contains(tld)) {
+        if previous != tlds {
             return Err(CreateReason::TldsChanged { previous });
         }
 
@@ -203,6 +203,7 @@ impl CertificateAuthority {
             KeyUsagePurpose::CrlSign,
             KeyUsagePurpose::DigitalSignature,
         ];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         params.name_constraints = Some(NameConstraints {
             permitted_subtrees: tlds
                 .iter()
@@ -381,6 +382,10 @@ mod tests {
         let usage = x509.key_usage().unwrap().unwrap();
         assert!(usage.critical);
         assert!(usage.value.key_cert_sign() && usage.value.crl_sign());
+        let eku = x509.extended_key_usage().unwrap().unwrap().value;
+        assert!(eku.server_auth);
+        assert!(!eku.email_protection && !eku.client_auth && !eku.code_signing);
+        assert!(eku.other.is_empty());
         assert!(x509.name_constraints().unwrap().unwrap().critical);
         assert_eq!(permitted_dns_names(&x509), ["test"]);
         let lifetime =
@@ -522,11 +527,18 @@ mod tests {
     }
 
     #[test]
-    fn keeps_a_ca_made_for_more_tlds() {
+    fn replaces_a_ca_made_for_more_tlds() {
         let tmp = tempfile::tempdir().unwrap();
-        CertificateAuthority::load_or_create(tmp.path(), "x", &["test", "localhost"]).unwrap();
+        CertificateAuthority::load_or_create(tmp.path(), "x", &["dev", "localhost"]).unwrap();
         let ca = CertificateAuthority::load_or_create(tmp.path(), "x", &["localhost"]).unwrap();
-        assert_eq!(ca.origin(), &CaOrigin::Loaded);
+        assert_eq!(
+            ca.origin(),
+            &CaOrigin::Created(CreateReason::TldsChanged {
+                previous: vec!["dev".into(), "localhost".into()]
+            })
+        );
+        let (_, x509) = X509Certificate::from_der(ca.cert_der()).unwrap();
+        assert_eq!(permitted_dns_names(&x509), ["localhost"]);
     }
 
     #[test]

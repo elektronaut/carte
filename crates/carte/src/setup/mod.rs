@@ -1105,7 +1105,7 @@ mod tests {
                 "wait until launchctl print gui/501/io.puma.dev fails",
                 "sudo tee /r/resolver/test",
                 "create ca",
-                "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /r/state/ca.pem",
+                "sudo security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain /r/state/ca.pem",
                 "write /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
                 "launchctl bootstrap gui/501 /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
                 "verify",
@@ -1298,7 +1298,7 @@ mod tests {
         assert_eq!(
             commands(&plan_install(&env, &changed)),
             [
-                "sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /r/state/ca.pem",
+                "sudo security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain /r/state/ca.pem",
                 "launchctl bootout gui/501/no.elektronaut.carte",
                 "wait until launchctl print gui/501/no.elektronaut.carte fails",
                 "write /r/home/Library/LaunchAgents/no.elektronaut.carte.plist",
