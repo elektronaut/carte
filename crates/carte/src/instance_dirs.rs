@@ -135,6 +135,7 @@ mod tests {
                 scheme: Scheme::Https,
                 idle_timeout: None,
                 teardown_delay: None,
+                from_template: false,
                 apps: Vec::new(),
             },
             worktrees: map,

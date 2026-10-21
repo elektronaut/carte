@@ -2533,6 +2533,16 @@ impl Actor {
                 key.stack.slug()
             ));
         }
+        if matches!(
+            action,
+            Action::Pin { save: true }
+                | Action::Unpin { save: true }
+                | Action::Disable { save: true }
+                | Action::Enable { save: true }
+        ) && let Some(state) = self.world.project(&key.project)
+        {
+            carte_core::config_edit::policy_file(&state.project).map_err(|e| e.to_string())?;
+        }
         let by_hand = Some("by hand");
         match action {
             Action::Up => match process {
@@ -2665,7 +2675,9 @@ impl Actor {
             .world
             .project(&key.project)
             .ok_or_else(|| format!("no project named {}", key.project))?;
-        let path = state.project.config_path.clone();
+        let path = carte_core::config_edit::policy_file(&state.project)
+            .map_err(|err| err.to_string())?
+            .to_path_buf();
         let app_policy = state
             .project
             .app(&key.app)

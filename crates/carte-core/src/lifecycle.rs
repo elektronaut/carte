@@ -241,6 +241,7 @@ mod tests {
             scheme: Scheme::Https,
             idle_timeout: None,
             teardown_delay: None,
+            from_template: false,
             apps: deps
                 .iter()
                 .map(|(name, depends_on)| App {

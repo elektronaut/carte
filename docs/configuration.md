@@ -926,7 +926,10 @@ interactive shells.
 
 `carte pin`, `carte disable` and the terminal UI change a policy until
 the daemon restarts. With `--save` (or `S` in the terminal UI) the change
-is written to the project file, keeping its comments and formatting.
+is written to the project file, keeping its comments and formatting. A
+project made by a template has no file of its own, so `--save` refuses
+rather than change every project of the template; give the project a
+file of its own first.
 
 ## Environment
 

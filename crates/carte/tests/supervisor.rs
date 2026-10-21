@@ -1213,6 +1213,38 @@ async fn saved_policies_are_written_to_the_project_file() {
 }
 
 #[tokio::test]
+async fn policies_of_template_projects_are_not_saved_to_the_template() {
+    let setup = Setup::new();
+    let sites = setup.root.join("work/sites");
+    for name in ["acme", "nova"] {
+        repo(&sites.join(name), "web: exec sleep 30\n");
+    }
+    let template = format!(
+        "root = \"{}\"\nprojects = \"*\"\nenv_provider = \"none\"\n",
+        sites.display()
+    );
+    let template_path = setup.paths.project_file("sites");
+    std::fs::write(&template_path, &template).unwrap();
+    let handle = setup.start();
+
+    let mut request = control("acme", Action::Disable { save: true });
+    request.target.project = Some("acme".into());
+    let err = handle.control(request).await.unwrap_err();
+    assert!(err.contains("Give acme a project file of its own"), "{err}");
+    assert_eq!(std::fs::read_to_string(&template_path).unwrap(), template);
+    let snapshot = handle.snapshot();
+    let acme = snapshot.projects.iter().find(|p| p.name == "acme").unwrap();
+    let web = &acme.stacks[0].instances[0];
+    assert!(
+        web.processes
+            .iter()
+            .all(|p| p.policy == carte_api::Policy::Auto),
+        "{web:?}"
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn checkout_watchers_run_once_and_move_to_another_instance() {
     let setup = Setup::new();
     let web = setup.app("acme-web", WEB);
