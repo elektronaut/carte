@@ -31,6 +31,9 @@ pub struct Known {
     pub projects: BTreeMap<String, KnownProject>,
     /// Projects whose directories are left alone, with the reason.
     pub skipped: BTreeMap<String, String>,
+    /// Names that aren't loaded projects but aren't gone either, such as a directory
+    /// a template matches that has nothing to run right now.
+    pub present: BTreeSet<String>,
     /// Every project file was listed, so a project that isn't loaded or skipped is gone.
     pub complete: bool,
     /// Instances that are starting, running or stopping.
@@ -158,6 +161,7 @@ pub fn plan(roots: &DirRoots, pidfiles: &Path, listing: &Listing, known: &Known)
         known.complete
             && !known.projects.contains_key(project)
             && !known.skipped.contains_key(project)
+            && !known.present.contains(project)
     };
     let mut candidates = trash(roots, listing);
     let mut owners: BTreeMap<PathBuf, (InstanceKey, bool)> = BTreeMap::new();

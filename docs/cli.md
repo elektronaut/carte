@@ -98,7 +98,9 @@ and every project whose
 configuration or discovery has a problem (an `include` entry that matches
 nothing, a failing `git worktree list`), and says so. While a template
 has a problem or doesn't load, no project counts as gone, since the
-projects it makes may be missing only for that. Several cartes
+projects it makes may be missing only for that. A directory a template
+matches keeps its data even while it has nothing to run, such as in the
+middle of a checkout. Several cartes
 (with different state directories) can share the run root, and give
 the same instance the same run directory, so a run directory is only
 removed when the `.owner` file beside it names this carte.
