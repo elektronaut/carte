@@ -242,7 +242,12 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
         CaState::Replace(why) => report.push(
             Status::Warn,
             "CA",
-            format!("{ca} needs replacing, as `carte setup` does: {why}"),
+            format!("{ca} will be replaced by `carte setup`: {why}"),
+        ),
+        CaState::Restore => report.push(
+            Status::Warn,
+            "CA",
+            format!("{ca} doesn't match the CA's key; `carte setup` restores it"),
         ),
         CaState::Untrusted => report.push(Status::Missing, "CA", format!("{ca} is not trusted")),
         CaState::Trusted => report.push(Status::Ok, "CA", format!("{ca} is trusted")),
