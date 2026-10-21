@@ -179,11 +179,13 @@ const MAX_COLUMN: usize = 4096;
 /// making room below its prompt, or drawing a dialog there, leaves the prompt line
 /// unfinished however its output is split into reads. [`Stripper::settle`] ends
 /// the open rows above the cursor, for when output has gone quiet, but a move up
-/// opens them again; more than a screen of open rows ends the oldest. Text
+/// opens them again; more than a screen of open rows ends the oldest. So a settle
+/// in the middle of a redraw can repeat lines, or end rows left on the screen,
+/// like a completion menu's, half-typed input or blank rows made room with. Text
 /// written after moving up past those rows is dropped until the cursor is back,
 /// so redraws of earlier rows, like a multi-line progress bar, don't reach the
-/// log, and a move up or down of more than a screen counts as one. Other control characters except tab are dropped. Invalid
-/// UTF-8 becomes U+FFFD.
+/// log, and a move up or down of more than a screen counts as one. Other control
+/// characters except tab are dropped. Invalid UTF-8 becomes U+FFFD.
 #[derive(Debug, Default, Clone)]
 pub struct Stripper {
     state: State,

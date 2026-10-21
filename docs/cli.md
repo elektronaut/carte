@@ -210,7 +210,11 @@ since its requests wait; a paused worker leaves it `ready`. When nobody
 is attached, a pause sends a [notification](configuration.md#notifications)
 with the `carte attach` command that answers it, at most once a minute
 per process. The pause ends when the process prints a complete line after
-the prompt, as answering it does, or exits.
+the prompt, as answering it does, or exits. When the answer prints nothing,
+the pause ends once the output has been quiet for a second, or three after
+pry, which leaves its cursor below the answered prompt. If the output stalls
+for a second while irb makes room below its prompt at the bottom of the
+terminal, the pause ends and starts again at the same prompt.
 
 The prompt is all carte goes by. A process that is a console, like a
 `rails console` before Rails 7.1 or `pry` run as a carte process, shows
