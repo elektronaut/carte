@@ -724,3 +724,15 @@ fn lists_projects_made_from_a_template() {
     assert!(out.stdout.contains("wiki        1  -  (from sites)"));
     assert!(!out.stdout.contains("lib"), "{}", out.stdout);
 }
+
+#[test]
+fn a_share_shorter_than_a_second_is_refused() {
+    let sb = Sandbox::new();
+    let out = sb.run(&["share", "web", "--ttl", "500ms"]);
+    assert_eq!(out.code, Some(2), "{}", out.stderr);
+    assert!(
+        out.stderr.contains("--ttl must be at least 1s"),
+        "{}",
+        out.stderr
+    );
+}
