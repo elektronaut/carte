@@ -29,8 +29,9 @@ struct Port {
     _lock: std::fs::File,
 }
 
-/// A free port below the ephemeral range, where the daemons under test pick their
-/// apps' ports, so a test's listener and another daemon's app can't get the same one.
+/// A free port between 20000 and 29999, apart from the ephemeral range and from
+/// the blocks the daemons under test pick their apps' ports from, so a test's
+/// listener and another daemon's app can't get the same one.
 /// Checks by connecting: macOS sockets aren't created close-on-exec, so a listener
 /// bound here could leak into a daemon spawned meanwhile and hold the port.
 fn free_port() -> Port {
@@ -231,6 +232,7 @@ impl Daemon {
             .env("CARTE_RUNTIME_HOME", self.root.join("tmp"))
             .env("NO_COLOR", "1")
             .env("CARTE_SKILL_REFRESH", "0")
+            .env("CARTE_TEST_PORTS", "1")
             .env("FIXTURE_LIFELINE_PID", lifeline())
             .current_dir(&self.root);
         if let Some(bin) = &self.bin {
@@ -829,6 +831,7 @@ fn env_shows_the_assigned_port_while_running() {
         .find(|p| p.name == "web")
         .and_then(|p| p.port)
         .unwrap();
+    assert!((10_000..20_000).contains(&port), "{port}");
     let env: carte_api::EnvResponse =
         serde_json::from_str(&stdout(&daemon.run(&["env", "web", "--json"]))).unwrap();
     let value = |key: &str| {
