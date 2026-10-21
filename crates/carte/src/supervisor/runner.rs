@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carte_api::LogLine;
@@ -459,15 +459,97 @@ async fn http_ok(mut stream: TcpStream, port: u16, path: &str) -> bool {
     matches!(status, Some(code) if code < 500)
 }
 
-/// A free port on loopback, found by binding port 0.
+/// A free port on loopback, found by binding port 0, or from the blocks
+/// [`use_test_ports`] leases.
 pub fn free_port() -> std::io::Result<u16> {
+    if let Some(port) = TEST_PORTS
+        .get()
+        .and_then(|ports| ports.lock().unwrap().next())
+    {
+        return Ok(port);
+    }
     let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     Ok(listener.local_addr()?.port())
+}
+
+static TEST_PORTS: OnceLock<Mutex<TestPorts>> = OnceLock::new();
+
+/// Makes [`free_port`] hand out ports from blocks of 50 between 10000 and 19999,
+/// below the ephemeral range, each locked by this process until it exits.
+/// Parallel test processes then never pick the same port, and none hands out a
+/// port twice, so no app can lose its port between the pick and its bind. Falls
+/// back to port 0 once every block is taken.
+pub fn use_test_ports() {
+    TEST_PORTS.get_or_init(|| {
+        Mutex::new(TestPorts {
+            dir: std::env::temp_dir().join("carte-test-port-blocks"),
+            blocks: Vec::new(),
+            next_block: 0,
+            next: 0,
+            end: 0,
+        })
+    });
+}
+
+struct TestPorts {
+    dir: std::path::PathBuf,
+    blocks: Vec<std::fs::File>,
+    next_block: u16,
+    next: u16,
+    end: u16,
+}
+
+impl TestPorts {
+    /// The next port that nothing listens on, checked by connecting: macOS
+    /// sockets aren't created close-on-exec, so a probe listener could leak into
+    /// a process spawned meanwhile and hold the port.
+    fn next(&mut self) -> Option<u16> {
+        loop {
+            while self.next < self.end {
+                let port = self.next;
+                self.next += 1;
+                if std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err()
+                    && std::net::TcpStream::connect((Ipv6Addr::LOCALHOST, port)).is_err()
+                {
+                    return Some(port);
+                }
+            }
+            self.lease()?;
+        }
+    }
+
+    fn lease(&mut self) -> Option<()> {
+        std::fs::create_dir_all(&self.dir).ok()?;
+        while self.next_block < 200 {
+            let block = self.next_block;
+            self.next_block += 1;
+            let lock = std::fs::File::create(self.dir.join(block.to_string())).ok()?;
+            if lock.try_lock().is_ok() {
+                self.blocks.push(lock);
+                self.next = 10_000 + block * 50;
+                self.end = self.next + 50;
+                return Some(());
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ports_come_from_leased_blocks_and_never_repeat() {
+        use_test_ports();
+        let ports: Vec<u16> = (0..120).map(|_| free_port().unwrap()).collect();
+        assert!(
+            ports.iter().all(|p| (10_000..20_000).contains(p)),
+            "{ports:?}"
+        );
+        let unique: std::collections::HashSet<_> = ports.iter().collect();
+        assert_eq!(unique.len(), ports.len());
+    }
 
     #[test]
     fn log_keeps_lines_within_the_cap() {

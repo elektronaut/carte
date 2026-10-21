@@ -18,6 +18,11 @@ fn spawner() -> Spawner {
     Spawner::new(env!("CARGO_BIN_EXE_carte"))
 }
 
+fn free_port() -> u16 {
+    carte::supervisor::runner::use_test_ports();
+    carte::supervisor::runner::free_port().unwrap()
+}
+
 fn spec() -> SpawnSpec {
     SpawnSpec::new(fixture().display().to_string(), std::env::temp_dir())
         .env("FIXTURE_LIFELINE_PID", lifeline())
@@ -178,11 +183,7 @@ async fn command_runs_with_given_env_and_cwd() {
 #[tokio::test]
 async fn serves_http_on_port() {
     for ipv6 in [false, true] {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = free_port();
         let mut spec = spec()
             .env("PORT", port.to_string())
             .env("FIXTURE_NAME", "web")
@@ -249,11 +250,7 @@ async fn stop_escalates_to_kill() {
 
 #[tokio::test]
 async fn suspend_character_on_the_pty_does_not_stop_the_app() {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+    let port = free_port();
     let mut handle = spawner()
         .spawn(&spec().env("PORT", port.to_string()))
         .await

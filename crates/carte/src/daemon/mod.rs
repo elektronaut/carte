@@ -38,6 +38,10 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     }
     let _ = std::fs::remove_file(&socket);
 
+    if std::env::var_os("CARTE_TEST_PORTS").is_some() {
+        supervisor::runner::use_test_ports();
+    }
+
     match groups::kill_leftovers(&paths.run_dir().join("groups")) {
         Ok(0) => {}
         Ok(n) => warn!("killed {n} process groups left behind by a previous daemon"),

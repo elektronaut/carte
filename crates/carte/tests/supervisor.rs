@@ -68,6 +68,7 @@ impl Setup {
             ..Options::new(&self.paths)
         };
         adjust(&mut options);
+        supervisor::runner::use_test_ports();
         supervisor::start(
             world,
             self.paths.clone(),
