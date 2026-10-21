@@ -18,19 +18,36 @@ struct Daemon {
     /// Searched before the inherited `PATH`, for fake tunnel programs.
     bin: Option<PathBuf>,
     child: Option<Child>,
+    ports: Vec<Port>,
+}
+
+/// A port reserved for one test daemon: other test processes skip it while the
+/// lock is held.
+struct Port {
+    number: u16,
+    _lock: std::fs::File,
 }
 
 /// A free port below the ephemeral range, where the daemons under test pick their
 /// apps' ports, so a test's listener and another daemon's app can't get the same one.
-fn free_port() -> u16 {
+/// Checks by connecting: macOS sockets aren't created close-on-exec, so a listener
+/// bound here could leak into a daemon spawned meanwhile and hold the port.
+fn free_port() -> Port {
     static NEXT: AtomicU16 = AtomicU16::new(0);
     let start = 20_000 + (std::process::id() % 400) as u16 * 25;
+    let locks = std::env::temp_dir().join("carte-test-ports");
+    std::fs::create_dir_all(&locks).unwrap();
     loop {
-        let port = 20_000 + (start - 20_000 + NEXT.fetch_add(1, Ordering::Relaxed)) % 10_000;
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
-            && std::net::TcpListener::bind(("::1", port)).is_ok()
+        let number = 20_000 + (start - 20_000 + NEXT.fetch_add(1, Ordering::Relaxed)) % 10_000;
+        let lock = std::fs::File::create(locks.join(number.to_string())).unwrap();
+        if lock.try_lock().is_ok()
+            && TcpStream::connect(("127.0.0.1", number)).is_err()
+            && TcpStream::connect(("::1", number)).is_err()
         {
-            return port;
+            return Port {
+                number,
+                _lock: lock,
+            };
         }
     }
 }
@@ -52,7 +69,8 @@ impl Daemon {
     }
 
     fn start_sharing_with(provider: &str, domain: &str) -> Self {
-        let share_port = free_port();
+        let share = free_port();
+        let share_port = share.number;
         let mut daemon = Self::start_configured(
             false,
             "",
@@ -62,6 +80,7 @@ impl Daemon {
             ),
         );
         daemon.share_port = Some(share_port);
+        daemon.ports.push(share);
         daemon
     }
 
@@ -105,7 +124,8 @@ impl Daemon {
         } else {
             std::fs::create_dir_all(config.join("projects")).unwrap();
         }
-        let (http_port, https_port, dns_port) = (free_port(), free_port(), free_port());
+        let ports = vec![free_port(), free_port(), free_port()];
+        let (http_port, https_port, dns_port) = (ports[0].number, ports[1].number, ports[2].number);
         std::fs::write(
             config.join("config.toml"),
             format!(
@@ -139,6 +159,7 @@ impl Daemon {
             share_port: None,
             bin: Some(bin),
             child: None,
+            ports,
         };
         let child = daemon
             .command(&["daemon"])
