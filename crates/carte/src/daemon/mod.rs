@@ -7,6 +7,7 @@ mod router;
 pub mod tunnel;
 pub mod watch;
 
+use std::io::IsTerminal;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -28,9 +29,8 @@ use crate::proxy::{ListenerOptions, Proxy};
 use crate::supervisor::{self, Options, groups};
 use crate::tls::{self, CaOrigin, CertResolver, CertificateAuthority, CreateReason};
 
+/// Runs until a signal stops it. The caller holds [`lock`] until the runtime is gone.
 pub async fn run(paths: Paths) -> anyhow::Result<()> {
-    std::fs::create_dir_all(&paths.state_dir)
-        .with_context(|| format!("creating {}", paths.state_dir.display()))?;
     let socket = paths.socket();
     if UnixStream::connect(&socket).await.is_ok() {
         bail!("a carte daemon is already running on {}", socket.display());
@@ -219,6 +219,38 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Locks `daemon.lock` in the state directory, creating the directory. The
+/// lock goes with the process, so a crashed daemon doesn't keep the next one
+/// from starting or from killing its leftovers.
+pub fn lock(state_dir: &Path) -> anyhow::Result<std::fs::File> {
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating {}", state_dir.display()))?;
+    let path = state_dir.join("daemon.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let hint = if cfg!(target_os = "macos") && std::io::stderr().is_terminal() {
+                " (the LaunchAgent may be running it; use `carte daemon restart`)"
+            } else {
+                ""
+            };
+            bail!(
+                "a carte daemon is already running, or still stopping, for {}{hint}",
+                state_dir.display()
+            )
+        }
+        Err(std::fs::TryLockError::Error(err)) => {
+            Err(err).with_context(|| format!("locking {}", path.display()))
+        }
+    }
+}
+
 /// Binds the API socket under a temporary name and moves it into place once it
 /// listens, so the socket doesn't appear before the daemon accepts connections.
 /// The daemon removes it as soon as it starts stopping.
@@ -236,6 +268,16 @@ fn bind_api(socket: &Path) -> std::io::Result<UnixListener> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_daemon_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = lock(dir.path()).unwrap();
+        let err = lock(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("already running"), "{err}");
+        drop(first);
+        lock(dir.path()).unwrap();
+    }
 
     #[tokio::test]
     async fn the_api_socket_appears_listening_and_private() {

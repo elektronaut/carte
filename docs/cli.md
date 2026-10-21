@@ -69,7 +69,7 @@ address inside it when given one.
 | `carte import puma-dev` | Create projects from `~/.puma-dev` |
 | `carte import kube [--folder F] [--kubeconfig FILE]` | Create a [kube project](configuration.md#kube-projects) for each kubeconfig context you pick |
 | `carte tui` | The terminal UI |
-| `carte daemon` | Run the daemon in the foreground |
+| `carte daemon` | Run the daemon in the foreground. It refuses to start while another daemon with the same state directory is running or still stopping |
 | `carte daemon restart` | Restart the daemon launchd runs, after installing a new build or changing `[share]`. Running apps stop and start again on their next request |
 
 `pin`, `disable` and their opposites last until the daemon restarts;
