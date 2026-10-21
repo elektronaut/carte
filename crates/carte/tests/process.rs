@@ -352,6 +352,38 @@ async fn closing_the_lifeline_resumes_a_stopped_group() {
 }
 
 #[tokio::test]
+async fn a_group_that_suspends_itself_is_resumed() {
+    let mut handle = spawner()
+        .spawn(&SpawnSpec::new(
+            "echo ready; kill -TSTP 0; echo resumed",
+            std::env::temp_dir(),
+        ))
+        .await
+        .unwrap();
+    let mut output = handle.take_output().unwrap();
+    read_until(&mut output, &mut Vec::new(), "resumed").await;
+    drain(output);
+    assert!(handle.wait().await.unwrap().success());
+}
+
+#[tokio::test]
+async fn a_group_stopped_with_sigstop_stays_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut handle = spawner()
+        .spawn(&trapping_term(&dir.path().join("terminated")))
+        .await
+        .unwrap();
+    let mut output = handle.take_output().unwrap();
+    read_until(&mut output, &mut Vec::new(), "ready").await;
+    drain(output);
+    handle.signal_group(Signal::SIGSTOP).unwrap();
+    wait_stopped(handle.pid()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    wait_stopped(handle.pid()).await;
+    stop(handle).await;
+}
+
+#[tokio::test]
 async fn sigint_is_delivered_to_the_group() {
     let mut handle = spawner().spawn(&spec()).await.unwrap();
     let mut output = handle.take_output().unwrap();
