@@ -8,7 +8,7 @@ use carte_api::attach::{AttachRequest, Attached};
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Credentials, EnvResponse, EventsRequest,
     InstanceStatus, KubeProjectInfo, KubeServiceEntry, LogLine, LogsRequest, ProxiedRequest,
-    RequestsRequest, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
+    RequestsRequest, ResolvedConfig, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
 };
 use carte_core::detach::{DetachFilter, DetachKeys};
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -19,7 +19,7 @@ use super::input::{self, Confirm, Control, Focus, Intent, Mode};
 use super::jump::{self, Jump};
 use super::logs::{Logs, Prefix};
 use super::requests::Requests;
-use super::tabs::{EnvSubject, EnvTab, Tab};
+use super::tabs::{ConfigTab, EnvSubject, EnvTab, Tab};
 use super::target;
 use super::theme::{self, Colors, Theme};
 use super::theme_files;
@@ -61,6 +61,10 @@ pub enum Event {
     Env {
         generation: u64,
         result: Result<EnvResponse, String>,
+    },
+    Config {
+        generation: u64,
+        result: Result<Box<ResolvedConfig>, String>,
     },
     /// A kube project's Services, as the cluster lists them.
     Services {
@@ -118,6 +122,10 @@ pub enum Command {
     MouseCapture(bool),
     Copy(String),
     FetchEnv {
+        generation: u64,
+        target: Address,
+    },
+    FetchConfig {
         generation: u64,
         target: Address,
     },
@@ -228,6 +236,7 @@ pub struct App {
     pub problems_area: Rect,
     pub selection: Option<Selection>,
     pub env: EnvTab,
+    pub config: ConfigTab,
     /// Where each tab's name was drawn on the top border of `logs_area`: its first
     /// column and the column after it.
     pub tab_spans: Vec<(Tab, u16, u16)>,
@@ -282,6 +291,7 @@ impl App {
             problems_area: Rect::default(),
             selection: None,
             env: EnvTab::default(),
+            config: ConfigTab::default(),
             tab_spans: Vec::new(),
             jump: None,
             start_at: None,
@@ -374,6 +384,12 @@ impl App {
                     self.env.env = Some(result);
                 }
             }
+            Event::Config { generation, result } => {
+                self.config.in_flight = false;
+                if generation == self.config.generation {
+                    self.config.config = Some(result);
+                }
+            }
             Event::Attached { session, result } if self.typing_to(session) => match result {
                 Ok(attached) => {
                     if let Some(typing) = &mut self.typing {
@@ -410,6 +426,7 @@ impl App {
         }
         commands.extend(self.sync_logs());
         commands.extend(self.sync_env());
+        commands.extend(self.sync_config());
         commands.extend(self.sync_requests());
         commands
     }
@@ -567,7 +584,7 @@ impl App {
                         }
                         false
                     }
-                    Tab::Env => false,
+                    Tab::Env | Tab::Config => false,
                 };
                 if lines
                     && at.y >= top
@@ -630,6 +647,7 @@ impl App {
                     match self.tab {
                         Tab::Logs | Tab::Events => self.logs.scroll_by(if up { 3 } else { -3 }),
                         Tab::Env => self.env.scroll_by(if up { -3 } else { 3 }),
+                        Tab::Config => self.config.scroll_by(if up { -3 } else { 3 }),
                         Tab::Requests if self.requests.detail_area.contains(at) => {
                             let requests = &mut self.requests;
                             let delta = if up { -3 } else { 3 };
@@ -1045,14 +1063,17 @@ impl App {
         let page = |height: usize| height.saturating_sub(1).max(1) as isize;
         match self.tab {
             Tab::Logs | Tab::Events => return false,
-            Tab::Env => {
-                let view = &mut self.env;
+            Tab::Env | Tab::Config => {
+                let (scroll, height) = match self.tab {
+                    Tab::Config => (&mut self.config.scroll, self.config.height),
+                    _ => (&mut self.env.scroll, self.env.height),
+                };
                 match intent {
-                    Intent::Move(delta) => view.scroll_by(delta),
-                    Intent::PageDown => view.scroll_by(page(view.height)),
-                    Intent::PageUp => view.scroll_by(-page(view.height)),
-                    Intent::Top => view.scroll = 0,
-                    Intent::Bottom => view.scroll = usize::MAX,
+                    Intent::Move(delta) => *scroll = scroll.saturating_add_signed(delta),
+                    Intent::PageDown => *scroll = scroll.saturating_add_signed(page(height)),
+                    Intent::PageUp => *scroll = scroll.saturating_add_signed(-page(height)),
+                    Intent::Top => *scroll = 0,
+                    Intent::Bottom => *scroll = usize::MAX,
                     Intent::StartFilter => self.inform("/ searches the logs"),
                     Intent::FindMatch { .. } | Intent::OpenRow | Intent::ToggleLogFilter => {}
                     _ => return false,
@@ -1093,15 +1114,68 @@ impl App {
         true
     }
 
-    /// Shows `tab`; picking the env tab again fetches the env again.
+    /// Shows `tab`; picking the env or config tab again fetches it again.
     fn pick_tab(&mut self, tab: Tab) {
         if tab == self.tab {
             match tab {
                 Tab::Env => self.env.subject = EnvSubject::None,
+                Tab::Config => self.config.subject = None,
                 Tab::Logs | Tab::Events | Tab::Requests => {}
             }
         }
         self.tab = tab;
+    }
+
+    /// What the config tab shows: the selection, unless it's a folder.
+    fn config_subject(&self) -> Option<NodeId> {
+        match self.tab {
+            Tab::Config => {}
+            Tab::Logs | Tab::Events | Tab::Env | Tab::Requests => return None,
+        }
+        self.selected_node()
+            .map(Node::id)
+            .filter(|id| !matches!(id, NodeId::Folder { .. }))
+            .cloned()
+    }
+
+    /// Fetches the config tab's subject once it changed, or once its instance's
+    /// policies, states or ports did, one fetch at a time. A subject that changes
+    /// while a fetch runs is fetched when it returns.
+    fn sync_config(&mut self) -> Option<Command> {
+        let subject = self.config_subject();
+        if subject != self.config.subject {
+            self.config.restart(subject);
+        }
+        let stamp = self.config_stamp();
+        let current = self.config.config.is_some() && stamp == self.config.stamp;
+        if self.config.in_flight || current {
+            return None;
+        }
+        let target = target::address(self.config.subject.as_ref()?);
+        self.config.stamp = stamp;
+        self.config.in_flight = true;
+        Some(Command::FetchConfig {
+            generation: self.config.generation,
+            target,
+        })
+    }
+
+    /// What the config tab shows of the selected instance's runtime, as a hash: each
+    /// process's policy, whether it lasts until the daemon restarts, state and port.
+    fn config_stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let instance = self
+            .config
+            .subject
+            .as_ref()
+            .and_then(|id| self.instance(id));
+        for process in instance.iter().flat_map(|i| &i.processes) {
+            process.name.hash(&mut hasher);
+            format!("{:?} {:?}", process.policy, process.state).hash(&mut hasher);
+            (process.temporary, process.port).hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// The env tab's subject: the selected process, or the process of the selected app
@@ -1109,7 +1183,7 @@ impl App {
     fn env_subject(&self) -> EnvSubject {
         match self.tab {
             Tab::Env => {}
-            Tab::Logs | Tab::Events | Tab::Requests => return EnvSubject::None,
+            Tab::Logs | Tab::Events | Tab::Config | Tab::Requests => return EnvSubject::None,
         }
         let unavailable = |text: &str| EnvSubject::Unavailable(text.to_string());
         let Some(id) = self.selected_node().map(Node::id) else {
@@ -1533,7 +1607,7 @@ impl App {
         let node = self.selected_node();
         let events = match self.tab {
             Tab::Events => true,
-            Tab::Logs | Tab::Env | Tab::Requests => false,
+            Tab::Logs | Tab::Env | Tab::Config | Tab::Requests => false,
         };
         if events || self.follows_kube_events() {
             return Some(Command::FollowEvents {
@@ -1569,7 +1643,7 @@ impl App {
         self.snapshot.as_ref()?;
         let id = self.selected_node().map(Node::id);
         match self.tab {
-            Tab::Env | Tab::Requests => None,
+            Tab::Env | Tab::Config | Tab::Requests => None,
             Tab::Events => Some(match id {
                 Some(id) if !matches!(id, NodeId::Folder { .. }) => {
                     format!("events {}", target::label(id))
@@ -1602,7 +1676,7 @@ impl App {
                 Some(id) => format!("requests {}", target::label(id)),
                 None => "requests".to_string(),
             }),
-            Tab::Requests | Tab::Logs | Tab::Events | Tab::Env => None,
+            Tab::Requests | Tab::Logs | Tab::Events | Tab::Env | Tab::Config => None,
         };
         let mut commands = Vec::new();
         if wanted != self.requests.key {
@@ -1642,7 +1716,7 @@ impl App {
     fn log_prefix(&self) -> Prefix {
         let events = match self.tab {
             Tab::Events => true,
-            Tab::Logs | Tab::Env | Tab::Requests => false,
+            Tab::Logs | Tab::Env | Tab::Config | Tab::Requests => false,
         };
         if events || self.follows_kube_events() {
             return Prefix::None;
@@ -1738,8 +1812,8 @@ mod tests {
         assert_eq!(app.tab, Tab::Logs);
 
         assert!(
-            press(&mut app, now, KeyCode::Char('4')).is_empty(),
-            "no tab 4 yet"
+            press(&mut app, now, KeyCode::Char('6')).is_empty(),
+            "no tab 6"
         );
         assert_eq!(app.tab, Tab::Logs);
         press(&mut app, now, KeyCode::Char(']'));
@@ -1756,8 +1830,17 @@ mod tests {
             Some("@main")
         );
         let commands = press(&mut app, now, KeyCode::Char('['));
+        assert_eq!(app.tab, Tab::Config);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [Command::FetchConfig { .. }, Command::StopRequests]
+            ),
+            "{commands:?}"
+        );
+        let commands = press(&mut app, now, KeyCode::Char('['));
         assert_eq!(app.tab, Tab::Env);
-        assert_eq!(commands, [Command::StopRequests], "a stack has no env");
+        assert!(commands.is_empty(), "a stack has no env: {commands:?}");
         assert_eq!(app.focus, Focus::Tree, "only tab moves the focus");
         assert_eq!(app.cursor, 1);
     }
@@ -2416,6 +2499,109 @@ mod tests {
         assert!(app.update(Event::Key(ctrl_close_bracket), now).is_empty());
         assert_eq!(press(&mut app, now, KeyCode::Char('d')), [Command::Detach]);
         assert_eq!(app.mode, Mode::Normal);
+    }
+
+    fn fetches_config(commands: &[Command]) -> Vec<(u64, String)> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                Command::FetchConfig { generation, target } => {
+                    assert_eq!(target.project.as_deref(), Some("nova"));
+                    Some((*generation, target.address.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_config_tab_fetches_the_selection_one_request_at_a_time() {
+        let (mut app, now) = connected();
+        let fetched = fetches_config(&press(&mut app, now, KeyCode::Char('4')));
+        let [(first, project)] = fetched.as_slice() else {
+            panic!("{fetched:?}");
+        };
+        assert_eq!(project, "", "the project, as the empty address in it");
+        let first = *first;
+
+        press(&mut app, now, KeyCode::Down);
+        let moved = press(&mut app, now, KeyCode::Down);
+        assert!(
+            fetches_config(&moved).is_empty(),
+            "one fetch at a time: {moved:?}"
+        );
+        let commands = app.update(
+            Event::Config {
+                generation: first,
+                result: Err("late".into()),
+            },
+            now,
+        );
+        assert_eq!(app.config.config, None, "an earlier selection's answer");
+        let [(latest, ref address)] = fetches_config(&commands)[..] else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(
+            *address,
+            target::address(app.selected_node().unwrap().id()).address,
+            "the latest selection"
+        );
+        assert_ne!(address, "");
+        app.update(
+            Event::Config {
+                generation: latest,
+                result: Err("no".into()),
+            },
+            now,
+        );
+        assert_eq!(app.config.config, Some(Err("no".into())));
+        assert!(
+            fetches_config(&press(&mut app, now, KeyCode::Char('?'))).is_empty(),
+            "answered, so nothing more to fetch"
+        );
+        press(&mut app, now, KeyCode::Esc);
+        let [(again, _)] = fetches_config(&press(&mut app, now, KeyCode::Char('4')))[..] else {
+            panic!("4 on the config tab fetches it again");
+        };
+        assert!(again > latest);
+    }
+
+    #[test]
+    fn the_config_tab_fetches_again_when_the_instance_changes() {
+        let (mut app, now) = connected();
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
+        let commands = press(&mut app, now, KeyCode::Down);
+        assert!(fetches_config(&commands).is_empty(), "the tab isn't open");
+        let [(generation, ref address)] =
+            fetches_config(&press(&mut app, now, KeyCode::Char('4')))[..]
+        else {
+            panic!("the tab opens on the app");
+        };
+        assert_eq!(address, "nova-billing@main");
+        app.update(
+            Event::Config {
+                generation,
+                result: Err("answered".into()),
+            },
+            now,
+        );
+        let same = app.update(Event::Snapshot(Box::new(sample())), now);
+        assert!(fetches_config(&same).is_empty(), "{same:?}");
+
+        let mut pinned = sample();
+        let worker = &mut pinned.projects[0].stacks[0].instances[0].processes[1];
+        worker.policy = carte_api::Policy::Pinned;
+        worker.temporary = true;
+        let commands = app.update(Event::Snapshot(Box::new(pinned)), now);
+        let [(again, _)] = fetches_config(&commands)[..] else {
+            panic!("a pin changes what the tab shows: {commands:?}");
+        };
+        assert_eq!(again, generation, "the same subject");
+        assert!(
+            matches!(app.config.config, Some(Err(_))),
+            "the old answer stays until the new one"
+        );
     }
 
     fn fetches_env(commands: &[Command]) -> (u64, String) {

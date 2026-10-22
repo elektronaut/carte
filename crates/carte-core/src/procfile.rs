@@ -691,6 +691,26 @@ pub fn rewrite_port(command: &str) -> Option<String> {
 }
 
 fn rewrite_port_flag(command: &str) -> Option<String> {
+    let ranges = port_flags(command);
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut out = command.to_string();
+    for range in ranges.into_iter().rev() {
+        out.replace_range(range, "$PORT");
+    }
+    Some(out)
+}
+
+/// The port a command hardcodes with `-p`, `--port` or their `=` forms, which
+/// [`rewrite_port`] replaces with `$PORT`.
+pub fn hardcoded_port(command: &str) -> Option<u16> {
+    let range = port_flags(command).into_iter().next()?;
+    command[range].parse().ok()
+}
+
+/// Where the port numbers of `-p`, `--port` and their `=` forms are in a command.
+fn port_flags(command: &str) -> Vec<std::ops::Range<usize>> {
     let tokens = tokens_with_offsets(command);
     let mut ranges = Vec::new();
     for (i, &(start, token)) in tokens.iter().enumerate() {
@@ -709,14 +729,7 @@ fn rewrite_port_flag(command: &str) -> Option<String> {
             ranges.push(start + token.len() - value.len()..start + token.len());
         }
     }
-    if ranges.is_empty() {
-        return None;
-    }
-    let mut out = command.to_string();
-    for range in ranges.into_iter().rev() {
-        out.replace_range(range, "$PORT");
-    }
-    Some(out)
+    ranges
 }
 
 fn is_port_number(s: &str) -> bool {

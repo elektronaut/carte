@@ -8,7 +8,8 @@ use std::time::Duration;
 use carte_api::attach::{AttachRequest, Frame};
 use carte_api::{
     ControlResponse, EnvResponse, Event as DaemonEvent, KubeServicesRequest, KubeServicesResponse,
-    LogLine, MarkRequest, ProxiedRequest, ShareResponse, Snapshot, StopAllRequest, paths,
+    LogLine, MarkRequest, ProxiedRequest, ResolvedConfig, ShareResponse, Snapshot, StopAllRequest,
+    paths,
 };
 use http::Method;
 use ratatui::crossterm::event::{
@@ -207,6 +208,16 @@ impl Tasks {
                         .await
                         .map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Event::Env { generation, result });
+                });
+            }
+            Command::FetchConfig { generation, target } => {
+                tokio::spawn(async move {
+                    let result = client
+                        .post::<_, ResolvedConfig>(paths::CONFIG, &target)
+                        .await
+                        .map(Box::new)
+                        .map_err(|e| format!("{e:#}"));
+                    let _ = tx.send(Event::Config { generation, result });
                 });
             }
             Command::FetchServices(project) => {

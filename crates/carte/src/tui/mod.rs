@@ -13,6 +13,7 @@ use crate::paths::Paths;
 
 mod app;
 mod browse;
+mod config;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod input;

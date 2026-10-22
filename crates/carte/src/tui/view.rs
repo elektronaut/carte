@@ -521,47 +521,64 @@ fn render_selection(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App)
         return;
     };
     let title = format!(" {} ", target::label(node.id()));
-    let details = details(theme, app, node);
-    let lines = if app.zoom.is_some() {
-        details.joined(theme, usize::from(area.width.saturating_sub(2)))
-    } else {
-        details.0.into_iter().map(|(line, _)| line).collect()
-    };
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false }).block(pane(
+    let height = DETAILS_HEIGHT.min(area.height / 2);
+    let lines = details(theme, app, node).rows(
         theme,
-        Line::from(title).bold(),
-        false,
-    ));
-    let height = bordered_height(&paragraph, area.width).min(area.height.saturating_sub(4));
+        usize::from(area.width.saturating_sub(2)),
+        app.zoom.is_some(),
+        usize::from(height.saturating_sub(2)),
+    );
+    let paragraph = Paragraph::new(lines).block(pane(theme, Line::from(title).bold(), false));
     let [top, bottom] =
         Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(area);
     frame.render_widget(paragraph, top);
     render_tabs(theme, frame, bottom, app);
 }
 
-/// The details' lines, each marked whether it's a short fact that can share a row.
+/// The details pane's rows, borders included.
+const DETAILS_HEIGHT: u16 = 7;
+
+/// What a line of the details is about. When they don't all fit, the later kinds
+/// go first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Rank {
+    /// The state and the address.
+    State,
+    /// Errors and problems.
+    Trouble,
+    /// A share, holds, the idle timer, a boot, runtime pins.
+    Attention,
+    /// The latest event and everything else.
+    Rest,
+}
+
+/// The details' lines, each with its rank and whether it's a short fact that can
+/// share a row.
 #[derive(Default)]
-struct Details(Vec<(Line<'static>, bool)>);
+struct Details(Vec<(Line<'static>, Rank, bool)>);
 
 impl Details {
-    fn push(&mut self, line: Line<'static>) {
-        self.0.push((line, true));
+    fn push(&mut self, rank: Rank, line: Line<'static>) {
+        self.0.push((line, rank, true));
     }
 
     /// A line that keeps a row of its own, like an error.
-    fn alone(&mut self, line: Line<'static>) {
-        self.0.push((line, false));
+    fn alone(&mut self, rank: Rank, line: Line<'static>) {
+        self.0.push((line, rank, false));
     }
 
     fn extend(&mut self, other: Details) {
         self.0.extend(other.0);
     }
 
-    /// Joins facts in a row while they fit in `width` columns, separated by ` · `.
-    fn joined(self, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    /// At most `room` rows of `width` columns, by rank. Zoomed, facts share a row
+    /// while they fit, separated by ` · `. A line too long for its row ends in `…`,
+    /// and the last row says how many lines didn't fit.
+    fn rows(mut self, theme: &Theme, width: usize, zoom: bool, room: usize) -> Vec<Line<'static>> {
+        self.0.sort_by_key(|(_, rank, _)| *rank);
         let mut rows: Vec<Line<'static>> = Vec::new();
         let mut joinable = false;
-        for (line, fact) in self.0 {
+        for (line, _, fact) in self.0 {
             let fits = rows
                 .last()
                 .is_some_and(|row| row.width() + 3 + line.width() <= width);
@@ -570,7 +587,7 @@ impl Details {
                 .iter()
                 .map(|span| Span::styled(span.content.clone(), line.style.patch(span.style)))
                 .collect();
-            if joinable && fact && fits {
+            if zoom && joinable && fact && fits {
                 let row = rows.last_mut().expect("a row");
                 row.spans.push(Span::raw(" · ").fg(theme.muted));
                 row.spans.extend(spans);
@@ -579,14 +596,32 @@ impl Details {
                 rows.push(Line::from(spans));
             }
         }
-        rows
+        if rows.len() > room {
+            let cut = rows.len() - room.saturating_sub(1);
+            rows.truncate(room.saturating_sub(1));
+            rows.push(Line::from(format!("+{cut} more")).fg(theme.muted));
+        }
+        rows.into_iter().map(|row| ellipsized(row, width)).collect()
     }
 }
 
-/// The rows a wrapped paragraph in a bordered pane takes at `width`, borders
-/// included.
-fn bordered_height(paragraph: &Paragraph, width: u16) -> u16 {
-    u16::try_from(paragraph.line_count(width.saturating_sub(2))).unwrap_or(u16::MAX)
+/// `line` within `width` columns, ending in `…` when it was longer.
+fn ellipsized(line: Line<'static>, width: usize) -> Line<'static> {
+    if line.width() <= width {
+        return line;
+    }
+    let mut left = width.saturating_sub(1);
+    let mut spans = Vec::new();
+    for span in line.spans {
+        if left == 0 {
+            break;
+        }
+        let text: String = span.content.chars().take(left).collect();
+        left -= text.chars().count();
+        spans.push(Span::styled(text, span.style));
+    }
+    spans.push(Span::raw("…"));
+    Line::from(spans).style(line.style)
 }
 
 fn details(theme: &Theme, app: &App, node: &Node) -> Details {
@@ -631,16 +666,16 @@ fn details(theme: &Theme, app: &App, node: &Node) -> Details {
             {
                 first.push(Span::raw(format!(" · branch {branch}")).fg(theme.muted));
             }
-            lines.push(Line::from(first));
+            lines.push(Rank::State, Line::from(first));
             if let NodeId::Project { project } = id
                 && let Some(kube) = app.kube_project(project)
             {
-                lines.push(Line::from(format!("kube context {}", kube.context)).fg(theme.muted));
                 if let Some(error) = &kube.error {
-                    lines.alone(Line::from(error.clone()).fg(theme.error));
+                    lines.alone(Rank::Trouble, Line::from(error.clone()).fg(theme.error));
                 }
                 if let Some(Browse::Failed(error)) = app.browse.get(project) {
                     lines.alone(
+                        Rank::Trouble,
                         Line::from(format!("listing Services failed: {error}")).fg(theme.error),
                     );
                 }
@@ -648,9 +683,10 @@ fn details(theme: &Theme, app: &App, node: &Node) -> Details {
             let crashed: Vec<&str> = crashed_below(node);
             if !crashed.is_empty() {
                 let word = if status.kube { "failed" } else { "crashed" };
-                lines.alone(Line::from(
-                    format!("{word}: {}", crashed.join(", ")).fg(theme.error),
-                ));
+                lines.alone(
+                    Rank::Trouble,
+                    Line::from(format!("{word}: {}", crashed.join(", ")).fg(theme.error)),
+                );
             }
         }
         NodeId::Instance { .. } => {
@@ -674,10 +710,16 @@ fn details(theme: &Theme, app: &App, node: &Node) -> Details {
         }
     }
     if let Some(event) = latest_event(app, id) {
-        lines.push(Line::from(event_note(event, crate::clock::now_ms())).fg(theme.muted));
+        lines.push(
+            Rank::Rest,
+            Line::from(event_note(event, crate::clock::now_ms())).fg(theme.muted),
+        );
     }
     for problem in problems_for(app, id) {
-        lines.alone(Line::from(format!("! {}", problem.message)).fg(theme.error));
+        lines.alone(
+            Rank::Trouble,
+            Line::from(format!("! {}", problem.message)).fg(theme.error),
+        );
     }
     lines
 }
@@ -753,39 +795,35 @@ fn instance_details(
     status: &Status,
 ) -> Details {
     let mut lines = Details::default();
-    lines.push(Line::from(vec![
-        state,
-        Span::raw(" · ").fg(theme.muted),
-        Span::raw(instance.url.clone()).underlined(),
-    ]));
+    lines.push(
+        Rank::State,
+        Line::from(vec![
+            state,
+            Span::raw(" · ").fg(theme.muted),
+            Span::raw(instance.url.clone()).underlined(),
+        ]),
+    );
     if let Some(boot) = &instance.boot {
-        lines.push(Line::from(boot_progress(app, instance, boot)).fg(theme.warn));
+        lines.push(
+            Rank::Attention,
+            Line::from(boot_progress(app, instance, boot)).fg(theme.warn),
+        );
     }
     lines.extend(share_details(theme, app, project, instance));
-    if let Some(kube) = &instance.kube {
-        let place = match (&kube.pod, kube.port) {
-            (Some(pod), Some(port)) => format!("pod {pod} :{port} · namespace {}", instance.stack),
-            _ => format!("namespace {}", instance.stack),
-        };
-        lines.push(Line::from(place.fg(theme.muted)));
-    } else {
-        let checkout = if status.fallback {
-            "main (no worktree for this stack)".to_string()
-        } else {
-            instance.checkout.clone()
-        };
-        let mut checkout = format!("checkout {checkout}");
-        if !instance.checkout_path.as_os_str().is_empty() {
-            checkout.push_str(&format!(" · {}", instance.checkout_path.display()));
-        }
-        lines.push(Line::from(checkout.fg(theme.muted)));
+    if let Some(kube) = &instance.kube
+        && let (Some(pod), Some(port)) = (&kube.pod, kube.port)
+    {
+        lines.push(
+            Rank::Rest,
+            Line::from(format!("pod {pod} :{port}").fg(theme.muted)),
+        );
     }
     let mut notes = Vec::new();
     for (word, policy) in [("pinned", Policy::Pinned), ("disabled", Policy::Disabled)] {
         let procs: Vec<&ProcessStatus> = instance
             .processes
             .iter()
-            .filter(|p| p.policy == policy)
+            .filter(|p| p.policy == policy && p.temporary)
             .collect();
         if procs.is_empty() {
             continue;
@@ -795,9 +833,7 @@ fn instance_details(
             let names: Vec<&str> = procs.iter().map(|p| p.name.as_str()).collect();
             note = format!("{} {word}", names.join(", "));
         }
-        if procs.iter().any(|p| p.temporary) {
-            note.push_str(" until the daemon restarts");
-        }
+        note.push_str(" until the daemon restarts");
         notes.push(note);
     }
     if !status.held_by.is_empty() {
@@ -807,12 +843,15 @@ fn instance_details(
         notes.push(format!("idles out in {}", duration(app.idle_in(secs))));
     }
     if !notes.is_empty() {
-        lines.push(Line::from(notes.join(" · ")).fg(theme.muted));
+        lines.push(
+            Rank::Attention,
+            Line::from(notes.join(" · ")).fg(theme.muted),
+        );
     }
     if let Some(error) = &instance.last_error
         && (status.state == State::Crashed || status.kube)
     {
-        lines.alone(Line::from(error.clone()).fg(theme.error));
+        lines.alone(Rank::Trouble, Line::from(error.clone()).fg(theme.error));
     }
     lines
 }
@@ -823,16 +862,22 @@ fn share_details(theme: &Theme, app: &App, project: &str, instance: &InstanceSta
     let Some(public) = &instance.public_url else {
         return lines;
     };
-    lines.push(Line::from(vec![
-        Span::raw("shared at ").fg(theme.shared),
-        Span::raw(public.clone()).underlined(),
-    ]));
+    lines.push(
+        Rank::Attention,
+        Line::from(vec![
+            Span::raw("shared at ").fg(theme.shared),
+            Span::raw(public.clone()).underlined(),
+        ]),
+    );
     let snapshot = app.snapshot.as_ref().expect("a snapshot to draw");
     if let Some(tunnel) = &snapshot.tunnel
         && tunnel.state == TunnelState::Failed
     {
         let message = tunnel.message.as_deref().unwrap_or("no reason given");
-        lines.alone(Line::from(format!("the tunnel is down: {message}")).fg(theme.error));
+        lines.alone(
+            Rank::Trouble,
+            Line::from(format!("the tunnel is down: {message}")).fg(theme.error),
+        );
     }
     let Some(share) = snapshot
         .shares
@@ -863,7 +908,10 @@ fn share_details(theme: &Theme, app: &App, project: &str, instance: &InstanceSta
             duration(share.shared_secs + app.now.duration_since(app.snapshot_at).as_secs())
         )),
     }
-    lines.push(Line::from(notes.join(" · ")).fg(theme.muted));
+    lines.push(
+        Rank::Attention,
+        Line::from(notes.join(" · ")).fg(theme.muted),
+    );
     lines
 }
 
@@ -879,12 +927,6 @@ fn process_details(
     if let Some(pid) = process.pid {
         facts.push(format!("pid {pid}"));
     }
-    if let Some(port) = process.port {
-        facts.push(format!("port {port}"));
-    }
-    if process.http {
-        facts.push("serves HTTP".into());
-    }
     if process.restarts > 0 {
         facts.push(format!("{} restarts", process.restarts));
     }
@@ -892,7 +934,7 @@ fn process_details(
         first.push(Span::raw(format!(" · {fact}")).fg(theme.muted));
     }
     let mut lines = Details::default();
-    lines.push(Line::from(first));
+    lines.push(Rank::State, Line::from(first));
     if let ProcessState::Exited { code, signal } = process.state {
         let how = match (code, signal) {
             (_, Some(signal)) => format!("killed by signal {signal}"),
@@ -901,18 +943,20 @@ fn process_details(
         };
         let line = Line::from(how);
         if code == Some(0) {
-            lines.push(line.fg(theme.muted));
+            lines.push(Rank::Rest, line.fg(theme.muted));
         } else {
-            lines.alone(line.fg(theme.error));
+            lines.alone(Rank::Trouble, line.fg(theme.error));
         }
     }
     if let Some(secs) = process.restart_in_secs {
         lines.push(
+            Rank::Attention,
             Line::from(format!("restarting in {}", duration(app.idle_in(secs)))).fg(theme.warn),
         );
     }
     if process.gave_up {
         lines.alone(
+            Rank::Trouble,
             Line::from(
                 "it crashed too often, so carte stopped restarting it; start it to try again",
             )
@@ -922,7 +966,7 @@ fn process_details(
     if let Some(error) = &instance.last_error
         && !matches!(process.state, ProcessState::Running | ProcessState::Done)
     {
-        lines.alone(Line::from(error.clone()).fg(theme.error));
+        lines.alone(Rank::Trouble, Line::from(error.clone()).fg(theme.error));
     }
     lines
 }
@@ -957,7 +1001,7 @@ fn render_tabs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let status = match app.tab {
         Tab::Logs | Tab::Events => logs_status(theme, &app.logs),
         Tab::Requests => requests_status(theme, &app.requests, app.zoom.is_some()),
-        Tab::Env => Vec::new(),
+        Tab::Env | Tab::Config => Vec::new(),
     };
     let status = Line::from(status);
     let names_end = area.right().saturating_sub(1 + status.width() as u16);
@@ -991,6 +1035,7 @@ fn render_tabs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     match app.tab {
         Tab::Logs | Tab::Events => render_logs(theme, frame, inner, app),
         Tab::Env => render_env(theme, frame, inner, app),
+        Tab::Config => super::config::render(theme, frame, inner, app),
         Tab::Requests => render_requests(theme, frame, inner, app),
     }
 }
@@ -1263,7 +1308,7 @@ fn logs_status(theme: &Theme, logs: &Logs) -> Vec<Span<'static>> {
 fn render_logs(theme: &Theme, frame: &mut Frame, mut inner: Rect, app: &mut App) {
     let events = match app.tab {
         Tab::Events => true,
-        Tab::Logs | Tab::Env | Tab::Requests => false,
+        Tab::Logs | Tab::Env | Tab::Config | Tab::Requests => false,
     };
     let logs = &app.logs;
     let typing = app.mode == Mode::Filter && app.focus == Focus::Logs;
@@ -1464,6 +1509,15 @@ fn footer_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
     let (focus, tab) = (app.focus, app.tab);
     let problems = has_problems(app);
     let keys: &[(&str, &str)] = match (focus, tab) {
+        (Focus::Logs, Tab::Env | Tab::Config) => &[
+            ("?", "help"),
+            ("q", "quit"),
+            ("↑↓", "scroll"),
+            ("g G", "top, bottom"),
+            ("1-5", "tabs"),
+            ("z", "zoom"),
+            ("tab", "tree"),
+        ],
         (Focus::Tree, _) => &[
             ("?", "help"),
             ("q", "quit"),
@@ -1499,7 +1553,7 @@ fn footer_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
             ("z", "zoom"),
             ("tab", "tree"),
         ],
-        (Focus::Logs, Tab::Logs | Tab::Events | Tab::Env) => &[
+        (Focus::Logs, Tab::Logs | Tab::Events) => &[
             ("?", "help"),
             ("q", "quit"),
             ("↑↓", "scroll"),
@@ -1758,7 +1812,7 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 
 /// Breaks styled text into rows of at most `width` characters, indenting the rows
 /// after the first by `indent`.
-fn wrap(parts: Vec<(String, Style)>, width: usize, indent: usize) -> Vec<Line<'static>> {
+pub(super) fn wrap(parts: Vec<(String, Style)>, width: usize, indent: usize) -> Vec<Line<'static>> {
     let mut rows = Vec::new();
     let mut row: Vec<Span<'static>> = Vec::new();
     let mut used = 0;
@@ -1902,12 +1956,35 @@ mod tests {
     }
 
     #[test]
-    fn a_bordered_pane_is_as_tall_as_its_wrapped_lines() {
-        let paragraph = Paragraph::new("x".repeat(9))
-            .wrap(Wrap { trim: false })
-            .block(pane(&Theme::terminal(), Line::from("t"), false));
-        assert_eq!(bordered_height(&paragraph, 11), 3);
-        assert_eq!(bordered_height(&paragraph, 10), 4);
+    fn details_keep_what_matters_most_and_say_what_they_cut() {
+        let theme = Theme::terminal();
+        let mut details = Details::default();
+        details.push(Rank::Rest, Line::from("started 3m ago"));
+        details.push(Rank::Attention, Line::from("held by acme-api"));
+        details.alone(Rank::Trouble, Line::from("x".repeat(30)));
+        details.push(Rank::State, Line::from("● running"));
+        details.alone(Rank::Trouble, Line::from("! a problem"));
+        let text = |rows: Vec<Line<'static>>| {
+            rows.iter()
+                .map(|row| row.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect::<Vec<String>>()
+        };
+        let rows = |details: Details, room| text(details.rows(&theme, 20, false, room));
+        let all = Details(details.0.clone());
+        assert_eq!(
+            rows(all, 5),
+            [
+                "● running",
+                &format!("{}…", "x".repeat(19)),
+                "! a problem",
+                "held by acme-api",
+                "started 3m ago",
+            ]
+        );
+        assert_eq!(
+            rows(details, 3),
+            ["● running", &format!("{}…", "x".repeat(19)), "+3 more"]
+        );
     }
 
     fn press(app: &mut App, now: Instant, code: KeyCode) -> Vec<Command> {
@@ -1995,15 +2072,15 @@ mod tests {
             "\
 ╭ carte · 2 running · 1 problem ─────────────────────╮╭ nova-billing@main ─────────────────────────────────────────────╮
 │                                         CPU   MEM  ││● running · https://nova-billing.test                           │
-│▾ ✖ nova !              2/4                 3%  412M││checkout main · /work/nova-billing                              │
-│  ▾ ✖ main              1/2                 3%  412M││worker pinned until the daemon restarts                         │
-│    ▾ ● billing pin*    ready               3%  412M│╰────────────────────────────────────────────────────────────────╯
-│        ● web           running             0%    0B│╭ 1 logs │ 2 events │ 3 env │ 5 requests ───────────── following ╮
-│        ● worker pin*   running             0%    0B││web    Puma starting in single mode...                          │
-│      ✖ frontend !      crashed                     ││worker Started worker with 5 threads                            │
-│  ▸ ● feature-x         1/2                 0%    0B││web    GET /up 200 in 2ms                                       │
-│                                                    ││                                                                │
-│                                                    ││                                                                │
+│▾ ✖ nova !              2/4                 3%  412M││worker pinned until the daemon restarts                         │
+│  ▾ ✖ main              1/2                 3%  412M││                                                                │
+│    ▾ ● billing pin*    ready               3%  412M││                                                                │
+│        ● web           running             0%    0B││                                                                │
+│        ● worker pin*   running             0%    0B│╰────────────────────────────────────────────────────────────────╯
+│      ✖ frontend !      crashed                     │╭ 1 logs │ 2 events │ 3 env │ 4 config │ 5 requests ── following ╮
+│  ▸ ● feature-x         1/2                 0%    0B││web    Puma starting in single mode...                          │
+│                                                    ││worker Started worker with 5 threads                            │
+│                                                    ││web    GET /up 200 in 2ms                                       │
 │                                                    ││                                                                │
 │                                                    ││                                                                │
 │                                                    ││                                                                │
@@ -2387,12 +2464,12 @@ mod tests {
             screen,
             "\
 ╭ nova-billing@main ───────────────────────────────────────────────────────────────────────────────────────────────────╮
-│● running · https://nova-billing.test · checkout main · /work/nova-billing · worker pinned until the daemon restarts  │
+│● running · https://nova-billing.test · worker pinned until the daemon restarts                                       │
+│                                                                                                                      │
+│                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ 1 logs │ 2 events │ 3 env │ 5 requests ─────────────────────────────────────────────────────────────────── following ╮
+╭ 1 logs │ 2 events │ 3 env │ 4 config │ 5 requests ──────────────────────────────────────────────────────── following ╮
 │web GET /up 200 in 2ms                                                                                                │
-│                                                                                                                      │
-│                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -2409,7 +2486,7 @@ mod tests {
             "{screen}"
         );
         assert!(
-            screen.contains("│checkout main"),
+            screen.contains("│worker pinned until the daemon restarts"),
             "the details stack again\n{screen}"
         );
 
@@ -2495,24 +2572,109 @@ mod tests {
         let screen = draw(&mut app, 60, 16);
         let rows: Vec<&str> = screen.lines().collect();
         assert_eq!(
-            rows[..6],
+            rows[..4],
             [
                 "╭ nova-frontend@main ──────────────────────────────────────╮",
                 "│✖ crashed · https://nova-frontend.test                    │",
-                "│checkout main · /work/nova-frontend                       │",
                 "│web exited with code 1 before it was ready                │",
                 "│! stack \"billing\" names an app                            │",
-                "╰──────────────────────────────────────────────────────────╯",
             ],
-            "errors keep their rows, and a fact that doesn't fit starts one\n{screen}"
+            "errors keep their rows\n{screen}"
         );
-        let screen = draw(&mut app, 120, 16);
+        press(&mut app, now, KeyCode::Char('z'));
+        press(&mut app, now, KeyCode::Up);
+        press(&mut app, now, KeyCode::Char('z'));
+        let screen = draw(&mut app, 60, 16);
+        let rows: Vec<&str> = screen.lines().collect();
         assert!(
-            screen.contains(
-                "│✖ crashed · https://nova-frontend.test · checkout main · /work/nova-frontend   "
-            ),
-            "{screen}"
+            rows[1].starts_with("│● running · https://nova-billing.test   ")
+                && rows[2].starts_with("│worker pinned until the daemon restarts   "),
+            "a fact that doesn't fit starts a row\n{screen}"
         );
+    }
+
+    #[test]
+    fn the_details_keep_one_height_so_the_tabs_stay_put() {
+        let mut app = busy_app();
+        let now = app.now;
+        let details = |app: &mut App| {
+            let screen = draw(app, 120, 24);
+            let rows: Vec<String> = screen.lines().map(str::to_string).collect();
+            let tabs = rows.iter().position(|l| l.contains("╭ 1 logs")).unwrap();
+            (tabs, rows[..tabs].join("\n"))
+        };
+        let (project, _) = details(&mut app);
+        assert_eq!(project, 7, "five lines of details between the borders");
+
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down, KeyCode::Down] {
+            press(&mut app, now, code);
+        }
+        let mut snapshot = app.snapshot.clone().unwrap();
+        snapshot.projects[0].stacks[0].instances[1].last_error = Some(
+            "web exited with code 1 before it was ready, after a very long time of trying \
+             to get the database to answer, which it never did"
+                .repeat(4),
+        );
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let (tabs, crowded) = details(&mut app);
+        assert_eq!(tabs, project, "a crash with a long error");
+        assert!(
+            crowded.contains("│✖ crashed · https://nova-frontend.test"),
+            "{crowded}"
+        );
+        assert!(
+            crowded.contains("│web exited with code 1 before it was ready, after a"),
+            "{crowded}"
+        );
+        assert!(
+            crowded.contains("…"),
+            "the error is cut to one row\n{crowded}"
+        );
+        assert!(
+            crowded.contains("│! stack \"billing\" names an app"),
+            "{crowded}"
+        );
+
+        let mut snapshot = shared_sample();
+        snapshot.shares[0].requests = (0..5)
+            .map(|i| carte_api::ExternalRequest {
+                at_ms: i,
+                app: "nova-billing".into(),
+                method: "GET".into(),
+                path: format!("/page-{i}"),
+                refused: false,
+            })
+            .collect();
+        snapshot.tunnel = Some(carte_api::TunnelStatus {
+            provider: "cloudflare".into(),
+            single_host: false,
+            state: carte_api::TunnelState::Failed,
+            message: Some("lost the connection".into()),
+        });
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.state = InstanceState::Crashed;
+        billing.last_error = Some("web exited with code 1".into());
+        snapshot.problems.push(Problem {
+            project: Some("nova".into()),
+            app: Some("nova-billing".into()),
+            message: "port 3000 is taken".into(),
+        });
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
+        press(&mut app, now, KeyCode::Down);
+        let (tabs, shared) = details(&mut app);
+        assert_eq!(tabs, project, "a shared instance in trouble");
+        for wanted in [
+            "the tunnel is down: lost the connection",
+            "web exited with code 1",
+            "! port 3000 is taken",
+            "more",
+        ] {
+            assert!(shared.contains(wanted), "{wanted}\n{shared}");
+        }
+        assert!(!shared.contains("/page-"), "visits go first\n{shared}");
     }
 
     #[test]
@@ -2539,12 +2701,12 @@ mod tests {
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭ nova-frontend@main ──────────────────────────────────────────────────────────╮
 │✖ crashed · https://nova-frontend.test                                        │
-│checkout main · /work/nova-frontend                                           │
 │web exited with code 1 before it was ready                                    │
 │! stack \"billing\" names an app                                                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ 1 logs │ 2 events │ 3 env │ 5 requests ─────────────────────────── following ╮
+╭ 1 logs │ 2 events │ 3 env │ 4 config │ 5 requests ──────────────── following ╮
 │No output yet.                                                                │
+│                                                                              │
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -2812,7 +2974,7 @@ mod tests {
         assert_eq!(
             pane,
             [
-                "╭ 1 logs │ 2 events │ 3 env │ 5 requests ──────────────────╮",
+                "╭ 1 logs │ 2 events │ 3 env │ 4 config │ 5 requests ───────╮",
                 "│CARTE_APP  nova-billing  carte                            │",
                 "│PATH       /Users/alex/.local/share/mise/installs/ruby/3.4│",
                 "│           /bin:/usr/local/bin:/usr/bin:/bin  mise        │",
@@ -3501,10 +3663,7 @@ mod tests {
             .is_some();
         assert!(grafana);
         let screen = draw(&mut app, 110, 30);
-        assert!(
-            screen.contains("pod grafana-7d9f-x2k :3000 · namespace monitoring"),
-            "{screen}"
-        );
+        assert!(screen.contains("pod grafana-7d9f-x2k :3000"), "{screen}");
         assert!(!screen.contains("checkout"), "{screen}");
 
         let mut snapshot = kube_sample();

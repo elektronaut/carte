@@ -68,14 +68,20 @@ Apps and processes can carry badges after their name:
 
 ### Details and tabs
 
-The details say what the selected row is doing, what keeps it running,
-its address and share, and its latest event.
+The details show the selected row's state and what needs attention:
+its address and share, boot progress, what keeps it running, pins and
+disables that last until the daemon restarts, a process's pid,
+restarts and exit, the last error, its latest event and its problems.
+They take five lines, so the tabs below stay put as you move, zoomed
+or not. When more is going on, errors and problems come right after
+the state, a long line ends in `…`, and the last line says how many
+more there are. The config tab has the rest.
 
 Below the details, the pane's top border lists its tabs: `1 logs`,
-`2 events`, `3 env` and `5 requests`. The current tab is highlighted.
-A tab that doesn't apply to the selection, such as env on a folder, is
-dimmed. The number keys pick a tab, and `[` and `]` go to the previous
-and next.
+`2 events`, `3 env`, `4 config` and `5 requests`. The current tab is
+highlighted. A tab that doesn't apply to the selection, such as env on
+a folder, is dimmed. `1` to `5` pick a tab, and `[` and `]` go to the
+previous and next.
 Picking a tab doesn't move the focus, so you can move through the tree
 and watch each row's tab.
 
@@ -96,6 +102,19 @@ process that serves HTTP, and says so; select a process to see
 another's. An app with several processes and none serving HTTP lists
 them to pick from. `3` on the env tab fetches it again, as the env can
 change when a process starts.
+
+The config tab shows what carte resolved for the selection, from its
+configuration only. On an app: its checkout, hostnames, aliases, env
+sources, idle timeout, dependencies, served files, and each process
+with its command. On a process: its command, the command as it runs
+with its port, the port, readiness, paths, how it stops and restarts,
+and its policy. On a project or stack: the project file, settings, and
+each stack's checkouts. On a [kube project](kubernetes.md): its
+context, namespaces and forwards. Values someone configured are bold:
+those that aren't carte's default, or aren't what the machine, the
+project or the app gives them. Defaults are plain. A pin or disable
+that lasts until the daemon restarts shows apart from the configured
+policy. `4` on the config tab fetches it again.
 
 The requests tab lists the requests carte's proxy answered: the time,
 method, path, status, and how long it took. That is how long carte held
@@ -175,7 +194,7 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `g` `G`, `Home` `End` | Top, bottom. `G` in the logs and requests follows new ones |
 | `PgUp` `PgDn` | Page up, down |
 | `tab` | Switch between the tree and the tabs |
-| `1` `2` `3` `5` | Show the logs, events, env or requests tab |
+| `1` to `5` | Show the logs, events, env, config or requests tab |
 | `[` `]` | Previous, next tab |
 | `enter`, `esc` | Open a request, back to the list (requests) |
 | `/` | Filter the tree, or search the logs |

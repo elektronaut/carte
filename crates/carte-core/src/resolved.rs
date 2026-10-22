@@ -151,6 +151,8 @@ pub struct ProcessSettings {
     pub command: Setting<String>,
     /// The command as written, when carte replaced a hardcoded port in it with `$PORT`.
     pub rewritten_from: Option<String>,
+    /// The port the command as written hardcoded.
+    pub rewritten_from_port: Option<u16>,
     /// Relative to the checkout unless absolute.
     pub cwd: Setting<Option<PathBuf>>,
     pub http: Setting<bool>,
@@ -185,15 +187,17 @@ impl ProcessSettings {
             Ok(default) => (default, app_policy, None),
             Err(err) => (spec.clone(), spec.policy, Some(err)),
         };
+        let rewritten_from = notices.iter().find_map(|notice| match notice {
+            Notice::PortRewritten { process, from, .. } if *process == spec.name => {
+                Some(from.clone())
+            }
+            _ => None,
+        });
         ProcessSettings {
             name: spec.name.clone(),
             command: Setting::new(spec.command.clone(), default.command.clone()),
-            rewritten_from: notices.iter().find_map(|notice| match notice {
-                Notice::PortRewritten { process, from, .. } if *process == spec.name => {
-                    Some(from.clone())
-                }
-                _ => None,
-            }),
+            rewritten_from_port: rewritten_from.as_deref().and_then(procfile::hardcoded_port),
+            rewritten_from,
             cwd: Setting::new(spec.cwd.clone(), default.cwd.clone()),
             http: Setting::new(spec.http, default.http),
             ready: Setting::new(spec.ready.clone(), default.ready.clone()),
@@ -379,6 +383,7 @@ mod tests {
             web.rewritten_from.as_deref(),
             Some("bin/rails server -p 3000")
         );
+        assert_eq!(web.rewritten_from_port, Some(3000));
         assert!(!web.command.differs());
         assert!(web.http.value && !web.http.differs());
         assert!(web.timed);
