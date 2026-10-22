@@ -157,6 +157,7 @@ carte           # open the terminal UI
 
 `touch tmp/restart.txt` restarts an app too.
 
+[docs/tui.md](docs/tui.md) covers the terminal UI.
 [docs/cli.md](docs/cli.md) covers the rest of the CLI. Coding agents can
 use carte through its MCP server; see [docs/mcp.md](docs/mcp.md).
 
