@@ -30,6 +30,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
+    app.problems_area = Rect::default();
     if app.snapshot.is_some() {
         let [left, right] = if main.width >= 110 {
             Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(main)
@@ -114,6 +115,8 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         Span::raw(" carte "),
         Span::raw(format!("· {} running ", snapshot.running_instances)).fg(theme.muted),
     ];
+    let width = |title: &[Span]| title.iter().map(Span::width).sum::<usize>();
+    let mut problems_from = None;
     match app.fold.show {
         Show::All => {}
         Show::Running => title.push(Span::raw("· running only ").fg(theme.muted)),
@@ -135,17 +138,28 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             format!("· {shared} shared, {word} ")
         };
+        if tunnel.state == TunnelState::Failed {
+            problems_from = Some(width(&title));
+        }
         title.push(Span::raw(what).fg(color));
     }
-    app.problems_area = Rect::default();
     if !snapshot.problems.is_empty() {
         let count = snapshot.problems.len();
         let noun = if count == 1 { "problem" } else { "problems" };
-        let text = format!("· {count} {noun} ");
-        let before: usize = title.iter().map(Span::width).sum();
-        let x = area.x + 1 + u16::try_from(before).unwrap_or(u16::MAX);
-        app.problems_area = Rect::new(x, area.y, text.chars().count() as u16, 1).intersection(area);
-        title.push(Span::raw(text).fg(theme.error));
+        problems_from.get_or_insert(width(&title));
+        title.push(Span::raw(format!("· {count} {noun} ")).fg(theme.error));
+    }
+    if let Some(from) = problems_from {
+        let column = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+        let title_area = Rect {
+            x: area.x + 1,
+            width: area.width.saturating_sub(2),
+            height: 1,
+            ..area
+        };
+        let x = title_area.x.saturating_add(column(from));
+        app.problems_area =
+            Rect::new(x, area.y, column(width(&title) - from), 1).intersection(title_area);
     }
     let block = pane(theme, Line::from(title), app.focus == Focus::Tree);
     app.tree_height = block.inner(area).height.saturating_sub(1) as usize;
@@ -1001,13 +1015,15 @@ fn status_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
     Line::default()
 }
 
-/// Problems the daemon reports, or a tunnel that is down.
+/// Problems the daemon reports, or a tunnel that is down while something is shared,
+/// as the tree's title shows them.
 fn has_problems(app: &App) -> bool {
     app.snapshot.as_ref().is_some_and(|s| {
         !s.problems.is_empty()
-            || s.tunnel
-                .as_ref()
-                .is_some_and(|t| t.state == TunnelState::Failed)
+            || (!s.shares.is_empty()
+                && s.tunnel
+                    .as_ref()
+                    .is_some_and(|t| t.state == TunnelState::Failed))
     })
 }
 
@@ -1551,23 +1567,13 @@ mod tests {
         let title: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
         let at = title.find("1 problem").expect(&title);
         let x = title[..at].chars().count() as u16;
-        let click = |column| {
-            Event::Mouse(ratatui::crossterm::event::MouseEvent {
-                kind: ratatui::crossterm::event::MouseEventKind::Down(
-                    ratatui::crossterm::event::MouseButton::Left,
-                ),
-                column,
-                row: 0,
-                modifiers: KeyModifiers::NONE,
-            })
-        };
-        app.update(click(2), now);
+        app.update(click(2, 0), now);
         assert_eq!(
             app.mode,
             Mode::Normal,
             "the rest of the title isn't a button"
         );
-        app.update(click(x + 3), now);
+        app.update(click(x + 3, 0), now);
         assert_eq!(app.mode, Mode::Problems);
 
         press(&mut app, now, KeyCode::Esc);
@@ -1576,8 +1582,76 @@ mod tests {
         app.update(Event::Snapshot(Box::new(snapshot)), now);
         let screen = draw(&mut app, width, height);
         assert!(!screen.contains("problem"), "{screen}");
-        app.update(click(x + 3), now);
+        app.update(click(x + 3, 0), now);
         assert_eq!(app.mode, Mode::Normal, "nothing to click without problems");
+    }
+
+    fn click(column: u16, row: u16) -> Event {
+        Event::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn the_problem_count_is_clickable_in_the_stacked_layout_and_only_inside_the_title() {
+        let mut app = busy_app();
+        let now = app.now;
+        let screen = draw(&mut app, 80, 24);
+        let title = screen.lines().next().unwrap();
+        let x = title[..title.find("1 problem").expect(title)]
+            .chars()
+            .count() as u16;
+        app.update(click(x, 0), now);
+        assert_eq!(app.mode, Mode::Problems, "{screen}");
+        press(&mut app, now, KeyCode::Esc);
+
+        let screen = draw(&mut app, 28, 24);
+        let title = screen.lines().next().unwrap();
+        assert_eq!(title, "╭ carte · 2 running · 1 pro╮");
+        app.update(click(27, 0), now);
+        assert_eq!(app.mode, Mode::Normal, "the corner isn't part of it");
+        app.update(click(24, 0), now);
+        assert_eq!(app.mode, Mode::Problems);
+        press(&mut app, now, KeyCode::Esc);
+
+        app.update(Event::Disconnected("gone".into()), now);
+        draw(&mut app, 28, 24);
+        app.update(click(24, 0), now);
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "the waiting screen has nothing to click"
+        );
+    }
+
+    #[test]
+    fn a_tunnel_down_is_a_problem_to_click() {
+        let mut snapshot = shared_sample();
+        let tunnel = snapshot.tunnel.as_mut().unwrap();
+        tunnel.state = TunnelState::Failed;
+        tunnel.message = Some("the connector exited".into());
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let screen = draw(&mut app, 120, 18);
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines[17].starts_with(" ! problems  ? help"), "{screen}");
+        let at = lines[0].find("tunnel down").expect(&screen);
+        let x = lines[0][..at].chars().count() as u16;
+        app.update(click(2, 0), now);
+        assert_eq!(app.mode, Mode::Normal);
+        app.update(click(x, 0), now);
+        assert_eq!(app.mode, Mode::Problems);
+        let screen = draw(&mut app, 120, 18);
+        assert!(
+            screen.contains("cloudflare tunnel: the connector exited"),
+            "{screen}"
+        );
     }
 
     #[test]
