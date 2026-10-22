@@ -39,6 +39,42 @@ pub struct Window<'a> {
     pub indent: usize,
 }
 
+/// Text in lower case one character at a time, so each folded character stands for
+/// one character of the original.
+pub fn fold(text: &str) -> Vec<char> {
+    text.chars().map(fold_char).collect()
+}
+
+/// A character's lower case, or the first character of it when it takes several,
+/// like `İ`. A final sigma folds like any other.
+fn fold_char(c: char) -> char {
+    match c.to_lowercase().next().unwrap_or(c) {
+        'ς' => 'σ',
+        lower => lower,
+    }
+}
+
+/// The byte range of the first match of `needle`, folded with `fold`, in `text` at or
+/// after byte `from`, ignoring case. It walks `text` itself, so the range always
+/// falls on its character boundaries.
+pub fn find(text: &str, needle: &[char], from: usize) -> Option<(usize, usize)> {
+    if needle.is_empty() {
+        return None;
+    }
+    let rest = &text[from..];
+    rest.char_indices().find_map(|(start, _)| {
+        let mut chars = rest[start..].char_indices();
+        for &wanted in needle {
+            let (_, c) = chars.next()?;
+            if fold_char(c) != wanted {
+                return None;
+            }
+        }
+        let end = chars.next().map_or(rest.len(), |(i, _)| start + i);
+        Some((from + start, from + end))
+    })
+}
+
 #[derive(Debug)]
 pub struct Logs {
     pub generation: u64,
@@ -122,7 +158,7 @@ impl Logs {
             self.labels.push(label);
         }
         let seq = self.dropped + self.lines.len() as u64;
-        if self.matches(&line, &self.search.to_ascii_lowercase()) {
+        if self.matches(&line, &fold(&self.search)) {
             self.matched.push_back(seq);
         }
         if (self.scroll > 0 || self.hold) && self.shown(seq, &line) {
@@ -148,10 +184,9 @@ impl Logs {
         self.labels.iter().position(|l| l == label).unwrap_or(0)
     }
 
-    /// Whether a line holds `needle`, the search in lower case. Case folds the way the
-    /// view's highlight does.
-    fn matches(&self, line: &LogLine, needle: &str) -> bool {
-        !line.marker && !needle.is_empty() && line.text.to_ascii_lowercase().contains(needle)
+    /// Whether a line holds `needle`, the search folded with `fold`.
+    fn matches(&self, line: &LogLine, needle: &[char]) -> bool {
+        !line.marker && find(&line.text, needle, 0).is_some()
     }
 
     fn filtering(&self) -> bool {
@@ -312,7 +347,7 @@ impl Logs {
     /// Searches for `search` from the newest line.
     pub fn set_search(&mut self, search: String) {
         self.search = search;
-        let needle = self.search.to_ascii_lowercase();
+        let needle = fold(&self.search);
         self.matched = self
             .lines
             .iter()
@@ -503,6 +538,42 @@ mod tests {
         logs.set_search("nothing".into());
         assert_eq!(logs.current, None);
         assert_eq!(logs.scroll, 0);
+    }
+
+    #[test]
+    fn matching_ignores_case_beyond_ascii() {
+        for (text, search) in [
+            ("BLÅBÆRSYLTETØY", "blåbærsyltetøy"),
+            ("Ærlig talt", "ær"),
+            ("ØST", "øst"),
+            ("Ålesund", "å"),
+            ("ΣΩΜΑ", "σωμα"),
+            ("σῶμα", "Σ"),
+            ("ΟΔΟΣ", "οδος"),
+            ("οδος", "ΟΔΟΣ"),
+            ("İstanbul", "istanbul"),
+            ("İSTANBUL", "İs"),
+        ] {
+            assert!(find(text, &fold(search), 0).is_some(), "{search} in {text}");
+        }
+        assert_eq!(find("xÆøy", &fold("æØ"), 0), Some((1, 5)), "byte offsets");
+        assert_eq!(find("æ æ", &fold("Æ"), 2), Some((3, 5)));
+        assert_eq!(
+            find("aİb", &fold("i"), 0),
+            Some((1, 3)),
+            "İ stays one character"
+        );
+        assert_eq!(find("abc", &fold("d"), 0), None);
+        assert_eq!(find("abc", &[], 0), None);
+
+        let mut logs = Logs::default();
+        let generation = logs.restart(None, Prefix::None);
+        logs.push(generation, line("Kjører på Østlandet"));
+        logs.push(generation, line("ingen treff"));
+        logs.set_search("ØSTLANDET".into());
+        assert_eq!(logs.match_seqs(), [0]);
+        logs.push(generation, line("østlandet igjen"));
+        assert_eq!(logs.match_seqs(), [0, 2], "lines that arrive match too");
     }
 
     #[test]
