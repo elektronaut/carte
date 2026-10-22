@@ -89,8 +89,8 @@ impl Theme {
         on(Style::new(), self.selection_bg)
     }
 
-    /// A selected log line or pick in a list. A theme that leaves the background to
-    /// the terminal reverses it, which reads on any palette.
+    /// A selected log line or pick in a list: reversed in a theme that leaves the
+    /// background to the terminal.
     pub fn line_selection(&self) -> Style {
         if self.bg == Color::Reset {
             Style::new().reversed()
@@ -182,24 +182,34 @@ impl Theme {
         .chain(self.prefixes.iter_mut())
     }
 
-    /// The theme as `colors` draws it, with each colour that is too faint moved by
-    /// the fewest whole percent, up to `MAX_SHIFT`, that reach the contrast
-    /// `contrast_failures` asks for. `fg` and the hues move toward black or white,
-    /// which keeps their hue; `muted` and `selection_fg` move toward `fg`, and
-    /// `border` toward `bg`. Search match backgrounds move away from their text.
-    fn legible(mut self, colors: Colors) -> Self {
+    /// The theme as `colors` draws it, with each colour that is too faint moved
+    /// until it reaches the contrast `contrast_failures` asks for. At 256 colours,
+    /// each role then takes the closest of the 256 that keeps that contrast.
+    fn legible(self, colors: Colors) -> Self {
+        let theme = self.legible_truecolor();
+        match colors {
+            Colors::Truecolor => theme,
+            Colors::Indexed => theme.pick_indexed(),
+        }
+    }
+
+    /// Each colour that is too faint moved by the fewest whole percent that reach
+    /// the contrast: `fg` and the hues toward black or white, which keeps their hue,
+    /// up to `MAX_SHIFT`; `muted` and `selection_fg` toward `fg`, up to
+    /// `MUTED_SHIFT`; `border` toward `bg`. Search match backgrounds move away from
+    /// their text.
+    fn legible_truecolor(mut self) -> Self {
         let backs = [self.bg, self.selection_bg];
         let away = away_from(self.bg);
-        self.fg = toward(self.fg, away, FG_CONTRAST, &backs, colors, MAX_SHIFT);
+        self.fg = toward(self.fg, away, FG_CONTRAST, &backs, MAX_SHIFT);
         let fg = self.fg;
-        self.muted = toward(self.muted, fg, ROLE_CONTRAST, &backs, colors, MAX_SHIFT);
+        self.muted = toward(self.muted, fg, ROLE_CONTRAST, &backs, MUTED_SHIFT);
         self.selection_fg = toward(
             self.selection_fg,
             fg,
             ROLE_CONTRAST,
             &[self.selection_bg],
-            colors,
-            MAX_SHIFT,
+            MUTED_SHIFT,
         );
         for role in [
             &mut self.accent,
@@ -212,14 +222,13 @@ impl Theme {
         .into_iter()
         .chain(self.prefixes.iter_mut())
         {
-            *role = toward(*role, away, ROLE_CONTRAST, &backs, colors, MAX_SHIFT);
+            *role = toward(*role, away, ROLE_CONTRAST, &backs, MAX_SHIFT);
         }
         self.border_focus = toward(
             self.border_focus,
             away,
             ROLE_CONTRAST,
             &[self.bg],
-            colors,
             MAX_SHIFT,
         );
         self.border = toward(
@@ -227,26 +236,81 @@ impl Theme {
             self.bg,
             BORDER_CONTRAST,
             &[self.border_focus],
-            colors,
             100,
         );
         for (text, back) in [
             (&mut self.match_fg, &mut self.match_bg),
             (&mut self.match_current_fg, &mut self.match_current_bg),
         ] {
-            *back = toward(
-                *back,
-                away_from(*text),
-                FG_CONTRAST,
-                &[*text],
-                colors,
-                MAX_SHIFT,
-            );
+            *back = toward(*back, away_from(*text), FG_CONTRAST, &[*text], MAX_SHIFT);
         }
-        match colors {
-            Colors::Truecolor => self,
-            Colors::Indexed => self.indexed(),
+        self
+    }
+
+    /// Each role as the closest of the 256 colours, in OKLab, that keeps the
+    /// contrast. Coloured roles skip the greys, and the status colours and the
+    /// accent each take a different one.
+    fn pick_indexed(mut self) -> Self {
+        let dark = luminance(self.bg).is_some_and(|l| l <= 0.18);
+        let behind = |target: Color| {
+            let target = luminance(target).unwrap_or(0.0);
+            move |c: Color| {
+                let l = luminance(c).unwrap_or(0.0);
+                if dark { l <= target } else { l >= target }
+            }
+        };
+        self.bg = closest_indexed(self.bg, false, behind(self.bg));
+        let behind_selection = behind(self.selection_bg);
+        self.selection_bg = closest_indexed(self.selection_bg, false, |c| {
+            c != self.bg && behind_selection(c)
+        });
+        let backs = [self.bg, self.selection_bg];
+        let passes = |need: f64, backs: &[Color]| {
+            let backs = backs.to_vec();
+            move |c: Color| {
+                backs
+                    .iter()
+                    .all(|back| contrast(c, *back).is_none_or(|ratio| ratio >= need))
+            }
+        };
+        self.fg = closest_indexed(self.fg, false, passes(FG_CONTRAST, &backs));
+        self.muted = closest_indexed(self.muted, false, passes(ROLE_CONTRAST, &backs));
+        self.selection_fg = closest_indexed(
+            self.selection_fg,
+            false,
+            passes(ROLE_CONTRAST, &[self.selection_bg]),
+        );
+        let mut taken = Vec::new();
+        for role in [
+            &mut self.ok,
+            &mut self.warn,
+            &mut self.error,
+            &mut self.shared,
+            &mut self.paused,
+            &mut self.accent,
+        ] {
+            let legible = passes(ROLE_CONTRAST, &backs);
+            *role = closest_indexed(*role, true, |c| legible(c) && !taken.contains(&c));
+            taken.push(*role);
         }
+        for prefix in &mut self.prefixes {
+            *prefix = closest_indexed(*prefix, true, passes(ROLE_CONTRAST, &backs));
+        }
+        self.border_focus =
+            closest_indexed(self.border_focus, true, passes(ROLE_CONTRAST, &[self.bg]));
+        self.border = closest_indexed(
+            self.border,
+            false,
+            passes(BORDER_CONTRAST, &[self.border_focus]),
+        );
+        for (text, back) in [
+            (&mut self.match_fg, &mut self.match_bg),
+            (&mut self.match_current_fg, &mut self.match_current_bg),
+        ] {
+            *text = closest_indexed(*text, false, |_| true);
+            *back = closest_indexed(*back, true, passes(FG_CONTRAST, &[*text]));
+        }
+        self
     }
 
     /// Pairs below the contrast this theme should have, as `role on background
@@ -348,13 +412,6 @@ impl Colors {
             Colors::Indexed
         }
     }
-
-    fn quantize(self, color: Color) -> Color {
-        match self {
-            Colors::Truecolor => color,
-            Colors::Indexed => nearest_indexed(color),
-        }
-    }
 }
 
 /// Every built-in theme, `terminal` first, legible in `colors`.
@@ -396,6 +453,9 @@ const ROLE_CONTRAST: f64 = 3.0;
 const BORDER_CONTRAST: f64 = 1.5;
 /// How far, in percent, `legible` may move a colour.
 const MAX_SHIFT: u8 = 50;
+const MUTED_SHIFT: u8 = 60;
+/// OKLab chroma below which a colour counts as grey.
+const GREY_CHROMA: f64 = 0.03;
 
 fn on(style: Style, bg: Color) -> Style {
     if bg == Color::Reset {
@@ -431,36 +491,22 @@ fn blend(top: Color, under: Color, alpha: f64) -> Color {
 }
 
 /// `color` moved toward `goal` by the fewest whole percent, up to `max`, that
-/// give it `need` against every one of `backs` once `colors` draws them. Unmoved
-/// when no shift is enough.
-fn toward(color: Color, goal: Color, need: f64, backs: &[Color], colors: Colors, max: u8) -> Color {
+/// give it `need` against every one of `backs`. Unmoved when no shift is enough.
+fn toward(color: Color, goal: Color, need: f64, backs: &[Color], max: u8) -> Color {
     (0..=max)
         .map(|percent| blend(goal, color, f64::from(percent) / 100.0))
         .find(|candidate| {
-            backs.iter().all(|back| {
-                contrast(colors.quantize(*candidate), colors.quantize(*back))
-                    .is_none_or(|ratio| ratio >= need)
-            })
+            backs
+                .iter()
+                .all(|back| contrast(*candidate, *back).is_none_or(|ratio| ratio >= need))
         })
         .unwrap_or(color)
 }
 
 /// WCAG relative luminance, for truecolor and the 256 colours from 16 up.
 fn luminance(color: Color) -> Option<f64> {
-    let (r, g, b) = match color {
-        Color::Rgb(r, g, b) => (r, g, b),
-        Color::Indexed(index @ 16..) => xterm(index),
-        _ => return None,
-    };
-    let channel = |c: u8| {
-        let c = f64::from(c) / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    };
-    Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
+    let (r, g, b) = rgb(color)?;
+    Some(0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b))
 }
 
 /// WCAG contrast ratio, for colours with a known value.
@@ -470,19 +516,73 @@ fn contrast(a: Color, b: Color) -> Option<f64> {
 }
 
 fn nearest_indexed(color: Color) -> Color {
-    let Color::Rgb(r, g, b) = color else {
+    closest_indexed(color, true, |_| true)
+}
+
+/// The colour from 16 up closest to `color` in OKLab among those `allowed` lets
+/// through. A grey stays grey, and with `keep_hue` a colour stays a colour. ANSI
+/// colours and `Reset` stay as they are, and so does `color` when nothing is
+/// allowed.
+fn closest_indexed(color: Color, keep_hue: bool, allowed: impl Fn(Color) -> bool) -> Color {
+    let Some(want) = oklab(color) else {
         return color;
     };
-    let distance = |index: u8| {
-        let (r2, g2, b2) = xterm(index);
-        let d = |a: u8, b: u8| (i32::from(a) - i32::from(b)).pow(2);
-        d(r, r2) + d(g, g2) + d(b, b2)
-    };
-    Color::Indexed(
-        (16..=255)
-            .min_by_key(|&i| distance(i))
-            .expect("256 colours"),
-    )
+    let grey = chroma(want) < GREY_CHROMA;
+    (16..=255)
+        .map(Color::Indexed)
+        .filter(|c| {
+            let candidate_grey = chroma(oklab(*c).expect("an xterm colour")) < GREY_CHROMA;
+            let fits = match (grey, keep_hue) {
+                (true, _) => candidate_grey,
+                (false, true) => !candidate_grey,
+                (false, false) => true,
+            };
+            fits && allowed(*c)
+        })
+        .min_by(|a, b| {
+            let distance = |c: &Color| distance(want, oklab(*c).expect("an xterm colour"));
+            distance(a).total_cmp(&distance(b))
+        })
+        .unwrap_or(color)
+}
+
+fn rgb(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Rgb(r, g, b) => Some((r, g, b)),
+        Color::Indexed(index @ 16..) => Some(xterm(index)),
+        _ => None,
+    }
+}
+
+fn linear(c: u8) -> f64 {
+    let c = f64::from(c) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// OKLab lightness and the a and b axes.
+fn oklab(color: Color) -> Option<[f64; 3]> {
+    let (r, g, b) = rgb(color)?;
+    let (r, g, b) = (linear(r), linear(g), linear(b));
+    let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+    let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+    let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+    Some([
+        0.210_454_255_3 * l + 0.793_617_785 * m - 0.004_072_046_8 * s,
+        1.977_998_495_1 * l - 2.428_592_205 * m + 0.450_593_709_9 * s,
+        0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766 * s,
+    ])
+}
+
+fn chroma(lab: [f64; 3]) -> f64 {
+    lab[1].hypot(lab[2])
+}
+
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum()
 }
 
 /// The RGB value of an xterm colour from 16 up.
@@ -1049,6 +1149,37 @@ mod tests {
             for theme in builtins(colors) {
                 let failures = theme.contrast_failures();
                 assert!(failures.is_empty(), "{} {colors:?}: {failures:?}", theme.id);
+            }
+        }
+    }
+
+    #[test]
+    fn status_colours_stay_distinct_and_coloured() {
+        for colors in [Colors::Truecolor, Colors::Indexed] {
+            for theme in builtins(colors).into_iter().skip(1) {
+                let roles = [
+                    ("ok", theme.ok),
+                    ("warn", theme.warn),
+                    ("error", theme.error),
+                    ("shared", theme.shared),
+                    ("paused", theme.paused),
+                    ("accent", theme.accent),
+                ];
+                for (i, (name, color)) in roles.iter().enumerate() {
+                    let lab = oklab(*color).unwrap();
+                    assert!(
+                        chroma(lab) >= GREY_CHROMA,
+                        "{} {colors:?}: {name} {color:?} is grey",
+                        theme.id
+                    );
+                    for (other, other_color) in &roles[i + 1..] {
+                        assert_ne!(
+                            color, other_color,
+                            "{} {colors:?}: {name} and {other}",
+                            theme.id
+                        );
+                    }
+                }
             }
         }
     }
