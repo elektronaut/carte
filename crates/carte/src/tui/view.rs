@@ -16,18 +16,13 @@ use super::browse::Browse;
 use super::input::{Confirm, Focus, HELP, Mode};
 use super::jump;
 use super::target;
+use super::theme::Theme;
 use super::tree::{self, Node, NodeId, Show, Source, State, Status};
 
-const PREFIX_COLORS: [Color; 6] = [
-    Color::Cyan,
-    Color::Magenta,
-    Color::Yellow,
-    Color::Blue,
-    Color::Green,
-    Color::LightRed,
-];
-
 pub fn render(frame: &mut Frame, app: &mut App) {
+    let theme = app.theme.clone();
+    let theme = &theme;
+    frame.render_widget(Block::new().style(theme.base()), frame.area());
     let [main, status, footer] = Layout::vertical([
         Constraint::Min(0),
         Constraint::Length(1),
@@ -41,55 +36,56 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         } else {
             Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(main)
         };
-        render_tree(frame, left, app);
-        render_selection(frame, right, app);
+        render_tree(theme, frame, left, app);
+        render_selection(theme, frame, right, app);
     } else {
-        render_waiting(frame, main, app);
+        render_waiting(theme, frame, main, app);
     }
-    frame.render_widget(status_line(app, status.width), status);
-    frame.render_widget(footer_line(app.focus, app.events, footer.width), footer);
+    frame.render_widget(status_line(theme, app, status.width), status);
+    frame.render_widget(
+        footer_line(theme, app.focus, app.events, footer.width),
+        footer,
+    );
 
     match &app.mode {
-        Mode::Help => render_help(frame, main),
-        Mode::Problems => render_problems(frame, main, app),
-        Mode::Confirm(confirm) => render_confirm(frame, main, app, confirm),
-        Mode::Env => render_env(frame, main, app),
-        Mode::Jump => render_jump(frame, main, app),
+        Mode::Help => render_help(theme, frame, main),
+        Mode::Problems => render_problems(theme, frame, main, app),
+        Mode::Confirm(confirm) => render_confirm(theme, frame, main, app, confirm),
+        Mode::Env => render_env(theme, frame, main, app),
+        Mode::Jump => render_jump(theme, frame, main, app),
         Mode::Normal | Mode::Filter | Mode::Type => {}
     }
 }
 
-fn pane(title: Line<'static>, focused: bool) -> Block<'static> {
+fn pane(theme: &Theme, title: Line<'static>, focused: bool) -> Block<'static> {
+    let (border, title_color) = if focused {
+        (theme.border_focus, theme.border_focus)
+    } else {
+        (theme.border, theme.fg)
+    };
     Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(if focused {
-            Style::new().blue()
-        } else {
-            Style::new().dark_gray()
-        })
-        .title_style(if focused {
-            Style::new().blue()
-        } else {
-            Style::new().fg(Color::Reset)
-        })
+        .border_style(Style::new().fg(border))
+        .style(theme.base())
+        .title_style(Style::new().fg(title_color))
         .title(title)
 }
 
-fn render_waiting(frame: &mut Frame, area: Rect, app: &App) {
+fn render_waiting(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
     let lines = match &app.connection {
         Connection::Lost(message) => vec![
             Line::from("The carte daemon isn't reachable.".bold()),
             Line::default(),
             Line::from(message.clone()),
             Line::default(),
-            Line::from("Retrying every second.".dark_gray()),
+            Line::from("Retrying every second.".fg(theme.muted)),
         ],
         Connection::Connecting | Connection::Connected => {
             vec![Line::from("Connecting to the carte daemon…")]
         }
     };
     let height = lines.len() as u16 + 2;
-    let block = pane(Line::from(" carte "), false);
+    let block = pane(theme, Line::from(" carte "), false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [_, middle, _] = Layout::vertical([
@@ -106,27 +102,27 @@ fn render_waiting(frame: &mut Frame, area: Rect, app: &App) {
 
 // Tree
 
-fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let snapshot = app.snapshot.as_ref().expect("a snapshot to draw");
     let mut title = vec![
         Span::raw(" carte "),
-        Span::raw(format!("· {} running ", snapshot.running_instances)).dark_gray(),
+        Span::raw(format!("· {} running ", snapshot.running_instances)).fg(theme.muted),
     ];
     match app.fold.show {
         Show::All => {}
-        Show::Running => title.push(Span::raw("· running only ").dark_gray()),
-        Show::Shared => title.push(Span::raw("· shared only ").dark_gray()),
+        Show::Running => title.push(Span::raw("· running only ").fg(theme.muted)),
+        Show::Shared => title.push(Span::raw("· shared only ").fg(theme.muted)),
     }
     if !snapshot.shares.is_empty()
         && let Some(tunnel) = &snapshot.tunnel
     {
         let shared: usize = snapshot.shares.iter().map(|s| s.apps.len()).sum();
         let (word, color) = match tunnel.state {
-            TunnelState::Connected => ("online", Color::Magenta),
-            TunnelState::Starting => ("connecting", Color::Yellow),
-            TunnelState::Failed => ("tunnel down (!)", Color::Red),
-            TunnelState::Idle => ("", Color::DarkGray),
-            TunnelState::Unknown => ("tunnel unknown", Color::DarkGray),
+            TunnelState::Connected => ("online", theme.shared),
+            TunnelState::Starting => ("connecting", theme.warn),
+            TunnelState::Failed => ("tunnel down (!)", theme.error),
+            TunnelState::Idle => ("", theme.muted),
+            TunnelState::Unknown => ("tunnel unknown", theme.muted),
         };
         let what = if tunnel.state == TunnelState::Idle {
             format!("· {shared} shared ")
@@ -138,22 +134,23 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
     if !snapshot.problems.is_empty() {
         let count = snapshot.problems.len();
         let noun = if count == 1 { "problem" } else { "problems" };
-        title.push(Span::raw(format!("· {count} {noun} (!) ")).red());
+        title.push(Span::raw(format!("· {count} {noun} (!) ")).fg(theme.error));
     }
-    let block = pane(Line::from(title), app.focus == Focus::Tree);
+    let block = pane(theme, Line::from(title), app.focus == Focus::Tree);
     app.tree_height = block.inner(area).height.saturating_sub(1) as usize;
 
     let rows: Vec<Row> = app
         .rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(i, row)| {
             let node = tree::node(&app.roots, &row.path);
-            tree_row(app, node, row)
+            tree_row(theme, app, node, row, i == app.cursor)
         })
         .collect();
-    let header = Row::new(["", "", "CPU", "MEM"]).dark_gray();
+    let header = Row::new(["", "", "CPU", "MEM"]).fg(theme.muted);
     let selected_style = if app.focus == Focus::Tree {
-        Style::new().bg(Color::DarkGray)
+        Style::new().bg(theme.selection_bg)
     } else {
         Style::new().add_modifier(Modifier::DIM | Modifier::REVERSED)
     };
@@ -184,19 +181,27 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
         let inner = Rect {
             y: area.y + 2,
             height: 1,
-            ..pane(Line::default(), false).inner(area)
+            ..pane(theme, Line::default(), false).inner(area)
         };
-        frame.render_widget(Paragraph::new(message.dark_gray()).centered(), inner);
+        frame.render_widget(Paragraph::new(message.fg(theme.muted)).centered(), inner);
     }
 }
 
-fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
+/// On the selected row, `muted` text turns `selection_fg`, so it stays readable on
+/// the selection's background.
+fn tree_row(
+    theme: &Theme,
+    app: &App,
+    node: &Node,
+    row: &tree::Row,
+    selected: bool,
+) -> Row<'static> {
     let status = &node.status;
     let aggregate = matches!(
         node.id(),
         NodeId::Folder { .. } | NodeId::Project { .. } | NodeId::Stack { .. }
     );
-    let (symbol, color) = symbol(status.state);
+    let (symbol, color) = symbol(theme, status.state);
     let mut spans = vec![
         Span::raw("  ".repeat(row.depth)),
         Span::raw(match (row.expandable, row.expanded) {
@@ -204,7 +209,7 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
             (true, true) => "▾ ",
             (true, false) => "▸ ",
         })
-        .dark_gray(),
+        .fg(theme.muted),
         Span::raw(symbol).fg(color),
         Span::raw(" "),
     ];
@@ -212,38 +217,38 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     spans.push(match &node.ids[0] {
         NodeId::Folder { .. } => label.bold(),
         NodeId::Project { .. } => label.bold(),
-        _ if status.state == State::Disabled => label.dark_gray(),
-        NodeId::Stack { .. } => label.blue().bold(),
-        _ if status.kube && status.state == State::Stopped => label.dark_gray(),
+        _ if status.state == State::Disabled => label.fg(theme.muted),
+        NodeId::Stack { .. } => label.fg(theme.accent).bold(),
+        _ if status.kube && status.state == State::Stopped => label.fg(theme.muted),
         _ => label,
     });
-    spans.extend(badges(status, aggregate));
+    spans.extend(badges(theme, status, aggregate));
 
     let detail = if let NodeId::Project { project } = node.id()
         && let Some(kube) = app.kube_project(project)
     {
         match (app.browse.get(project), &kube.error) {
-            (Some(Browse::Loading(_)), _) => Span::raw("⎈ listing…").yellow(),
+            (Some(Browse::Loading(_)), _) => Span::raw("⎈ listing…").fg(theme.warn),
             (Some(Browse::Failed(error)), _) | (_, Some(error)) => {
-                Span::raw(format!("⎈ {error}")).red()
+                Span::raw(format!("⎈ {error}")).fg(theme.error)
             }
-            _ => Span::raw(format!("⎈ {}", kube.context)).dark_gray(),
+            _ => Span::raw(format!("⎈ {}", kube.context)).fg(theme.muted),
         }
     } else if status.kube && matches!(node.id(), NodeId::Stack { .. }) && status.running == 0 {
         Span::raw(match status.total {
             1 => "1 service".to_string(),
             n => format!("{n} services"),
         })
-        .dark_gray()
+        .fg(theme.muted)
     } else if aggregate {
         Span::raw(if status.running > 0 {
             format!("{}/{}", status.running, status.total)
         } else {
             String::new()
         })
-        .dark_gray()
+        .fg(theme.muted)
     } else {
-        detail(app, node.id(), status)
+        detail(theme, app, node.id(), status)
     };
     let (cpu, memory) = if status.running > 0 && !status.kube {
         (
@@ -253,31 +258,39 @@ fn tree_row(app: &App, node: &Node, row: &tree::Row) -> Row<'static> {
     } else {
         (String::new(), String::new())
     };
+    let mut detail = vec![detail];
+    if selected {
+        for span in spans.iter_mut().chain(&mut detail) {
+            if span.style.fg == Some(theme.muted) {
+                span.style.fg = Some(theme.selection_fg);
+            }
+        }
+    }
     Row::new([
         Cell::from(Line::from(spans)),
-        Cell::from(detail),
+        Cell::from(Line::from(detail)),
         Cell::from(Line::from(cpu).right_aligned()),
         Cell::from(Line::from(memory).right_aligned()),
     ])
 }
 
-fn symbol(state: State) -> (&'static str, Color) {
+fn symbol(theme: &Theme, state: State) -> (&'static str, Color) {
     match state {
-        State::Ready => ("●", Color::Green),
-        State::Starting | State::Restarting => ("◐", Color::Yellow),
-        State::Paused => ("◆", Color::Magenta),
-        State::Suspended => ("◆", Color::Yellow),
-        State::Stopping => ("◑", Color::Yellow),
-        State::Stopped | State::Exited => ("○", Color::DarkGray),
-        State::Done => ("✓", Color::DarkGray),
-        State::Crashed => ("✖", Color::Red),
-        State::Disabled => ("⊘", Color::DarkGray),
-        State::Unknown => ("?", Color::DarkGray),
+        State::Ready => ("●", theme.ok),
+        State::Starting | State::Restarting => ("◐", theme.warn),
+        State::Paused => ("◆", theme.paused),
+        State::Suspended => ("◆", theme.warn),
+        State::Stopping => ("◑", theme.warn),
+        State::Stopped | State::Exited => ("○", theme.muted),
+        State::Done => ("✓", theme.muted),
+        State::Crashed => ("✖", theme.error),
+        State::Disabled => ("⊘", theme.muted),
+        State::Unknown => ("?", theme.muted),
     }
 }
 
 /// Policies show on the instances and processes they apply to, not on groups.
-fn badges(status: &Status, aggregate: bool) -> Vec<Span<'static>> {
+fn badges(theme: &Theme, status: &Status, aggregate: bool) -> Vec<Span<'static>> {
     let marked = |word: &str, source: Source| match source {
         Source::Config => word.to_string(),
         Source::Temporary => format!("{word}*"),
@@ -285,32 +298,32 @@ fn badges(status: &Status, aggregate: bool) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     if aggregate {
         if status.problems > 0 {
-            spans.push(Span::raw(" !").red().bold());
+            spans.push(Span::raw(" !").fg(theme.error).bold());
         }
         return spans;
     }
     if status.fallback {
-        spans.push(Span::raw(" main").dark_gray());
+        spans.push(Span::raw(" main").fg(theme.muted));
     }
     if let Some(source) = status.pinned {
-        spans.push(Span::raw(format!(" {}", marked("pin", source))).blue());
+        spans.push(Span::raw(format!(" {}", marked("pin", source))).fg(theme.accent));
     }
     if let Some(source) = status.disabled {
-        spans.push(Span::raw(format!(" {}", marked("off", source))).dark_gray());
+        spans.push(Span::raw(format!(" {}", marked("off", source))).fg(theme.muted));
     }
     if status.shared {
-        spans.push(Span::raw(" shared").magenta());
+        spans.push(Span::raw(" shared").fg(theme.shared));
     }
     if status.gave_up && status.state != State::Crashed {
-        spans.push(Span::raw(" gave up").red());
+        spans.push(Span::raw(" gave up").fg(theme.error));
     }
     if status.problems > 0 {
-        spans.push(Span::raw(" !").red().bold());
+        spans.push(Span::raw(" !").fg(theme.error).bold());
     }
     spans
 }
 
-fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
+fn detail(theme: &Theme, app: &App, id: &NodeId, status: &Status) -> Span<'static> {
     let process = matches!(id, NodeId::Process { .. });
     match status.state {
         State::Ready if !status.held_by.is_empty() => {
@@ -318,36 +331,38 @@ fn detail(app: &App, id: &NodeId, status: &Status) -> Span<'static> {
                 1 => String::new(),
                 n => format!(" +{}", n - 1),
             };
-            Span::raw(format!("held by {}{more}", status.held_by[0])).dark_gray()
+            Span::raw(format!("held by {}{more}", status.held_by[0])).fg(theme.muted)
         }
         State::Ready => match status.idle_in_secs {
-            Some(secs) => Span::raw(format!("idle in {}", duration(app.idle_in(secs)))).dark_gray(),
-            None if process => Span::raw("running").green(),
-            None => Span::raw("ready").green(),
+            Some(secs) => {
+                Span::raw(format!("idle in {}", duration(app.idle_in(secs)))).fg(theme.muted)
+            }
+            None if process => Span::raw("running").fg(theme.ok),
+            None => Span::raw("ready").fg(theme.ok),
         },
-        State::Starting => Span::raw("starting").yellow(),
+        State::Starting => Span::raw("starting").fg(theme.warn),
         State::Restarting => match status.restart_in_secs {
             Some(secs) => {
-                Span::raw(format!("restarting in {}", duration(app.idle_in(secs)))).yellow()
+                Span::raw(format!("restarting in {}", duration(app.idle_in(secs)))).fg(theme.warn)
             }
-            None => Span::raw("restarting").yellow(),
+            None => Span::raw("restarting").fg(theme.warn),
         },
-        State::Paused => Span::raw("paused").magenta(),
-        State::Suspended => Span::raw("suspended").yellow(),
-        State::Stopping => Span::raw("stopping").yellow(),
-        State::Crashed if process && status.gave_up => Span::raw("gave up").red(),
+        State::Paused => Span::raw("paused").fg(theme.paused),
+        State::Suspended => Span::raw("suspended").fg(theme.warn),
+        State::Stopping => Span::raw("stopping").fg(theme.warn),
+        State::Crashed if process && status.gave_up => Span::raw("gave up").fg(theme.error),
         State::Crashed if process => match status.restart_in_secs {
             Some(secs) => {
-                Span::raw(format!("restarting in {}", duration(app.idle_in(secs)))).yellow()
+                Span::raw(format!("restarting in {}", duration(app.idle_in(secs)))).fg(theme.warn)
             }
-            None => Span::raw("exited").red(),
+            None => Span::raw("exited").fg(theme.error),
         },
-        State::Crashed if status.kube => Span::raw("failed").red(),
-        State::Crashed => Span::raw("crashed").red(),
-        State::Exited => Span::raw("exited").dark_gray(),
-        State::Done => Span::raw("done").dark_gray(),
-        State::Disabled => Span::raw("disabled").dark_gray(),
-        State::Unknown => Span::raw("unknown").dark_gray(),
+        State::Crashed if status.kube => Span::raw("failed").fg(theme.error),
+        State::Crashed => Span::raw("crashed").fg(theme.error),
+        State::Exited => Span::raw("exited").fg(theme.muted),
+        State::Done => Span::raw("done").fg(theme.muted),
+        State::Disabled => Span::raw("disabled").fg(theme.muted),
+        State::Unknown => Span::raw("unknown").fg(theme.muted),
         State::Stopped => Span::raw(""),
     }
 }
@@ -388,20 +403,20 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 
 // Selection: details and logs
 
-fn render_selection(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_selection(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let Some(node) = app.selected_node() else {
-        render_logs(frame, area, app);
+        render_logs(theme, frame, area, app);
         return;
     };
     let title = format!(" {} ", target::label(node.id()));
-    let paragraph = Paragraph::new(details(app, node))
+    let paragraph = Paragraph::new(details(theme, app, node))
         .wrap(Wrap { trim: false })
-        .block(pane(Line::from(title).bold(), false));
+        .block(pane(theme, Line::from(title).bold(), false));
     let height = bordered_height(&paragraph, area.width).min(area.height.saturating_sub(4));
     let [top, bottom] =
         Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(area);
     frame.render_widget(paragraph, top);
-    render_logs(frame, bottom, app);
+    render_logs(theme, frame, bottom, app);
 }
 
 /// The rows a wrapped paragraph in a bordered pane takes at `width`, borders
@@ -410,9 +425,9 @@ fn bordered_height(paragraph: &Paragraph, width: u16) -> u16 {
     u16::try_from(paragraph.line_count(width.saturating_sub(2))).unwrap_or(u16::MAX)
 }
 
-fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
+fn details(theme: &Theme, app: &App, node: &Node) -> Vec<Line<'static>> {
     let status = &node.status;
-    let (symbol, color) = symbol(status.state);
+    let (symbol, color) = symbol(theme, status.state);
     let state_word = match status.state {
         State::Ready => "running",
         State::Starting => "starting",
@@ -450,44 +465,55 @@ fn details(app: &App, node: &Node) -> Vec<Line<'static>> {
                     .find(|s| s.name == *stack)
                     .and_then(|s| s.branch.clone())
             {
-                first.push(Span::raw(format!(" · branch {branch}")).dark_gray());
+                first.push(Span::raw(format!(" · branch {branch}")).fg(theme.muted));
             }
             lines.push(Line::from(first));
             if let NodeId::Project { project } = id
                 && let Some(kube) = app.kube_project(project)
             {
-                lines.push(Line::from(format!("kube context {}", kube.context)).dark_gray());
+                lines.push(Line::from(format!("kube context {}", kube.context)).fg(theme.muted));
                 if let Some(error) = &kube.error {
-                    lines.push(Line::from(error.clone()).red());
+                    lines.push(Line::from(error.clone()).fg(theme.error));
                 }
                 if let Some(Browse::Failed(error)) = app.browse.get(project) {
-                    lines.push(Line::from(format!("listing Services failed: {error}")).red());
+                    lines.push(
+                        Line::from(format!("listing Services failed: {error}")).fg(theme.error),
+                    );
                 }
             }
             let crashed: Vec<&str> = crashed_below(node);
             if !crashed.is_empty() {
                 let word = if status.kube { "failed" } else { "crashed" };
-                lines.push(Line::from(format!("{word}: {}", crashed.join(", ")).red()));
+                lines.push(Line::from(
+                    format!("{word}: {}", crashed.join(", ")).fg(theme.error),
+                ));
             }
         }
         NodeId::Instance { .. } => {
             if let Some(instance) = app.instance(id) {
-                lines.extend(instance_details(app, id.project(), instance, state, status));
+                lines.extend(instance_details(
+                    theme,
+                    app,
+                    id.project(),
+                    instance,
+                    state,
+                    status,
+                ));
             }
         }
         NodeId::Process { process, .. } => {
             if let Some(instance) = app.instance(id)
                 && let Some(proc) = instance.processes.iter().find(|p| p.name == *process)
             {
-                lines.extend(process_details(app, instance, proc, state));
+                lines.extend(process_details(theme, app, instance, proc, state));
             }
         }
     }
     if let Some(event) = latest_event(app, id) {
-        lines.push(Line::from(event_note(event, crate::clock::now_ms())).dark_gray());
+        lines.push(Line::from(event_note(event, crate::clock::now_ms())).fg(theme.muted));
     }
     for problem in problems_for(app, id) {
-        lines.push(Line::from(format!("! {}", problem.message)).red());
+        lines.push(Line::from(format!("! {}", problem.message)).fg(theme.error));
     }
     lines
 }
@@ -555,6 +581,7 @@ fn crashed_below(node: &Node) -> Vec<&str> {
 }
 
 fn instance_details(
+    theme: &Theme,
     app: &App,
     project: &str,
     instance: &InstanceStatus,
@@ -567,15 +594,15 @@ fn instance_details(
         Span::raw(instance.url.clone()).underlined(),
     ])];
     if let Some(boot) = &instance.boot {
-        lines.push(Line::from(boot_progress(app, instance, boot)).yellow());
+        lines.push(Line::from(boot_progress(app, instance, boot)).fg(theme.warn));
     }
-    lines.extend(share_details(app, project, instance));
+    lines.extend(share_details(theme, app, project, instance));
     if let Some(kube) = &instance.kube {
         let place = match (&kube.pod, kube.port) {
             (Some(pod), Some(port)) => format!("pod {pod} :{port} · namespace {}", instance.stack),
             _ => format!("namespace {}", instance.stack),
         };
-        lines.push(Line::from(place.dark_gray()));
+        lines.push(Line::from(place.fg(theme.muted)));
     } else {
         let checkout = if status.fallback {
             "main (no worktree for this stack)".to_string()
@@ -586,7 +613,7 @@ fn instance_details(
         if !instance.checkout_path.as_os_str().is_empty() {
             checkout.push_str(&format!(" · {}", instance.checkout_path.display()));
         }
-        lines.push(Line::from(checkout.dark_gray()));
+        lines.push(Line::from(checkout.fg(theme.muted)));
     }
     let mut notes = Vec::new();
     for (word, policy) in [("pinned", Policy::Pinned), ("disabled", Policy::Disabled)] {
@@ -615,23 +642,28 @@ fn instance_details(
         notes.push(format!("idles out in {}", duration(app.idle_in(secs))));
     }
     if !notes.is_empty() {
-        lines.push(Line::from(notes.join(" · ")).dark_gray());
+        lines.push(Line::from(notes.join(" · ")).fg(theme.muted));
     }
     if let Some(error) = &instance.last_error
         && (status.state == State::Crashed || status.kube)
     {
-        lines.push(Line::from(error.clone()).red());
+        lines.push(Line::from(error.clone()).fg(theme.error));
     }
     lines
 }
 
 /// Where a shared instance is public, how it's guarded, and its latest visitors.
-fn share_details(app: &App, project: &str, instance: &InstanceStatus) -> Vec<Line<'static>> {
+fn share_details(
+    theme: &Theme,
+    app: &App,
+    project: &str,
+    instance: &InstanceStatus,
+) -> Vec<Line<'static>> {
     let Some(public) = &instance.public_url else {
         return Vec::new();
     };
     let mut lines = vec![Line::from(vec![
-        Span::raw("shared at ").magenta(),
+        Span::raw("shared at ").fg(theme.shared),
         Span::raw(public.clone()).underlined(),
     ])];
     let snapshot = app.snapshot.as_ref().expect("a snapshot to draw");
@@ -639,7 +671,7 @@ fn share_details(app: &App, project: &str, instance: &InstanceStatus) -> Vec<Lin
         && tunnel.state == TunnelState::Failed
     {
         let message = tunnel.message.as_deref().unwrap_or("no reason given");
-        lines.push(Line::from(format!("the tunnel is down: {message}")).red());
+        lines.push(Line::from(format!("the tunnel is down: {message}")).fg(theme.error));
     }
     let Some(share) = snapshot
         .shares
@@ -670,7 +702,7 @@ fn share_details(app: &App, project: &str, instance: &InstanceStatus) -> Vec<Lin
             duration(share.shared_secs + app.now.duration_since(app.snapshot_at).as_secs())
         )),
     }
-    lines.push(Line::from(notes.join(" · ")).dark_gray());
+    lines.push(Line::from(notes.join(" · ")).fg(theme.muted));
     let visits: Vec<_> = share
         .requests
         .iter()
@@ -679,15 +711,16 @@ fn share_details(app: &App, project: &str, instance: &InstanceStatus) -> Vec<Lin
     for request in visits.iter().rev().take(3).rev() {
         let line = Line::from(format!("← {} {}", request.method, request.path));
         lines.push(if request.refused {
-            line.red()
+            line.fg(theme.error)
         } else {
-            line.dark_gray()
+            line.fg(theme.muted)
         });
     }
     lines
 }
 
 fn process_details(
+    theme: &Theme,
     app: &App,
     instance: &InstanceStatus,
     process: &ProcessStatus,
@@ -708,7 +741,7 @@ fn process_details(
         facts.push(format!("{} restarts", process.restarts));
     }
     for fact in facts {
-        first.push(Span::raw(format!(" · {fact}")).dark_gray());
+        first.push(Span::raw(format!(" · {fact}")).fg(theme.muted));
     }
     let mut lines = vec![Line::from(first)];
     if let ProcessState::Exited { code, signal } = process.state {
@@ -719,26 +752,28 @@ fn process_details(
         };
         let line = Line::from(how);
         lines.push(if code == Some(0) {
-            line.dark_gray()
+            line.fg(theme.muted)
         } else {
-            line.red()
+            line.fg(theme.error)
         });
     }
     if let Some(secs) = process.restart_in_secs {
-        lines.push(Line::from(format!("restarting in {}", duration(app.idle_in(secs)))).yellow());
+        lines.push(
+            Line::from(format!("restarting in {}", duration(app.idle_in(secs)))).fg(theme.warn),
+        );
     }
     if process.gave_up {
         lines.push(
             Line::from(
                 "it crashed too often, so carte stopped restarting it; start it to try again",
             )
-            .red(),
+            .fg(theme.error),
         );
     }
     if let Some(error) = &instance.last_error
         && !matches!(process.state, ProcessState::Running | ProcessState::Done)
     {
-        lines.push(Line::from(error.clone()).red());
+        lines.push(Line::from(error.clone()).fg(theme.error));
     }
     lines
 }
@@ -758,7 +793,7 @@ fn problems_for<'a>(app: &'a App, id: &NodeId) -> Vec<&'a Problem> {
         .collect()
 }
 
-fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_logs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let logs = &app.logs;
     let mut title = vec![Span::raw(if app.events { " events " } else { " logs " })];
     if !logs.search.is_empty() {
@@ -767,14 +802,14 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
             .current
             .and_then(|seq| seqs.iter().position(|&s| s == seq))
             .map_or(String::new(), |i| format!("{}/", i + 1));
-        title.push(Span::raw(format!("/{} {at}{} ", logs.search, seqs.len())).yellow());
+        title.push(Span::raw(format!("/{} {at}{} ", logs.search, seqs.len())).fg(theme.warn));
     }
     title.push(if logs.scroll > 0 {
-        Span::raw(format!("↑{} ", logs.scroll)).yellow()
+        Span::raw(format!("↑{} ", logs.scroll)).fg(theme.warn)
     } else {
-        Span::raw("following ").dark_gray()
+        Span::raw("following ").fg(theme.muted)
     });
-    let block = pane(Line::from(title), app.focus == Focus::Logs);
+    let block = pane(theme, Line::from(title), app.focus == Focus::Logs);
     let inner = block.inner(area);
     app.logs_area = area;
     frame.render_widget(block, area);
@@ -802,7 +837,7 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
             }
             (None, _) => String::new(),
         };
-        frame.render_widget(Paragraph::new(message.dark_gray()), inner);
+        frame.render_widget(Paragraph::new(message.fg(theme.muted)), inner);
         return;
     }
     let room = (inner.width as usize).saturating_sub(window.indent).max(1);
@@ -814,7 +849,7 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
                 Span::raw(crate::logs::marker_rule(line.at_ms, inner.width as usize)).bold(),
             )]
         } else {
-            let text = highlight(&line.text, &logs.search, logs.current == Some(*seq));
+            let text = highlight(theme, &line.text, &logs.search, logs.current == Some(*seq));
             let label = logs.prefix.label(line);
             wrap_spans(text, room)
                 .into_iter()
@@ -822,8 +857,7 @@ fn render_logs(frame: &mut Frame, area: Rect, app: &mut App) {
                 .map(|(i, mut spans)| {
                     let lead = match (&label, i) {
                         (Some(label), 0) => {
-                            let color =
-                                PREFIX_COLORS[logs.color_index(label) % PREFIX_COLORS.len()];
+                            let color = theme.prefix(logs.color_index(label));
                             Span::raw(format!("{label:<width$}", width = window.indent)).fg(color)
                         }
                         _ => Span::raw(" ".repeat(window.indent)),
@@ -872,9 +906,9 @@ fn wrap_spans(spans: Vec<Span<'static>>, room: usize) -> Vec<Vec<Span<'static>>>
     rows
 }
 
-/// Marks every match of the search in a line: black on yellow on the current match's
-/// line, yellow elsewhere.
-fn highlight(text: &str, search: &str, current: bool) -> Vec<Span<'static>> {
+/// Marks every match of the search in a line, more strongly on the current match's
+/// line.
+fn highlight(theme: &Theme, text: &str, search: &str, current: bool) -> Vec<Span<'static>> {
     if search.is_empty() {
         return vec![Span::raw(text.to_string())];
     }
@@ -890,11 +924,7 @@ fn highlight(text: &str, search: &str, current: bool) -> Vec<Span<'static>> {
         }
         spans.push(Span::raw(text[from..start].to_string()));
         let matched = Span::raw(text[start..end].to_string());
-        spans.push(if current {
-            matched.black().on_yellow()
-        } else {
-            matched.yellow().bold()
-        });
+        spans.push(matched.style(theme.search_match(current)));
         from = end;
     }
     spans.push(Span::raw(text[from..].to_string()));
@@ -904,13 +934,13 @@ fn highlight(text: &str, search: &str, current: bool) -> Vec<Span<'static>> {
 // Status, footer and popups
 
 /// The typing line keeps the detach keys in view and shows the end of a long line.
-fn status_line(app: &App, width: u16) -> Line<'static> {
+fn status_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
     if let Some(typing) = &app.typing {
         let keys = format!(" {} stops ", app.detach_keys);
         if !typing.attached {
             return Line::from(vec![
-                Span::raw(keys).dark_gray(),
-                Span::raw(format!("attaching to {}…", typing.label)).yellow(),
+                Span::raw(keys).fg(theme.muted),
+                Span::raw(format!("attaching to {}…", typing.label)).fg(theme.warn),
             ]);
         }
         let label = format!("{} › ", typing.label);
@@ -922,8 +952,8 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
             .iter()
             .collect();
         return Line::from(vec![
-            Span::raw(keys).dark_gray(),
-            Span::raw(label).yellow(),
+            Span::raw(keys).fg(theme.muted),
+            Span::raw(label).fg(theme.warn),
             Span::raw(format!("{shown}▏")),
         ]);
     }
@@ -933,30 +963,30 @@ fn status_line(app: &App, width: u16) -> Line<'static> {
             Focus::Logs => ("search logs", &app.logs.search),
         };
         return Line::from(vec![
-            Span::raw(format!(" {what}: ")).dark_gray(),
-            Span::raw(format!("{filter}▏")).yellow(),
-            Span::raw("  enter keeps · esc clears").dark_gray(),
+            Span::raw(format!(" {what}: ")).fg(theme.muted),
+            Span::raw(format!("{filter}▏")).fg(theme.warn),
+            Span::raw("  enter keeps · esc clears").fg(theme.muted),
         ]);
     }
     if let Some(notice) = &app.notice {
         let text = Span::raw(format!(" {}", notice.text));
         return Line::from(if notice.error {
-            text.red()
+            text.fg(theme.error)
         } else {
-            text.green()
+            text.fg(theme.ok)
         });
     }
     if let Connection::Lost(_) = app.connection {
-        return Line::from(" reconnecting to the daemon…".yellow());
+        return Line::from(" reconnecting to the daemon…".fg(theme.warn));
     }
     if !app.fold.filter.is_empty() {
-        return Line::from(format!(" filter: {} (esc clears)", app.fold.filter).dark_gray());
+        return Line::from(format!(" filter: {} (esc clears)", app.fold.filter).fg(theme.muted));
     }
     Line::default()
 }
 
 /// The most used keys for the focused pane, as many as fit in `width`.
-fn footer_line(focus: Focus, events: bool, width: u16) -> Line<'static> {
+fn footer_line(theme: &Theme, focus: Focus, events: bool, width: u16) -> Line<'static> {
     let other = if events { "logs" } else { "events" };
     let keys: &[(&str, &str)] = match focus {
         Focus::Tree => &[
@@ -992,13 +1022,13 @@ fn footer_line(focus: Focus, events: bool, width: u16) -> Line<'static> {
             break;
         }
         used += entry + 2;
-        spans.push(Span::raw(*key).blue().bold());
+        spans.push(Span::raw(*key).fg(theme.accent).bold());
         spans.push(Span::raw(format!(" {what}  ")));
     }
     Line::from(spans)
 }
 
-fn popup(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
+fn popup(theme: &Theme, frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     let width = lines
         .iter()
         .map(Line::width)
@@ -1016,14 +1046,14 @@ fn popup(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) 
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            pane(Line::from(format!(" {title} ")).bold(), true)
+            pane(theme, Line::from(format!(" {title} ")).bold(), true)
                 .padding(ratatui::widgets::Padding::horizontal(1)),
         ),
         rect,
     );
 }
 
-fn render_help(frame: &mut Frame, area: Rect) {
+fn render_help(theme: &Theme, frame: &mut Frame, area: Rect) {
     let width = HELP
         .iter()
         .flat_map(|(_, keys)| keys.iter())
@@ -1038,20 +1068,20 @@ fn render_help(frame: &mut Frame, area: Rect) {
         lines.push(Line::from(section.to_string()).bold());
         for (key, what) in keys.iter() {
             lines.push(Line::from(vec![
-                Span::raw(format!("{key:width$}  ")).blue(),
+                Span::raw(format!("{key:width$}  ")).fg(theme.accent),
                 Span::raw(what.to_string()),
             ]));
         }
     }
     lines.push(Line::default());
     lines.push(Line::from(
-        "pin* and off* last until the daemon restarts".dark_gray(),
+        "pin* and off* last until the daemon restarts".fg(theme.muted),
     ));
-    popup(frame, area, "keys", lines);
+    popup(theme, frame, area, "keys", lines);
 }
 
 /// The jump prompt near the top, with the best matches below what was typed.
-fn render_jump(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_jump(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let all = jump::candidates(&app.roots);
     let Some(prompt) = &mut app.jump else {
         return;
@@ -1061,11 +1091,11 @@ fn render_jump(frame: &mut Frame, area: Rect, app: &mut App) {
     let shown = 10;
     let first = prompt.cursor.saturating_sub(shown - 1);
     let mut lines = vec![Line::from(vec![
-        Span::raw("› ").blue(),
+        Span::raw("› ").fg(theme.accent),
         Span::raw(format!("{}▏", prompt.query)),
     ])];
     if found.is_empty() {
-        lines.push(Line::from("Nothing matches.".dark_gray()));
+        lines.push(Line::from("Nothing matches.".fg(theme.muted)));
     }
     for (i, candidate) in found.iter().enumerate().skip(first).take(shown) {
         let line = Line::from(format!("  {}", candidate.name));
@@ -1085,9 +1115,9 @@ fn render_jump(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Clear, rect);
     frame.render_widget(
         Paragraph::new(lines).block(
-            pane(Line::from(" jump to ").bold(), true)
+            pane(theme, Line::from(" jump to ").bold(), true)
                 .padding(ratatui::widgets::Padding::horizontal(1))
-                .title_bottom(Line::from(" ↑↓ pick · enter goes · esc closes ").dark_gray()),
+                .title_bottom(Line::from(" ↑↓ pick · enter goes · esc closes ").fg(theme.muted)),
         ),
         rect,
     );
@@ -1095,7 +1125,7 @@ fn render_jump(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// The selected process's env, one variable per line with where it came from, in a
 /// popup that fills most of the screen and scrolls.
-fn render_env(frame: &mut Frame, area: Rect, app: &mut App) {
+fn render_env(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let Some(view) = &mut app.env else {
         return;
     };
@@ -1109,14 +1139,14 @@ fn render_env(frame: &mut Frame, area: Rect, app: &mut App) {
         Some(Ok(env)) => &env.instance,
         _ => &view.title,
     };
-    let block = pane(Line::from(format!(" env · {title} ")).bold(), true)
+    let block = pane(theme, Line::from(format!(" env · {title} ")).bold(), true)
         .padding(ratatui::widgets::Padding::horizontal(1))
-        .title_bottom(Line::from(" ↑↓ scroll · esc closes ").dark_gray());
+        .title_bottom(Line::from(" ↑↓ scroll · esc closes ").fg(theme.muted));
     let inner = block.inner(rect);
     let width = usize::from(inner.width).max(1);
     let lines: Vec<Line> = match &view.env {
-        None => vec![Line::from("Rendering…".dark_gray())],
-        Some(Err(message)) => vec![Line::from(message.clone()).red()],
+        None => vec![Line::from("Rendering…".fg(theme.muted))],
+        Some(Err(message)) => vec![Line::from(message.clone()).fg(theme.error)],
         Some(Ok(env)) => {
             let key_width = env.vars.iter().map(|v| v.key.len()).max().unwrap_or(0);
             env.vars
@@ -1126,7 +1156,7 @@ fn render_env(frame: &mut Frame, area: Rect, app: &mut App) {
                         vec![
                             (format!("{:key_width$}  ", var.key), Style::new().bold()),
                             (var.value.clone().unwrap_or_default(), Style::new()),
-                            (format!("  {}", var.source), Style::new().dark_gray()),
+                            (format!("  {}", var.source), Style::new().fg(theme.muted)),
                         ],
                         width,
                         (key_width + 2).min(width / 2),
@@ -1174,7 +1204,7 @@ fn wrap(parts: Vec<(String, Style)>, width: usize, indent: usize) -> Vec<Line<'s
     rows
 }
 
-fn render_problems(frame: &mut Frame, area: Rect, app: &App) {
+fn render_problems(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
     let problems: Vec<&Problem> = app.snapshot.iter().flat_map(|s| &s.problems).collect();
     let tunnel = app
         .snapshot
@@ -1210,10 +1240,10 @@ fn render_problems(frame: &mut Frame, area: Rect, app: &App) {
             Span::raw(tunnel.message.clone().unwrap_or_default()),
         ]));
     }
-    popup(frame, area, "problems", lines);
+    popup(theme, frame, area, "problems", lines);
 }
 
-fn render_confirm(frame: &mut Frame, area: Rect, app: &App, confirm: &Confirm) {
+fn render_confirm(theme: &Theme, frame: &mut Frame, area: Rect, app: &App, confirm: &Confirm) {
     let (title, question, verb) = match confirm {
         Confirm::StopAll => {
             let running = app.snapshot.as_ref().map_or(0, |s| s.running_instances);
@@ -1240,6 +1270,7 @@ fn render_confirm(frame: &mut Frame, area: Rect, app: &App, confirm: &Confirm) {
         }
     };
     popup(
+        theme,
         frame,
         area,
         title,
@@ -1247,9 +1278,9 @@ fn render_confirm(frame: &mut Frame, area: Rect, app: &App, confirm: &Confirm) {
             Line::from(question),
             Line::default(),
             Line::from(vec![
-                Span::raw("y").blue().bold(),
+                Span::raw("y").fg(theme.accent).bold(),
                 Span::raw(verb),
-                Span::raw("any other key").blue().bold(),
+                Span::raw("any other key").fg(theme.accent).bold(),
                 Span::raw(" cancel"),
             ]),
         ],
@@ -1286,7 +1317,7 @@ mod tests {
     fn a_bordered_pane_is_as_tall_as_its_wrapped_lines() {
         let paragraph = Paragraph::new("x".repeat(9))
             .wrap(Wrap { trim: false })
-            .block(pane(Line::from("t"), false));
+            .block(pane(&Theme::terminal(), Line::from("t"), false));
         assert_eq!(bordered_height(&paragraph, 11), 3);
         assert_eq!(bordered_height(&paragraph, 10), 4);
     }
@@ -1393,6 +1424,61 @@ mod tests {
 
  ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  tab logs"
         );
+    }
+
+    #[test]
+    fn muted_text_on_the_selected_row_stays_readable() {
+        let mut snapshot = sample();
+        let billing = &mut snapshot.projects[0].stacks[0].instances[0];
+        billing.processes[1].state = ProcessState::Disabled;
+        billing.processes[1].policy = Policy::Disabled;
+        let now = Instant::now();
+        let mut app = App::new(now);
+        app.start_at = Some(NodeId::Instance {
+            project: "nova".into(),
+            stack: "main".into(),
+            app: "nova-billing".into(),
+        });
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        press(&mut app, now, KeyCode::Right);
+        let worker = app
+            .rows
+            .iter()
+            .position(|row| tree::node(&app.roots, &row.path).label == "worker")
+            .unwrap();
+        let unselected = draw_cells(&mut app, "worker");
+        assert_eq!(unselected.fg, app.theme.muted, "a disabled label is muted");
+        while app.cursor < worker {
+            press(&mut app, now, KeyCode::Down);
+        }
+        let theme = app.theme.clone();
+        let focused = draw_cells(&mut app, "worker");
+        assert_eq!(focused.bg, theme.selection_bg, "the row is selected");
+        assert_ne!(focused.fg, theme.selection_bg);
+        assert_eq!(focused.fg, theme.selection_fg);
+        press(&mut app, now, KeyCode::Tab);
+        let unfocused = draw_cells(&mut app, "worker");
+        assert!(unfocused.modifier.contains(Modifier::REVERSED));
+        assert_eq!(unfocused.fg, theme.selection_fg);
+    }
+
+    /// The first cell of `text` in the tree.
+    fn draw_cells(app: &mut App, text: &str) -> ratatui::buffer::Cell {
+        let (width, height) = (120, 18);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| render(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let tree = app.tree_area;
+        for y in tree.top()..tree.bottom() {
+            let line: String = (tree.left()..tree.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if let Some(at) = line.find(text) {
+                let x = tree.left() + line[..at].chars().count() as u16;
+                return buffer[(x, y)].clone();
+            }
+        }
+        panic!("{text} isn't drawn");
     }
 
     #[test]
@@ -1932,11 +2018,11 @@ mod tests {
         assert!(screen.contains("╭ logs /get 1/2 ↑"), "{screen}");
         assert!(screen.contains("Booting"), "every line stays\n{screen}");
 
-        let spans = highlight("GET /a then get /b", "get", true);
+        let spans = highlight(&Theme::terminal(), "GET /a then get /b", "get", true);
         let texts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(texts, ["", "GET", " /a then ", "get", " /b"]);
         assert_eq!(spans[1].style, Style::new().black().on_yellow());
-        let spans = highlight("GET /up", "get", false);
+        let spans = highlight(&Theme::terminal(), "GET /up", "get", false);
         assert_eq!(spans[1].style, Style::new().yellow().bold());
     }
 

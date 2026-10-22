@@ -19,6 +19,7 @@ use super::input::{self, Confirm, Control, Focus, Intent, Mode};
 use super::jump::{self, Jump};
 use super::logs::{Logs, Prefix};
 use super::target;
+use super::theme::Theme;
 use super::tree::{self, Fold, Node, NodeId, Row, Show};
 use crate::logs::Stripper;
 
@@ -204,6 +205,7 @@ pub struct App {
     /// The keys that stop typing into a process.
     pub detach_keys: DetachKeys,
     pub typing: Option<Typing>,
+    pub theme: Theme,
     typing_sessions: u64,
 }
 
@@ -239,6 +241,7 @@ impl App {
             quit: false,
             detach_keys: DetachKeys::default(),
             typing: None,
+            theme: Theme::default(),
             typing_sessions: 0,
         }
     }
