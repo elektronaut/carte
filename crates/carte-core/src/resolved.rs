@@ -1,37 +1,54 @@
-//! The settings carte resolved for a project, app or process, each with the value it
-//! would have if the configuration left it out, so a view can tell which ones differ.
+//! The settings carte resolved for a project, app or process, each with its built-in
+//! default and the value it inherits, so a view can tell which ones differ.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::model::{
-    App, AppRef, EnvProviderKind, MachineConfig, Policy, Preset, ProcessKind, ProcessSpec, Project,
-    Readiness, Restart, Scheme, Scope,
+    App, AppRef, EnvProviderKind, EnvTemplate, MachineConfig, Policy, Preset, ProcessKind,
+    ProcessSpec, Project, Readiness, Restart, Scheme, Scope,
 };
 use crate::procfile::{self, Notice, ProcessSource, ProcfileError};
 
-/// A resolved setting, and its default: the built-in value, or the project's or the
-/// machine's setting it overrides. A setting written out with its default value
-/// doesn't differ.
+/// A resolved setting, with carte's built-in default and what it inherits from the
+/// layer above: the machine for a project, the project or the machine for an app,
+/// the app for a process. Without such a layer, it inherits the default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Setting<T> {
     pub value: T,
     pub default: T,
+    pub inherited: T,
 }
 
-impl<T: PartialEq> Setting<T> {
+impl<T: PartialEq + Clone> Setting<T> {
+    /// A setting with nothing to inherit but its default.
     pub fn new(value: T, default: T) -> Self {
-        Setting { value, default }
+        Setting {
+            value,
+            inherited: default.clone(),
+            default,
+        }
     }
 
+    pub fn inheriting(value: T, default: T, inherited: T) -> Self {
+        Setting {
+            value,
+            default,
+            inherited,
+        }
+    }
+
+    /// Someone configured it: it isn't carte's default, or it isn't what the layer
+    /// above gives it.
     pub fn differs(&self) -> bool {
-        self.value != self.default
+        self.value != self.default || self.value != self.inherited
     }
 
     pub fn map<U>(self, f: impl Fn(T) -> U) -> Setting<U> {
         Setting {
             value: f(self.value),
             default: f(self.default),
+            inherited: f(self.inherited),
         }
     }
 }
@@ -49,13 +66,16 @@ pub struct ProjectSettings {
 }
 
 pub fn project(machine: &MachineConfig, project: &Project) -> ProjectSettings {
+    let builtin = MachineConfig::default();
     ProjectSettings {
-        idle_timeout: Setting::new(
+        idle_timeout: Setting::inheriting(
             project.idle_timeout.unwrap_or(machine.idle_timeout),
+            builtin.idle_timeout,
             machine.idle_timeout,
         ),
-        teardown_delay: Setting::new(
+        teardown_delay: Setting::inheriting(
             project.teardown_delay.unwrap_or(machine.teardown_delay),
+            builtin.teardown_delay,
             machine.teardown_delay,
         ),
         scheme: Setting::new(project.scheme, Scheme::default()),
@@ -80,6 +100,8 @@ pub struct AppSettings {
     pub env_files: Setting<Vec<String>>,
     /// Apps of its own project first, then of other projects.
     pub depends_on: Setting<Vec<AppRef>>,
+    /// The project's env templates, then the app's, one per key.
+    pub env: Vec<EnvTemplate>,
 }
 
 pub fn app(machine: &MachineConfig, project: &Project, app: &App) -> AppSettings {
@@ -93,20 +115,36 @@ pub fn app(machine: &MachineConfig, project: &Project, app: &App) -> AppSettings
         })
         .chain(settings.depends_on_elsewhere.iter().cloned())
         .collect();
+    let mut env: Vec<EnvTemplate> = Vec::new();
+    for template in project.env.iter().chain(&settings.env) {
+        match env.iter_mut().find(|t| t.key == template.key) {
+            Some(existing) => existing.value = template.value.clone(),
+            None => env.push(template.clone()),
+        }
+    }
     AppSettings {
-        idle_timeout: self::project(machine, project).idle_timeout,
+        idle_timeout: Setting::inheriting(
+            project.idle_timeout.unwrap_or(machine.idle_timeout),
+            MachineConfig::default().idle_timeout,
+            machine.idle_timeout,
+        ),
         aliases: Setting::new(settings.aliases.clone(), Vec::new()),
         subdomains: Setting::new(settings.subdomains, false),
         policy: Setting::new(settings.policy.unwrap_or_default(), Policy::default()),
         port: Setting::new(settings.port, None),
-        serve_files: Setting::new(settings.serve_files.clone(), project.serve_files.clone()),
+        serve_files: Setting::inheriting(
+            settings.serve_files.clone(),
+            None,
+            project.serve_files.clone(),
+        ),
         warm: Setting::new(!settings.never_warm, true),
         env_files: Setting::new(settings.env_files.clone(), Vec::new()),
         depends_on: Setting::new(depends_on, Vec::new()),
+        env,
     }
 }
 
-/// A process's settings, over what its Procfile line and the app give it.
+/// A process's settings, over what its Procfile line gives it and its app's policy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessSettings {
     pub name: String,
@@ -125,10 +163,28 @@ pub struct ProcessSettings {
     pub preset: Setting<Option<Preset>>,
     pub restart: Setting<Restart>,
     pub policy: Setting<Policy>,
+    /// Its own env templates, over the app's.
+    pub env: Vec<EnvTemplate>,
+    /// Env templates it sets on every process of the instance.
+    pub provides: Vec<EnvTemplate>,
+    /// The supervisor waits for it to become ready, or for a task to finish, within
+    /// the boot timeout.
+    pub timed: bool,
+    /// Why its defaults are unknown; each setting then has its value as defaults.
+    pub defaults_error: Option<String>,
 }
 
 impl ProcessSettings {
-    fn new(spec: &ProcessSpec, default: &ProcessSpec, notices: &[Notice]) -> Self {
+    fn new(
+        spec: &ProcessSpec,
+        defaults: Result<ProcessSpec, String>,
+        app_policy: Policy,
+        notices: &[Notice],
+    ) -> Self {
+        let (default, inherited_policy, defaults_error) = match defaults {
+            Ok(default) => (default, app_policy, None),
+            Err(err) => (spec.clone(), spec.policy, Some(err)),
+        };
         ProcessSettings {
             name: spec.name.clone(),
             command: Setting::new(spec.command.clone(), default.command.clone()),
@@ -148,7 +204,11 @@ impl ProcessSettings {
             after: Setting::new(spec.after.clone(), default.after.clone()),
             preset: Setting::new(spec.preset, default.preset),
             restart: Setting::new(spec.restart, default.restart),
-            policy: Setting::new(spec.policy, default.policy),
+            policy: Setting::inheriting(spec.policy, default.policy, inherited_policy),
+            env: spec.env.clone(),
+            provides: spec.provides.clone(),
+            timed: spec.is_checked() || spec.is_task(),
+            defaults_error,
         }
     }
 }
@@ -159,13 +219,14 @@ pub fn processes(
     settings: &crate::model::AppSettings,
 ) -> Result<(ProcessSource, Vec<ProcessSettings>), ProcfileError> {
     let list = procfile::load(checkout, settings)?;
+    let app_policy = settings.policy.unwrap_or_default();
     let processes = list
         .processes
         .iter()
         .chain(&list.teardown)
         .map(|spec| {
-            let default = procfile::unconfigured(checkout, settings, &spec.name);
-            ProcessSettings::new(spec, default.as_ref().unwrap_or(spec), &list.notices)
+            let defaults = procfile::unconfigured(checkout, settings, &spec.name);
+            ProcessSettings::new(spec, defaults, app_policy, &list.notices)
         })
         .collect();
     Ok((list.source, processes))
@@ -177,63 +238,102 @@ mod tests {
     use crate::model::ProcessOverride;
     use crate::test_support;
 
-    fn nova() -> (MachineConfig, Project) {
-        let machine = MachineConfig::default();
-        (machine, test_support::nova().project)
+    fn nova() -> Project {
+        test_support::nova().project
+    }
+
+    /// A machine whose idle timeout isn't carte's default.
+    fn machine_30m() -> MachineConfig {
+        MachineConfig {
+            idle_timeout: Duration::from_secs(30 * 60),
+            ..MachineConfig::default()
+        }
     }
 
     #[test]
-    fn a_project_setting_differs_from_the_machine_only_when_its_value_does() {
-        let (machine, mut project) = nova();
-        let settings = super::project(&machine, &project);
-        assert!(!settings.idle_timeout.differs());
-        assert_eq!(settings.idle_timeout.value, machine.idle_timeout);
-
-        project.idle_timeout = Some(machine.idle_timeout);
-        let settings = super::project(&machine, &project);
+    fn a_project_setting_differs_from_the_default_or_the_machine() {
+        let builtin = MachineConfig::default().idle_timeout;
+        let idle = |machine: &MachineConfig, project: Option<Duration>| {
+            let mut nova = nova();
+            nova.idle_timeout = project;
+            super::project(machine, &nova).idle_timeout
+        };
+        let default = MachineConfig::default();
+        assert!(!idle(&default, None).differs(), "unset everywhere");
         assert!(
-            !settings.idle_timeout.differs(),
-            "set to the machine's value"
+            !idle(&default, Some(builtin)).differs(),
+            "set to the default, which the machine keeps"
         );
+        let machine = machine_30m();
+        let inherited = idle(&machine, None);
+        assert_eq!(inherited.value, machine.idle_timeout);
+        assert!(inherited.differs(), "the machine's own value");
+        assert!(idle(&machine, Some(machine.idle_timeout)).differs());
+        assert!(
+            idle(&machine, Some(builtin)).differs(),
+            "the default, over the machine's"
+        );
+        assert!(idle(&default, Some(Duration::from_secs(60))).differs());
 
-        project.idle_timeout = Some(Duration::from_secs(60));
-        project.scheme = Scheme::Http;
-        let settings = super::project(&machine, &project);
-        assert!(settings.idle_timeout.differs());
-        assert_eq!(settings.idle_timeout.default, machine.idle_timeout);
+        let mut nova = nova();
+        nova.scheme = Scheme::Http;
+        let settings = super::project(&default, &nova);
         assert!(settings.scheme.differs());
         assert!(!settings.teardown_delay.differs());
     }
 
     #[test]
-    fn an_app_setting_differs_from_its_project_and_the_built_in_default() {
-        let (machine, mut project) = nova();
-        project.serve_files = Some("public".into());
+    fn an_app_setting_differs_from_the_default_or_its_project() {
+        let machine = MachineConfig::default();
+        let mut project = nova();
         let mut billing = project.app("nova-billing").unwrap().clone();
-        billing.settings.serve_files = Some("public".into());
-        let settings = app(&machine, &project, &billing);
-        assert!(
-            !settings.serve_files.differs(),
-            "set to the project's value"
-        );
-
-        billing.settings.serve_files = Some("static".into());
         billing.settings.policy = Some(Policy::Auto);
         billing.settings.aliases = vec!["pay".into()];
         let settings = app(&machine, &project, &billing);
-        assert!(settings.serve_files.differs());
-        assert_eq!(settings.serve_files.default, Some("public".into()));
         assert!(!settings.policy.differs(), "set to the default");
+        assert!(!settings.serve_files.differs(), "unset");
         assert!(settings.aliases.differs());
         assert!(!settings.warm.differs());
+        assert!(!settings.idle_timeout.differs());
 
-        project.idle_timeout = Some(Duration::from_secs(60));
+        project.serve_files = Some("public".into());
+        billing.settings.serve_files = Some("public".into());
         let settings = app(&machine, &project, &billing);
-        assert!(settings.idle_timeout.differs(), "the project's");
+        assert!(
+            settings.serve_files.differs(),
+            "the project's, which isn't the default"
+        );
+        billing.settings.serve_files = None;
+        let settings = app(&machine, &project, &billing);
+        assert!(
+            settings.serve_files.differs(),
+            "nothing, under a project that serves files"
+        );
+
+        let settings = app(&machine_30m(), &project, &billing);
+        assert!(settings.idle_timeout.differs(), "the machine's");
     }
 
     #[test]
-    fn a_process_setting_differs_from_its_procfile_line_and_the_app() {
+    fn templates_are_one_per_key_the_apps_last() {
+        let machine = MachineConfig::default();
+        let mut project = nova();
+        let template = |key: &str, value: &str| EnvTemplate {
+            key: key.into(),
+            value: value.into(),
+        };
+        project.env = vec![template("A", "1"), template("B", "2")];
+        let mut billing = project.app("nova-billing").unwrap().clone();
+        billing.settings.env = vec![template("B", "3"), template("C", "4")];
+        let env = app(&machine, &project, &billing).env;
+        assert_eq!(
+            env,
+            [template("A", "1"), template("B", "3"), template("C", "4")]
+        );
+    }
+
+    #[test]
+    fn a_process_setting_differs_from_its_procfile_line_or_its_app() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("Procfile.dev"),
@@ -244,23 +344,26 @@ mod tests {
             policy: Some(Policy::Pinned),
             ..Default::default()
         };
-        settings.processes.entries.insert(
-            "worker".into(),
+        let mut configure = |name: &str, ov: ProcessOverride| {
+            settings.processes.entries.insert(name.into(), ov);
+        };
+        configure(
+            "worker",
             ProcessOverride {
                 restart: Some(Restart::OnFailure),
                 pty: Some(false),
                 ..Default::default()
             },
         );
-        settings.processes.entries.insert(
-            "css".into(),
+        configure(
+            "css",
             ProcessOverride {
-                policy: Some(Policy::Disabled),
+                policy: Some(Policy::Auto),
                 ..Default::default()
             },
         );
-        settings.processes.entries.insert(
-            "mail".into(),
+        configure(
+            "mail",
             ProcessOverride {
                 command: Some("bin/mailcatcher".into()),
                 ..Default::default()
@@ -278,24 +381,64 @@ mod tests {
         );
         assert!(!web.command.differs());
         assert!(web.http.value && !web.http.differs());
+        assert!(web.timed);
+        assert_eq!(web.defaults_error, None);
         assert_eq!(web.policy.value, Policy::Pinned);
-        assert!(!web.policy.differs(), "the app's policy is its default");
+        assert!(
+            web.policy.differs(),
+            "the app's pin, which isn't the default"
+        );
 
         let worker = by_name("worker");
         assert!(!worker.restart.differs(), "on-failure, set, is the default");
         assert!(worker.pty.differs());
-        assert!(!worker.policy.differs());
+        assert!(!worker.timed);
 
         let css = by_name("css");
-        assert_eq!(css.policy.value, Policy::Disabled);
-        assert_eq!(css.policy.default, Policy::Pinned);
-        assert!(css.policy.differs());
+        assert_eq!(css.policy.value, Policy::Auto);
+        assert!(css.policy.differs(), "the default, over the app's pin");
 
         let mail = by_name("mail");
         assert!(
             !mail.command.differs(),
             "a process only config has: its command is its own"
         );
+    }
+
+    #[test]
+    fn a_process_whose_defaults_cant_load_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Procfile.dev"),
+            "web: bin/server\nvite: bin/vite dev\n",
+        )
+        .unwrap();
+        let mut settings = crate::model::AppSettings::default();
+        settings.processes.entries.insert(
+            "vite".into(),
+            ProcessOverride {
+                preset: Some(Preset::None),
+                pty: Some(false),
+                ..Default::default()
+            },
+        );
+        settings.processes.entries.insert(
+            "assets".into(),
+            ProcessOverride {
+                command: Some("bin/assets".into()),
+                paths: Some(vec!["/vite-dev/".into()]),
+                ..Default::default()
+            },
+        );
+        let (_, processes) = processes(dir.path(), &settings).unwrap();
+        let vite = processes.iter().find(|p| p.name == "vite").unwrap();
+        assert!(
+            vite.defaults_error
+                .as_deref()
+                .is_some_and(|e| e.contains("is served by both")),
+            "{vite:?}"
+        );
+        assert!(!vite.pty.differs(), "unknown, not different");
     }
 
     #[test]

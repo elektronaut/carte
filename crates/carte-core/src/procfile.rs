@@ -636,27 +636,40 @@ pub fn substitute_port(command: &str, port: u16) -> String {
     out
 }
 
-/// The process `name` as it would be without its own config, from the Procfile, or
-/// with only its command when config adds it. `None` when config has nothing for it,
-/// or leaving its config out gives no valid process list.
-pub fn unconfigured(checkout: &Path, settings: &AppSettings, name: &str) -> Option<ProcessSpec> {
+/// The process `name` as it would be without its own config and the app's policy:
+/// from the Procfile, or with only its command when config adds it. Fails when
+/// leaving that config out gives no valid process list with the process in it.
+pub fn unconfigured(
+    checkout: &Path,
+    settings: &AppSettings,
+    name: &str,
+) -> Result<ProcessSpec, String> {
     let mut bare = settings.clone();
-    let own = bare.processes.entries.remove(name)?;
-    let find = |settings: &AppSettings| {
-        let list = load(checkout, settings).ok()?;
-        list.processes
+    bare.policy = None;
+    let own = bare.processes.entries.remove(name);
+    let find = |settings: &AppSettings| -> Result<Option<ProcessSpec>, String> {
+        let list = load(checkout, settings).map_err(|err| err.to_string())?;
+        Ok(list
+            .processes
             .into_iter()
             .chain(list.teardown)
-            .find(|p| p.name == name)
+            .find(|p| p.name == name))
     };
-    find(&bare).or_else(|| {
-        let command = ProcessOverride {
-            command: own.command,
-            ..ProcessOverride::default()
-        };
-        bare.processes.entries.insert(name.to_string(), command);
-        find(&bare)
-    })
+    let missing = || format!("there is no process {name} without its config");
+    let command = own.and_then(|own| own.command);
+    match (find(&bare), command) {
+        (Ok(Some(spec)), _) => Ok(spec),
+        (Ok(None) | Err(_), Some(command)) => {
+            let command = ProcessOverride {
+                command: Some(command),
+                ..ProcessOverride::default()
+            };
+            bare.processes.entries.insert(name.to_string(), command);
+            find(&bare)?.ok_or_else(missing)
+        }
+        (Ok(None), None) => Err(missing()),
+        (Err(err), None) => Err(err),
+    }
 }
 
 /// Replaces a hardcoded `-p NNNN`, `-pNNNN`, `--port NNNN` or `--port=NNNN` with `$PORT`,

@@ -1764,12 +1764,12 @@ impl Actor {
         proc.crashes.push(now);
         let crashes = proc.crashes.len() as u32;
         let name = proc.spec.name.clone();
-        let message = if proc.stalls >= 5 {
+        let message = if proc.stalls >= super::GIVE_UP_AFTER {
             Some(format!(
                 "{name} didn't become ready {} times in a row; it stays down",
                 proc.stalls
             ))
-        } else if crashes >= 5 {
+        } else if crashes >= super::GIVE_UP_AFTER {
             Some(format!(
                 "{name} crashed {crashes} times within a minute; it stays down"
             ))

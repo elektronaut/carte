@@ -23,6 +23,9 @@ use tokio::process::{Child, Command};
 
 use crate::proctree::{descendant_groups, remaining_groups};
 
+/// The signal a process gets first when it stops; SIGKILL follows after the grace.
+pub const STOP_SIGNAL: Signal = Signal::SIGTERM;
+
 /// How a process's stdio is connected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoMode {
@@ -303,8 +306,8 @@ impl ProcessHandle {
         }
         let mut others = descendant_groups(self.shim_pid);
         others.retain(|&pgid| pgid != self.pid);
-        signal_groups(&others, Signal::SIGTERM);
-        ignore_esrch(self.signal_group(Signal::SIGTERM))?;
+        signal_groups(&others, STOP_SIGNAL);
+        ignore_esrch(self.signal_group(STOP_SIGNAL))?;
         signal_groups(&others, Signal::SIGCONT);
         let _ = self.signal_group(Signal::SIGCONT);
         if let Ok(status) = tokio::time::timeout(grace, self.wait()).await {

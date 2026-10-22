@@ -2374,8 +2374,8 @@ fn kube_projects_answer_from_the_proxy() {
         panic!("{body}")
     };
     assert_eq!(kube.context, "prod");
-    assert!(kube.kubeconfig.differs());
-    assert!(!kube.namespaces.differs());
+    assert!(kube.kubeconfig.differs);
+    assert!(!kube.namespaces.differs);
     assert_eq!(kube.namespace.as_deref(), Some("monitoring"));
     assert_eq!(kube.service.as_deref(), Some("grafana"));
 }
@@ -2903,11 +2903,11 @@ fn the_daemon_resolves_the_config_of_an_address_with_its_defaults() {
     };
     assert_eq!(project.idle_timeout_secs.value, 900);
     assert!(
-        !project.idle_timeout_secs.differs(),
-        "set to the machine's value"
+        !project.idle_timeout_secs.differs,
+        "set to the default, which the machine keeps"
     );
     assert_eq!(project.env_provider.value.as_deref(), Some("none"));
-    assert!(project.env_provider.differs());
+    assert!(project.env_provider.differs);
     assert_eq!(project.stacks[0].name, "main");
     assert_eq!(project.stacks[0].checkouts[0].app, "acme-web");
 
@@ -2921,12 +2921,14 @@ fn the_daemon_resolves_the_config_of_an_address_with_its_defaults() {
     let hosts: Vec<&str> = app.hostnames.iter().map(|h| h.host.as_str()).collect();
     assert!(hosts.contains(&"web.acme.test"), "{hosts:?}");
     assert!(hosts.contains(&"shop.test"), "{hosts:?}");
-    assert!(app.aliases.differs());
+    assert!(app.aliases.differs);
     assert_eq!(app.policy.value, carte_api::Policy::Auto);
-    assert!(!app.policy.differs(), "set to the default");
-    assert!(!app.serve_files.differs());
+    assert!(!app.policy.differs, "set to the default");
+    assert!(!app.serve_files.differs);
     let web = app.processes.iter().find(|p| p.name == "web").unwrap();
-    assert!(web.http.value && !web.http.differs());
+    assert!(web.http.value && !web.http.differs);
+    assert_eq!(web.boot_timeout_secs, Some(120));
+    assert!(app.env.provider.differs && app.env.detected == "none");
     assert!(web.port.is_some(), "{web:?}");
     assert_eq!(web.runs_as.as_deref(), Some(web.command.value.as_str()));
     assert_eq!(web.runtime_policy, None);
@@ -2936,11 +2938,19 @@ fn the_daemon_resolves_the_config_of_an_address_with_its_defaults() {
     let carte_api::ResolvedConfig::Process(worker) = serde_json::from_str(&body).unwrap() else {
         panic!("{body}")
     };
-    assert!(!worker.pty.value && worker.pty.differs());
-    assert!(!worker.command.differs());
-    assert!(!worker.policy.differs());
+    assert!(!worker.pty.value && worker.pty.differs);
+    assert!(!worker.command.differs);
+    assert!(!worker.policy.differs);
     assert_eq!(worker.runtime_policy, Some(carte_api::Policy::Disabled));
     assert_eq!(worker.restart.value, "on-failure");
+    assert_eq!(
+        worker.boot_timeout_secs, None,
+        "carte doesn't wait for a worker"
+    );
+    assert_eq!(
+        (worker.stop_signal.as_str(), worker.gives_up_after),
+        ("TERM", 5)
+    );
 
     let (head, body) = resolved_config(&daemon, "web/nope");
     assert!(head.starts_with("HTTP/1.1 404"), "{head}{body}");

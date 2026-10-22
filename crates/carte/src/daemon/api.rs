@@ -27,6 +27,7 @@ use hyper_util::rt::TokioIo;
 use super::requests::{Entry, RequestLog};
 use crate::kube::Kube;
 use crate::paths::Paths;
+use crate::resolved_config::ConfigError;
 use crate::supervisor::{AttachError, EventFilter, Handle};
 
 #[derive(Clone)]
@@ -628,7 +629,8 @@ async fn config(State(api): State<Api>, JsonBody(target): JsonBody<Address>) -> 
     .await;
     match resolved {
         Ok(Ok(config)) => Json(config).into_response(),
-        Ok(Err(err)) => error(StatusCode::NOT_FOUND, format!("{err:#}")),
+        Ok(Err(ConfigError::NotFound(message))) => error(StatusCode::NOT_FOUND, message),
+        Ok(Err(ConfigError::Invalid(message))) => error(StatusCode::BAD_REQUEST, message),
         Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }

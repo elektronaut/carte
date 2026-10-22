@@ -3,17 +3,16 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail};
 use carte_api::{
     Address, Dependency, KubeForward, ProcessStatus, ResolvedApp, ResolvedConfig, ResolvedEnv,
     ResolvedHost, ResolvedKube, ResolvedProcess, ResolvedProject, ResolvedStack, Setting, Snapshot,
     StackCheckout,
 };
-use carte_core::address;
+use carte_core::address::{self, AddressError};
 use carte_core::env::{self as core_env, SystemRunner};
 use carte_core::kube::{self, KubeAddress};
 use carte_core::model::{
-    App, EnvTemplate, InstanceKey, Policy, ProjectState, Readiness, Stack, World,
+    App, EnvTemplate, InstanceKey, MachineConfig, Policy, ProjectState, Readiness, Stack, World,
 };
 use carte_core::naming;
 use carte_core::procfile::{self, ProcessSource};
@@ -28,6 +27,25 @@ pub struct ProcessLimits {
     pub crash_window: Duration,
 }
 
+/// Why there is no configuration to show for an address.
+#[derive(Debug)]
+pub enum ConfigError {
+    /// It names nothing.
+    NotFound(String),
+    /// It can't be read or names more than one thing, or the app's processes can't
+    /// be listed.
+    Invalid(String),
+}
+
+impl From<AddressError> for ConfigError {
+    fn from(err: AddressError) -> Self {
+        match err {
+            AddressError::NoMatch { .. } => ConfigError::NotFound(err.to_string()),
+            _ => ConfigError::Invalid(err.to_string()),
+        }
+    }
+}
+
 /// The configuration carte resolved for `target`, with the ports and runtime pins of
 /// the running processes the snapshot shows.
 pub fn for_address(
@@ -35,23 +53,19 @@ pub fn for_address(
     snapshot: &Snapshot,
     limits: ProcessLimits,
     target: &Address,
-) -> anyhow::Result<ResolvedConfig> {
+) -> Result<ResolvedConfig, ConfigError> {
     let parsed: address::Address = target.address.parse()?;
     if let Some(kube) = kube::resolve_address(world, target.project.as_deref(), &parsed) {
-        return Ok(ResolvedConfig::Kube(kube_project(
-            world,
-            &kube.map_err(|err| anyhow!("{err}"))?,
-        )?));
+        return Ok(ResolvedConfig::Kube(kube_project(world, &kube?)?));
     }
     let cwd = target.cwd.as_deref();
     let resolved = match &target.project {
         Some(project) => address::resolve_in_project(world, project, &parsed, cwd),
         None => address::resolve(world, &parsed, cwd),
-    }
-    .map_err(|err| anyhow!("{err}"))?;
+    }?;
     let state = world
         .project(&resolved.project)
-        .ok_or_else(|| anyhow!("no project named {}", resolved.project))?;
+        .ok_or_else(|| ConfigError::NotFound(format!("no project named {}", resolved.project)))?;
     let Some(app_name) = &resolved.app else {
         let stack = resolved.stack.as_ref().map(|s| s.slug().to_string());
         return Ok(ResolvedConfig::Project(project(world, state, stack)));
@@ -63,15 +77,20 @@ pub fn for_address(
     };
     let mut app = self::app(world, snapshot, limits, state, &key)?;
     match &resolved.process {
-        None => Ok(ResolvedConfig::App(app)),
+        None => Ok(ResolvedConfig::App(Box::new(app))),
         Some(name) => {
             if let Some(error) = app.process_error {
-                bail!(error);
+                return Err(ConfigError::Invalid(error));
             }
             let at = app.processes.iter().position(|p| p.name == *name);
             match at {
-                Some(at) => Ok(ResolvedConfig::Process(app.processes.swap_remove(at))),
-                None => bail!("{} has no process {name}", app.app),
+                Some(at) => Ok(ResolvedConfig::Process(Box::new(
+                    app.processes.swap_remove(at),
+                ))),
+                None => Err(ConfigError::NotFound(format!(
+                    "{} has no process {name}",
+                    app.app
+                ))),
             }
         }
     }
@@ -123,25 +142,27 @@ fn app(
     limits: ProcessLimits,
     state: &ProjectState,
     key: &InstanceKey,
-) -> anyhow::Result<ResolvedApp> {
+) -> Result<ResolvedApp, ConfigError> {
     let project = &state.project;
-    let configured = project
-        .app(&key.app)
-        .ok_or_else(|| anyhow!("no app named {} in {}", key.app, key.project))?;
+    let configured = project.app(&key.app).ok_or_else(|| {
+        ConfigError::NotFound(format!("no app named {} in {}", key.app, key.project))
+    })?;
     let checkout = state
         .checkout(configured, &key.stack)
-        .ok_or_else(|| anyhow!(state.not_in_stack(configured, &key.stack)))?;
+        .ok_or_else(|| ConfigError::NotFound(state.not_in_stack(configured, &key.stack)))?;
     let app = state.app_at(configured, &key.stack);
     let settings = resolved::app(&world.machine, project, app);
+    let project_settings = resolved::project(&world.machine, project);
     let runner = SystemRunner::from_env();
-    let provider = |configured| core_env::detect_provider(configured, checkout.path(), &runner);
     let env = ResolvedEnv {
-        provider: Setting {
-            value: name(&provider(project.env_provider)),
-            default: name(&provider(None)),
-        },
+        provider: api(project_settings.env_provider.map(|p| p.map(|p| name(&p)))),
+        detected: name(&core_env::detect_provider(
+            project.env_provider,
+            checkout.path(),
+            &runner,
+        )),
         files: api(settings.env_files),
-        templates: templates(project.env.iter().chain(&app.settings.env)),
+        templates: templates(&settings.env),
     };
     let statuses = statuses(snapshot, key);
     let (process_source, processes, process_error) =
@@ -219,6 +240,7 @@ fn process(
 ) -> ResolvedProcess {
     let port = status.filter(|s| s.pid.is_some()).and_then(|s| s.port);
     let always_restarted = settings.http.value || !settings.paths.value.is_empty();
+    let stop_signal = crate::process::STOP_SIGNAL.as_str();
     ResolvedProcess {
         runs_as: port.map(|port| procfile::substitute_port(&settings.command.value, port)),
         dir: settings
@@ -236,7 +258,7 @@ fn process(
             Readiness::Port => carte_api::Readiness::Port,
             Readiness::Http(path) => carte_api::Readiness::Http { path },
         })),
-        boot_timeout_secs: limits.boot_timeout.as_secs(),
+        boot_timeout_secs: settings.timed.then_some(limits.boot_timeout.as_secs()),
         paths: api(settings.paths),
         scope: api(settings.scope.map(|s| name(&s))),
         kind: api(settings.kind.map(|k| k.map(|k| name(&k)))),
@@ -245,66 +267,66 @@ fn process(
         preset: api(settings.preset.map(|p| p.map(|p| p.name().to_string()))),
         restart: api(settings.restart.map(|r| name(&r))),
         always_restarted,
-        gives_up_after: 5,
+        gives_up_after: crate::supervisor::GIVE_UP_AFTER,
         crash_window_secs: limits.crash_window.as_secs(),
-        stop_signal: "TERM".into(),
+        stop_signal: stop_signal
+            .strip_prefix("SIG")
+            .unwrap_or(stop_signal)
+            .to_string(),
         stop_grace_secs: limits.stop_grace.as_secs(),
         policy: api(settings.policy.map(policy)),
         runtime_policy: status.filter(|s| s.temporary).map(|s| s.policy),
+        env: templates(&settings.env),
+        provides: templates(&settings.provides),
+        defaults_error: settings.defaults_error,
     }
 }
 
-fn kube_project(world: &World, address: &KubeAddress) -> anyhow::Result<ResolvedKube> {
+fn kube_project(world: &World, address: &KubeAddress) -> Result<ResolvedKube, ConfigError> {
     let project = world
         .kube_project(&address.project)
-        .ok_or_else(|| anyhow!("no kube project {}", address.project))?;
-    let idle = project.idle_timeout.unwrap_or(world.machine.idle_timeout);
+        .ok_or_else(|| ConfigError::NotFound(format!("no kube project {}", address.project)))?;
     let forwards = project
         .services
         .iter()
         .filter(|(name, _)| address.service.as_ref().is_none_or(|s| s == *name))
         .map(|(name, service)| KubeForward {
             service: name.clone(),
-            aliases: Setting {
-                value: service.aliases.clone(),
-                default: Vec::new(),
-            },
-            namespace: Setting {
-                value: service.namespace.clone(),
-                default: None,
-            },
-            service_port: Setting {
-                value: service.service_port.as_ref().map(ToString::to_string),
-                default: None,
-            },
-            policy: Setting {
-                value: policy(project.policy(name)),
-                default: carte_api::Policy::Auto,
-            },
+            aliases: api(resolved::Setting::new(service.aliases.clone(), Vec::new())),
+            namespace: api(resolved::Setting::new(service.namespace.clone(), None)),
+            service_port: api(resolved::Setting::new(
+                service.service_port.as_ref().map(ToString::to_string),
+                None,
+            )),
+            policy: api(resolved::Setting::new(
+                policy(project.policy(name)),
+                carte_api::Policy::Auto,
+            )),
         })
         .collect();
     Ok(ResolvedKube {
         name: project.name.clone(),
         config_path: project.config_path.clone(),
         context: project.context.clone(),
-        kubeconfig: Setting {
-            value: project.kubeconfig.clone(),
-            default: None,
-        },
-        namespaces: Setting {
-            value: project.namespaces.clone(),
-            default: Vec::new(),
-        },
+        kubeconfig: api(resolved::Setting::new(project.kubeconfig.clone(), None)),
+        namespaces: api(resolved::Setting::new(
+            project.namespaces.clone(),
+            Vec::new(),
+        )),
         namespace: address.namespace.clone(),
         service: address.service.clone(),
-        env_provider: Setting {
-            value: project.env_provider.map(|p| name(&p)),
-            default: None,
-        },
-        idle_timeout_secs: Setting {
-            value: idle.as_secs(),
-            default: world.machine.idle_timeout.as_secs(),
-        },
+        env_provider: api(resolved::Setting::new(
+            project.env_provider.map(|p| name(&p)),
+            None,
+        )),
+        idle_timeout_secs: api(resolved::Setting::inheriting(
+            project
+                .idle_timeout
+                .unwrap_or(world.machine.idle_timeout)
+                .as_secs(),
+            MachineConfig::default().idle_timeout.as_secs(),
+            world.machine.idle_timeout.as_secs(),
+        )),
         forwards,
     })
 }
@@ -323,10 +345,12 @@ fn statuses<'a>(snapshot: &'a Snapshot, key: &InstanceKey) -> Vec<&'a ProcessSta
         .collect()
 }
 
-fn api<T>(setting: resolved::Setting<T>) -> Setting<T> {
+fn api<T: PartialEq + Clone>(setting: resolved::Setting<T>) -> Setting<T> {
     Setting {
+        differs: setting.differs(),
         value: setting.value,
         default: setting.default,
+        inherited: setting.inherited,
     }
 }
 
