@@ -116,7 +116,15 @@ for _ in $(seq 30); do
   as_dev 'systemctl --user is-system-running' >/dev/null 2>&1 && break
   sleep 1
 done
-echo "user manager: $(as_dev 'systemctl --user is-system-running')"
+manager=$(as_dev 'systemctl --user is-system-running' 2>&1)
+echo "user manager: $manager"
+case $manager in
+  running | degraded) ;;
+  *)
+    systemctl --no-pager status "user@$(id -u dev).service"
+    journalctl -b --no-pager | tail -40
+    ;;
+esac
 
 # A project with one app that carte runs on demand.
 as_dev 'mkdir -p ~/shop ~/.config/carte/projects
