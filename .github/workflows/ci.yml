@@ -3,7 +3,13 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
 # A new push to a pull request cancels its run in progress. Pushes to main
 # queue instead, and release.yml finishes any release from whichever run
 # reaches the newest commit.
