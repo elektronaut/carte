@@ -8,7 +8,7 @@ use std::time::Duration;
 use carte_api::attach::{AttachRequest, Frame};
 use carte_api::{
     ControlResponse, EnvResponse, Event as DaemonEvent, KubeServicesRequest, KubeServicesResponse,
-    LogLine, MarkRequest, ShareResponse, Snapshot, StopAllRequest, paths,
+    LogLine, MarkRequest, ProxiedRequest, ShareResponse, Snapshot, StopAllRequest, paths,
 };
 use http::Method;
 use ratatui::crossterm::event::{
@@ -27,6 +27,7 @@ pub struct Tasks {
     socket: PathBuf,
     tx: UnboundedSender<Event>,
     logs: Option<JoinHandle<()>>,
+    requests: Option<JoinHandle<()>>,
     /// Typing into a process: where keys go, and the task that sends them.
     typing: Option<(UnboundedSender<Vec<u8>>, JoinHandle<()>)>,
 }
@@ -44,6 +45,7 @@ impl Tasks {
             socket,
             tx,
             logs: None,
+            requests: None,
             typing: None,
         }
     }
@@ -129,6 +131,33 @@ impl Tasks {
                 }));
             }
             Command::StopLogs => self.stop_logs(),
+            Command::FollowRequests {
+                generation,
+                request,
+            } => {
+                self.stop_requests();
+                self.requests = Some(tokio::spawn(async move {
+                    let line_tx = tx.clone();
+                    let result = client
+                        .stream(
+                            Method::POST,
+                            paths::REQUESTS,
+                            Some(&request),
+                            |request: ProxiedRequest| {
+                                let _ = line_tx.send(Event::Request {
+                                    generation,
+                                    request: Box::new(request),
+                                });
+                            },
+                        )
+                        .await;
+                    let _ = tx.send(Event::RequestsEnded {
+                        generation,
+                        error: result.err().map(|e| format!("{e:#}")),
+                    });
+                }));
+            }
+            Command::StopRequests => self.stop_requests(),
             Command::Share(request) => {
                 tokio::spawn(async move {
                     let result = client
@@ -228,6 +257,12 @@ impl Tasks {
 
     fn stop_logs(&mut self) {
         if let Some(task) = self.logs.take() {
+            task.abort();
+        }
+    }
+
+    fn stop_requests(&mut self) {
+        if let Some(task) = self.requests.take() {
             task.abort();
         }
     }

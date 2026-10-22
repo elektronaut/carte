@@ -67,6 +67,8 @@ pub enum Intent {
     ToggleMouse,
     /// Show the tab with this number below the details.
     PickTab(u8),
+    /// Open the selected row of the tab, like a request.
+    OpenRow,
     /// Show the tab this many places along.
     StepTab(isize),
     /// Give the right side the whole main area, or go back.
@@ -115,9 +117,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n N", "older, newer match in the logs"),
             ("esc", "clear the filter or search"),
             ("a", "show all, running or shared"),
-            ("1 2 3", "show logs, events, env"),
+            ("1 2 3 5", "show logs, events, env, requests"),
             ("[ ]", "previous, next tab"),
             ("z", "zoom the details and tabs, or go back"),
+            ("enter esc", "open a request, back to the list"),
             ("drag", "copy log lines"),
             ("-", "mark the logs with the time"),
             ("m", "mouse on or off"),
@@ -247,6 +250,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         (Focus::Tree, KeyCode::Right | KeyCode::Char('l')) => Some(Intent::Expand),
         (Focus::Tree, KeyCode::Enter | KeyCode::Char(' ')) => Some(Intent::Toggle),
         (Focus::Logs, KeyCode::Left | KeyCode::Char('h')) => Some(Intent::SwitchFocus),
+        (Focus::Logs, KeyCode::Enter) => Some(Intent::OpenRow),
         (Focus::Logs, KeyCode::Char('n')) => Some(Intent::FindMatch { older: true }),
         (Focus::Logs, KeyCode::Char('N')) => Some(Intent::FindMatch { older: false }),
         _ => None,

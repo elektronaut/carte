@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use carte_api::attach::{AttachRequest, Attached};
 use carte_api::{
     Action, Address, ControlRequest, ControlResponse, Credentials, EnvResponse, EventsRequest,
-    InstanceStatus, KubeProjectInfo, KubeServiceEntry, LogLine, LogsRequest, ShareRequest,
-    ShareResponse, Snapshot, UnshareRequest,
+    InstanceStatus, KubeProjectInfo, KubeServiceEntry, LogLine, LogsRequest, ProxiedRequest,
+    RequestsRequest, ShareRequest, ShareResponse, Snapshot, UnshareRequest,
 };
 use carte_core::detach::{DetachFilter, DetachKeys};
 use ratatui::crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -18,6 +18,7 @@ use super::browse::{self, Browse};
 use super::input::{self, Confirm, Control, Focus, Intent, Mode};
 use super::jump::{self, Jump};
 use super::logs::{Logs, Prefix};
+use super::requests::Requests;
 use super::tabs::{EnvSubject, EnvTab, Tab};
 use super::target;
 use super::theme::Theme;
@@ -37,6 +38,14 @@ pub enum Event {
         line: LogLine,
     },
     LogsEnded {
+        generation: u64,
+        error: Option<String>,
+    },
+    Request {
+        generation: u64,
+        request: Box<ProxiedRequest>,
+    },
+    RequestsEnded {
         generation: u64,
         error: Option<String>,
     },
@@ -91,6 +100,12 @@ pub enum Command {
         request: EventsRequest,
     },
     StopLogs,
+    /// Follows the requests the proxy answers into the requests tab.
+    FollowRequests {
+        generation: u64,
+        request: RequestsRequest,
+    },
+    StopRequests,
     Share(ShareRequest),
     Unshare(UnshareRequest),
     Open(String),
@@ -178,6 +193,7 @@ pub struct App {
     pub focus: Focus,
     pub mode: Mode,
     pub logs: Logs,
+    pub requests: Requests,
     /// The tab the pane below the details shows.
     pub tab: Tab,
     /// While the details and tabs fill the main area without the tree, the focus
@@ -231,6 +247,7 @@ impl App {
             focus: Focus::Tree,
             mode: Mode::Normal,
             logs: Logs::default(),
+            requests: Requests::default(),
             tab: Tab::Logs,
             zoom: None,
             notice: None,
@@ -307,6 +324,11 @@ impl App {
             }
             Event::Log { generation, line } => self.logs.push(generation, line),
             Event::LogsEnded { generation, error } => self.logs.end(generation, error),
+            Event::Request {
+                generation,
+                request,
+            } => self.requests.push(generation, *request),
+            Event::RequestsEnded { generation, error } => self.requests.end(generation, error),
             Event::ControlDone { verb, result } => self.control_done(verb, result),
             Event::Shared(result) => self.shared(result),
             Event::Unshared(Ok(apps)) => {
@@ -358,6 +380,7 @@ impl App {
         }
         commands.extend(self.sync_logs());
         commands.extend(self.sync_env());
+        commands.extend(self.sync_requests());
         commands
     }
 
@@ -502,6 +525,14 @@ impl App {
                 let top = self.logs_area.y + 1;
                 let lines = match self.tab {
                     Tab::Logs | Tab::Events => true,
+                    Tab::Requests => {
+                        let listed = self.requests.open.is_none() || self.zoom.is_some();
+                        if listed && at.y >= top && !self.requests.detail_area.contains(at) {
+                            let row = usize::from(at.y - top);
+                            self.requests.select_index(self.requests.offset + row);
+                        }
+                        false
+                    }
                     Tab::Env => false,
                 };
                 if lines
@@ -565,6 +596,15 @@ impl App {
                     match self.tab {
                         Tab::Logs | Tab::Events => self.logs.scroll_by(if up { 3 } else { -3 }),
                         Tab::Env => self.env.scroll_by(if up { -3 } else { 3 }),
+                        Tab::Requests if self.requests.detail_area.contains(at) => {
+                            let requests = &mut self.requests;
+                            let delta = if up { -3 } else { 3 };
+                            requests.detail_scroll =
+                                requests.detail_scroll.saturating_add_signed(delta);
+                        }
+                        Tab::Requests => {
+                            self.tab_key(Intent::Move(if up { -3 } else { 3 }));
+                        }
                     }
                 } else if self.tree_area.contains(at) {
                     self.move_by(if up { -1 } else { 1 });
@@ -623,10 +663,9 @@ impl App {
             }
             return;
         }
-        let env = match self.tab {
-            Tab::Env => true,
-            Tab::Logs | Tab::Events => false,
-        };
+        if self.focus == Focus::Logs && self.tab_key(intent) {
+            return;
+        }
         match (intent, self.focus) {
             (Intent::Quit, _) => self.quit = true,
             (Intent::Help, _) => self.mode = Mode::Help,
@@ -649,13 +688,7 @@ impl App {
             }
             (Intent::StepTab(delta), _) => self.pick_tab(self.tab.step(delta)),
             (Intent::Move(delta), Focus::Tree) => self.move_by(delta),
-            (Intent::Move(delta), Focus::Logs) if env => self.env.scroll_by(delta),
-            (Intent::PageDown, Focus::Logs) if env => self.env.scroll_by(page(self.env.height)),
-            (Intent::PageUp, Focus::Logs) if env => self.env.scroll_by(-page(self.env.height)),
-            (Intent::Top, Focus::Logs) if env => self.env.scroll = 0,
-            (Intent::Bottom, Focus::Logs) if env => self.env.scroll = usize::MAX,
-            (Intent::StartFilter, Focus::Logs) if env => self.inform("/ searches the logs"),
-            (Intent::FindMatch { .. }, Focus::Logs) if env => {}
+            (Intent::OpenRow, _) => {}
             (Intent::Move(delta), Focus::Logs) => self.logs.scroll_by(-delta),
             (Intent::PageDown, Focus::Tree) => self.move_by(page(self.tree_height)),
             (Intent::PageUp, Focus::Tree) => self.move_by(-page(self.tree_height)),
@@ -864,12 +897,66 @@ impl App {
         }
     }
 
+    /// Keys the tabs other than logs and events handle themselves, with the tabs pane
+    /// focused; false leaves the key to the rest.
+    fn tab_key(&mut self, intent: Intent) -> bool {
+        let page = |height: usize| height.saturating_sub(1).max(1) as isize;
+        match self.tab {
+            Tab::Logs | Tab::Events => return false,
+            Tab::Env => {
+                let view = &mut self.env;
+                match intent {
+                    Intent::Move(delta) => view.scroll_by(delta),
+                    Intent::PageDown => view.scroll_by(page(view.height)),
+                    Intent::PageUp => view.scroll_by(-page(view.height)),
+                    Intent::Top => view.scroll = 0,
+                    Intent::Bottom => view.scroll = usize::MAX,
+                    Intent::StartFilter => self.inform("/ searches the logs"),
+                    Intent::FindMatch { .. } | Intent::OpenRow => {}
+                    _ => return false,
+                }
+            }
+            Tab::Requests => {
+                let zoomed = self.zoom.is_some();
+                let requests = &mut self.requests;
+                let open = requests.open.is_some() && !zoomed;
+                if zoomed && matches!(intent, Intent::ClearFilter) {
+                    return false;
+                }
+                let scroll = |requests: &mut Requests, delta: isize| {
+                    requests.detail_scroll = requests.detail_scroll.saturating_add_signed(delta);
+                };
+                match intent {
+                    Intent::Move(delta) if open => scroll(requests, delta),
+                    Intent::PageDown if open => scroll(requests, page(requests.height)),
+                    Intent::PageUp if open => scroll(requests, -page(requests.height)),
+                    Intent::Top if open => requests.detail_scroll = 0,
+                    Intent::Bottom if open => requests.detail_scroll = usize::MAX,
+                    Intent::ClearFilter if open => requests.open = None,
+                    Intent::Move(delta) => requests.select_by(delta),
+                    Intent::PageDown => requests.select_by(page(requests.height)),
+                    Intent::PageUp => requests.select_by(-page(requests.height)),
+                    Intent::Top => requests.select_index(0),
+                    Intent::Bottom => requests.follow(),
+                    Intent::OpenRow => requests.open_selected(),
+                    Intent::StartFilter => self.inform("/ searches the logs"),
+                    Intent::FindMatch { .. } | Intent::ClearFilter => {}
+                    _ => return false,
+                }
+                if zoomed {
+                    self.requests.open = None;
+                }
+            }
+        }
+        true
+    }
+
     /// Shows `tab`; picking the env tab again fetches the env again.
     fn pick_tab(&mut self, tab: Tab) {
         if tab == self.tab {
             match tab {
                 Tab::Env => self.env.subject = EnvSubject::None,
-                Tab::Logs | Tab::Events => {}
+                Tab::Logs | Tab::Events | Tab::Requests => {}
             }
         }
         self.tab = tab;
@@ -880,7 +967,7 @@ impl App {
     fn env_subject(&self) -> EnvSubject {
         match self.tab {
             Tab::Env => {}
-            Tab::Logs | Tab::Events => return EnvSubject::None,
+            Tab::Logs | Tab::Events | Tab::Requests => return EnvSubject::None,
         }
         let unavailable = |text: &str| EnvSubject::Unavailable(text.to_string());
         let Some(id) = self.selected_node().map(Node::id) else {
@@ -1304,7 +1391,7 @@ impl App {
         let node = self.selected_node();
         let events = match self.tab {
             Tab::Events => true,
-            Tab::Logs | Tab::Env => false,
+            Tab::Logs | Tab::Env | Tab::Requests => false,
         };
         if events || self.follows_kube_events() {
             return Some(Command::FollowEvents {
@@ -1340,7 +1427,7 @@ impl App {
         self.snapshot.as_ref()?;
         let id = self.selected_node().map(Node::id);
         match self.tab {
-            Tab::Env => None,
+            Tab::Env | Tab::Requests => None,
             Tab::Events => Some(match id {
                 Some(id) if !matches!(id, NodeId::Folder { .. }) => {
                     format!("events {}", target::label(id))
@@ -1357,10 +1444,42 @@ impl App {
         }
     }
 
+    /// Starts a new requests stream when the selection changed: the requests for it
+    /// and everything below, or every request for a folder or an empty tree.
+    fn sync_requests(&mut self) -> Option<Command> {
+        let target = self
+            .selected_node()
+            .map(Node::id)
+            .filter(|id| !matches!(id, NodeId::Folder { .. }));
+        let wanted = match self.tab {
+            Tab::Requests if self.snapshot.is_some() => Some(match target {
+                Some(id) => format!("requests {}", target::label(id)),
+                None => "requests".to_string(),
+            }),
+            Tab::Requests | Tab::Logs | Tab::Events | Tab::Env => None,
+        };
+        if wanted == self.requests.key {
+            return None;
+        }
+        let target = target.map(target::address);
+        let generation = self.requests.restart(wanted.clone());
+        if wanted.is_none() {
+            return Some(Command::StopRequests);
+        }
+        Some(Command::FollowRequests {
+            generation,
+            request: RequestsRequest {
+                target,
+                follow: true,
+                tail: Some(1000),
+            },
+        })
+    }
+
     fn log_prefix(&self) -> Prefix {
         let events = match self.tab {
             Tab::Events => true,
-            Tab::Logs | Tab::Env => false,
+            Tab::Logs | Tab::Env | Tab::Requests => false,
         };
         if events || self.follows_kube_events() {
             return Prefix::None;
@@ -1464,10 +1583,104 @@ mod tests {
         assert_eq!(app.tab, Tab::Events);
         press(&mut app, now, KeyCode::Char('['));
         let commands = press(&mut app, now, KeyCode::Char('['));
-        assert_eq!(app.tab, Tab::Env, "[ goes around to the last tab");
-        assert_eq!(commands, [Command::StopLogs], "a stack has no env");
+        assert_eq!(app.tab, Tab::Requests, "[ goes around to the last tab");
+        let [Command::StopLogs, Command::FollowRequests { request, .. }] = commands.as_slice()
+        else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(
+            request.target.as_ref().map(|t| t.address.as_str()),
+            Some("@main")
+        );
+        let commands = press(&mut app, now, KeyCode::Char('['));
+        assert_eq!(app.tab, Tab::Env);
+        assert_eq!(commands, [Command::StopRequests], "a stack has no env");
         assert_eq!(app.focus, Focus::Tree, "only tab moves the focus");
         assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn the_requests_tab_follows_the_selection_and_opens_a_request() {
+        use crate::tui::requests::tests::request;
+
+        let (mut app, now) = connected();
+        let commands = press(&mut app, now, KeyCode::Char('5'));
+        let [
+            Command::StopLogs,
+            Command::FollowRequests { request: asked, .. },
+        ] = commands.as_slice()
+        else {
+            panic!("{commands:?}");
+        };
+        let target = asked.target.as_ref().expect("scoped to the project");
+        assert_eq!(
+            (target.address.as_str(), target.project.as_deref()),
+            ("", Some("nova"))
+        );
+        assert!(asked.follow);
+
+        let commands = press(&mut app, now, KeyCode::Down);
+        let [
+            Command::FollowRequests {
+                generation,
+                request: asked,
+            },
+        ] = commands.as_slice()
+        else {
+            panic!("{commands:?}");
+        };
+        assert_eq!(
+            asked.target.as_ref().map(|t| t.address.as_str()),
+            Some("@main"),
+            "requests follow the selection"
+        );
+        let generation = *generation;
+        for (seq, path) in [(1, "/"), (2, "/login")] {
+            app.update(
+                Event::Request {
+                    generation,
+                    request: Box::new(request(seq, path, Some(200))),
+                },
+                now,
+            );
+        }
+        app.update(
+            Event::Request {
+                generation: generation - 1,
+                request: Box::new(request(3, "/stale", Some(200))),
+            },
+            now,
+        );
+        assert_eq!(
+            app.requests.rows().len(),
+            2,
+            "an earlier scope's request is dropped"
+        );
+
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Enter);
+        assert_eq!(
+            app.requests.opened().map(|r| r.path.as_str()),
+            Some("/login")
+        );
+        press(&mut app, now, KeyCode::Esc);
+        assert_eq!(app.requests.open, None, "esc goes back to the list");
+        assert_eq!(app.tab, Tab::Requests);
+        assert_eq!(app.focus, Focus::Logs);
+        press(&mut app, now, KeyCode::Up);
+        press(&mut app, now, KeyCode::Up);
+        press(&mut app, now, KeyCode::Enter);
+        assert_eq!(app.requests.opened().map(|r| r.path.as_str()), Some("/"));
+        press(&mut app, now, KeyCode::Esc);
+        press(&mut app, now, KeyCode::Char('G'));
+        assert_eq!(app.requests.selected, None, "G follows again");
+        app.logs_area = Rect::new(40, 0, 40, 20);
+        app.update(mouse(MouseEventKind::Down(MouseButton::Left), 50, 1), now);
+        assert_eq!(app.requests.selected, Some(1), "a click selects a request");
+
+        let commands = press(&mut app, now, KeyCode::Char('1'));
+        assert_eq!(follows(&commands), ["@main"]);
+        assert!(commands.contains(&Command::StopRequests), "{commands:?}");
     }
 
     #[test]

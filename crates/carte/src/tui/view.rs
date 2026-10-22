@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use carte_api::{
-    BootProgress, Event, InstanceStatus, Policy, Problem, ProcessState, ProcessStatus, TunnelState,
+    BootProgress, Event, InstanceStatus, Policy, Problem, ProcessState, ProcessStatus,
+    ProxiedRequest, Served, TunnelState,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -18,6 +19,7 @@ use super::browse::Browse;
 use super::input::{Confirm, Focus, HELP, Mode};
 use super::jump;
 use super::logs::Logs;
+use super::requests::Requests;
 use super::tabs::{EnvSubject, Tab};
 use super::target;
 use super::theme::Theme;
@@ -867,19 +869,6 @@ fn share_details(theme: &Theme, app: &App, project: &str, instance: &InstanceSta
         )),
     }
     lines.push(Line::from(notes.join(" · ")).fg(theme.muted));
-    let visits: Vec<_> = share
-        .requests
-        .iter()
-        .filter(|r| r.app == instance.app)
-        .collect();
-    for request in visits.iter().rev().take(3).rev() {
-        let line = Line::from(format!("← {} {}", request.method, request.path));
-        lines.alone(if request.refused {
-            line.fg(theme.error)
-        } else {
-            line.fg(theme.muted)
-        });
-    }
     lines
 }
 
@@ -972,6 +961,7 @@ fn render_tabs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         .is_some_and(|id| app.kube_project(id.project()).is_some());
     let status = match app.tab {
         Tab::Logs | Tab::Events => logs_status(theme, &app.logs),
+        Tab::Requests => requests_status(theme, &app.requests, app.zoom.is_some()),
         Tab::Env => Vec::new(),
     };
     let status = Line::from(status);
@@ -1006,7 +996,241 @@ fn render_tabs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     match app.tab {
         Tab::Logs | Tab::Events => render_logs(theme, frame, inner, app),
         Tab::Env => render_env(theme, frame, inner, app),
+        Tab::Requests => render_requests(theme, frame, inner, app),
     }
+}
+
+/// Following, the selected row's place, or the way back from an open request.
+fn requests_status(theme: &Theme, requests: &Requests, zoomed: bool) -> Vec<Span<'static>> {
+    if requests.open.is_some() && !zoomed {
+        return vec![Span::raw(" esc back to the list ").fg(theme.muted)];
+    }
+    vec![match requests.selected_index() {
+        Some(index) => {
+            Span::raw(format!(" {}/{} ", index + 1, requests.rows().len())).fg(theme.warn)
+        }
+        None => Span::raw(" following ").fg(theme.muted),
+    }]
+}
+
+/// The requests tab: one row per request, or the open one in full. Zoomed, the list
+/// is on the left and the selected request on the right.
+fn render_requests(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut App) {
+    app.requests.height = usize::from(inner.height);
+    app.requests.detail_area = Rect::default();
+    if app.zoom.is_some() {
+        let [list, detail] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(inner);
+        render_request_list(theme, frame, list, app);
+        let block = Block::new()
+            .borders(Borders::LEFT)
+            .border_style(Style::new().fg(theme.border));
+        let detail_inner = block.inner(detail);
+        frame.render_widget(block, detail);
+        app.requests.detail_area = detail;
+        let seq = app.requests.shown().map(|r| r.seq);
+        render_request(theme, frame, detail_inner, app, seq);
+        return;
+    }
+    if app.requests.open.is_some() {
+        let seq = app.requests.open;
+        render_request(theme, frame, inner, app, seq);
+        return;
+    }
+    render_request_list(theme, frame, inner, app);
+}
+
+/// The request numbered `seq` in full, scrolled.
+fn render_request(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App, seq: Option<u64>) {
+    let requests = &mut app.requests;
+    let Some(request) = seq.and_then(|seq| requests.request(seq)) else {
+        return;
+    };
+    let lines = request_detail(theme, request, usize::from(area.width).max(1));
+    requests.detail_scroll = requests
+        .detail_scroll
+        .min(lines.len().saturating_sub(usize::from(area.height)));
+    let scroll = u16::try_from(requests.detail_scroll).unwrap_or(u16::MAX);
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), area);
+}
+
+fn render_request_list(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut App) {
+    let requests = &app.requests;
+    if requests.is_empty() {
+        let message = match &requests.ended {
+            Some(reason) => format!("No requests: {reason}"),
+            None => "No requests yet.".into(),
+        };
+        frame.render_widget(Paragraph::new(message.fg(theme.muted)), inner);
+        return;
+    }
+    let focused = app.focus == Focus::Logs;
+    let range = app.requests.window(usize::from(inner.height));
+    let requests = &app.requests;
+    let selected = requests.selected_index();
+    let rows: Vec<Row> = requests
+        .rows()
+        .range(range.clone())
+        .enumerate()
+        .map(|(i, request)| {
+            let muted = match (Some(range.start + i) == selected, focused) {
+                (true, true) => theme.selection_fg,
+                (true, false) => theme.fg,
+                (false, _) => theme.muted,
+            };
+            request_row(theme, request, muted)
+        })
+        .collect();
+    let selected_style = if focused {
+        Style::new().bg(theme.selection_bg)
+    } else {
+        Style::new().add_modifier(Modifier::DIM | Modifier::REVERSED)
+    };
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Fill(1),
+            Constraint::Length(9),
+            Constraint::Length(6),
+            Constraint::Length(1),
+        ],
+    )
+    .row_highlight_style(selected_style);
+    let mut state = TableState::default()
+        .with_selected(selected.and_then(|index| index.checked_sub(range.start)));
+    frame.render_stateful_widget(table, inner, &mut state);
+}
+
+fn request_row(theme: &Theme, request: &ProxiedRequest, muted: Color) -> Row<'static> {
+    let status = match request.status {
+        Some(status) => Span::raw(status.to_string()).fg(status_color(theme, status)),
+        None => Span::raw("cancelled").fg(muted),
+    };
+    let mark = if request.shared {
+        Span::raw("↗").fg(theme.shared)
+    } else {
+        Span::raw("")
+    };
+    Row::new([
+        Cell::from(Span::raw(crate::clock::local_hms(request.at_ms)).fg(muted)),
+        Cell::from(request.method.clone()),
+        Cell::from(request.path.clone()),
+        Cell::from(Line::from(status).right_aligned()),
+        Cell::from(Line::from(Span::raw(millis(total_ms(request))).fg(muted)).right_aligned()),
+        Cell::from(mark),
+    ])
+}
+
+fn status_color(theme: &Theme, status: u16) -> Color {
+    match status {
+        500.. => theme.error,
+        400..500 => theme.warn,
+        200..300 => theme.ok,
+        _ => theme.fg,
+    }
+}
+
+/// Held and upstream together.
+fn total_ms(request: &ProxiedRequest) -> u64 {
+    request.held_ms + request.upstream_ms.unwrap_or(0)
+}
+
+/// `12ms`, `1.2s`, `2m05s`.
+fn millis(ms: u64) -> String {
+    match ms {
+        0..1000 => format!("{ms}ms"),
+        1000..60_000 => format!("{:.1}s", ms as f64 / 1000.0),
+        _ => format!("{}m{:02}s", ms / 60_000, ms / 1000 % 60),
+    }
+}
+
+/// An open request: what was asked and answered, how it was routed and how long it
+/// took, then the headers in full.
+fn request_detail(theme: &Theme, request: &ProxiedRequest, width: usize) -> Vec<Line<'static>> {
+    let label = |text: &str| (format!("{text:<10}"), Style::new().fg(theme.muted));
+    let field =
+        |name: &str, value: String| wrap(vec![label(name), (value, Style::new())], width, 10);
+    let mut lines = vec![Line::from(vec![
+        Span::raw(format!("{} {}", request.method, request.path)).bold(),
+        Span::raw("  "),
+        match request.status {
+            Some(status) => Span::raw(status.to_string()).fg(status_color(theme, status)),
+            None => Span::raw("cancelled").fg(theme.muted),
+        },
+    ])];
+    lines.extend(field("host", request.host.clone()));
+    let mut route = Vec::new();
+    if let Some(subject) = &request.subject {
+        route.push(subject.label());
+    }
+    if let Some(checkout) = &request.route.checkout {
+        route.push(format!("checkout {checkout}"));
+    }
+    if request.route.via_alias {
+        route.push("through an alias".into());
+    }
+    if !route.is_empty() {
+        lines.extend(field("route", route.join(" · ")));
+    }
+    if let Some(served) = &request.route.served {
+        let served = match served {
+            Served::Process { port } => format!("the process on port {port}"),
+            Served::Forward => "the kube port-forward".into(),
+            Served::File { path } => format!("the file {}", path.display()),
+            Served::Page { title } => format!("carte's page: {title}"),
+            Served::Unknown => "something this carte doesn't know".into(),
+        };
+        lines.extend(field("served by", served));
+    }
+    if !request.route.warmed.is_empty() {
+        lines.extend(field("warmed", request.route.warmed.join(", ")));
+    }
+    if request.held_ms > 0 {
+        lines.extend(field("held", millis(request.held_ms)));
+    }
+    if let Some(upstream) = request.upstream_ms {
+        lines.extend(field("upstream", millis(upstream)));
+    }
+    if request.shared {
+        let visitor = request.visitor.clone().unwrap_or_else(|| "unknown".into());
+        lines.push(Line::from(vec![
+            Span::styled(label("shared").0, Style::new().fg(theme.shared)),
+            Span::raw(format!("from {visitor}")),
+        ]));
+    }
+    if request.websocket {
+        lines.extend(field("upgrade", "WebSocket".into()));
+    }
+    for (title, headers) in [
+        ("request headers", &request.request_headers),
+        ("response headers", &request.response_headers),
+    ] {
+        lines.push(Line::default());
+        lines.push(Line::from(title.to_string()).bold());
+        if headers.is_empty() {
+            lines.push(Line::from("none".fg(theme.muted)));
+        }
+        for header in headers {
+            lines.extend(wrap(
+                vec![
+                    (format!("{}: ", header.name), Style::new().fg(theme.muted)),
+                    (header.value.clone(), Style::new()),
+                ],
+                width,
+                2.min(width / 2),
+            ));
+        }
+    }
+    if request.headers_truncated {
+        lines.push(Line::default());
+        lines.push(Line::from(
+            "Long headers were cut short, or some left out.".fg(theme.warn),
+        ));
+    }
+    lines
 }
 
 /// How far up the logs are, for the pane's border.
@@ -1023,7 +1247,7 @@ fn logs_status(theme: &Theme, logs: &Logs) -> Vec<Span<'static>> {
 fn render_logs(theme: &Theme, frame: &mut Frame, mut inner: Rect, app: &mut App) {
     let events = match app.tab {
         Tab::Events => true,
-        Tab::Logs | Tab::Env => false,
+        Tab::Logs | Tab::Env | Tab::Requests => false,
     };
     let logs = &app.logs;
     let typing = app.mode == Mode::Filter && app.focus == Focus::Logs;
@@ -1217,8 +1441,8 @@ fn has_problems(app: &App) -> bool {
 /// The most used keys for the focused pane, as many as fit in `width`, after
 /// `! problems` while there are any.
 fn footer_line(theme: &Theme, focus: Focus, tab: Tab, problems: bool, width: u16) -> Line<'static> {
-    let keys: &[(&str, &str)] = match focus {
-        Focus::Tree => &[
+    let keys: &[(&str, &str)] = match (focus, tab) {
+        (Focus::Tree, _) => &[
             ("?", "help"),
             ("q", "quit"),
             ("s", "start"),
@@ -1229,11 +1453,22 @@ fn footer_line(theme: &Theme, focus: Focus, tab: Tab, problems: bool, width: u16
             ("/", "filter"),
             ("a", "show"),
             ("d", "disable"),
-            ("1-3", "tabs"),
+            ("1-5", "tabs"),
             ("z", "zoom"),
             ("tab", tab.name()),
         ],
-        Focus::Logs => &[
+        (Focus::Logs, Tab::Requests) => &[
+            ("?", "help"),
+            ("q", "quit"),
+            ("↑↓", "move"),
+            ("enter", "open"),
+            ("esc", "back"),
+            ("G", "follow"),
+            ("1-5", "tabs"),
+            ("z", "zoom"),
+            ("tab", "tree"),
+        ],
+        (Focus::Logs, Tab::Logs | Tab::Events | Tab::Env) => &[
             ("?", "help"),
             ("q", "quit"),
             ("↑↓", "scroll"),
@@ -1241,7 +1476,7 @@ fn footer_line(theme: &Theme, focus: Focus, tab: Tab, problems: bool, width: u16
             ("G", "follow"),
             ("/", "search"),
             ("n", "next match"),
-            ("1-3", "tabs"),
+            ("1-5", "tabs"),
             ("z", "zoom"),
             ("tab", "tree"),
         ],
@@ -1667,7 +1902,7 @@ mod tests {
 │▾ ✖ nova !              2/4                 3%  412M││checkout main · /work/nova-billing                              │
 │  ▾ ✖ main              1/2                 3%  412M││worker pinned until the daemon restarts                         │
 │    ▾ ● billing pin*    ready               3%  412M│╰────────────────────────────────────────────────────────────────╯
-│        ● web           running             0%    0B│╭ 1 logs │ 2 events │ 3 env ────────────────────────── following ╮
+│        ● web           running             0%    0B│╭ 1 logs │ 2 events │ 3 env │ 5 requests ───────────── following ╮
 │        ● worker pin*   running             0%    0B││web    Puma starting in single mode...                          │
 │      ✖ frontend !      crashed                     ││worker Started worker with 5 threads                            │
 │  ▸ ● feature-x         1/2                 0%    0B││web    GET /up 200 in 2ms                                       │
@@ -1679,7 +1914,7 @@ mod tests {
 │                                                    ││                                                                │
 ╰────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────╯
 
- ! problems  ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  1-3 tabs  z zoom"
+ ! problems  ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  1-5 tabs  z zoom"
         );
     }
 
@@ -1889,7 +2124,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_a_share_and_its_visitors() {
+    fn renders_a_share_without_its_visits() {
         let mut snapshot = shared_sample();
         snapshot.shares[0].requests = ["/", "/login", "/admin", "/admin"]
             .iter()
@@ -1917,12 +2152,13 @@ mod tests {
         for wanted in [
             "shared at https://nova-billing--main--nova.demo.dev",
             "behind a password · shared for 2m",
-            "← GET /login",
-            "← GET /admin",
         ] {
             assert!(screen.contains(wanted), "{wanted:?} in\n{screen}");
         }
-        assert!(!screen.contains("← GET / "), "only the last three visits");
+        assert!(
+            !screen.contains("GET /login"),
+            "visits are in the requests tab\n{screen}"
+        );
         assert!(screen.contains("billing shared"), "{screen}");
     }
 
@@ -2060,7 +2296,7 @@ mod tests {
 ╭ nova-billing@main ───────────────────────────────────────────────────────────────────────────────────────────────────╮
 │● running · https://nova-billing.test · checkout main · /work/nova-billing · worker pinned until the daemon restarts  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ 1 logs │ 2 events │ 3 env ──────────────────────────────────────────────────────────────────────────────── following ╮
+╭ 1 logs │ 2 events │ 3 env │ 5 requests ─────────────────────────────────────────────────────────────────── following ╮
 │web GET /up 200 in 2ms                                                                                                │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -2068,7 +2304,7 @@ mod tests {
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
- ! problems  ? help  q quit  ↑↓ scroll  g top  G follow  / search  n next match  1-3 tabs  z zoom  tab tree"
+ ! problems  ? help  q quit  ↑↓ scroll  g top  G follow  / search  n next match  1-5 tabs  z zoom  tab tree"
         );
         assert_eq!(app.tree_area, Rect::default(), "the tree takes no clicks");
 
@@ -2214,7 +2450,7 @@ mod tests {
 │web exited with code 1 before it was ready                                    │
 │! stack \"billing\" names an app                                                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ 1 logs │ 2 events │ 3 env ──────────────────────────────────────── following ╮
+╭ 1 logs │ 2 events │ 3 env │ 5 requests ─────────────────────────── following ╮
 │No output yet.                                                                │
 │                                                                              │
 │                                                                              │
@@ -2483,7 +2719,7 @@ mod tests {
         assert_eq!(
             pane,
             [
-                "╭ 1 logs │ 2 events │ 3 env ───────────────────────────────╮",
+                "╭ 1 logs │ 2 events │ 3 env │ 5 requests ──────────────────╮",
                 "│CARTE_APP  nova-billing  carte                            │",
                 "│PATH       /Users/alex/.local/share/mise/installs/ruby/3.4│",
                 "│           /bin:/usr/local/bin:/usr/bin:/bin  mise        │",
@@ -2594,6 +2830,172 @@ mod tests {
         draw(&mut app, 36, 30);
         let tabs: Vec<Tab> = app.tab_spans.iter().map(|(tab, ..)| *tab).collect();
         assert_eq!(tabs, [Tab::Logs, Tab::Events], "env is under the status");
+    }
+
+    fn requests_app() -> App {
+        use crate::tui::requests::tests::request;
+
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('5'));
+        let generation = app.requests.generation;
+        let mut shared = request(3, "/admin", Some(500));
+        shared.shared = true;
+        shared.visitor = Some("203.0.113.9".into());
+        shared.held_ms = 1500;
+        shared.upstream_ms = Some(250);
+        shared.subject = Some(carte_api::EventSubject {
+            project: "nova".into(),
+            stack: Some("feature-x".into()),
+            app: Some("nova-billing".into()),
+            process: Some("web".into()),
+        });
+        shared.route.checkout = Some("main".into());
+        shared.route.served = Some(carte_api::Served::Process { port: 41207 });
+        shared.route.warmed = vec!["nova-frontend".into()];
+        shared.response_headers = vec![carte_api::Header {
+            name: "set-cookie".into(),
+            value: "session=abc".into(),
+        }];
+        shared.headers_truncated = true;
+        for request in [
+            request(1, "/", Some(200)),
+            request(2, "/assets/app.css", None),
+            shared,
+        ] {
+            app.update(
+                Event::Request {
+                    generation,
+                    request: Box::new(request),
+                },
+                now,
+            );
+        }
+        app
+    }
+
+    #[test]
+    fn renders_requests_with_their_status_and_a_mark_for_shared() {
+        let mut app = requests_app();
+        let screen = draw(&mut app, 120, 30);
+        let time = crate::clock::local_hms(0);
+        for wanted in [
+            format!("│{time} GET     /                                  200   12ms  │"),
+            format!("│{time} GET     /assets/app.css              cancelled   12ms  │"),
+            format!("│{time} GET     /admin                             500   1.8s ↗│"),
+        ] {
+            assert!(screen.contains(&wanted), "{wanted:?} in\n{screen}");
+        }
+        assert!(screen.contains("5 requests"), "{screen}");
+        assert!(screen.contains("─ following ╮"), "{screen}");
+
+        let now = app.now;
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Up);
+        let screen = draw(&mut app, 120, 30);
+        assert!(screen.contains("─ 3/3 ╮"), "{screen}");
+    }
+
+    #[test]
+    fn the_newest_requests_show_while_following() {
+        use crate::tui::requests::tests::request;
+
+        let mut app = requests_app();
+        let generation = app.requests.generation;
+        for seq in 4..40 {
+            let path = format!("/page/{seq}");
+            app.update(
+                Event::Request {
+                    generation,
+                    request: Box::new(request(seq, &path, Some(200))),
+                },
+                app.now,
+            );
+        }
+        let screen = draw(&mut app, 120, 30);
+        assert!(screen.contains("/page/39"), "{screen}");
+        assert!(!screen.contains("/page/4 "), "{screen}");
+    }
+
+    #[test]
+    fn renders_an_open_request_in_full() {
+        let mut app = requests_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Enter);
+        let screen = draw(&mut app, 120, 40);
+        for wanted in [
+            "│GET /admin  500",
+            "│host      nova-billing.test",
+            "│route     nova-billing@feature-x/web · checkout main",
+            "│served by the process on port 41207",
+            "│warmed    nova-frontend",
+            "│held      1.5s",
+            "│upstream  250ms",
+            "│shared    from 203.0.113.9",
+            "│request headers",
+            "│accept: */*",
+            "│response headers",
+            "│set-cookie: session=abc",
+            "│Long headers were cut short, or some left out.",
+            "esc back to the list ╮",
+        ] {
+            assert!(screen.contains(wanted), "{wanted:?} in\n{screen}");
+        }
+        press(&mut app, now, KeyCode::Esc);
+        let screen = draw(&mut app, 120, 40);
+        assert!(
+            screen.contains("/assets/app.css"),
+            "back to the list\n{screen}"
+        );
+    }
+
+    #[test]
+    fn zoomed_the_requests_split_into_the_list_and_the_selected_one() {
+        let mut app = requests_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Char('z'));
+        let screen = draw(&mut app, 120, 30);
+        let row = screen
+            .lines()
+            .find(|l| l.contains("200   12ms"))
+            .expect(&screen);
+        assert!(
+            row.contains("│GET /admin  500"),
+            "the newest beside the list\n{screen}"
+        );
+        assert!(screen.contains("│request headers"), "{screen}");
+
+        press(&mut app, now, KeyCode::Up);
+        press(&mut app, now, KeyCode::Up);
+        let screen = draw(&mut app, 120, 30);
+        assert!(
+            screen.contains("│GET /assets/app.css  cancelled"),
+            "{screen}"
+        );
+        assert!(!screen.contains("GET /admin  500"), "{screen}");
+
+        let detail = app.requests.detail_area;
+        app.update(
+            Event::Mouse(ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::ScrollDown,
+                column: detail.x + 2,
+                row: detail.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }),
+            now,
+        );
+        assert_eq!(
+            app.requests.detail_scroll, 3,
+            "the wheel scrolls the request"
+        );
+        assert_eq!(app.requests.selected, Some(2), "and leaves the list");
+
+        press(&mut app, now, KeyCode::Esc);
+        assert_eq!(app.zoom, None, "esc goes back from the zoom");
+        let screen = draw(&mut app, 120, 30);
+        assert!(screen.contains("─ 2/3 ╮"), "the list again\n{screen}");
     }
 
     #[test]

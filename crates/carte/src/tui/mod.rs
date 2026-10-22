@@ -18,6 +18,7 @@ pub(crate) mod fixtures;
 mod input;
 mod jump;
 mod logs;
+mod requests;
 mod saved;
 mod tabs;
 mod target;
