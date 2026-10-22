@@ -195,7 +195,8 @@ pub struct App {
     pub tree_area: Rect,
     pub tree_offset: usize,
     pub logs_area: Rect,
-    /// Where the tree's title counts problems; empty while there are none.
+    /// Where the tree's title counts problems or says the tunnel is down; empty while
+    /// there are none.
     pub problems_area: Rect,
     pub selection: Option<Selection>,
     pub env: Option<EnvView>,
