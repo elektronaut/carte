@@ -425,6 +425,7 @@ pub(crate) mod tests {
             scheme: Scheme::Https,
             idle_timeout: None,
             teardown_delay: None,
+            serve_files: None,
             from_template: false,
             apps: vec![
                 app("nova-postcard-frontend"),

@@ -2362,6 +2362,22 @@ fn kube_projects_answer_from_the_proxy() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("kube"), "carte {args:?}: {stderr}");
     }
+
+    let (head, body) = api_request(
+        &daemon,
+        "POST",
+        carte_api::paths::CONFIG,
+        r#"{"address":"grafana@monitoring","cwd":null,"project":"prod"}"#,
+    );
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
+    let carte_api::ResolvedConfig::Kube(kube) = serde_json::from_str(&body).unwrap() else {
+        panic!("{body}")
+    };
+    assert_eq!(kube.context, "prod");
+    assert!(kube.kubeconfig.differs());
+    assert!(!kube.namespaces.differs());
+    assert_eq!(kube.namespace.as_deref(), Some("monitoring"));
+    assert_eq!(kube.service.as_deref(), Some("grafana"));
 }
 
 #[test]
@@ -2854,4 +2870,78 @@ fn the_proxy_keeps_shared_requests_with_the_visitor_address() {
     assert_eq!(visit.path, "/visit");
     assert!(visit.shared && !visit.websocket);
     assert_eq!(visit.visitor.as_deref(), Some("203.0.113.9"));
+}
+
+/// What the daemon resolved for an address in the acme project.
+fn resolved_config(daemon: &Daemon, address: &str) -> (String, String) {
+    let target = carte_api::Address {
+        address: address.into(),
+        cwd: None,
+        project: Some("acme".into()),
+    };
+    api_request(
+        daemon,
+        "POST",
+        carte_api::paths::CONFIG,
+        &serde_json::to_string(&target).unwrap(),
+    )
+}
+
+#[test]
+fn the_daemon_resolves_the_config_of_an_address_with_its_defaults() {
+    let daemon = Daemon::start_with_project(
+        "idle_timeout = \"15m\"\n\n[apps.acme-web]\naliases = [\"shop\"]\npolicy = \"auto\"\n\n[apps.acme-web.processes.worker]\npty = false\n",
+    );
+    let page = daemon.request("web.acme.test", "/");
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    daemon.run(&["disable", "web/worker"]);
+
+    let (head, body) = resolved_config(&daemon, "");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
+    let carte_api::ResolvedConfig::Project(project) = serde_json::from_str(&body).unwrap() else {
+        panic!("{body}")
+    };
+    assert_eq!(project.idle_timeout_secs.value, 900);
+    assert!(
+        !project.idle_timeout_secs.differs(),
+        "set to the machine's value"
+    );
+    assert_eq!(project.env_provider.value.as_deref(), Some("none"));
+    assert!(project.env_provider.differs());
+    assert_eq!(project.stacks[0].name, "main");
+    assert_eq!(project.stacks[0].checkouts[0].app, "acme-web");
+
+    let (head, body) = resolved_config(&daemon, "web");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
+    let carte_api::ResolvedConfig::App(app) = serde_json::from_str(&body).unwrap() else {
+        panic!("{body}")
+    };
+    assert_eq!(app.checkout, "main");
+    assert_eq!(app.process_source.as_deref(), Some("Procfile.dev"));
+    let hosts: Vec<&str> = app.hostnames.iter().map(|h| h.host.as_str()).collect();
+    assert!(hosts.contains(&"web.acme.test"), "{hosts:?}");
+    assert!(hosts.contains(&"shop.test"), "{hosts:?}");
+    assert!(app.aliases.differs());
+    assert_eq!(app.policy.value, carte_api::Policy::Auto);
+    assert!(!app.policy.differs(), "set to the default");
+    assert!(!app.serve_files.differs());
+    let web = app.processes.iter().find(|p| p.name == "web").unwrap();
+    assert!(web.http.value && !web.http.differs());
+    assert!(web.port.is_some(), "{web:?}");
+    assert_eq!(web.runs_as.as_deref(), Some(web.command.value.as_str()));
+    assert_eq!(web.runtime_policy, None);
+
+    let (head, body) = resolved_config(&daemon, "web/worker");
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
+    let carte_api::ResolvedConfig::Process(worker) = serde_json::from_str(&body).unwrap() else {
+        panic!("{body}")
+    };
+    assert!(!worker.pty.value && worker.pty.differs());
+    assert!(!worker.command.differs());
+    assert!(!worker.policy.differs());
+    assert_eq!(worker.runtime_policy, Some(carte_api::Policy::Disabled));
+    assert_eq!(worker.restart.value, "on-failure");
+
+    let (head, body) = resolved_config(&daemon, "web/nope");
+    assert!(head.starts_with("HTTP/1.1 404"), "{head}{body}");
 }

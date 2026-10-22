@@ -22,6 +22,8 @@ pub mod paths {
     pub const ENV: &str = "/v1/env";
     /// The env a process of an `Address` gets, as an `EnvResponse`.
     pub const PROCESS_ENV: &str = "/v1/process-env";
+    /// POST an `Address`: what carte resolved for it, as a `ResolvedConfig`.
+    pub const CONFIG: &str = "/v1/config";
     pub const RELOAD: &str = "/v1/reload";
     pub const SHARE: &str = "/v1/share";
     pub const UNSHARE: &str = "/v1/unshare";
@@ -679,6 +681,237 @@ impl EventKind {
             EventKind::Unknown => "unknown",
         }
     }
+}
+
+/// A setting as carte resolved it, and its default: the built-in value, or the
+/// project's or the machine's setting it overrides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Setting<T> {
+    pub value: T,
+    pub default: T,
+}
+
+impl<T: PartialEq> Setting<T> {
+    /// The configuration sets it to something other than its default. A setting
+    /// written out with its default value doesn't differ.
+    pub fn differs(&self) -> bool {
+        self.value != self.default
+    }
+}
+
+/// What carte resolved for an address, configuration only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "for")]
+pub enum ResolvedConfig {
+    /// A project, or one of its stacks.
+    Project(ResolvedProject),
+    App(ResolvedApp),
+    Process(ResolvedProcess),
+    /// A kube project, or a namespace or Service of it.
+    Kube(ResolvedKube),
+    /// Sent by a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedProject {
+    pub name: String,
+    pub config_path: PathBuf,
+    /// Made by a template, whose file `config_path` is.
+    pub from_template: bool,
+    /// The stack the address named; `stacks` then has only that one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<String>,
+    /// `main` first.
+    pub stacks: Vec<ResolvedStack>,
+    pub strip_prefix: Option<String>,
+    /// `None` detects the provider in each checkout.
+    pub env_provider: Setting<Option<String>>,
+    pub env: Vec<EnvTemplate>,
+    pub requires: Vec<String>,
+    /// `https` or `http`.
+    pub scheme: Setting<String>,
+    pub idle_timeout_secs: Setting<u64>,
+    pub teardown_delay_secs: Setting<u64>,
+    /// The default `serve_files` of its apps.
+    pub serve_files: Setting<Option<PathBuf>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedStack {
+    pub name: String,
+    /// The branch its worktrees have checked out, when they agree.
+    pub branch: Option<String>,
+    /// Where each app of the stack runs from.
+    pub checkouts: Vec<StackCheckout>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StackCheckout {
+    pub app: String,
+    /// `main`, or the stack's worktree; `main` in another stack is a fallback.
+    pub checkout: String,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvTemplate {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedApp {
+    pub project: String,
+    pub app: String,
+    pub short: String,
+    pub stack: String,
+    /// `main`, or the stack's worktree; `main` in another stack is a fallback.
+    pub checkout: String,
+    pub checkout_path: PathBuf,
+    /// Its own hostnames first, then main's when it is in another stack.
+    pub hostnames: Vec<ResolvedHost>,
+    pub aliases: Setting<Vec<String>>,
+    /// Takes any hostname under its own.
+    pub subdomains: Setting<bool>,
+    pub env: ResolvedEnv,
+    pub idle_timeout_secs: Setting<u64>,
+    /// Apps of other projects are `app` of `project`.
+    pub depends_on: Setting<Vec<Dependency>>,
+    pub serve_files: Setting<Option<PathBuf>>,
+    /// The policy of its processes, unless a process sets its own.
+    pub policy: Setting<Policy>,
+    /// The fixed port of an app that only routes.
+    pub port: Setting<Option<u16>>,
+    /// May start ahead of a request.
+    pub warm: Setting<bool>,
+    /// `Procfile.dev`, `Procfile`, `config.ru`, `package.json`, `config`, `port` or
+    /// `serve_files`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_source: Option<String>,
+    pub processes: Vec<ResolvedProcess>,
+    /// Why its processes can't be listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedHost {
+    pub host: String,
+    /// The stack it reaches.
+    pub stack: String,
+    /// One of the app's `aliases`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub alias: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dependency {
+    pub project: String,
+    pub app: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedEnv {
+    /// `mise`, `direnv`, `shell` or `none`; the default is what carte detects.
+    pub provider: Setting<String>,
+    pub files: Setting<Vec<String>>,
+    /// The project's templates, then the app's.
+    pub templates: Vec<EnvTemplate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedProcess {
+    pub name: String,
+    pub command: Setting<String>,
+    /// The command as written, when carte replaced a hardcoded port in it with
+    /// `$PORT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewritten_from: Option<String>,
+    /// The command with its port filled in, once it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_as: Option<String>,
+    /// Relative to the checkout unless absolute.
+    pub cwd: Setting<Option<PathBuf>>,
+    /// Where it runs.
+    pub dir: PathBuf,
+    /// The port it was given, as `PORT`, once it has started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Serves the app's HTTP.
+    pub http: Setting<bool>,
+    pub ready: Setting<Readiness>,
+    /// How long it may take to become ready.
+    pub boot_timeout_secs: u64,
+    pub paths: Setting<Vec<String>>,
+    /// `instance` or `checkout`.
+    pub scope: Setting<String>,
+    /// `service`, `task` or `teardown`.
+    pub kind: Setting<Option<String>>,
+    pub pty: Setting<bool>,
+    pub after: Setting<Vec<String>>,
+    pub preset: Setting<Option<String>>,
+    /// `on-failure` or `never`.
+    pub restart: Setting<String>,
+    /// carte restarts it whenever it exits, as it does the HTTP process and processes
+    /// that serve paths.
+    pub always_restarted: bool,
+    /// Crashes within `crash_window_secs` that make carte give up on it.
+    pub gives_up_after: u32,
+    pub crash_window_secs: u64,
+    /// Sent first when it stops; `KILL` follows after `stop_grace_secs`.
+    pub stop_signal: String,
+    pub stop_grace_secs: u64,
+    /// From the configuration.
+    pub policy: Setting<Policy>,
+    /// A `pin` or `disable` that lasts until the daemon restarts, over `policy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_policy: Option<Policy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "check")]
+pub enum Readiness {
+    /// Its port accepts connections.
+    Port,
+    /// A GET of `path` answers with a status below 500.
+    Http { path: String },
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedKube {
+    pub name: String,
+    pub config_path: PathBuf,
+    pub context: String,
+    /// `None` uses `$KUBECONFIG`, then `~/.kube/config`.
+    pub kubeconfig: Setting<Option<PathBuf>>,
+    /// Empty for every namespace.
+    pub namespaces: Setting<Vec<String>>,
+    /// The namespace the address named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    /// The Service the address named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    pub env_provider: Setting<Option<String>>,
+    pub idle_timeout_secs: Setting<u64>,
+    /// The Services its `[apps.<service>]` tables configure; only the named one when
+    /// the address names a Service.
+    pub forwards: Vec<KubeForward>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubeForward {
+    pub service: String,
+    pub aliases: Setting<Vec<String>>,
+    /// The namespace its short hostname means.
+    pub namespace: Setting<Option<String>>,
+    /// A port name or number.
+    pub service_port: Setting<Option<String>>,
+    pub policy: Setting<Policy>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

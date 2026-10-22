@@ -81,6 +81,11 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let http_sockets = activation::activate_socket("http")?;
     let https_sockets = activation::activate_socket("https")?;
     activation::warn_unclaimed_sockets();
+    let limits = crate::resolved_config::ProcessLimits {
+        boot_timeout: options.boot_timeout,
+        stop_grace: options.grace,
+        crash_window: options.crash_window,
+    };
     let supervisor = supervisor::start(world, paths.clone(), Spawner::current()?, options);
 
     let loopback = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -177,6 +182,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         kube,
         paths: paths.clone(),
         requests,
+        limits,
         reload: Arc::new(move || {
             let world = discovery::load_world(&config_dir);
             let problems = world

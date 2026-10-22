@@ -606,6 +606,59 @@ pub fn is_watcher(name: &str, command: &str) -> bool {
         })
 }
 
+/// The command as the shell runs it with `PORT` set to `port`: `$PORT`, `${PORT}` and
+/// `${PORT:-…}` replaced with the number.
+pub fn substitute_port(command: &str, port: u16) -> String {
+    let port = port.to_string();
+    let mut out = String::with_capacity(command.len());
+    let mut rest = command;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let braced = after
+            .strip_prefix("{PORT")
+            .filter(|tail| tail.starts_with(['}', ':', '-']))
+            .and_then(|tail| tail.find('}').map(|end| &tail[end + 1..]));
+        if let Some(tail) = braced {
+            out.push_str(&port);
+            rest = tail;
+        } else if let Some(tail) = after.strip_prefix("PORT")
+            && !tail.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+        {
+            out.push_str(&port);
+            rest = tail;
+        } else {
+            out.push('$');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The process `name` as it would be without its own config, from the Procfile, or
+/// with only its command when config adds it. `None` when config has nothing for it,
+/// or leaving its config out gives no valid process list.
+pub fn unconfigured(checkout: &Path, settings: &AppSettings, name: &str) -> Option<ProcessSpec> {
+    let mut bare = settings.clone();
+    let own = bare.processes.entries.remove(name)?;
+    let find = |settings: &AppSettings| {
+        let list = load(checkout, settings).ok()?;
+        list.processes
+            .into_iter()
+            .chain(list.teardown)
+            .find(|p| p.name == name)
+    };
+    find(&bare).or_else(|| {
+        let command = ProcessOverride {
+            command: own.command,
+            ..ProcessOverride::default()
+        };
+        bare.processes.entries.insert(name.to_string(), command);
+        find(&bare)
+    })
+}
+
 /// Replaces a hardcoded `-p NNNN`, `-pNNNN`, `--port NNNN` or `--port=NNNN` with `$PORT`,
 /// and drops leading `unset PORT &&` or `unset PORT;`.
 pub fn rewrite_port(command: &str) -> Option<String> {
