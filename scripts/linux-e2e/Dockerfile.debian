@@ -1,0 +1,9 @@
+# Debian 13 (trixie): systemd 257, so DNS goes through a resolved.conf drop-in.
+FROM debian:trixie
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    systemd systemd-sysv systemd-resolved dbus dbus-user-session libpam-systemd \
+    python3 openssl curl ca-certificates libnss3-tools iproute2 procps sudo bsdutils \
+ && rm -rf /var/lib/apt/lists/*
+RUN useradd -m -s /bin/bash dev && echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

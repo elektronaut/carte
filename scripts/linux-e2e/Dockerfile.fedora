@@ -1,0 +1,8 @@
+# Fedora 43: systemd 258, so DNS goes through a DNS delegate.
+FROM fedora:43
+RUN dnf -y install --setopt=install_weak_deps=False systemd systemd-resolved dbus-broker \
+    python3 openssl curl ca-certificates p11-kit-trust nss-tools iproute procps-ng sudo util-linux-script \
+ && dnf clean all
+RUN useradd -m -s /bin/bash dev && echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
