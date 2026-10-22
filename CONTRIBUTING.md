@@ -103,6 +103,29 @@ toolchain: `cargo +nightly fuzz run strip`. A weekly workflow runs every
 target for a few minutes. When it finds a crash, open an issue with the
 input from the run's artifacts and add a regression test with the fix.
 
+### Setup on Linux
+
+The test suite can't run `carte setup`, since it changes the machine.
+`scripts/linux-e2e/run.sh` runs it for real in systemd containers, Ubuntu
+24.04 (systemd 255), Debian 13 (systemd 257) and Fedora 43 (systemd 258), as
+a user with passwordless sudo:
+it sets carte up with `--tld test`, checks the ports, units, certificate
+stores and DNS, restarts the daemon, and uninstalls it again. It needs
+Docker, and runs in CI for pull requests that touch setup.
+
+```sh
+scripts/linux-e2e/run.sh                   # every distribution
+scripts/linux-e2e/run.sh --distro fedora   # one
+scripts/linux-e2e/run.sh --browsers        # also load a page in headless Chromium
+scripts/linux-e2e/run.sh --keep            # leave the containers running
+scripts/linux-e2e/run.sh clean             # remove its containers, images and volumes
+```
+
+The first run builds carte in a container and keeps the cargo registry and
+target directory in Docker volumes, so later runs rebuild only what changed.
+`--bin <path>` uses a Linux build of carte instead. Everything the script
+creates is labelled `carte-e2e=1`.
+
 ## Skeletons
 
 Leave out optional sections you have nothing for.

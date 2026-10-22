@@ -1,0 +1,35 @@
+name: Linux setup end-to-end
+# Runs `carte setup` for real in systemd containers: Ubuntu 24.04 (systemd 255)
+# and Debian 13 (systemd 257), which use a resolved.conf drop-in, and Fedora 43
+# (systemd 258), which uses a DNS delegate.
+on:
+  pull_request:
+    paths:
+      - crates/carte/src/setup/**
+      - crates/carte/src/daemon/activation.rs
+      - crates/carte/src/cli/setup.rs
+      - scripts/linux-e2e/**
+      - .github/workflows/linux-e2e.yml
+  workflow_dispatch:
+concurrency:
+  group: linux-e2e-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  e2e:
+    name: Setup (${{ matrix.distro }})
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [debian, fedora, ubuntu]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6.1.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p carte --bin carte
+      - run: scripts/linux-e2e/run.sh --distro ${{ matrix.distro }} --bin target/debug/carte
