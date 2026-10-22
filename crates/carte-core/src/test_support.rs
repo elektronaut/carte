@@ -38,6 +38,7 @@ pub fn project(name: &str, strip_prefix: Option<&str>, apps: Vec<App>) -> Projec
         scheme: Default::default(),
         idle_timeout: None,
         teardown_delay: None,
+        serve_files: None,
         from_template: false,
         apps,
     }

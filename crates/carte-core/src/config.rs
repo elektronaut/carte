@@ -999,6 +999,9 @@ pub fn assemble_project(
         scheme,
         idle_timeout,
         teardown_delay,
+        serve_files: serve_files
+            .filter(|dir| check_serve_files(dir).is_ok())
+            .map(PathBuf::from),
         from_template,
         apps,
     };

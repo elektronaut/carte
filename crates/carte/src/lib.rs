@@ -17,6 +17,7 @@ pub mod proxy;
 pub mod prune;
 pub mod pty;
 pub mod rank;
+pub mod resolved_config;
 pub mod setup;
 pub mod shim;
 pub mod supervisor;

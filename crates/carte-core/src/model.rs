@@ -122,6 +122,8 @@ pub struct Project {
     pub scheme: Scheme,
     pub idle_timeout: Option<Duration>,
     pub teardown_delay: Option<Duration>,
+    /// The default `serve_files` of its apps.
+    pub serve_files: Option<PathBuf>,
     /// Made by a template, so its `config_path` is the template's file.
     pub from_template: bool,
     pub apps: Vec<App>,

@@ -35,6 +35,8 @@ pub struct Api {
     pub kube: Kube,
     pub paths: Paths,
     pub requests: Arc<RequestLog>,
+    /// What the supervisor does with every process.
+    pub limits: crate::resolved_config::ProcessLimits,
     /// Reloads the configuration from disk and returns its problems.
     pub reload: Arc<dyn Fn() -> Vec<Problem> + Send + Sync>,
 }
@@ -52,6 +54,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::RELOAD, post(reload))
         .route(paths::ENV, get(daemon_env))
         .route(paths::PROCESS_ENV, post(process_env))
+        .route(paths::CONFIG, post(config))
         .route(paths::SHARE, post(share))
         .route(paths::UNSHARE, post(unshare))
         .route(paths::PRUNE, get(prune_list).post(prune))
@@ -611,6 +614,21 @@ async fn process_env(State(api): State<Api>, JsonBody(target): JsonBody<Address>
     match rendered {
         Ok(Ok(response)) => Json(response).into_response(),
         Ok(Err(err)) => error(StatusCode::BAD_REQUEST, format!("{err:#}")),
+        Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+async fn config(State(api): State<Api>, JsonBody(target): JsonBody<Address>) -> Response {
+    let world = api.supervisor.world();
+    let snapshot = api.supervisor.snapshot();
+    let limits = api.limits;
+    let resolved = tokio::task::spawn_blocking(move || {
+        crate::resolved_config::for_address(&world, &snapshot, limits, &target)
+    })
+    .await;
+    match resolved {
+        Ok(Ok(config)) => Json(config).into_response(),
+        Ok(Err(err)) => error(StatusCode::NOT_FOUND, format!("{err:#}")),
         Err(err) => error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
