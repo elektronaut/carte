@@ -54,10 +54,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_waiting(theme, frame, main, app);
     }
     frame.render_widget(status_line(theme, app, status.width), status);
-    frame.render_widget(
-        footer_line(theme, app.focus, app.tab, has_problems(app), footer.width),
-        footer,
-    );
+    frame.render_widget(footer_line(theme, app, footer.width), footer);
 
     match &app.mode {
         Mode::Help => render_help(theme, frame, main),
@@ -1069,6 +1066,14 @@ fn render_request_list(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut 
     let range = app.requests.window(usize::from(inner.height));
     let requests = &app.requests;
     let selected = requests.selected_index();
+    let method_width = requests
+        .rows()
+        .range(range.clone())
+        .map(|r| r.method.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(7);
+    let path_width = usize::from(inner.width).saturating_sub(8 + method_width + 9 + 6 + 1 + 5);
     let rows: Vec<Row> = requests
         .rows()
         .range(range.clone())
@@ -1079,7 +1084,7 @@ fn render_request_list(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut 
                 (true, false) => theme.fg,
                 (false, _) => theme.muted,
             };
-            request_row(theme, request, muted)
+            request_row(theme, request, muted, path_width)
         })
         .collect();
     let selected_style = if focused {
@@ -1091,7 +1096,7 @@ fn render_request_list(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut 
         rows,
         [
             Constraint::Length(8),
-            Constraint::Length(7),
+            Constraint::Length(method_width as u16),
             Constraint::Fill(1),
             Constraint::Length(9),
             Constraint::Length(6),
@@ -1104,7 +1109,13 @@ fn render_request_list(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut 
     frame.render_stateful_widget(table, inner, &mut state);
 }
 
-fn request_row(theme: &Theme, request: &ProxiedRequest, muted: Color) -> Row<'static> {
+/// A request's row, its path cut to `path_width` with an ellipsis.
+fn request_row(
+    theme: &Theme,
+    request: &ProxiedRequest,
+    muted: Color,
+    path_width: usize,
+) -> Row<'static> {
     let status = match request.status {
         Some(status) => Span::raw(status.to_string()).fg(status_color(theme, status)),
         None => Span::raw("cancelled").fg(muted),
@@ -1117,7 +1128,7 @@ fn request_row(theme: &Theme, request: &ProxiedRequest, muted: Color) -> Row<'st
     Row::new([
         Cell::from(Span::raw(crate::clock::local_hms(request.at_ms)).fg(muted)),
         Cell::from(request.method.clone()),
-        Cell::from(request.path.clone()),
+        Cell::from(ellipsis(&request.path, path_width)),
         Cell::from(Line::from(status).right_aligned()),
         Cell::from(Line::from(Span::raw(millis(total_ms(request))).fg(muted)).right_aligned()),
         Cell::from(mark),
@@ -1142,9 +1153,22 @@ fn total_ms(request: &ProxiedRequest) -> u64 {
 fn millis(ms: u64) -> String {
     match ms {
         0..1000 => format!("{ms}ms"),
-        1000..60_000 => format!("{:.1}s", ms as f64 / 1000.0),
-        _ => format!("{}m{:02}s", ms / 60_000, ms / 1000 % 60),
+        1000..59_950 => format!("{:.1}s", ms as f64 / 1000.0),
+        _ => {
+            let secs = (ms + 500) / 1000;
+            format!("{}m{:02}s", secs / 60, secs % 60)
+        }
     }
+}
+
+/// `text` cut to `width` characters, ending in `…` when cut.
+fn ellipsis(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
 }
 
 /// An open request: what was asked and answered, how it was routed and how long it
@@ -1440,7 +1464,9 @@ fn has_problems(app: &App) -> bool {
 
 /// The most used keys for the focused pane, as many as fit in `width`, after
 /// `! problems` while there are any.
-fn footer_line(theme: &Theme, focus: Focus, tab: Tab, problems: bool, width: u16) -> Line<'static> {
+fn footer_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
+    let (focus, tab) = (app.focus, app.tab);
+    let problems = has_problems(app);
     let keys: &[(&str, &str)] = match (focus, tab) {
         (Focus::Tree, _) => &[
             ("?", "help"),
@@ -1456,6 +1482,15 @@ fn footer_line(theme: &Theme, focus: Focus, tab: Tab, problems: bool, width: u16
             ("1-5", "tabs"),
             ("z", "zoom"),
             ("tab", tab.name()),
+        ],
+        (Focus::Logs, Tab::Requests) if app.zoom.is_some() => &[
+            ("?", "help"),
+            ("q", "quit"),
+            ("↑↓", "move"),
+            ("G", "follow"),
+            ("1-5", "tabs"),
+            ("z", "zoom"),
+            ("tab", "tree"),
         ],
         (Focus::Logs, Tab::Requests) => &[
             ("?", "help"),
@@ -2991,11 +3026,23 @@ mod tests {
             "the wheel scrolls the request"
         );
         assert_eq!(app.requests.selected, Some(2), "and leaves the list");
+        let screen = draw(&mut app, 120, 30);
+        assert!(!screen.contains("enter open"), "{screen}");
+        assert!(!screen.contains("esc back"), "{screen}");
 
         press(&mut app, now, KeyCode::Esc);
         assert_eq!(app.zoom, None, "esc goes back from the zoom");
         let screen = draw(&mut app, 120, 30);
         assert!(screen.contains("─ 2/3 ╮"), "the list again\n{screen}");
+    }
+
+    #[test]
+    fn long_paths_end_in_an_ellipsis_and_durations_round_up() {
+        assert_eq!(ellipsis("/assets/app.css", 8), "/assets…");
+        assert_eq!(ellipsis("/up", 8), "/up");
+        assert_eq!(millis(59_940), "59.9s");
+        assert_eq!(millis(59_960), "1m00s");
+        assert_eq!(millis(125_400), "2m05s");
     }
 
     #[test]

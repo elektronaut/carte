@@ -1470,6 +1470,12 @@ fn password_protected_shares_ask_for_credentials() {
     assert_eq!(echoed(&headers, "authorization"), [] as [&str; 0]);
     let requests = &snapshot(&daemon).shares[0].requests;
     assert_eq!(requests.iter().filter(|r| r.refused).count(), 2);
+    let refused: Vec<_> = proxied(&daemon, Some("web"), 100)
+        .into_iter()
+        .filter(|r| r.status == Some(401))
+        .collect();
+    assert_eq!(refused.len(), 2, "refused visits are the app's requests");
+    assert!(refused.iter().all(|r| r.shared), "{refused:?}");
 }
 
 #[test]

@@ -379,6 +379,7 @@ impl SupervisorRouter {
             _ => naming::resolve_public_host(world, host).map_err(|_| not_shared())?,
         };
         let credentials = routes.get(&key).ok_or_else(not_shared)?;
+        note_instance(world, &key, request);
         let refused = credentials
             .as_ref()
             .is_some_and(|c| !share::authorized(request.authorization, c));

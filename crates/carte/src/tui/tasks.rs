@@ -226,6 +226,12 @@ impl Tasks {
                 }
             }
             Command::Detach => self.detach(),
+            Command::Wake(delay) => {
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    let _ = tx.send(Event::Tick);
+                });
+            }
             Command::MouseCapture(on) => set_mouse_capture(on),
             Command::Copy(text) => copy(&text),
             Command::Open(url) => {

@@ -106,6 +106,8 @@ pub enum Command {
         request: RequestsRequest,
     },
     StopRequests,
+    /// Sends a `Tick` after the delay, for what waits on a short pause.
+    Wake(Duration),
     Share(ShareRequest),
     Unshare(UnshareRequest),
     Open(String),
@@ -527,7 +529,11 @@ impl App {
                     Tab::Logs | Tab::Events => true,
                     Tab::Requests => {
                         let listed = self.requests.open.is_none() || self.zoom.is_some();
-                        if listed && at.y >= top && !self.requests.detail_area.contains(at) {
+                        let bottom = top + self.requests.height as u16;
+                        if listed
+                            && (top..bottom).contains(&at.y)
+                            && !self.requests.detail_area.contains(at)
+                        {
                             let row = usize::from(at.y - top);
                             self.requests.select_index(self.requests.offset + row);
                         }
@@ -912,7 +918,7 @@ impl App {
                     Intent::Top => view.scroll = 0,
                     Intent::Bottom => view.scroll = usize::MAX,
                     Intent::StartFilter => self.inform("/ searches the logs"),
-                    Intent::FindMatch { .. } | Intent::OpenRow => {}
+                    Intent::FindMatch { .. } | Intent::OpenRow | Intent::ToggleLogFilter => {}
                     _ => return false,
                 }
             }
@@ -932,7 +938,7 @@ impl App {
                     Intent::PageUp if open => scroll(requests, -page(requests.height)),
                     Intent::Top if open => requests.detail_scroll = 0,
                     Intent::Bottom if open => requests.detail_scroll = usize::MAX,
-                    Intent::ClearFilter if open => requests.open = None,
+                    Intent::ClearFilter if open => requests.close(),
                     Intent::Move(delta) => requests.select_by(delta),
                     Intent::PageDown => requests.select_by(page(requests.height)),
                     Intent::PageUp => requests.select_by(-page(requests.height)),
@@ -940,11 +946,11 @@ impl App {
                     Intent::Bottom => requests.follow(),
                     Intent::OpenRow => requests.open_selected(),
                     Intent::StartFilter => self.inform("/ searches the logs"),
-                    Intent::FindMatch { .. } | Intent::ClearFilter => {}
+                    Intent::FindMatch { .. } | Intent::ClearFilter | Intent::ToggleLogFilter => {}
                     _ => return false,
                 }
                 if zoomed {
-                    self.requests.open = None;
+                    self.requests.close();
                 }
             }
         }
@@ -1446,34 +1452,55 @@ impl App {
 
     /// Starts a new requests stream when the selection changed: the requests for it
     /// and everything below, or every request for a folder or an empty tree.
-    fn sync_requests(&mut self) -> Option<Command> {
+    ///
+    /// Moving through the tree waits for the selection to settle before it starts the
+    /// next stream, since each start sends the scope's recent requests again.
+    fn sync_requests(&mut self) -> Vec<Command> {
         let target = self
             .selected_node()
             .map(Node::id)
-            .filter(|id| !matches!(id, NodeId::Folder { .. }));
+            .filter(|id| !matches!(id, NodeId::Folder { .. }))
+            .cloned();
         let wanted = match self.tab {
-            Tab::Requests if self.snapshot.is_some() => Some(match target {
+            Tab::Requests if self.snapshot.is_some() => Some(match &target {
                 Some(id) => format!("requests {}", target::label(id)),
                 None => "requests".to_string(),
             }),
             Tab::Requests | Tab::Logs | Tab::Events | Tab::Env => None,
         };
-        if wanted == self.requests.key {
-            return None;
+        let mut commands = Vec::new();
+        if wanted != self.requests.key {
+            let moved = self.requests.key.is_some();
+            self.requests.restart(wanted.clone());
+            if moved {
+                commands.push(Command::StopRequests);
+            }
+            if wanted.is_none() {
+                self.requests.pending = None;
+                return commands;
+            }
+            let settle = Duration::from_millis(150);
+            let at = if moved { self.now + settle } else { self.now };
+            self.requests.pending = Some(at);
+            if moved {
+                commands.push(Command::Wake(settle));
+            }
         }
-        let target = target.map(target::address);
-        let generation = self.requests.restart(wanted.clone());
-        if wanted.is_none() {
-            return Some(Command::StopRequests);
+        match self.requests.pending {
+            Some(at) if at <= self.now => {
+                self.requests.pending = None;
+                commands.push(Command::FollowRequests {
+                    generation: self.requests.generation,
+                    request: RequestsRequest {
+                        target: target.as_ref().map(target::address),
+                        follow: true,
+                        tail: Some(200),
+                    },
+                });
+            }
+            _ => {}
         }
-        Some(Command::FollowRequests {
-            generation,
-            request: RequestsRequest {
-                target,
-                follow: true,
-                tail: Some(1000),
-            },
-        })
+        commands
     }
 
     fn log_prefix(&self) -> Prefix {
@@ -1620,6 +1647,19 @@ mod tests {
         assert!(asked.follow);
 
         let commands = press(&mut app, now, KeyCode::Down);
+        assert_eq!(
+            commands,
+            [
+                Command::StopRequests,
+                Command::Wake(Duration::from_millis(150))
+            ],
+            "a move waits for the selection to settle"
+        );
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Up);
+        let later = |ms| now + Duration::from_millis(ms);
+        assert!(app.update(Event::Tick, later(100)).is_empty());
+        let commands = app.update(Event::Tick, later(200));
         let [
             Command::FollowRequests {
                 generation,
@@ -1632,8 +1672,9 @@ mod tests {
         assert_eq!(
             asked.target.as_ref().map(|t| t.address.as_str()),
             Some("@main"),
-            "requests follow the selection"
+            "requests follow the settled selection"
         );
+        assert_eq!(asked.tail, Some(200));
         let generation = *generation;
         for (seq, path) in [(1, "/"), (2, "/login")] {
             app.update(
@@ -1674,7 +1715,10 @@ mod tests {
         press(&mut app, now, KeyCode::Esc);
         press(&mut app, now, KeyCode::Char('G'));
         assert_eq!(app.requests.selected, None, "G follows again");
-        app.logs_area = Rect::new(40, 0, 40, 20);
+        app.logs_area = Rect::new(40, 0, 40, 3);
+        app.requests.height = 1;
+        app.update(mouse(MouseEventKind::Down(MouseButton::Left), 50, 2), now);
+        assert_eq!(app.requests.selected, None, "the bottom border isn't a row");
         app.update(mouse(MouseEventKind::Down(MouseButton::Left), 50, 1), now);
         assert_eq!(app.requests.selected, Some(1), "a click selects a request");
 

@@ -96,9 +96,13 @@ another's. An app with several processes and none serving HTTP lists
 them to pick from. `3` on the env tab fetches it again, as the env can
 change when a process starts.
 
-The requests tab lists the requests carte's proxy answered, the latest
-1000 at most: the time, method, path, status, and how long it took. A
-request whose client went away first says `cancelled`. `↗` marks a
+The requests tab lists the requests carte's proxy answered: the time,
+method, path, status, and how long it took. That is how long carte held
+it, waiting for a boot included, plus how long the app took to answer;
+for a page carte answered itself, it's the hold alone. A request whose
+client went away first says `cancelled`. The tab starts with the latest
+200 requests and keeps up to 1000. Moving through the tree, it waits a
+moment for the selection to settle before it asks for the next. `↗` marks a
 request that came through a share. New requests follow at the bottom.
 `↑` selects a request and stops that; `G` follows again.
 
