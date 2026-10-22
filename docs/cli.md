@@ -23,7 +23,7 @@ where every part is optional and inferred from the current directory:
 worktree in it and what they depend on. `up` refuses a whole project; name an app
 or a stack.
 
-In a [kube project](configuration.md#kube-projects), the app is a Service
+In a [kube project](kubernetes.md), the app is a Service
 and the stack a namespace:
 
 | Address | Means |
@@ -49,7 +49,7 @@ address inside it when given one.
 | Command | |
 | --- | --- |
 | `carte ls [-a]` | Running instances, with URL and notes, like processes that are down and when they restart; `--all` includes stopped ones |
-| `carte status [address]` | URL, state, public URL, processes, holds, idle time and last error of an app; a crashed process shows when it restarts, and a process that serves [paths](configuration.md#paths) shows them |
+| `carte status [address]` | URL, state, public URL, processes, holds, idle time and last error of an app; a crashed process shows when it restarts, and a process that serves [paths](paths.md) shows them |
 | `carte up [address] [--no-wait]` | Start, and wait until ready |
 | `carte restart [address] [--no-wait]` | Restart, and wait until ready |
 | `carte down [address]` | Stop |
@@ -68,7 +68,7 @@ address inside it when given one.
 | `carte project add\|ls\|edit\|rm` | Manage project files |
 | `carte setup [--dry-run\|--check\|--uninstall] [--tld tld] [--share domain]` | Set up the machine |
 | `carte import puma-dev` | Create projects from `~/.puma-dev` |
-| `carte import kube [--folder F] [--kubeconfig FILE]` | Create a [kube project](configuration.md#kube-projects) for each kubeconfig context you pick |
+| `carte import kube [--folder F] [--kubeconfig FILE]` | Create a [kube project](kubernetes.md) for each kubeconfig context you pick |
 | `carte tui` | The terminal UI |
 | `carte daemon` | Run the daemon in the foreground. It refuses to start while another daemon with the same state directory is running or still stopping |
 | `carte daemon restart` | Restart the daemon launchd or systemd runs, after installing a new build or changing `[share]`. Running apps stop and start again on their next request |
@@ -120,12 +120,12 @@ the ports need it; `carte setup --uninstall` removes them.
 
 ### Prune
 
-`carte prune` removes [instance directories](configuration.md#instance-directories)
+`carte prune` removes [instance directories](environment.md#instance-directories)
 and pidfiles that nothing that exists owns any more: those of stacks with
 no worktree (never `main`), of apps no longer in their project, and of
 projects whose file is gone. It lists them by project and stack with
 their sizes, then asks before removing them. It only removes files: it
-never runs a [teardown](configuration.md#teardown) or touches databases,
+never runs a [teardown](processes.md#teardown) or touches databases,
 so it names the stacks whose teardown never ran or failed, whose external
 resources may remain.
 
@@ -279,7 +279,7 @@ process shows as `paused at a breakpoint` in `carte status`, as
 `paused: worker (carte attach)` in `carte ls` and with a ◆ in the
 terminal UI. An app whose web process is paused shows as `paused`,
 since its requests wait; a paused worker leaves it `ready`. When nobody
-is attached, a pause sends a [notification](configuration.md#notifications)
+is attached, a pause sends a [notification](processes.md#notifications)
 with the `carte attach` command that answers it, at most once a minute
 per process. The pause ends when the process prints a complete line after
 the prompt, as answering it does, or exits. When the answer prints nothing,
@@ -345,7 +345,7 @@ A project's `folder` is the path of its file's directory below
 `projects/`, like `clients/sites`, and absent for a file at the top.
 
 A stack's `name` comes from its worktrees' folder names
-([names](configuration.md#names-and-hostnames)). Its `branch` is the
+([names](projects.md#names-and-hostnames)). Its `branch` is the
 branch its worktrees have checked out, and null on `main`, when they are
 on different branches, or when one has a detached HEAD.
 
@@ -358,14 +358,14 @@ An **Instance** is:
 | `app`, `stack`, `checkout` | Names; `checkout` is `main` for an app running from its main checkout in another stack |
 | `checkout_path` | Where its code is |
 | `url`, `public_url` | `public_url` is null unless shared |
-| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](configuration.md#paths), is waiting to restart after a crash or to pass its readiness check again), `paused` (one of those waits at a debugger prompt), `suspended` (one of those was stopped by a signal), `stopping` or `crashed` |
-| `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](configuration.md#paths) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `paused` (at a debugger prompt), `suspended` (stopped by a signal, such as `SIGSTOP`), `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
+| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](paths.md), is waiting to restart after a crash or to pass its readiness check again), `paused` (one of those waits at a debugger prompt), `suspended` (one of those was stopped by a signal), `stopping` or `crashed` |
+| `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](paths.md) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `paused` (at a debugger prompt), `suspended` (stopped by a signal, such as `SIGSTOP`), `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
 | `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec" \| "paused" \| "suspended", … }`; `exec` counts `carte exec` commands still running, `paused` names a process waiting at a debugger prompt, and `suspended` one stopped by a signal |
 | `idle_in_secs` | Until idle shutdown, when counting down |
 | `last_error`, `last_event` | Null when there's none |
 | `boot` | `{ elapsed_ms, waiting_for }` while starting |
 | `env_changed` | Its tool versions changed since it started |
-| `warms` | `[{ app, hits, opens }]`: the apps opening it [warms](configuration.md#learned-warming), each followed `hits` of its last `opens` opens; left out when empty |
+| `warms` | `[{ app, hits, opens }]`: the apps opening it [warms](projects.md#learned-warming), each followed `hits` of its last `opens` opens; left out when empty |
 | `memory_bytes`, `cpu_percent` | Summed over its processes |
 
 A `carte` older than the daemon it talks to shows a state, hold, policy or
@@ -383,7 +383,7 @@ where `kind` is one of `started`, `ready`, `stopped`, `crashed`,
 `tunnel-connected`, `tunnel-failed`, `policy-changed`,
 `teardown-scheduled`, `teardown-paused`, `teardown-cancelled`, `teardown-finished`,
 `teardown-failed` and `paused` (a process stopped at a debugger prompt while
-no terminal was attached). A [teardown](configuration.md#teardown) has one
+no terminal was attached). A [teardown](processes.md#teardown) has one
 `teardown-finished` or `teardown-failed` event per process, about
 `app@stack/process` and with its `exit_code`, and one about the stack
 when its folders are removed or kept. A process that exits with code 0
