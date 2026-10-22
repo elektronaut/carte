@@ -120,7 +120,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n N", "older, newer match in the logs"),
             ("esc", "clear the filter or search"),
             ("a", "show all, running or shared"),
-            ("1 2 3 5", "show logs, events, env, requests"),
+            ("1-5", "show logs, events, env, config, requests"),
             ("[ ]", "previous, next tab"),
             ("z", "zoom the details and tabs, or go back"),
             ("enter esc", "open a request, back to the list"),

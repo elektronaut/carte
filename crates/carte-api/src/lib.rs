@@ -828,6 +828,10 @@ pub struct ResolvedProcess {
     /// `$PORT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewritten_from: Option<String>,
+    /// The port the command as written hardcoded; `None` when carte only dropped an
+    /// `unset PORT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewritten_from_port: Option<u16>,
     /// The command with its port filled in, once it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runs_as: Option<String>,

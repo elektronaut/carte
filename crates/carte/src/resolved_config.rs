@@ -251,6 +251,7 @@ fn process(
         name: settings.name,
         command: api(settings.command),
         rewritten_from: settings.rewritten_from,
+        rewritten_from_port: settings.rewritten_from_port,
         cwd: api(settings.cwd),
         port,
         http: api(settings.http),
