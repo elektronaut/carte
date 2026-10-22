@@ -47,8 +47,11 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
     if tld.is_some() {
         setup::set_tld(&mut plan, &env, &facts)?;
     }
-    let import_first = !args.uninstall && facts.puma_dev.links > 0 && facts.projects == 0;
-    if !args.uninstall && facts.puma_dev.installed() {
+    let puma_dev = facts.mac().map(|mac| &mac.puma_dev);
+    let puma_dev_links = puma_dev.map_or(0, |p| p.links);
+    let puma_dev_installed = puma_dev.is_some_and(|p| p.installed());
+    let import_first = !args.uninstall && puma_dev_links > 0 && facts.projects == 0;
+    if !args.uninstall && puma_dev_installed {
         let resolver = if env.needs_resolver() {
             format!(", and points /etc/resolver/{} at carte", env.machine.tld)
         } else {
@@ -66,11 +69,11 @@ pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
     if import_first {
         println!(
             "You have {} apps in {} and no carte projects yet: run `carte import puma-dev` first.",
-            facts.puma_dev.links,
+            puma_dev_links,
             tilde(&env.puma_dev_dir)
         );
     }
-    if !args.uninstall && (facts.puma_dev.installed() || import_first) {
+    if !args.uninstall && (puma_dev_installed || import_first) {
         println!();
     }
 
@@ -146,7 +149,10 @@ fn choose_tld(env: &SetupEnv, facts: &Facts, args: &SetupArgs) -> anyhow::Result
     if env.tld_configured || previous.is_empty() {
         return Ok(None);
     }
-    let by = if facts.puma_dev.domains.iter().any(|d| previous.contains(d)) {
+    let by = if facts
+        .mac()
+        .is_some_and(|mac| mac.puma_dev.domains.iter().any(|d| previous.contains(d)))
+    {
         "puma-dev"
     } else {
         "an earlier carte setup"

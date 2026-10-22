@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 
 use crate::cli::prompt::tilde;
 
-use super::plist::{LABEL, OLD_LABEL};
+use super::plist::LABEL;
 use super::skill::{SkillDir, SkillLink};
-use super::{CaState, Facts, PUMA_DEV_LABEL, SetupEnv};
+use super::{CaState, Facts, OsFacts, SetupEnv, macos};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -34,7 +34,7 @@ pub struct Report {
 }
 
 impl Report {
-    fn push(&mut self, status: Status, label: &str, detail: impl Into<String>) {
+    pub(super) fn push(&mut self, status: Status, label: &str, detail: impl Into<String>) {
         self.lines.push(Line {
             status,
             label: label.to_string(),
@@ -127,35 +127,6 @@ pub fn port_users(protocol: &str, port: u16) -> Vec<PortUser> {
         .output()
         .map(|o| parse_lsof(&String::from_utf8_lossy(&o.stdout)))
         .unwrap_or_default()
-}
-
-/// Whether launchd has `service` (`gui/<uid>/<label>`) loaded, asked read-only.
-pub fn launchd_loaded(service: &str) -> bool {
-    cfg!(target_os = "macos")
-        && Command::new("launchctl")
-            .args(["print", service])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-}
-
-/// The pid of the process launchd runs for `service`, asked read-only.
-pub fn launchd_pid(service: &str) -> Option<u32> {
-    let output = Command::new("launchctl")
-        .args(["print", service])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    parse_launchd_pid(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn parse_launchd_pid(text: &str) -> Option<u32> {
-    text.lines()
-        .find_map(|line| line.trim().strip_prefix("pid = "))
-        .and_then(|pid| pid.trim().parse().ok())
 }
 
 /// The `nameserver` and `port` of a resolver file.
@@ -258,51 +229,8 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
         ),
     }
 
-    let plist = tilde(&env.agent_plist());
-    let loaded = if facts.agent_loaded {
-        "loaded"
-    } else {
-        "not loaded"
-    };
-    match &facts.agent_plist {
-        None if facts.agent_loaded => report.push(
-            Status::Warn,
-            "LaunchAgent",
-            format!("{LABEL} is loaded but {plist} is missing"),
-        ),
-        None => report.push(
-            Status::Missing,
-            "LaunchAgent",
-            format!("{plist} is missing"),
-        ),
-        Some(text) if *text != env.agent().to_plist() => report.push(
-            Status::Warn,
-            "LaunchAgent",
-            format!("{plist} differs from what setup writes now; {loaded}"),
-        ),
-        Some(_) => report.push(
-            if facts.agent_loaded {
-                Status::Ok
-            } else {
-                Status::Missing
-            },
-            "LaunchAgent",
-            format!("{plist}, {loaded}"),
-        ),
-    }
-    if facts.old_agent.installed() {
-        report.push(
-            Status::Warn,
-            "LaunchAgent",
-            format!(
-                "{} is installed under its old label; `carte setup` replaces it",
-                if facts.old_agent.plist {
-                    tilde(&env.old_agent_plist())
-                } else {
-                    OLD_LABEL.to_string()
-                }
-            ),
-        );
+    match &facts.os {
+        OsFacts::MacOs(mac) => macos::check_agent(&mut report, env, mac),
     }
     report.push(
         if facts.daemon_running {
@@ -349,44 +277,8 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
         report.push(status, "agent skill", format!("{detail}{link}"));
     }
 
-    let puma_dev = &facts.puma_dev;
-    if !puma_dev.installed() && (puma_dev.plist || puma_dev.links > 0) {
-        let mut parts = vec!["not installed".to_string()];
-        if puma_dev.plist {
-            parts.push(format!("{} left behind", tilde(&env.puma_dev_plist())));
-        }
-        if puma_dev.links > 0 {
-            parts.push(format!(
-                "{} entries in {}",
-                puma_dev.links,
-                tilde(&env.puma_dev_dir)
-            ));
-        }
-        report.push(Status::Info, "puma-dev", parts.join(", "));
-    } else if puma_dev.installed() {
-        let mut parts = Vec::new();
-        if puma_dev.plist {
-            parts.push(format!("{} present", tilde(&env.puma_dev_plist())));
-        }
-        parts.push(if puma_dev.loaded {
-            format!("{PUMA_DEV_LABEL} loaded")
-        } else {
-            format!("{PUMA_DEV_LABEL} not loaded")
-        });
-        parts.push(format!(
-            "{} entries in {}",
-            puma_dev.links,
-            tilde(&env.puma_dev_dir)
-        ));
-        report.push(
-            if puma_dev.loaded {
-                Status::Warn
-            } else {
-                Status::Info
-            },
-            "puma-dev",
-            parts.join(", "),
-        );
+    match &facts.os {
+        OsFacts::MacOs(mac) => macos::check_puma_dev(&mut report, env, mac),
     }
 
     let machine = &env.machine;
@@ -537,13 +429,6 @@ pub fn fallback(env: &SetupEnv) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reads_the_pid_from_launchctl_print() {
-        let text = "gui/501/no.elektronaut.carte = {\n\tactive count = 2\n\tstate = running\n\tpid = 32003\n\tprogram = /x/carte\n}\n";
-        assert_eq!(parse_launchd_pid(text), Some(32003));
-        assert_eq!(parse_launchd_pid("state = not running\n"), None);
-    }
 
     #[test]
     fn parses_lsof_field_output() {
