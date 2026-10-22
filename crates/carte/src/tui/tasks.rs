@@ -160,13 +160,13 @@ impl Tasks {
                     }
                 });
             }
-            Command::FetchEnv(target) => {
+            Command::FetchEnv { generation, target } => {
                 tokio::spawn(async move {
                     let result = client
                         .post::<_, EnvResponse>(paths::PROCESS_ENV, &target)
                         .await
                         .map_err(|e| format!("{e:#}"));
-                    let _ = tx.send(Event::Env(result));
+                    let _ = tx.send(Event::Env { generation, result });
                 });
             }
             Command::FetchServices(project) => {

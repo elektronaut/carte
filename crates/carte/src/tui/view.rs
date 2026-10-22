@@ -15,6 +15,8 @@ use super::app::{App, Connection};
 use super::browse::Browse;
 use super::input::{Confirm, Focus, HELP, Mode};
 use super::jump;
+use super::logs::Logs;
+use super::tabs::{EnvSubject, Tab};
 use super::target;
 use super::theme::Theme;
 use super::tree::{self, Node, NodeId, Show, Source, State, Status};
@@ -44,13 +46,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
     frame.render_widget(status_line(theme, app, status.width), status);
     frame.render_widget(
-        footer_line(
-            theme,
-            app.focus,
-            app.events,
-            has_problems(app),
-            footer.width,
-        ),
+        footer_line(theme, app.focus, has_problems(app), footer.width),
         footer,
     );
 
@@ -58,7 +54,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Help => render_help(theme, frame, main),
         Mode::Problems => render_problems(theme, frame, main, app),
         Mode::Confirm(confirm) => render_confirm(theme, frame, main, app, confirm),
-        Mode::Env => render_env(theme, frame, main, app),
         Mode::Jump => render_jump(theme, frame, main, app),
         Mode::Normal | Mode::Filter | Mode::Type => {}
     }
@@ -435,7 +430,7 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 
 fn render_selection(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let Some(node) = app.selected_node() else {
-        render_logs(theme, frame, area, app);
+        render_tabs(theme, frame, area, app);
         return;
     };
     let title = format!(" {} ", target::label(node.id()));
@@ -446,7 +441,7 @@ fn render_selection(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App)
     let [top, bottom] =
         Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(area);
     frame.render_widget(paragraph, top);
-    render_logs(theme, frame, bottom, app);
+    render_tabs(theme, frame, bottom, app);
 }
 
 /// The rows a wrapped paragraph in a bordered pane takes at `width`, borders
@@ -823,26 +818,75 @@ fn problems_for<'a>(app: &'a App, id: &NodeId) -> Vec<&'a Problem> {
         .collect()
 }
 
-fn render_logs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
-    let logs = &app.logs;
-    let mut title = vec![Span::raw(if app.events { " events " } else { " logs " })];
+/// The pane below the details: the tabs on its top border, and the current one.
+fn render_tabs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
+    let focused = app.focus == Focus::Logs;
+    let separator = if focused {
+        theme.border_focus
+    } else {
+        theme.border
+    };
+    let id = app.selected_node().map(|n| n.id().clone());
+    let kube = id
+        .as_ref()
+        .is_some_and(|id| app.kube_project(id.project()).is_some());
+    let mut title = vec![Span::raw(" ")];
+    let mut x = area.x + 2;
+    app.tab_spans.clear();
+    for (i, tab) in Tab::ALL.into_iter().enumerate() {
+        if i > 0 {
+            title.push(Span::raw(" │ ").fg(separator));
+            x += 3;
+        }
+        let name = format!("{} {}", tab.number(), tab.name());
+        let width = name.chars().count() as u16;
+        let style = match (tab == app.tab, tab.applies(id.as_ref(), kube)) {
+            (true, true) => Style::new().fg(theme.accent).bold(),
+            (true, false) => Style::new().fg(theme.muted).bold(),
+            (false, true) => Style::new().fg(theme.fg),
+            (false, false) => Style::new().fg(theme.muted),
+        };
+        title.push(Span::styled(name, style));
+        if x + width < area.right() {
+            app.tab_spans.push((tab, x, x + width));
+        }
+        x += width;
+    }
+    title.push(Span::raw(" "));
+    let mut block = pane(theme, Line::from(title), focused);
+    if app.tab != Tab::Env {
+        block = block.title(Line::from(logs_status(theme, &app.logs)).right_aligned());
+    }
+    let inner = block.inner(area);
+    app.logs_area = area;
+    frame.render_widget(block, area);
+    match app.tab {
+        Tab::Logs | Tab::Events => render_logs(theme, frame, inner, app),
+        Tab::Env => render_env(theme, frame, inner, app),
+    }
+}
+
+/// The search and how far up the logs are, for the pane's border.
+fn logs_status(theme: &Theme, logs: &Logs) -> Vec<Span<'static>> {
+    let mut title = vec![];
     if !logs.search.is_empty() {
         let seqs = logs.match_seqs();
         let at = logs
             .current
             .and_then(|seq| seqs.iter().position(|&s| s == seq))
             .map_or(String::new(), |i| format!("{}/", i + 1));
-        title.push(Span::raw(format!("/{} {at}{} ", logs.search, seqs.len())).fg(theme.warn));
+        title.push(Span::raw(format!(" /{} {at}{}", logs.search, seqs.len())).fg(theme.warn));
     }
     title.push(if logs.scroll > 0 {
-        Span::raw(format!("↑{} ", logs.scroll)).fg(theme.warn)
+        Span::raw(format!(" ↑{} ", logs.scroll)).fg(theme.warn)
     } else {
-        Span::raw("following ").fg(theme.muted)
+        Span::raw(" following ").fg(theme.muted)
     });
-    let block = pane(theme, Line::from(title), app.focus == Focus::Logs);
-    let inner = block.inner(area);
-    app.logs_area = area;
-    frame.render_widget(block, area);
+    title
+}
+
+fn render_logs(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut App) {
+    let events = app.tab == Tab::Events;
     app.logs.height = inner.height as usize;
     app.logs.width = inner.width as usize;
     let logs = &app.logs;
@@ -853,9 +897,9 @@ fn render_logs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
             .selected_node()
             .is_some_and(|n| matches!(n.status.state, State::Stopped | State::Disabled));
         let message = match (&logs.ended, logs.is_empty()) {
-            (Some(reason), _) if app.events => format!("No events: {reason}"),
+            (Some(reason), _) if events => format!("No events: {reason}"),
             (Some(reason), _) => format!("No logs: {reason}"),
-            (None, _) if app.events => "Nothing has happened here yet.".into(),
+            (None, _) if events => "Nothing has happened here yet.".into(),
             (None, _) if logs.key.is_some() && stopped => "Not running; s starts it.".into(),
             (None, _) if logs.key.is_some() => "No output yet.".into(),
             (None, _)
@@ -1029,14 +1073,7 @@ fn has_problems(app: &App) -> bool {
 
 /// The most used keys for the focused pane, as many as fit in `width`, after
 /// `! problems` while there are any.
-fn footer_line(
-    theme: &Theme,
-    focus: Focus,
-    events: bool,
-    problems: bool,
-    width: u16,
-) -> Line<'static> {
-    let other = if events { "logs" } else { "events" };
+fn footer_line(theme: &Theme, focus: Focus, problems: bool, width: u16) -> Line<'static> {
     let keys: &[(&str, &str)] = match focus {
         Focus::Tree => &[
             ("?", "help"),
@@ -1049,6 +1086,7 @@ fn footer_line(
             ("/", "filter"),
             ("a", "show"),
             ("d", "disable"),
+            ("1-3", "tabs"),
             ("tab", "logs"),
         ],
         Focus::Logs => &[
@@ -1059,7 +1097,7 @@ fn footer_line(
             ("G", "follow"),
             ("/", "search"),
             ("n", "next match"),
-            ("e", other),
+            ("1-3", "tabs"),
             ("tab", "tree"),
         ],
     };
@@ -1180,57 +1218,74 @@ fn render_jump(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     );
 }
 
-/// The selected process's env, one variable per line with where it came from, in a
-/// popup that fills most of the screen and scrolls.
-fn render_env(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
-    let Some(view) = &mut app.env else {
-        return;
-    };
-    let rect = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
-    };
-    let title = match &view.env {
-        Some(Ok(env)) => &env.instance,
-        _ => &view.title,
-    };
-    let block = pane(theme, Line::from(format!(" env · {title} ")).bold(), true)
-        .padding(ratatui::widgets::Padding::horizontal(1))
-        .title_bottom(Line::from(" ↑↓ scroll · esc closes ").fg(theme.muted));
-    let inner = block.inner(rect);
+/// The env tab: one variable per line with where it came from, scrolled.
+fn render_env(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut App) {
+    let view = &mut app.env;
     let width = usize::from(inner.width).max(1);
-    let lines: Vec<Line> = match &view.env {
-        None => vec![Line::from("Rendering…".fg(theme.muted))],
-        Some(Err(message)) => vec![Line::from(message.clone()).fg(theme.error)],
-        Some(Ok(env)) => {
-            let key_width = env.vars.iter().map(|v| v.key.len()).max().unwrap_or(0);
-            env.vars
-                .iter()
-                .flat_map(|var| {
-                    wrap(
-                        vec![
-                            (format!("{:key_width$}  ", var.key), Style::new().bold()),
-                            (var.value.clone().unwrap_or_default(), Style::new()),
-                            (format!("  {}", var.source), Style::new().fg(theme.muted)),
-                        ],
-                        width,
-                        (key_width + 2).min(width / 2),
-                    )
-                })
-                .collect()
+    let mut lines: Vec<Line> = Vec::new();
+    match &view.subject {
+        EnvSubject::None => {}
+        EnvSubject::Unavailable(message) => {
+            lines.push(Line::from(message.clone().fg(theme.muted)));
         }
-    };
+        EnvSubject::Fetch { note, .. } => {
+            if let Some(note) = note {
+                lines.extend(
+                    wrap_words(note, width)
+                        .into_iter()
+                        .map(|row| row.fg(theme.muted).into()),
+                );
+            }
+            match &view.env {
+                None => lines.push(Line::from("Rendering…".fg(theme.muted))),
+                Some(Err(message)) => lines.push(Line::from(message.clone()).fg(theme.error)),
+                Some(Ok(env)) => {
+                    let key_width = env.vars.iter().map(|v| v.key.len()).max().unwrap_or(0);
+                    lines.extend(env.vars.iter().flat_map(|var| {
+                        wrap(
+                            vec![
+                                (format!("{:key_width$}  ", var.key), Style::new().bold()),
+                                (var.value.clone().unwrap_or_default(), Style::new()),
+                                (format!("  {}", var.source), Style::new().fg(theme.muted)),
+                            ],
+                            width,
+                            (key_width + 2).min(width / 2),
+                        )
+                    }));
+                }
+            }
+        }
+    }
     view.height = usize::from(inner.height);
     view.scroll = view.scroll.min(lines.len().saturating_sub(view.height));
-    frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(lines)
-            .scroll((u16::try_from(view.scroll).unwrap_or(u16::MAX), 0))
-            .block(block),
-        rect,
+        Paragraph::new(lines).scroll((u16::try_from(view.scroll).unwrap_or(u16::MAX), 0)),
+        inner,
     );
+}
+
+/// Breaks text into rows of at most `width` characters between words, and inside
+/// words longer than that.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut row = String::new();
+    for word in text.split_whitespace() {
+        let fits = row.chars().count() + 1 + word.chars().count() <= width;
+        if !row.is_empty() && !fits {
+            rows.push(std::mem::take(&mut row));
+        }
+        if !row.is_empty() {
+            row.push(' ');
+        }
+        for c in word.chars() {
+            if row.chars().count() == width {
+                rows.push(std::mem::take(&mut row));
+            }
+            row.push(c);
+        }
+    }
+    rows.push(row);
+    rows
 }
 
 /// Breaks styled text into rows of at most `width` characters, indenting the rows
@@ -1467,7 +1522,7 @@ mod tests {
 │▾ ✖ nova !              2/4                 3%  412M││checkout main · /work/nova-billing                              │
 │  ▾ ✖ main              1/2                 3%  412M││worker pinned until the daemon restarts                         │
 │    ▾ ● billing pin*    ready               3%  412M│╰────────────────────────────────────────────────────────────────╯
-│        ● web           running             0%    0B│╭ logs following ────────────────────────────────────────────────╮
+│        ● web           running             0%    0B│╭ 1 logs │ 2 events │ 3 env ────────────────────────── following ╮
 │        ● worker pin*   running             0%    0B││web    Puma starting in single mode...                          │
 │      ✖ frontend !      crashed                     ││worker Started worker with 5 threads                            │
 │  ▸ ● feature-x         1/2                 0%    0B││web    GET /up 200 in 2ms                                       │
@@ -1479,7 +1534,7 @@ mod tests {
 │                                                    ││                                                                │
 ╰────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────╯
 
- ! problems  ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  tab logs"
+ ! problems  ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  1-3 tabs  tab logs"
         );
     }
 
@@ -1783,7 +1838,7 @@ mod tests {
         stacks[1].instances[0].last_event =
             Some(event(3, carte_api::EventKind::Ready, "in 2.1s", 600_000));
         app.update(Event::Snapshot(Box::new(snapshot)), now);
-        let commands = press(&mut app, now, KeyCode::Char('e'));
+        let commands = press(&mut app, now, KeyCode::Char('2'));
         let Some(Command::FollowEvents { generation, .. }) = commands.first() else {
             panic!("{commands:?}");
         };
@@ -1807,7 +1862,8 @@ mod tests {
             screen.contains("stopped 3m ago: idle for 15m"),
             "the project shows its newest event:\n{screen}"
         );
-        assert!(screen.contains("╭ events following"), "{screen}");
+        assert!(screen.contains("2 events │ 3 env"), "{screen}");
+        assert!(screen.contains("─ following ╮"), "{screen}");
         assert!(
             screen.contains("│14:32:05  nova-billing  stopped: idle for 15m"),
             "{screen}"
@@ -1869,7 +1925,7 @@ mod tests {
 │web exited with code 1 before it was ready                                    │
 │! stack \"billing\" names an app                                                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ logs following ──────────────────────────────────────────────────────────────╮
+╭ 1 logs │ 2 events │ 3 env ──────────────────────────────────────── following ╮
 │No output yet.                                                                │
 │                                                                              │
 │                                                                              │
@@ -2085,14 +2141,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn renders_an_env_that_wraps_and_scrolls() {
-        let mut app = busy_app();
-        let now = app.now;
-        press(&mut app, now, KeyCode::Down);
-        press(&mut app, now, KeyCode::Right);
-        press(&mut app, now, KeyCode::Down);
-        press(&mut app, now, KeyCode::Char('v'));
+    fn env_response(instance: &str) -> Event {
         let var = |key: &str, value: &str, source: &str| carte_api::EnvVar {
             key: key.into(),
             value: Some(value.into()),
@@ -2100,9 +2149,10 @@ mod tests {
             source: source.into(),
             overrides: Vec::new(),
         };
-        app.update(
-            Event::Env(Ok(carte_api::EnvResponse {
-                instance: "nova-billing@main/web".into(),
+        Event::Env {
+            generation: 0,
+            result: Ok(carte_api::EnvResponse {
+                instance: instance.into(),
                 vars: vec![
                     var("CARTE_APP", "nova-billing", "carte"),
                     var(
@@ -2112,35 +2162,131 @@ mod tests {
                     ),
                     var("PORT", "<assigned at start>", "carte"),
                 ],
-            })),
-            now,
-        );
-        let screen = draw(&mut app, 60, 14);
-        let popup: Vec<&str> = screen.lines().skip(1).take(10).collect();
+            }),
+        }
+    }
+
+    fn answer_env(app: &mut App, instance: &str) {
+        let Event::Env { result, .. } = env_response(instance) else {
+            unreachable!();
+        };
+        let generation = app.env.generation;
+        app.update(Event::Env { generation, result }, app.now);
+    }
+
+    #[test]
+    fn renders_a_process_env_that_wraps_and_scrolls() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Char('3'));
+        answer_env(&mut app, "nova-billing@main/web");
+        let screen = draw(&mut app, 60, 30);
+        let pane: Vec<&str> = screen
+            .lines()
+            .skip_while(|l| !l.starts_with("╭ 1 logs"))
+            .take(6)
+            .collect();
         assert_eq!(
-            popup,
+            pane,
             [
-                "│ ╭ env · nova-billing@main/web ─────────────────────────╮ │",
-                "│▾│ CARTE_APP  nova-billing  carte                       │M│",
-                "│ │ PATH       /Users/alex/.local/share/mise/installs/ru │M│",
-                "│ │            by/3.4/bin:/usr/local/bin:/usr/bin:/bin   │M│",
-                "╰─│            mise                                      │─╯",
-                "╭ │ PORT       <assigned at start>  carte                │─╮",
-                "╰─│                                                      │─╯",
-                "╭ │                                                      │─╮",
-                "│N│                                                      │ │",
-                "│ ╰ ↑↓ scroll · esc closes ──────────────────────────────╯ │",
+                "╭ 1 logs │ 2 events │ 3 env ───────────────────────────────╮",
+                "│CARTE_APP  nova-billing  carte                            │",
+                "│PATH       /Users/alex/.local/share/mise/installs/ruby/3.4│",
+                "│           /bin:/usr/local/bin:/usr/bin:/bin  mise        │",
+                "│PORT       <assigned at start>  carte                     │",
+                "│                                                          │",
             ],
             "{screen}"
         );
 
+        press(&mut app, now, KeyCode::Tab);
         press(&mut app, now, KeyCode::Char('G'));
-        let screen = draw(&mut app, 60, 10);
-        assert!(screen.contains("PORT"), "{screen}");
+        let screen = draw(&mut app, 60, 18);
+        assert!(screen.contains("│PORT"), "{screen}");
         assert!(
             !screen.contains("CARTE_APP"),
             "scrolled to the end\n{screen}"
         );
+    }
+
+    #[test]
+    fn the_env_tab_on_an_app_says_which_process_it_shows() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Right);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Char('3'));
+        answer_env(&mut app, "nova-billing@main/web");
+        let screen = draw(&mut app, 120, 30);
+        assert!(
+            screen.contains("│The env of web, which serves HTTP. Select a process to see "),
+            "{screen}"
+        );
+        assert!(screen.contains("│another: web, worker."), "{screen}");
+        assert!(
+            screen.contains("│CARTE_APP  nova-billing  carte"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn the_tab_border_marks_the_current_tab_and_mutes_what_doesnt_apply() {
+        let mut app = busy_app();
+        let now = app.now;
+        let screen = draw(&mut app, 120, 30);
+        let (y, line) = screen
+            .lines()
+            .enumerate()
+            .find(|(_, l)| l.contains("1 logs │ 2 events │ 3 env"))
+            .expect(&screen);
+        assert!(line.contains("following ╮"), "{line}");
+        let column = |name: &str| {
+            let at = line.find(name).unwrap();
+            line[..at].chars().count() as u16
+        };
+        let cell = |app: &mut App, name: &str| {
+            let x = column(name);
+            let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            terminal.draw(|frame| render(frame, app)).unwrap();
+            terminal.backend().buffer()[(x, y as u16)].clone()
+        };
+        let theme = Theme::terminal();
+        let logs = cell(&mut app, "1 logs");
+        assert_eq!(logs.fg, theme.accent);
+        assert!(logs.modifier.contains(Modifier::BOLD), "the current tab");
+        assert_eq!(cell(&mut app, "2 events").fg, theme.fg);
+        assert_eq!(
+            cell(&mut app, "3 env").fg,
+            theme.muted,
+            "a project has no env"
+        );
+
+        let click = |column| {
+            Event::Mouse(ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::Down(
+                    ratatui::crossterm::event::MouseButton::Left,
+                ),
+                column,
+                row: y as u16,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let commands = app.update(click(column("events") + 2), now);
+        assert_eq!(app.tab, Tab::Events);
+        assert!(
+            matches!(commands.as_slice(), [Command::FollowEvents { .. }]),
+            "{commands:?}"
+        );
+        assert_eq!(app.focus, Focus::Tree, "a tab click leaves the focus");
+        app.update(click(column("1 logs") - 2), now);
+        assert_eq!(app.tab, Tab::Events, "the border beside a tab isn't one");
+        assert_eq!(cell(&mut app, "2 events").fg, theme.accent);
     }
 
     #[test]
@@ -2188,7 +2334,7 @@ mod tests {
         press(&mut app, now, KeyCode::Enter);
         press(&mut app, now, KeyCode::Char('n'));
         let screen = draw(&mut app, 80, 24);
-        assert!(screen.contains("╭ logs /get 1/2 ↑"), "{screen}");
+        assert!(screen.contains("── /get 1/2 ↑"), "{screen}");
         assert!(screen.contains("Booting"), "every line stays\n{screen}");
 
         let spans = highlight(&Theme::terminal(), "GET /a then get /b", "get", true);
