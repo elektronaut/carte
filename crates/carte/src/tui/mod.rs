@@ -21,6 +21,7 @@ mod logs;
 mod saved;
 mod target;
 mod tasks;
+mod theme;
 mod tree;
 mod view;
 
