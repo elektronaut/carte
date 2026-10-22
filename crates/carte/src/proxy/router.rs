@@ -79,8 +79,9 @@ impl Trace {
         note(&mut self.0.lock().unwrap_or_else(|e| e.into_inner()));
     }
 
-    pub fn into_inner(self) -> Resolution {
-        self.0.into_inner().unwrap_or_else(|e| e.into_inner())
+    /// What the router noted, leaving the trace empty.
+    pub fn take(&self) -> Resolution {
+        std::mem::take(&mut self.0.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -89,21 +90,25 @@ impl Trace {
 pub struct Handled {
     pub at: std::time::SystemTime,
     pub kind: ListenerKind,
-    /// The visitor's addresses, for a request through a share.
+    /// The visitor's address, for a request through a share.
     pub visitor: Option<String>,
     pub method: http::Method,
     pub host: String,
     pub path: String,
-    pub status: StatusCode,
+    /// `None` when the client went away before the response's head.
+    pub status: Option<StatusCode>,
     /// How long routing took, waiting for a boot included.
     pub held: std::time::Duration,
     /// How long the upstream took to send its response's head.
     pub upstream: Option<std::time::Duration>,
     pub websocket: bool,
-    pub served: carte_api::Served,
+    /// `None` when the client went away before the response's head.
+    pub served: Option<carte_api::Served>,
     pub resolution: Resolution,
     pub request_headers: http::HeaderMap,
     pub response_headers: http::HeaderMap,
+    /// Header values were cut short or left out to keep the entry small.
+    pub headers_truncated: bool,
 }
 
 pub enum Route {
@@ -233,8 +238,9 @@ pub trait Router: Send + Sync + 'static {
     /// await its readiness here.
     fn route<'a>(&'a self, request: RouteRequest<'a>) -> BoxFuture<'a, Route>;
 
-    /// Called once the proxy has the head of a request's response, with what it
-    /// knows about the request. Runs on the request's path, so it must be quick.
+    /// Called with what the proxy knows about a request once it has the head of its
+    /// response, or once its client went away before that. Runs on the request's
+    /// path.
     fn handled(&self, request: Handled) {
         let _ = request;
     }

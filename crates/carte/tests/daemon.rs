@@ -2664,7 +2664,11 @@ fn the_proxy_keeps_its_requests_with_their_route_timings_and_headers() {
     let all = proxied(&daemon, None, 100);
     assert_eq!(
         all.iter()
-            .map(|r| (r.host.as_str(), r.path.as_str(), r.status))
+            .map(|r| (
+                r.host.as_str(),
+                r.path.as_str(),
+                r.status.unwrap_or_default()
+            ))
             .collect::<Vec<_>>(),
         [
             ("web.acme.test", "/robots.txt", 200),
@@ -2680,7 +2684,7 @@ fn the_proxy_keeps_its_requests_with_their_route_timings_and_headers() {
         unreachable!()
     };
     let path = daemon.root.join("work/acme-web/public/robots.txt");
-    assert_eq!(file.route.served, carte_api::Served::File { path });
+    assert_eq!(file.route.served, Some(carte_api::Served::File { path }));
     assert_eq!(file.upstream_ms, None);
     let subject = file.subject.as_ref().unwrap();
     assert_eq!(
@@ -2694,7 +2698,7 @@ fn the_proxy_keeps_its_requests_with_their_route_timings_and_headers() {
     assert!(booted.upstream_ms.is_some());
     assert!(matches!(
         booted.route.served,
-        carte_api::Served::Process { .. }
+        Some(carte_api::Served::Process { .. })
     ));
     assert_eq!(
         booted.subject.as_ref().unwrap().process.as_deref(),
@@ -2712,7 +2716,7 @@ fn the_proxy_keeps_its_requests_with_their_route_timings_and_headers() {
     assert_eq!(nothing.subject, None);
     assert!(matches!(
         &nothing.route.served,
-        carte_api::Served::Page { title } if title == "No app here"
+        Some(carte_api::Served::Page { title }) if title == "No app here"
     ));
 
     assert_eq!(
@@ -2720,7 +2724,7 @@ fn the_proxy_keeps_its_requests_with_their_route_timings_and_headers() {
         Some("broken")
     );
     assert!(
-        matches!(&crashed.route.served, carte_api::Served::Page { .. }),
+        matches!(&crashed.route.served, Some(carte_api::Served::Page { .. })),
         "{crashed:?}"
     );
 
@@ -2780,6 +2784,38 @@ fn the_proxy_keeps_its_requests_with_their_route_timings_and_headers() {
 }
 
 #[test]
+fn the_proxy_keeps_a_request_its_client_gave_up_on_during_a_boot() {
+    let daemon = Daemon::start_with_project(
+        "\n[apps.acme-web.processes.web.env]\nFIXTURE_BOOT_DELAY_MS = \"3000\"\n",
+    );
+    let mut stream = TcpStream::connect(("127.0.0.1", daemon.http_port)).unwrap();
+    write!(
+        stream,
+        "GET /early HTTP/1.1\r\nHost: web.acme.test\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    drop(stream);
+
+    let mut early = None;
+    eventually("the cancelled request", || {
+        early = proxied(&daemon, None, 10)
+            .into_iter()
+            .find(|r| r.path == "/early");
+        early.is_some()
+    });
+    let early = early.unwrap();
+    assert!(early.cancelled, "{early:?}");
+    assert_eq!((early.status, &early.route.served), (None, &None));
+    assert!(early.held_ms >= 400, "{early:?}");
+    assert_eq!(
+        early.subject.as_ref().and_then(|s| s.app.as_deref()),
+        Some("acme-web")
+    );
+    assert!(early.response_headers.is_empty());
+}
+
+#[test]
 fn the_proxy_keeps_the_latest_thousand_requests() {
     let daemon = Daemon::start();
     for i in 0..1010 {
@@ -2800,7 +2836,7 @@ fn the_proxy_keeps_shared_requests_with_the_visitor_address() {
     let host = "web--acme.share.example";
     let _socket = daemon.shared_websocket(host);
     let response = daemon.public_raw(&format!(
-        "GET /visit HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-For: 127.0.0.1, 203.0.113.9\r\n"
+        "GET /visit HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-For: 198.51.100.1, 203.0.113.9\r\n"
     ));
     assert!(response.starts_with("HTTP/1.1"), "{response}");
 
@@ -2809,11 +2845,11 @@ fn the_proxy_keeps_shared_requests_with_the_visitor_address() {
         panic!("{all:?}")
     };
     assert!(websocket.shared && websocket.websocket, "{websocket:?}");
-    assert_eq!(websocket.status, 101);
+    assert_eq!(websocket.status, Some(101));
     assert_eq!(websocket.visitor, None);
     assert!(matches!(
         websocket.route.served,
-        carte_api::Served::Process { .. }
+        Some(carte_api::Served::Process { .. })
     ));
     assert_eq!(visit.path, "/visit");
     assert!(visit.shared && !visit.websocket);

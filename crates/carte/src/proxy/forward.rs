@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::error::Error as _;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
@@ -85,8 +85,6 @@ const HOP_BY_HOP: [&str; 9] = [
 /// A response, and how it came about, for the request log.
 struct Answer {
     response: Response<ProxyBody>,
-    /// How long the router took.
-    held: Duration,
     served: Served,
     upstream: Option<Duration>,
     websocket: bool,
@@ -96,7 +94,6 @@ impl Answer {
     fn page(page: &ErrorPage, kind: ListenerKind, request_headers: &HeaderMap) -> Self {
         Answer {
             response: render(page, kind, request_headers),
-            held: Duration::ZERO,
             served: Served::Page {
                 title: page.title.clone(),
             },
@@ -106,62 +103,166 @@ impl Answer {
     }
 }
 
+/// When a request's routing ended and when it was sent on, as far as it got.
+#[derive(Default)]
+struct Timing {
+    held: OnceLock<Duration>,
+    sent: OnceLock<Instant>,
+}
+
+/// Tells the router about a request once it has an answer, or as cancelled when its
+/// client goes away before that.
+struct Recorder {
+    router: Arc<dyn Router>,
+    arrived: Instant,
+    timing: Timing,
+    trace: Trace,
+    request: Option<Arrived>,
+}
+
+/// What a request brought with it.
+struct Arrived {
+    at: SystemTime,
+    kind: ListenerKind,
+    visitor: Option<String>,
+    method: Method,
+    host: String,
+    path: String,
+    headers: HeaderMap,
+}
+
+impl Recorder {
+    fn record(&mut self, answer: Option<&Answer>) {
+        let Some(arrived) = self.request.take() else {
+            return;
+        };
+        let held = self
+            .timing
+            .held
+            .get()
+            .copied()
+            .unwrap_or_else(|| self.arrived.elapsed());
+        let upstream = match answer {
+            Some(answer) => answer.upstream,
+            None => self.timing.sent.get().map(Instant::elapsed),
+        };
+        let mut budget = HEADER_BUDGET;
+        let (request_headers, request_cut) = capped(arrived.headers, &mut budget);
+        let (response_headers, response_cut) = match answer {
+            Some(answer) => capped(answer.response.headers().clone(), &mut budget),
+            None => (HeaderMap::new(), false),
+        };
+        self.router.handled(Handled {
+            at: arrived.at,
+            kind: arrived.kind,
+            visitor: arrived.visitor,
+            method: arrived.method,
+            host: arrived.host,
+            path: arrived.path,
+            status: answer.map(|a| a.response.status()),
+            held,
+            upstream,
+            websocket: answer.is_some_and(|a| a.websocket),
+            served: answer.map(|a| a.served.clone()),
+            resolution: self.trace.take(),
+            request_headers,
+            response_headers,
+            headers_truncated: request_cut || response_cut,
+        });
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.record(None);
+    }
+}
+
+/// The most header bytes one entry of the request log keeps, request and response
+/// together.
+const HEADER_BUDGET: usize = 32 * 1024;
+/// The longest header value the request log keeps whole.
+const LONGEST_HEADER: usize = 8 * 1024;
+
+/// `headers` within what is left of `budget`: long values cut short, and headers past
+/// the budget left out. Says whether anything was.
+fn capped(headers: HeaderMap, budget: &mut usize) -> (HeaderMap, bool) {
+    let size = |name: &HeaderName, value: &HeaderValue| name.as_str().len() + value.len();
+    let total: usize = headers.iter().map(|(n, v)| size(n, v)).sum();
+    if total <= *budget && headers.values().all(|v| v.len() <= LONGEST_HEADER) {
+        *budget -= total;
+        return (headers, false);
+    }
+    let mut kept = HeaderMap::new();
+    let mut cut = false;
+    for (name, value) in &headers {
+        let value = if value.len() > LONGEST_HEADER {
+            cut = true;
+            HeaderValue::from_bytes(&value.as_bytes()[..LONGEST_HEADER])
+                .unwrap_or_else(|_| HeaderValue::from_static(""))
+        } else {
+            value.clone()
+        };
+        let size = size(name, &value);
+        if size > *budget {
+            cut = true;
+            continue;
+        }
+        *budget -= size;
+        kept.append(name.clone(), value);
+    }
+    (kept, cut)
+}
+
 pub(crate) async fn handle(
     shared: Arc<Shared>,
     inbound: Arc<Inbound>,
     request: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
-    let at = SystemTime::now();
-    let request_headers = request.headers().clone();
-    let method = request.method().clone();
     let path = request
         .uri()
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "/".into());
-    let visitor = (inbound.kind == ListenerKind::Share)
-        .then(|| visitor_addresses(&request_headers).join(", "))
-        .filter(|addresses| !addresses.is_empty());
-    let trace = Trace::new();
-    let (host, answer) = match request_host(&request) {
-        Some(host) => {
-            let routed = Routed {
-                headers: &request_headers,
-                trace: &trace,
-                host: &host,
-                path: &path,
-            };
-            let answer = route(&shared, &inbound, routed, request).await;
-            (host, answer)
-        }
-        None => {
-            let page = ErrorPage::new(
-                StatusCode::BAD_REQUEST,
-                "No host",
-                "The request has no Host header, so carte can't tell which app it is for.",
-            );
-            (
-                String::new(),
-                Answer::page(&page, inbound.kind, &request_headers),
-            )
-        }
+    let mut recorder = Recorder {
+        router: shared.router.clone(),
+        arrived: Instant::now(),
+        timing: Timing::default(),
+        trace: Trace::new(),
+        request: Some(Arrived {
+            at: SystemTime::now(),
+            kind: inbound.kind,
+            visitor: (inbound.kind == ListenerKind::Share)
+                .then(|| visitor(request.headers(), inbound.cloudflare))
+                .flatten(),
+            method: request.method().clone(),
+            host: request_host(&request).unwrap_or_default(),
+            path,
+            headers: request.headers().clone(),
+        }),
     };
-    shared.router.handled(Handled {
-        at,
-        kind: inbound.kind,
-        visitor,
-        method,
-        host,
-        path,
-        status: answer.response.status(),
-        held: answer.held,
-        upstream: answer.upstream,
-        websocket: answer.websocket,
-        served: answer.served,
-        resolution: trace.into_inner(),
-        request_headers,
-        response_headers: answer.response.headers().clone(),
-    });
+    let arrived = recorder
+        .request
+        .as_ref()
+        .expect("a request that just arrived");
+    let answer = if arrived.host.is_empty() {
+        let page = ErrorPage::new(
+            StatusCode::BAD_REQUEST,
+            "No host",
+            "The request has no Host header, so carte can't tell which app it is for.",
+        );
+        Answer::page(&page, inbound.kind, &arrived.headers)
+    } else {
+        let routed = Routed {
+            headers: &arrived.headers,
+            trace: &recorder.trace,
+            timing: &recorder.timing,
+            host: &arrived.host,
+            path: &arrived.path,
+        };
+        route(&shared, &inbound, routed, request).await
+    };
+    recorder.record(Some(&answer));
     Ok(answer.response)
 }
 
@@ -171,6 +272,7 @@ struct Routed<'a> {
     /// The request's headers as received.
     headers: &'a HeaderMap,
     trace: &'a Trace,
+    timing: &'a Timing,
     host: &'a str,
     path: &'a str,
 }
@@ -184,6 +286,7 @@ async fn route(
     let Routed {
         headers: request_headers,
         trace,
+        timing,
         host,
         path,
     } = routed;
@@ -222,8 +325,8 @@ async fn route(
     };
     let started = Instant::now();
     let route = shared.router.route(route_request).await;
-    let held = started.elapsed();
-    let mut answer = match route {
+    let _ = timing.held.set(started.elapsed());
+    match route {
         Route::Error(page) => Answer::page(&page, inbound.kind, request_headers),
         Route::Upstream {
             port,
@@ -236,6 +339,7 @@ async fn route(
             let forwarding = Forwarding {
                 route_request,
                 request_headers,
+                timing,
                 upstream: Upstream::Port(port),
             };
             forward(shared, inbound, forwarding, guard, request).await
@@ -244,6 +348,7 @@ async fn route(
             let forwarding = Forwarding {
                 route_request,
                 request_headers,
+                timing,
                 upstream: Upstream::Dialed(&dialer),
             };
             forward(shared, inbound, forwarding, guard, request).await
@@ -255,7 +360,6 @@ async fn route(
             match responded {
                 Ok(response) => Answer {
                     response: closing(response, body_closed),
-                    held: Duration::ZERO,
                     served: Served::File { path },
                     upstream: None,
                     websocket: false,
@@ -263,9 +367,7 @@ async fn route(
                 Err(page) => Answer::page(&page, inbound.kind, request_headers),
             }
         }
-    };
-    answer.held = held;
-    answer
+    }
 }
 
 /// A request on its way to an upstream.
@@ -273,6 +375,7 @@ struct Forwarding<'a> {
     route_request: RouteRequest<'a>,
     /// The request's headers as received.
     request_headers: &'a HeaderMap,
+    timing: &'a Timing,
     upstream: Upstream<'a>,
 }
 
@@ -286,6 +389,7 @@ async fn forward(
     let Forwarding {
         route_request,
         request_headers,
+        timing,
         upstream,
     } = forwarding;
     let page = |page: &ErrorPage, waited: Option<Duration>| Answer {
@@ -315,6 +419,7 @@ async fn forward(
         request.headers_mut().insert(HOST, host);
     }
     let started = Instant::now();
+    let _ = timing.sent.set(started);
     let sent = match upstream {
         Upstream::Port(port) => {
             *request.uri_mut() = upstream_uri(port, request.uri());
@@ -350,7 +455,6 @@ async fn forward(
     };
     let answer = |response: Response<ProxyBody>| Answer {
         response,
-        held: Duration::ZERO,
         served: match upstream {
             Upstream::Port(port) => Served::Process { port },
             Upstream::Dialed(_) => Served::Forward,
@@ -702,6 +806,28 @@ fn visitor_chain(headers: &HeaderMap) -> String {
     }
 }
 
+/// The visitor's address as the tunnel gives it: Cloudflare's `CF-Connecting-IP`, or
+/// else the last `X-Forwarded-For` entry, the one the tunnel added. The entries
+/// before it come from the visitor, who can write anything there.
+fn visitor(headers: &HeaderMap, cloudflare: bool) -> Option<String> {
+    let name = if cloudflare {
+        "cf-connecting-ip"
+    } else {
+        "x-forwarded-for"
+    };
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .next_back()?
+        .trim()
+        .parse::<IpAddr>()
+        .ok()
+        .filter(|ip| !is_local_address(*ip))
+        .map(|ip| ip.to_string())
+}
+
 /// The `X-Forwarded-For` addresses a tunnel sent, without local or malformed ones.
 fn visitor_addresses(headers: &HeaderMap) -> Vec<String> {
     headers
@@ -1005,6 +1131,52 @@ mod tests {
             ]),
             "198.51.100.4, 2001:db8::1"
         );
+    }
+
+    #[test]
+    fn the_visitor_is_the_address_the_tunnel_added() {
+        let spoofed = headers(&[
+            ("x-forwarded-for", "198.51.100.1, 203.0.113.9"),
+            ("cf-connecting-ip", "203.0.113.7"),
+        ]);
+        assert_eq!(visitor(&spoofed, false).as_deref(), Some("203.0.113.9"));
+        assert_eq!(visitor(&spoofed, true).as_deref(), Some("203.0.113.7"));
+        let local = headers(&[("x-forwarded-for", "198.51.100.1, 127.0.0.1")]);
+        assert_eq!(visitor(&local, false), None);
+        assert_eq!(visitor(&headers(&[]), true), None);
+    }
+
+    #[test]
+    fn caps_the_headers_an_entry_keeps() {
+        let small = headers(&[("accept", "*/*")]);
+        let mut budget = HEADER_BUDGET;
+        let (kept, cut) = capped(small.clone(), &mut budget);
+        assert_eq!((kept, cut), (small, false));
+        assert_eq!(budget, HEADER_BUDGET - "accept".len() - 3);
+
+        let mut long = HeaderMap::new();
+        long.insert(
+            "cookie",
+            HeaderValue::from_str(&"a".repeat(20_000)).unwrap(),
+        );
+        long.insert("accept", HeaderValue::from_static("*/*"));
+        let mut budget = HEADER_BUDGET;
+        let (kept, cut) = capped(long, &mut budget);
+        assert!(cut);
+        assert_eq!(kept["cookie"].len(), LONGEST_HEADER);
+        assert_eq!(kept["accept"], "*/*");
+
+        let mut many = HeaderMap::new();
+        for i in 0..10 {
+            let name = HeaderName::from_bytes(format!("x-{i}").as_bytes()).unwrap();
+            many.insert(name, HeaderValue::from_str(&"b".repeat(5_000)).unwrap());
+        }
+        let mut budget = HEADER_BUDGET;
+        let (kept, cut) = capped(many, &mut budget);
+        assert!(cut);
+        assert_eq!(kept.len(), 6);
+        let (rest, cut) = capped(headers(&[("accept", "*/*")]), &mut budget);
+        assert!(!cut && rest.len() == 1, "what's left of the budget");
     }
 
     #[test]

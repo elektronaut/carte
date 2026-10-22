@@ -75,7 +75,7 @@ impl Router for DaemonRouter {
                     ),
                 ));
             }
-            self.kube.route_traced(target, request.trace).await
+            self.kube.route(request.trace, target).await
         })
     }
 
@@ -229,6 +229,9 @@ impl Router for SupervisorRouter {
                             subject.process = upstream.process;
                         }
                         resolution.warmed = upstream.warmed;
+                        if upstream.checkout.is_some() {
+                            resolution.checkout = upstream.checkout;
+                        }
                     });
                     Route::Upstream {
                         port: upstream.port,
@@ -409,7 +412,7 @@ fn not_shared() -> ErrorPage {
     )
 }
 
-/// Notes the instance a request is for, and the checkout it runs from.
+/// Notes the instance a request is for, and the checkout it would run from.
 fn note_instance(world: &World, key: &InstanceKey, request: RouteRequest<'_>) {
     let checkout = world.project(&key.project).and_then(|state| {
         let app = state.project.app(&key.app)?;
