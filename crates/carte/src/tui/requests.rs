@@ -3,6 +3,7 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::time::Instant;
 
 use carte_api::ProxiedRequest;
 use ratatui::layout::Rect;
@@ -28,6 +29,10 @@ pub struct Requests {
     pub offset: usize,
     /// Where the selected request was drawn beside the list while zoomed.
     pub detail_area: Rect,
+    /// The open request once it left the buffer, to keep showing it.
+    kept: Option<ProxiedRequest>,
+    /// When to start the stream for `key`; `None` once it started.
+    pub pending: Option<Instant>,
 }
 
 impl Requests {
@@ -41,6 +46,7 @@ impl Requests {
         self.detail_scroll = 0;
         self.ended = None;
         self.offset = 0;
+        self.kept = None;
         self.generation
     }
 
@@ -50,9 +56,13 @@ impl Requests {
         }
         self.rows.push_back(request);
         if self.rows.len() > CAPACITY {
-            self.rows.pop_front();
+            let evicted = self.rows.pop_front();
+            if self.open.is_some() && self.open == evicted.as_ref().map(|r| r.seq) {
+                self.kept = evicted;
+            }
             let first = self.rows.front().map_or(0, |r| r.seq);
             if let Some(seq) = &mut self.selected {
+                self.offset = self.offset.saturating_sub(1);
                 *seq = (*seq).max(first);
             }
         }
@@ -122,11 +132,17 @@ impl Requests {
             self.selected = Some(seq);
             self.open = Some(seq);
             self.detail_scroll = 0;
+            self.kept = None;
         }
     }
 
+    pub fn close(&mut self) {
+        self.open = None;
+        self.kept = None;
+    }
+
     pub fn request(&self, seq: u64) -> Option<&ProxiedRequest> {
-        self.rows.iter().find(|r| r.seq == seq)
+        self.rows.iter().chain(&self.kept).find(|r| r.seq == seq)
     }
 
     #[cfg(test)]
@@ -217,6 +233,38 @@ pub mod tests {
         assert_eq!(requests.selected, Some(10));
         requests.follow();
         assert_eq!(requests.window(4), 7..11);
+    }
+
+    #[test]
+    fn a_full_buffer_keeps_a_held_view_and_the_open_request() {
+        let mut requests = filled(CAPACITY as u64);
+        requests.select_by(-10);
+        let held = requests.window(4);
+        requests.open_selected();
+        let open = requests.open;
+        let generation = requests.generation;
+        for seq in 0..5 {
+            requests.push(
+                generation,
+                request(CAPACITY as u64 + seq, "/new", Some(200)),
+            );
+        }
+        assert_eq!(requests.rows().len(), CAPACITY);
+        assert_eq!(
+            requests.window(4),
+            held.start - 5..held.end - 5,
+            "the same rows"
+        );
+        assert_eq!(requests.selected, open);
+
+        let mut requests = filled(CAPACITY as u64);
+        requests.select_index(0);
+        requests.open_selected();
+        let generation = requests.generation;
+        requests.push(generation, request(CAPACITY as u64, "/new", Some(200)));
+        assert_eq!(requests.opened().map(|r| r.seq), Some(0), "kept while open");
+        requests.close();
+        assert_eq!(requests.request(0), None);
     }
 
     #[test]
