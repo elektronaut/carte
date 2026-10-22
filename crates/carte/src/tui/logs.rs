@@ -1,5 +1,5 @@
-//! The log pane's buffer: the lines followed for the selected node, the search and
-//! the scroll position.
+//! The log pane's buffer: the lines followed for the selected node, the search or
+//! filter and the scroll position.
 
 use std::collections::VecDeque;
 
@@ -51,8 +51,12 @@ pub struct Logs {
     dropped: u64,
     /// Prefix labels in order of appearance, which picks their colours.
     labels: Vec<String>,
-    /// Text to highlight; every line stays visible.
+    /// Text to highlight; every line stays visible unless `filter` is on.
     pub search: String,
+    /// Hide the lines that don't match the search.
+    pub filter: bool,
+    /// The sequence numbers of the lines that match the search, oldest first.
+    matched: VecDeque<u64>,
     /// The match `n` and `N` last moved to, by sequence number.
     pub current: Option<u64>,
     /// Lines above the bottom; 0 follows new lines.
@@ -79,6 +83,8 @@ impl Default for Logs {
             dropped: 0,
             labels: Vec::new(),
             search: String::new(),
+            filter: false,
+            matched: VecDeque::new(),
             current: None,
             scroll: 0,
             ended: None,
@@ -97,6 +103,7 @@ impl Logs {
         self.prefix = prefix;
         self.dropped += self.lines.len() as u64;
         self.lines.clear();
+        self.matched.clear();
         self.hold = false;
         self.labels.clear();
         self.current = None;
@@ -114,12 +121,19 @@ impl Logs {
         {
             self.labels.push(label);
         }
-        if self.scroll > 0 || self.hold {
+        let seq = self.dropped + self.lines.len() as u64;
+        if self.matches(&line, &self.search.to_ascii_lowercase()) {
+            self.matched.push_back(seq);
+        }
+        if (self.scroll > 0 || self.hold) && self.shown(seq, &line) {
             self.scroll += 1;
         }
         self.lines.push_back(line);
         if self.lines.len() > CAPACITY {
             self.lines.pop_front();
+            if self.matched.front() == Some(&self.dropped) {
+                self.matched.pop_front();
+            }
             self.dropped += 1;
         }
     }
@@ -134,36 +148,48 @@ impl Logs {
         self.labels.iter().position(|l| l == label).unwrap_or(0)
     }
 
-    fn matches(&self, line: &LogLine) -> bool {
-        !line.marker
-            && !self.search.is_empty()
-            && line
-                .text
-                .to_lowercase()
-                .contains(&self.search.to_lowercase())
+    /// Whether a line holds `needle`, the search in lower case. Case folds the way the
+    /// view's highlight does.
+    fn matches(&self, line: &LogLine, needle: &str) -> bool {
+        !line.marker && !needle.is_empty() && line.text.to_ascii_lowercase().contains(needle)
+    }
+
+    fn filtering(&self) -> bool {
+        self.filter && !self.search.is_empty()
+    }
+
+    /// Whether the filter keeps a line. Markers always stay.
+    fn shown(&self, seq: u64, line: &LogLine) -> bool {
+        !self.filtering() || line.marker || self.matched.binary_search(&seq).is_ok()
     }
 
     #[cfg(test)]
     pub fn visible(&self) -> Vec<&LogLine> {
-        self.lines.iter().collect()
+        self.numbered().into_iter().map(|(_, l)| l).collect()
     }
 
-    /// The lines with their sequence numbers.
+    /// The lines the filter keeps, with their sequence numbers.
     fn numbered(&self) -> Vec<(u64, &LogLine)> {
         self.lines
             .iter()
             .enumerate()
             .map(|(i, l)| (self.dropped + i as u64, l))
+            .filter(|&(seq, l)| self.shown(seq, l))
             .collect()
+    }
+
+    /// How many lines the filter keeps.
+    fn shown_count(&self) -> usize {
+        if self.filtering() {
+            self.matched.len() + self.lines.iter().filter(|l| l.marker).count()
+        } else {
+            self.lines.len()
+        }
     }
 
     /// The sequence numbers of the lines that match the search, oldest first.
     pub fn match_seqs(&self) -> Vec<u64> {
-        self.numbered()
-            .into_iter()
-            .filter(|(_, l)| self.matches(l))
-            .map(|(seq, _)| seq)
-            .collect()
+        self.matched.iter().copied().collect()
     }
 
     /// Moves to the next older match (`older`) or the next newer one, starting from
@@ -180,8 +206,9 @@ impl Logs {
             return false;
         };
         self.current = Some(seq);
-        let index = (seq - self.dropped) as usize;
-        let below = self.lines.len() - 1 - index;
+        let shown = self.numbered();
+        let index = shown.iter().position(|&(s, _)| s == seq).unwrap_or(0);
+        let below = shown.len() - 1 - index;
         self.scroll = below.saturating_sub(self.height / 2);
         self.scroll_by(0);
         true
@@ -270,12 +297,12 @@ impl Logs {
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
-        let max = self.lines.len().saturating_sub(self.height.max(1));
+        let max = self.shown_count().saturating_sub(self.height.max(1));
         self.scroll = self.scroll.min(max).saturating_add_signed(delta).min(max);
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.scroll = self.lines.len().saturating_sub(self.height.max(1));
+        self.scroll = self.shown_count().saturating_sub(self.height.max(1));
     }
 
     pub fn follow(&mut self) {
@@ -285,10 +312,25 @@ impl Logs {
     /// Searches for `search` from the newest line.
     pub fn set_search(&mut self, search: String) {
         self.search = search;
+        let needle = self.search.to_ascii_lowercase();
+        self.matched = self
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| self.matches(l, &needle))
+            .map(|(i, _)| self.dropped + i as u64)
+            .collect();
         self.current = None;
         if !self.find(true) {
             self.scroll = 0;
         }
+    }
+
+    /// Switches between highlighting the matches and hiding the lines without one.
+    pub fn toggle_filter(&mut self) {
+        self.filter = !self.filter;
+        let search = std::mem::take(&mut self.search);
+        self.set_search(search);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -367,7 +409,7 @@ mod tests {
                 ..line("")
             },
         );
-        logs.search = "e".into();
+        logs.set_search("e".into());
         assert_eq!(logs.match_seqs().len(), 1);
         let visible = logs.visible();
         assert_eq!(visible.len(), 2);
@@ -461,5 +503,71 @@ mod tests {
         logs.set_search("nothing".into());
         assert_eq!(logs.current, None);
         assert_eq!(logs.scroll, 0);
+    }
+
+    #[test]
+    fn the_filter_hides_lines_without_a_match() {
+        let mut logs = Logs::default();
+        let generation = logs.restart(None, Prefix::Process);
+        for i in 0..20 {
+            let text = if i % 5 == 0 {
+                format!("GET /up {i}")
+            } else {
+                format!("{i}")
+            };
+            logs.push(generation, line(&text));
+        }
+        logs.push(
+            generation,
+            LogLine {
+                marker: true,
+                ..line("")
+            },
+        );
+        logs.height = 2;
+        logs.set_search("get".into());
+        logs.toggle_filter();
+        assert!(logs.filter);
+        assert_eq!(
+            texts(logs.visible()),
+            ["GET /up 0", "GET /up 5", "GET /up 10", "GET /up 15", ""],
+            "markers stay"
+        );
+        assert_eq!(logs.current, Some(15));
+        logs.scroll_to_top();
+        assert_eq!(logs.scroll, 3);
+        assert_eq!(texts(logs.window(2)), ["GET /up 0", "GET /up 5"]);
+        logs.push(generation, line("21"));
+        assert_eq!(logs.scroll, 3, "a hidden line doesn't move the view");
+        logs.push(generation, line("GET /up 22"));
+        assert_eq!(logs.scroll, 4);
+        assert_eq!(texts(logs.window(2)), ["GET /up 0", "GET /up 5"]);
+
+        assert!(logs.find(true));
+        assert_eq!(logs.current, Some(10), "n steps over hidden lines");
+        logs.hold = true;
+        let (first, last) = (logs.seq_at(0).unwrap(), logs.seq_at(1).unwrap());
+        assert_eq!(
+            logs.text_between(first, last),
+            ("web GET /up 10\nweb GET /up 15".to_string(), 2),
+            "a copy holds only the shown lines"
+        );
+        logs.push(generation, line("23"));
+        logs.push(generation, line("get 24"));
+        assert_eq!(seq_texts(&logs, first, last), ["GET /up 10", "GET /up 15"]);
+        logs.hold = false;
+
+        logs.toggle_filter();
+        assert_eq!(logs.visible().len(), 25);
+        logs.filter = true;
+        logs.set_search(String::new());
+        assert_eq!(logs.visible().len(), 25, "no search, nothing hidden");
+    }
+
+    /// The text of the lines a held view shows on its first two rows.
+    fn seq_texts(logs: &Logs, first: u64, last: u64) -> Vec<String> {
+        assert_eq!(logs.seq_at(0), Some(first), "the view held still");
+        assert_eq!(logs.seq_at(1), Some(last));
+        logs.window(2).iter().map(|l| l.text.clone()).collect()
     }
 }

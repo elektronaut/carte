@@ -9,7 +9,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
+};
 
 use super::app::{App, Connection};
 use super::browse::Browse;
@@ -162,7 +164,20 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
             Rect::new(x, area.y, column(width(&title) - from), 1).intersection(title_area);
     }
     let block = pane(theme, Line::from(title), app.focus == Focus::Tree);
-    app.tree_height = block.inner(area).height.saturating_sub(1) as usize;
+    let mut inner = block.inner(area);
+    frame.render_widget(block, area);
+    let typing = app.mode == Mode::Filter && app.focus == Focus::Tree;
+    if typing || !app.fold.filter.is_empty() {
+        let input = Input {
+            label: "filter",
+            term: &app.fold.filter,
+            count: None,
+            keys: "enter keeps · esc clears",
+            typing,
+        };
+        inner = render_input(theme, frame, inner, input);
+    }
+    app.tree_height = inner.height.saturating_sub(1) as usize;
 
     let rows: Vec<Row> = app
         .rows
@@ -189,12 +204,11 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         ],
     )
     .header(header)
-    .block(block)
     .row_highlight_style(selected_style);
     let mut state = TableState::default()
         .with_offset(app.tree_offset)
         .with_selected((!app.rows.is_empty()).then_some(app.cursor));
-    frame.render_stateful_widget(table, area, &mut state);
+    frame.render_stateful_widget(table, inner, &mut state);
     app.tree_area = area;
     app.tree_offset = state.offset();
     if app.rows.is_empty() {
@@ -203,13 +217,84 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         } else {
             "Nothing matches."
         };
-        let inner = Rect {
-            y: area.y + 2,
+        let row = Rect {
+            y: inner.y + 1,
             height: 1,
-            ..pane(theme, Line::default(), false).inner(area)
+            ..inner
         };
-        frame.render_widget(Paragraph::new(message.fg(theme.muted)).centered(), inner);
+        frame.render_widget(Paragraph::new(message.fg(theme.muted)).centered(), row);
     }
+}
+
+/// A pane's filter or search.
+struct Input<'a> {
+    label: &'static str,
+    term: &'a str,
+    /// The current match and how many there are, like `3/12`.
+    count: Option<String>,
+    /// What the keys do while typing.
+    keys: &'static str,
+    typing: bool,
+}
+
+/// Draws the input at the bottom of a pane's `inner` area and returns the area above
+/// it: under a rule with the label, the count and, while typing, the keys, or on one
+/// row with the label when the pane is short. The term shows with a cursor while
+/// typing, its end kept in view.
+fn render_input(theme: &Theme, frame: &mut Frame, inner: Rect, input: Input) -> Rect {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let rows = if inner.height >= 10 { 2 } else { 1 };
+    let [above, below] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(inner);
+    let color = if input.typing {
+        theme.border_focus
+    } else {
+        theme.border
+    };
+    let label = format!(" {} ", input.label);
+    let count = input.count.map(|c| format!(" {c} ")).unwrap_or_default();
+    let mut room = usize::from(below.width);
+    let text_area = if rows == 2 {
+        let mut title = vec![Span::raw(label).fg(color)];
+        if input.typing {
+            title.push(Span::raw(format!("· {} ", input.keys)).fg(theme.muted));
+        }
+        let block = Block::new()
+            .borders(Borders::TOP)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(color))
+            .title(Line::from(title))
+            .title(Line::from(count).fg(color).right_aligned());
+        let text_area = block.inner(below);
+        frame.render_widget(block, below);
+        text_area
+    } else {
+        room = room.saturating_sub(label.width() + count.width());
+        let [label_area, text_area, count_area] = Layout::horizontal([
+            Constraint::Length(label.width() as u16),
+            Constraint::Fill(1),
+            Constraint::Length(count.width() as u16),
+        ])
+        .areas(below);
+        frame.render_widget(Paragraph::new(label.fg(color).reversed()), label_area);
+        frame.render_widget(Paragraph::new(count.fg(color)), count_area);
+        text_area
+    };
+    let mut text: Vec<char> = input.term.chars().collect();
+    if input.typing {
+        text.push('▏');
+    }
+    let mut used = 0;
+    let start = text
+        .iter()
+        .rposition(|c| {
+            used += c.width().unwrap_or(0);
+            used > room.saturating_sub(1)
+        })
+        .map_or(0, |i| i + 1);
+    let shown: String = text[start..].iter().collect();
+    frame.render_widget(Paragraph::new(format!(" {shown}")), text_area);
+    above
 }
 
 /// On the selected row, `muted` text is drawn in `selection_fg` while the tree has
@@ -924,17 +1009,9 @@ fn render_tabs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// The search and how far up the logs are, for the pane's border.
+/// How far up the logs are, for the pane's border.
 fn logs_status(theme: &Theme, logs: &Logs) -> Vec<Span<'static>> {
     let mut title = vec![];
-    if !logs.search.is_empty() {
-        let seqs = logs.match_seqs();
-        let at = logs
-            .current
-            .and_then(|seq| seqs.iter().position(|&s| s == seq))
-            .map_or(String::new(), |i| format!("{}/", i + 1));
-        title.push(Span::raw(format!(" /{} {at}{}", logs.search, seqs.len())).fg(theme.warn));
-    }
     title.push(if logs.scroll > 0 {
         Span::raw(format!(" ↑{} ", logs.scroll)).fg(theme.warn)
     } else {
@@ -943,11 +1020,35 @@ fn logs_status(theme: &Theme, logs: &Logs) -> Vec<Span<'static>> {
     title
 }
 
-fn render_logs(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut App) {
+fn render_logs(theme: &Theme, frame: &mut Frame, mut inner: Rect, app: &mut App) {
     let events = match app.tab {
         Tab::Events => true,
         Tab::Logs | Tab::Env => false,
     };
+    let logs = &app.logs;
+    let typing = app.mode == Mode::Filter && app.focus == Focus::Logs;
+    if typing || !logs.search.is_empty() {
+        let count = (!logs.search.is_empty()).then(|| {
+            let seqs = logs.match_seqs();
+            let at = logs
+                .current
+                .and_then(|seq| seqs.iter().position(|&s| s == seq))
+                .map_or(String::new(), |i| format!("{}/", i + 1));
+            format!("{at}{}", seqs.len())
+        });
+        let input = Input {
+            label: if logs.filter { "filter" } else { "search" },
+            term: &logs.search,
+            count,
+            keys: if logs.filter {
+                "ctrl-f searches · enter keeps · esc clears"
+            } else {
+                "ctrl-f filters · enter keeps · esc clears"
+            },
+            typing,
+        };
+        inner = render_input(theme, frame, inner, input);
+    }
     app.logs.height = inner.height as usize;
     app.logs.width = inner.width as usize;
     let logs = &app.logs;
@@ -958,6 +1059,7 @@ fn render_logs(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut App) {
             .selected_node()
             .is_some_and(|n| matches!(n.status.state, State::Stopped | State::Disabled));
         let message = match (&logs.ended, logs.is_empty()) {
+            (_, false) if logs.filter => "Nothing matches.".into(),
             (Some(reason), _) if events => format!("No events: {reason}"),
             (Some(reason), _) => format!("No logs: {reason}"),
             (None, _) if events => "Nothing has happened here yet.".into(),
@@ -1092,17 +1194,6 @@ fn status_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
             Span::raw(format!("{shown}▏")),
         ]);
     }
-    if app.mode == Mode::Filter {
-        let (what, filter) = match app.focus {
-            Focus::Tree => ("filter tree", &app.fold.filter),
-            Focus::Logs => ("search logs", &app.logs.search),
-        };
-        return Line::from(vec![
-            Span::raw(format!(" {what}: ")).fg(theme.muted),
-            Span::raw(format!("{filter}▏")).fg(theme.warn),
-            Span::raw("  enter keeps · esc clears").fg(theme.muted),
-        ]);
-    }
     if let Some(notice) = &app.notice {
         let text = Span::raw(format!(" {}", notice.text));
         return Line::from(if notice.error {
@@ -1113,9 +1204,6 @@ fn status_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
     }
     if let Connection::Lost(_) = app.connection {
         return Line::from(" reconnecting to the daemon…".fg(theme.warn));
-    }
-    if !app.fold.filter.is_empty() {
-        return Line::from(format!(" filter: {} (esc clears)", app.fold.filter).fg(theme.muted));
     }
     Line::default()
 }
@@ -2026,6 +2114,32 @@ mod tests {
     }
 
     #[test]
+    fn tabs_take_clicks_while_zoomed_and_env_takes_no_search() {
+        let mut app = busy_app();
+        let now = app.now;
+        for code in [KeyCode::Down, KeyCode::Right, KeyCode::Down] {
+            press(&mut app, now, code);
+        }
+        press(&mut app, now, KeyCode::Char('z'));
+        let screen = draw(&mut app, 120, 12);
+        let (y, row) = screen
+            .lines()
+            .enumerate()
+            .find(|(_, r)| r.contains("2 events"))
+            .expect(&screen);
+        let x = row[..row.find("2 events").unwrap()].chars().count() as u16;
+        app.update(click(x + 2, y as u16), now);
+        assert_eq!(app.tab, Tab::Events, "{screen}");
+        assert!(app.zoom.is_some());
+
+        press(&mut app, now, KeyCode::Char('3'));
+        press(&mut app, now, KeyCode::Char('/'));
+        assert_eq!(app.mode, Mode::Normal, "the env has nothing to search");
+        let screen = draw(&mut app, 120, 12);
+        assert!(!screen.contains("│ search"), "{screen}");
+    }
+
+    #[test]
     fn a_jump_while_zoomed_keeps_the_right_side() {
         let mut app = busy_app();
         let now = app.now;
@@ -2483,12 +2597,7 @@ mod tests {
         let mut app = busy_app();
         let now = app.now;
         press(&mut app, now, KeyCode::Tab);
-        press(&mut app, now, KeyCode::Char('/'));
-        for c in "puma-starting-mode".chars() {
-            press(&mut app, now, KeyCode::Char(c));
-        }
-        press(&mut app, now, KeyCode::Enter);
-        draw(&mut app, 56, 30);
+        draw(&mut app, 36, 30);
         let tabs: Vec<Tab> = app.tab_spans.iter().map(|(tab, ..)| *tab).collect();
         assert_eq!(tabs, [Tab::Logs, Tab::Events], "env is under the status");
     }
@@ -2537,9 +2646,15 @@ mod tests {
         }
         press(&mut app, now, KeyCode::Enter);
         press(&mut app, now, KeyCode::Char('n'));
-        let screen = draw(&mut app, 80, 24);
-        assert!(screen.contains("── /get 1/2 ↑"), "{screen}");
+        let screen = draw(&mut app, 120, 24);
+        assert!(
+            screen.contains("─ ↑2 ╮"),
+            "the term stays off the border\n{screen}"
+        );
         assert!(screen.contains("Booting"), "every line stays\n{screen}");
+        assert!(screen.contains("││ search ─"), "{screen}");
+        assert!(screen.contains("─ 1/2 │"), "{screen}");
+        assert!(screen.contains("││ get  "), "{screen}");
 
         let spans = highlight(&Theme::terminal(), "GET /a then get /b", "get", true);
         let texts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
@@ -2547,6 +2662,128 @@ mod tests {
         assert_eq!(spans[1].style, Style::new().black().on_yellow());
         let spans = highlight(&Theme::terminal(), "GET /up", "get", false);
         assert_eq!(spans[1].style, Style::new().yellow().bold());
+    }
+
+    #[test]
+    fn the_input_sits_at_the_bottom_of_the_focused_pane() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('/'));
+        for c in "bill".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        let screen = draw(&mut app, 120, 30);
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(
+            rows[25].starts_with("│ filter · enter keeps · esc clears ───"),
+            "a rule over the input in a tall pane\n{screen}"
+        );
+        assert!(rows[26].starts_with("│ bill▏    "), "{screen}");
+        assert!(rows[27].starts_with("╰───"), "{screen}");
+        assert_eq!(rows[28], "", "the status line doesn't repeat it");
+
+        let screen = draw(&mut app, 80, 24);
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(
+            rows[9].starts_with("│ filter  bill▏    "),
+            "one row in a short pane\n{screen}"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(10, 9)].symbol(), "b");
+        assert_eq!(buffer[(10, 9)].fg, app.theme.fg, "normal text");
+
+        for c in "日本語のログを探す".chars().cycle().take(60) {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        let screen = draw(&mut app, 80, 24);
+        let row = screen.lines().nth(9).unwrap();
+        assert!(
+            row.ends_with("▏│") || row.ends_with("▏ │"),
+            "the cursor stays in view\n{screen}"
+        );
+        for _ in 0..60 {
+            press(&mut app, now, KeyCode::Backspace);
+        }
+
+        press(&mut app, now, KeyCode::Enter);
+        let screen = draw(&mut app, 80, 24);
+        assert!(
+            screen.contains("│ filter  bill    "),
+            "kept without a cursor\n{screen}"
+        );
+        press(&mut app, now, KeyCode::Esc);
+        let screen = draw(&mut app, 80, 24);
+        assert!(!screen.contains(" filter  "), "{screen}");
+    }
+
+    #[test]
+    fn the_logs_keep_room_for_lines_and_clicks_on_the_input_select_nothing() {
+        let mut app = busy_app();
+        let now = app.now;
+        let generation = app.logs.generation;
+        for i in 0..10 {
+            log(&mut app, generation, "web", &format!("GET /up {i}"));
+        }
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Char('/'));
+        press(&mut app, now, KeyCode::Char('g'));
+        press(&mut app, now, KeyCode::Enter);
+        let screen = draw(&mut app, 80, 24);
+        assert!(app.logs.height >= 3, "{screen}");
+        let rows: Vec<&str> = screen.lines().collect();
+        let input = rows
+            .iter()
+            .position(|r| r.starts_with("│ search  g"))
+            .expect(&screen);
+        let down = Event::Mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column: 10,
+            row: input as u16,
+            modifiers: KeyModifiers::NONE,
+        });
+        app.update(down, now);
+        assert_eq!(app.selection, None, "{screen}");
+        assert!(!app.logs.hold);
+    }
+
+    #[test]
+    fn ctrl_f_filters_the_logs_instead_of_searching_them() {
+        let mut app = busy_app();
+        let now = app.now;
+        let generation = app.logs.generation;
+        for text in ["GET /up", "Booting", "GET /a then get /b"] {
+            log(&mut app, generation, "web", text);
+        }
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Char('/'));
+        for c in "get".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        let screen = draw(&mut app, 120, 24);
+        assert!(screen.contains("Booting"), "{screen}");
+        assert!(screen.contains("ctrl-f filters · enter keeps"), "{screen}");
+
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        app.update(Event::Key(ctrl_f), now);
+        assert_eq!(app.logs.search, "get", "the term stays");
+        let screen = draw(&mut app, 120, 24);
+        assert!(!screen.contains("Booting"), "{screen}");
+        assert!(screen.contains("GET /up"), "{screen}");
+        assert!(screen.contains("││ filter · ctrl-f searches"), "{screen}");
+        assert!(screen.contains("ctrl-f searches · enter keeps"), "{screen}");
+
+        press(&mut app, now, KeyCode::Char('x'));
+        let screen = draw(&mut app, 120, 24);
+        assert!(screen.contains("Nothing matches."), "{screen}");
+
+        press(&mut app, now, KeyCode::Esc);
+        assert!(!app.logs.filter, "the next search starts as a search");
+        let screen = draw(&mut app, 120, 24);
+        assert!(screen.contains("Booting"), "{screen}");
     }
 
     /// The kube sample with its project opened and an empty listing back.

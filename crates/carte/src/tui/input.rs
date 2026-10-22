@@ -61,6 +61,8 @@ pub enum Intent {
     FilterChar(char),
     FilterBackspace,
     FilterDone,
+    /// Switch the logs between searching and filtering while typing.
+    ToggleLogFilter,
     CycleShow,
     ToggleMouse,
     /// Show the tab with this number below the details.
@@ -109,6 +111,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("PgUp PgDn", "page"),
             ("tab", "switch between tree and logs"),
             ("/", "filter the tree, search the logs"),
+            ("ctrl-f", "filter or search the logs, while typing"),
             ("n N", "older, newer match in the logs"),
             ("esc", "clear the filter or search"),
             ("a", "show all, running or shared"),
@@ -160,6 +163,10 @@ pub fn intent(mode: &Mode, focus: Focus, key: KeyEvent) -> Option<Intent> {
             KeyCode::Char('p') if *mode == Mode::Jump => return Some(Intent::Move(-1)),
             KeyCode::Char('n') if *mode == Mode::Jump => return Some(Intent::Move(1)),
             KeyCode::Char('p') if *mode == Mode::Normal => return Some(Intent::StartJump),
+            KeyCode::Char('f') if *mode == Mode::Filter && focus == Focus::Logs => {
+                return Some(Intent::ToggleLogFilter);
+            }
+            KeyCode::Char(_) if matches!(mode, Mode::Filter | Mode::Jump) => return None,
             _ => {}
         }
     }
@@ -339,6 +346,16 @@ mod tests {
         assert_eq!(
             intent(&Mode::Filter, Focus::Tree, key(KeyCode::Esc)),
             Some(Intent::ClearFilter)
+        );
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert_eq!(
+            intent(&Mode::Filter, Focus::Logs, ctrl_f),
+            Some(Intent::ToggleLogFilter)
+        );
+        assert_eq!(
+            intent(&Mode::Filter, Focus::Tree, ctrl_f),
+            None,
+            "the tree only filters, and ctrl-f doesn't type"
         );
     }
 
