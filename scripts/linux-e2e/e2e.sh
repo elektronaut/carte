@@ -67,14 +67,6 @@ each_unit() {
   done
   return $all
 }
-no_unit_active() {
-  local unit answer
-  for unit in $units; do
-    answer=$(as_dev "systemctl --user is-active $unit")
-    echo "$unit: $answer"
-    [ "$answer" != active ] || return 1
-  done
-}
 # sysctl_files <file…>: `sysctl --system` reads only these files.
 sysctl_files() {
   local read
@@ -90,9 +82,15 @@ grep PRETTY_NAME /etc/os-release
 
 # Kernel sysctls outside the network namespace belong to the host. boot.sh
 # leaves only /proc/sys/net writable; stop if it didn't.
-sysrq=$(cat /proc/sys/kernel/sysrq)
-if (echo "$sysrq" > /proc/sys/kernel/sysrq) 2>/dev/null; then
-  echo "kernel sysctls are writable in this container; stopping before anything changes them"
+sysrq=$(cat /proc/sys/kernel/sysrq 2>/dev/null)
+if [ -z "$sysrq" ] || (echo "$sysrq" > /proc/sys/kernel/sysrq) 2>/dev/null; then
+  echo "kernel sysctls may be writable in this container; stopping before anything changes them"
+  exit 1
+fi
+if ! grep -q ' /sys ro,' /proc/self/mountinfo || grep -qE ' /sys/(kernel|fs/fuse|fs/binfmt)' /proc/self/mountinfo \
+  || grep -q ' /proc/sys/fs/binfmt_misc ' /proc/self/mountinfo; then
+  grep -E ' /sys| /proc/sys' /proc/self/mountinfo
+  echo "/sys is writable, or the host's kernel filesystems are mounted; stopping"
   exit 1
 fi
 check "sysctl --system reads no distribution files" sysctl_files
@@ -216,7 +214,7 @@ step "carte setup --uninstall"
 check "uninstall exits 0" setup_yes --uninstall
 check "unit files gone" sh -c "! ls /home/dev/.config/systemd/user/carte*"
 check "no unit links left" sh -c "! ls -d /home/dev/.config/systemd/user/*.wants/carte*"
-check "units not active" no_unit_active
+check "units inactive" each_unit is-active inactive
 check "sysctl drop-in gone" test ! -e /etc/sysctl.d/50-carte.conf
 check "sysctl value back to 1024" test "$(port_start)" = 1024
 check "sysctl --system reads no files" sysctl_files
