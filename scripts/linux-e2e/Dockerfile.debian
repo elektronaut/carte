@@ -5,5 +5,9 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     python3 openssl curl ca-certificates libnss3-tools iproute2 procps sudo bsdutils \
  && rm -rf /var/lib/apt/lists/*
 RUN useradd -m -s /bin/bash dev && echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev
+# No distribution sysctl files, so `sysctl --system` applies only carte's.
+RUN rm -f /usr/lib/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf /etc/sysctl.d/*.conf /etc/sysctl.conf \
+ && systemctl mask systemd-sysctl.service
+COPY boot.sh /usr/local/sbin/boot
 STOPSIGNAL SIGRTMIN+3
-CMD ["/sbin/init"]
+CMD ["/usr/local/sbin/boot"]

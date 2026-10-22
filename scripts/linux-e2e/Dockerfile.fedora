@@ -4,5 +4,9 @@ RUN dnf -y install --setopt=install_weak_deps=False systemd systemd-resolved dbu
     python3 openssl curl ca-certificates p11-kit-trust nss-tools iproute procps-ng sudo util-linux-script \
  && dnf clean all
 RUN useradd -m -s /bin/bash dev && echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev
+# No distribution sysctl files, so `sysctl --system` applies only carte's.
+RUN rm -f /usr/lib/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf /etc/sysctl.d/*.conf /etc/sysctl.conf \
+ && systemctl mask systemd-sysctl.service
+COPY boot.sh /usr/local/sbin/boot
 STOPSIGNAL SIGRTMIN+3
-CMD ["/sbin/init"]
+CMD ["/usr/local/sbin/boot"]
