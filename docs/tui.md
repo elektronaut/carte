@@ -20,6 +20,11 @@ has a blue border. The keys at the bottom are the most used ones for
 the focused pane. While there are problems, or the share tunnel is
 down, the keys start with `! problems`.
 
+`z` zooms the right side: the details and tabs fill the space, with
+the details at full width on top. Their short facts then share a line.
+`z` goes back to the focus you had. So does `esc`, once the search is
+clear. `tab` goes back to the tree. The tree doesn't zoom.
+
 ### Tree
 
 The tree groups folders, projects, stacks, apps and processes. Inside a
@@ -145,8 +150,9 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `[` `]` | Previous, next tab |
 | `/` | Filter the tree, or search the logs |
 | `n` `N` | Older, newer match (logs) |
-| `esc` | Clear the filter or search of the focused pane |
+| `esc` | Clear the filter or search of the focused pane, or leave the zoom |
 | `a` | Show all, running or shared instances |
+| `z` | Zoom the details and tabs, or go back |
 | `-` | Mark the logs with the time |
 | `m` | Mouse on or off |
 | `ctrl-p` | Jump to a project, stack, app or process |

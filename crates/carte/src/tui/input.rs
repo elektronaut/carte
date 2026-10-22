@@ -67,6 +67,8 @@ pub enum Intent {
     PickTab(u8),
     /// Show the tab this many places along.
     StepTab(isize),
+    /// Give the right side the whole main area, or go back.
+    ToggleZoom,
     Control(Control),
     StopIdle,
     StopAll,
@@ -112,6 +114,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("a", "show all, running or shared"),
             ("1 2 3", "show logs, events, env"),
             ("[ ]", "previous, next tab"),
+            ("z", "zoom the details and tabs, or go back"),
             ("drag", "copy log lines"),
             ("-", "mark the logs with the time"),
             ("m", "mouse on or off"),
@@ -224,6 +227,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char(c @ '1'..='5') => Some(Intent::PickTab(c as u8 - b'0')),
         KeyCode::Char('[') => Some(Intent::StepTab(-1)),
         KeyCode::Char(']') => Some(Intent::StepTab(1)),
+        KeyCode::Char('z') => Some(Intent::ToggleZoom),
         KeyCode::Char('m') => Some(Intent::ToggleMouse),
         KeyCode::Char('t') => Some(Intent::StartTyping),
         _ => None,
