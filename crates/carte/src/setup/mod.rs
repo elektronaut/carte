@@ -6,6 +6,7 @@ pub mod macos;
 pub mod plist;
 pub mod share;
 pub mod skill;
+pub mod trust_stores;
 pub mod units;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -657,6 +658,30 @@ fn ca_files_uninstall_step(facts: &Facts, plan: &mut Plan) {
     ));
 }
 
+/// The command with the hash of the CA in the state dir in place of
+/// [`trust_stores::NEW_CA_HASH`], for a step planned before the CA existed.
+fn with_new_ca_hash(command: &CommandLine, env: &SetupEnv) -> anyhow::Result<CommandLine> {
+    if !command
+        .args
+        .iter()
+        .any(|a| a.contains(trust_stores::NEW_CA_HASH))
+    {
+        return Ok(command.clone());
+    }
+    let hash = crate::tls::ca::current_hash(&env.paths.state_dir)
+        .context("reading the hash of carte's new CA")?;
+    let short = trust_stores::entry_name(&hash);
+    let short = short.trim_start_matches("carte-");
+    Ok(CommandLine {
+        program: command.program.clone(),
+        args: command
+            .args
+            .iter()
+            .map(|a| a.replace(trust_stores::NEW_CA_HASH, short))
+            .collect(),
+    })
+}
+
 /// Runs the steps in order and stops at the first that fails.
 pub fn execute(steps: &[Step], env: &SetupEnv) -> anyhow::Result<()> {
     for (i, step) in steps.iter().enumerate() {
@@ -683,6 +708,7 @@ fn run_step(step: &Step, env: &SetupEnv) -> anyhow::Result<()> {
             sudo,
             stdin,
         } => {
+            let command = &with_new_ca_hash(command, env)?;
             let mut process = if *sudo {
                 let mut process = std::process::Command::new("sudo");
                 process.arg(&command.program).args(&command.args);

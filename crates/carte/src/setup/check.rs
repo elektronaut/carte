@@ -238,7 +238,7 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
 
     match &facts.os {
         OsFacts::MacOs(mac) => macos::check_agent(&mut report, env, mac),
-        OsFacts::Linux(linux) => linux::check_units(&mut report, env, linux),
+        OsFacts::Linux(linux) => linux::check_units(&mut report, env, facts, linux),
     }
     report.push(
         if facts.daemon_running {

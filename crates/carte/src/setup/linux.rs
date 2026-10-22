@@ -10,8 +10,9 @@ use std::process::{Command, Stdio};
 use crate::cli::prompt::tilde;
 
 use super::check::{PortUser, Report, Status};
+use super::trust_stores::{self, TrustFacts};
 use super::units::{SERVICE, UNITS};
-use super::{Action, CaState, Facts, Plan, SetupEnv, Step};
+use super::{Action, Facts, Plan, SetupEnv, Step};
 
 pub const PORT_START_KEY: &str = "net.ipv4.ip_unprivileged_port_start";
 
@@ -70,6 +71,7 @@ pub struct LinuxFacts {
     pub port_start_files: Vec<(PathBuf, String)>,
     /// Whether the loopback interface has `::1`.
     pub ipv6: bool,
+    pub trust: TrustFacts,
 }
 
 impl LinuxFacts {
@@ -113,6 +115,7 @@ impl LinuxFacts {
             sysctl_dir: env.sysctl_dir.is_dir(),
             port_start_files: port_start_files(&env.sysctl_file()),
             ipv6: has_ipv6_loopback(),
+            trust: TrustFacts::gather(env),
         }
     }
 
@@ -409,6 +412,8 @@ pub(super) fn plan_install(env: &SetupEnv, facts: &Facts, linux: &LinuxFacts) ->
     }
 
     steps.extend(super::create_ca_step(facts));
+    trust_stores::install_steps(env, facts, &linux.trust, &mut plan);
+    let steps = &mut plan.steps;
 
     if linux.systemd {
         let agent = env.agent();
@@ -493,13 +498,6 @@ pub(super) fn plan_install(env: &SetupEnv, facts: &Facts, linux: &LinuxFacts) ->
              {port}, such as with dnsmasq's `server=/{tld}/127.0.0.1#{port}`",
             tld = env.machine.tld,
             port = env.machine.dns_port,
-        ));
-    }
-    if facts.ca != CaState::Trusted {
-        plan.notes.push(format!(
-            "setup doesn't add carte's CA to Linux trust stores yet; trust {} in your system \
-             store and browsers yourself",
-            tilde(&env.ca_cert())
         ));
     }
     if facts.daemon_running && !linux.service_active() {
@@ -599,6 +597,7 @@ pub(super) fn plan_uninstall(env: &SetupEnv, facts: &Facts, linux: &LinuxFacts) 
         &mut plan.steps,
     );
     super::skill_uninstall_steps(env, facts, &mut plan);
+    trust_stores::uninstall_steps(&linux.trust, &mut plan);
     super::ca_files_uninstall_step(facts, &mut plan);
     plan.notes.push(format!(
         "your projects in {config} and the rest of carte's state in {state} are left alone.",
@@ -609,7 +608,8 @@ pub(super) fn plan_uninstall(env: &SetupEnv, facts: &Facts, linux: &LinuxFacts) 
 }
 
 /// The units' and the port sysctl's lines in `carte setup --check`.
-pub(super) fn check_units(report: &mut Report, env: &SetupEnv, linux: &LinuxFacts) {
+pub(super) fn check_units(report: &mut Report, env: &SetupEnv, facts: &Facts, linux: &LinuxFacts) {
+    trust_stores::check(report, facts, &linux.trust);
     if let Some(port) = env.privileged_port() {
         match linux.port_start {
             Some(start) if start <= port => report.push(
@@ -712,13 +712,14 @@ pub fn fallback(env: &SetupEnv) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::path::Path;
 
     use super::*;
     use crate::setup::tests::{commands, env, fresh, with_test_tld};
+    use crate::setup::trust_stores::SystemStore;
     use crate::setup::units::HTTP_SOCKET;
-    use crate::setup::{OsFacts, Platform, plan_install, plan_uninstall, set_tld};
+    use crate::setup::{CaState, OsFacts, Platform, plan_install, plan_uninstall, set_tld};
 
     fn linux_env(root: &Path) -> SetupEnv {
         SetupEnv {
@@ -727,25 +728,44 @@ mod tests {
         }
     }
 
-    fn on_linux(linux: LinuxFacts) -> Facts {
+    pub(in crate::setup) const HASH: &str = "C544AB0012FF34EE9900";
+
+    pub(in crate::setup) fn on_linux(linux: LinuxFacts) -> Facts {
         Facts {
+            ca_hash: Some(HASH.into()),
             os: OsFacts::Linux(linux),
             ..fresh()
         }
     }
 
-    fn bare() -> LinuxFacts {
+    pub(in crate::setup) fn debian(own: &[&str]) -> SystemStore {
+        SystemStore {
+            dir: "/usr/local/share/ca-certificates".into(),
+            update: "/usr/sbin/update-ca-certificates".into(),
+            extension: "crt".into(),
+            own: own.iter().map(|name| name.to_string()).collect(),
+            others: Vec::new(),
+        }
+    }
+
+    pub(in crate::setup) fn bare() -> LinuxFacts {
         LinuxFacts {
             systemd: true,
             sysctl_dir: true,
             port_start: Some(1024),
             ipv6: true,
+            trust: TrustFacts {
+                system: Some(debian(&[])),
+                certutil: Some("/usr/bin/certutil".into()),
+                ..TrustFacts::default()
+            },
             ..LinuxFacts::default()
         }
     }
 
-    /// Units installed as setup writes them, enabled and running, and low ports open.
-    fn ready(env: &SetupEnv) -> LinuxFacts {
+    /// Units installed as setup writes them, enabled and running, low ports open, and
+    /// the CA in the system's store.
+    pub(in crate::setup) fn ready(env: &SetupEnv) -> LinuxFacts {
         let units = env
             .agent()
             .units(true)
@@ -762,6 +782,11 @@ mod tests {
         LinuxFacts {
             units,
             port_start: Some(80),
+            trust: TrustFacts {
+                system: Some(debian(&["carte-C544AB0012FF34EE"])),
+                certutil: Some("/usr/bin/certutil".into()),
+                ..TrustFacts::default()
+            },
             ..bare()
         }
     }
@@ -776,6 +801,8 @@ mod tests {
                 "sudo tee /r/sysctl.d/50-carte.conf",
                 "sudo sysctl --system",
                 "create ca",
+                "sudo install -m 644 /r/state/ca.pem '/usr/local/share/ca-certificates/carte-{new-ca-hash}.crt'",
+                "sudo /usr/sbin/update-ca-certificates",
                 "write /r/home/.config/systemd/user/carte-http.socket",
                 "write /r/home/.config/systemd/user/carte-https.socket",
                 "write /r/home/.config/systemd/user/carte.service",
@@ -795,21 +822,14 @@ mod tests {
             )
         );
         assert_eq!(
-            plan.steps[3].description,
+            plan.steps[5].description,
             "Install the socket unit that opens port 80 for carte"
         );
         assert_eq!(
-            plan.steps[4].description,
+            plan.steps[6].description,
             "Install the socket unit that opens port 443 for carte"
         );
-        assert!(
-            plan.notes
-                .iter()
-                .any(|n| n.contains("doesn't add carte's CA to Linux trust stores yet")),
-            "{:?}",
-            plan.notes
-        );
-        assert!(!plan.notes.iter().any(|n| n.contains("lookups")));
+        assert!(plan.notes.is_empty(), "{:?}", plan.notes);
 
         let shown = plan.render(&env, false);
         assert!(
@@ -861,6 +881,9 @@ mod tests {
             commands(&plan_install(&env, &facts)),
             [
                 "create ca",
+                "sudo rm -f /usr/local/share/ca-certificates/carte-C544AB0012FF34EE.crt",
+                "sudo install -m 644 /r/state/ca.pem '/usr/local/share/ca-certificates/carte-{new-ca-hash}.crt'",
+                "sudo /usr/sbin/update-ca-certificates",
                 "systemctl --user stop carte-http.socket carte-https.socket carte.service",
                 "write /r/home/.config/systemd/user/carte.service",
                 "systemctl --user daemon-reload",
@@ -878,10 +901,11 @@ mod tests {
             ca: CaState::Replace("it was made for .nova, .localhost".into()),
             ..on_linux(ready(&env))
         };
+        let planned = commands(&plan_install(&env, &facts));
         assert_eq!(
-            commands(&plan_install(&env, &facts)),
+            planned[planned.len() - 3..],
             [
-                "create ca",
+                "sudo /usr/sbin/update-ca-certificates",
                 "systemctl --user restart carte.service",
                 "verify"
             ]
@@ -961,7 +985,14 @@ mod tests {
             ..bare()
         };
         let plan = plan_install(&env, &on_linux(facts));
-        assert_eq!(commands(&plan), ["create ca"]);
+        assert_eq!(
+            commands(&plan),
+            [
+                "create ca",
+                "sudo install -m 644 /r/state/ca.pem '/usr/local/share/ca-certificates/carte-{new-ca-hash}.crt'",
+                "sudo /usr/sbin/update-ca-certificates",
+            ]
+        );
         assert!(
             plan.notes[0].contains("run `carte daemon` yourself"),
             "{:?}",
@@ -997,6 +1028,9 @@ mod tests {
                 format!("sudo rm -f {root}/sysctl.d/50-carte.conf"),
                 "sudo sysctl -w net.ipv4.ip_unprivileged_port_start=1024".to_string(),
                 "sudo sysctl --system".to_string(),
+                "sudo rm -f /usr/local/share/ca-certificates/carte-C544AB0012FF34EE.crt"
+                    .to_string(),
+                "sudo /usr/sbin/update-ca-certificates".to_string(),
                 format!("rm -f {root}/state/ca.pem {root}/state/ca-key.pem"),
             ]
         );
@@ -1067,7 +1101,12 @@ mod tests {
             plan.notes
         );
         let mut report = Report::default();
-        check_units(&mut report, &env, &overridden);
+        check_units(
+            &mut report,
+            &env,
+            &on_linux(overridden.clone()),
+            &overridden,
+        );
         assert!(
             report.to_string().contains(
                 "net.ipv4.ip_unprivileged_port_start is 1024 (/etc/sysctl.conf sets 1024, after carte's drop-in), so systemd can't open port 80 for carte"
@@ -1135,12 +1174,13 @@ mod tests {
         let env = linux_env(Path::new("/r"));
         let report = |linux: &LinuxFacts| {
             let mut report = Report::default();
-            check_units(&mut report, &env, linux);
+            check_units(&mut report, &env, &on_linux(linux.clone()), linux);
             report.to_string()
         };
         assert_eq!(
             report(&ready(&env)),
-            "  ok  low ports           net.ipv4.ip_unprivileged_port_start is 80\n  \
+            "  ok  system store        /usr/local/share/ca-certificates/carte-C544AB0012FF34EE.crt\n  \
+             ok  low ports           net.ipv4.ip_unprivileged_port_start is 80\n  \
              ok  carte-http.socket   /r/home/.config/systemd/user/carte-http.socket, enabled, active\n  \
              ok  carte-https.socket  /r/home/.config/systemd/user/carte-https.socket, enabled, active\n  \
              ok  carte.service       /r/home/.config/systemd/user/carte.service, enabled, active\n"
