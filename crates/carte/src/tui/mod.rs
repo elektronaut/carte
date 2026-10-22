@@ -24,6 +24,7 @@ mod tabs;
 mod target;
 mod tasks;
 mod theme;
+mod theme_files;
 mod tree;
 mod view;
 
@@ -36,6 +37,7 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
     let socket = paths.socket();
     let start_at = here(paths);
     let saved_path = saved::path(&paths.state_dir);
+    let themes_dir = theme_files::dir(&paths.config_dir);
     let restored = saved::load(&saved_path);
     let detach_keys = carte_core::config::load_machine_config(&paths.machine_config())
         .map(|machine| machine.attach.detach_keys)
@@ -49,7 +51,15 @@ pub fn run(paths: &Paths) -> anyhow::Result<ExitCode> {
                 restore(info);
             }));
             tasks::set_mouse_capture(true);
-            let result = event_loop(&mut terminal, socket, start_at, restored, detach_keys).await;
+            let result = event_loop(
+                &mut terminal,
+                socket,
+                themes_dir,
+                start_at,
+                restored,
+                detach_keys,
+            )
+            .await;
             tasks::set_mouse_capture(false);
             ratatui::restore();
             result
@@ -84,20 +94,23 @@ fn here(paths: &Paths) -> Option<tree::NodeId> {
 async fn event_loop(
     terminal: &mut DefaultTerminal,
     socket: std::path::PathBuf,
+    themes_dir: std::path::PathBuf,
     start_at: Option<tree::NodeId>,
     restored: saved::Saved,
     detach_keys: carte_core::detach::DetachKeys,
 ) -> anyhow::Result<saved::Saved> {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut tasks = tasks::Tasks::start(socket, tx);
+    let colors = theme::Colors::detect();
+    let mut tasks = tasks::Tasks::start(socket, themes_dir.clone(), colors, tx);
     let mut app = app::App::new(Instant::now());
     app.start_at = start_at;
     app.detach_keys = detach_keys;
-    app.colors = theme::Colors::detect();
+    app.colors = colors;
+    app.set_themes(theme_files::load(&themes_dir, colors));
     let restored_theme = restored.theme.clone();
     if let Some(theme) = restored_theme
         .as_deref()
-        .and_then(|id| theme::named(id, app.colors))
+        .and_then(|id| app.themes.iter().find(|t| t.id == id).cloned())
     {
         app.use_theme(theme);
     }

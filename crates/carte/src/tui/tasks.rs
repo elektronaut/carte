@@ -1,7 +1,7 @@
 //! The IO side: daemon streams and calls, terminal input and a clock, each feeding
 //! events into the app loop.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +18,11 @@ use ratatui::crossterm::event::{
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 
+use notify::{RecursiveMode, Watcher};
+
 use super::app::{Command, Event};
+use super::theme::Colors;
+use super::theme_files;
 use crate::cli::attach::Connection;
 use crate::client::Client;
 
@@ -33,13 +37,20 @@ pub struct Tasks {
 }
 
 impl Tasks {
-    pub fn start(socket: PathBuf, tx: UnboundedSender<Event>) -> Self {
+    pub fn start(
+        socket: PathBuf,
+        themes_dir: PathBuf,
+        colors: Colors,
+        tx: UnboundedSender<Event>,
+    ) -> Self {
         let client = Arc::new(Client::new(&socket));
         let socket = socket.clone();
         tokio::spawn(watch(client.clone(), tx.clone()));
         tokio::spawn(tick(tx.clone()));
         let input_tx = tx.clone();
         std::thread::spawn(move || read_terminal(input_tx));
+        let themes_tx = tx.clone();
+        std::thread::spawn(move || watch_themes(&themes_dir, colors, &themes_tx));
         Tasks {
             client,
             socket,
@@ -358,6 +369,50 @@ async fn watch(client: Arc<Client>, tx: UnboundedSender<Event>) {
 }
 
 /// Redraws countdowns and expires notices.
+/// Loads the theme files again a moment after they change, and the folder's parent
+/// too, so a folder made later is noticed.
+fn watch_themes(dir: &Path, colors: Colors, tx: &UnboundedSender<Event>) {
+    let (changes_tx, changes) = std::sync::mpsc::channel();
+    let Ok(mut watcher) = notify::recommended_watcher(move |event| {
+        let _ = changes_tx.send(event);
+    }) else {
+        return;
+    };
+    let parent = dir.parent().unwrap_or(dir);
+    let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
+    let mut watching = watcher.watch(dir, RecursiveMode::NonRecursive).is_ok();
+    let resolved = match (parent.canonicalize(), dir.file_name()) {
+        (Ok(parent), Some(name)) => parent.join(name),
+        _ => dir.to_path_buf(),
+    };
+    let touches = |event: &notify::Result<notify::Event>| {
+        event.as_ref().is_ok_and(|event| {
+            event
+                .paths
+                .iter()
+                .any(|path| path.starts_with(dir) || path.starts_with(&resolved))
+        })
+    };
+    while let Ok(first) = changes.recv() {
+        let mut relevant = touches(&first);
+        while let Ok(event) = changes.recv_timeout(Duration::from_millis(300)) {
+            relevant |= touches(&event);
+        }
+        if !relevant {
+            continue;
+        }
+        if !watching {
+            watching = watcher.watch(dir, RecursiveMode::NonRecursive).is_ok();
+        }
+        if tx
+            .send(Event::Themes(theme_files::load(dir, colors)))
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
 async fn tick(tx: UnboundedSender<Event>) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     loop {
@@ -429,4 +484,33 @@ pub fn set_mouse_capture(on: bool) {
     } else {
         ratatui::crossterm::execute!(out, DisableMouseCapture)
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_theme_folder_made_later_is_watched() {
+        let config = tempfile::tempdir().unwrap();
+        let dir = theme_files::dir(config.path());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let watched = dir.clone();
+        std::thread::spawn(move || watch_themes(&watched, Colors::Truecolor, &tx));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("acme.toml"), "ok = \"cyan\"\n").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let event = tokio::time::timeout_at(deadline, rx.recv())
+                .await
+                .expect("the themes load again")
+                .unwrap();
+            if let Event::Themes(loaded) = event
+                && loaded.themes.iter().any(|t| t.id == "acme")
+            {
+                break;
+            }
+        }
+    }
 }

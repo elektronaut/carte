@@ -22,6 +22,7 @@ use super::requests::Requests;
 use super::tabs::{EnvSubject, EnvTab, Tab};
 use super::target;
 use super::theme::{self, Colors, Theme};
+use super::theme_files;
 use super::tree::{self, Fold, Node, NodeId, Row, Show};
 use crate::logs::Stripper;
 
@@ -31,6 +32,8 @@ pub enum Event {
     Mouse(MouseEvent),
     Tick,
     Redraw,
+    /// The theme files, loaded again after a change.
+    Themes(theme_files::Loaded),
     Snapshot(Box<Snapshot>),
     Disconnected(String),
     Log {
@@ -241,6 +244,10 @@ pub struct App {
     /// Whether a theme was picked this session.
     pub picked_theme: bool,
     pub picker: Option<ThemePicker>,
+    /// The built-in and custom themes on offer.
+    pub themes: Vec<Theme>,
+    /// What was wrong with the theme files that didn't load.
+    pub theme_problems: Vec<String>,
     typing_sessions: u64,
 }
 
@@ -284,6 +291,8 @@ impl App {
             colors: Colors::Truecolor,
             picked_theme: false,
             picker: None,
+            themes: theme::builtins(Colors::Truecolor),
+            theme_problems: Vec::new(),
             typing_sessions: 0,
         }
     }
@@ -299,6 +308,7 @@ impl App {
             }
             Event::Mouse(mouse) if self.mode == Mode::Normal => self.mouse(mouse, &mut commands),
             Event::Mouse(_) | Event::Tick | Event::Redraw => {}
+            Event::Themes(loaded) => self.set_themes(loaded),
             Event::Snapshot(snapshot) => {
                 self.connection = Connection::Connected;
                 self.credentials.retain(|(project, stack), _| {
@@ -901,10 +911,23 @@ impl App {
         self.theme = self.drawable(theme);
     }
 
+    /// Takes the themes as the files now are, and redraws with the current theme's
+    /// new version. A current theme whose file broke stays as it was.
+    pub fn set_themes(&mut self, loaded: theme_files::Loaded) {
+        self.theme_problems = loaded.problems;
+        self.themes = loaded.themes;
+        if self.picker.is_none()
+            && let Some(theme) = self.themes.iter().find(|t| t.id == self.theme.id).cloned()
+        {
+            self.use_theme(theme);
+        }
+    }
+
     fn pick_theme(&mut self) {
-        let themes: Vec<Theme> = theme::builtins(self.colors)
-            .into_iter()
-            .map(|t| self.drawable(t))
+        let themes: Vec<Theme> = self
+            .themes
+            .iter()
+            .map(|t| self.drawable(t.clone()))
             .collect();
         let cursor = themes
             .iter()
