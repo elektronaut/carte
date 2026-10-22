@@ -68,10 +68,10 @@ for distro in $distros; do
   echo "######## $distro"
   docker build --label "$label" -t "carte-e2e-$distro" -f "$here/Dockerfile.$distro" "$here"
   name=carte-e2e-$distro-$$
+  containers+=("$name")
   docker run -d --name "$name" --label "$label" --hostname "carte-e2e-$distro" \
     --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock \
     "carte-e2e-$distro" >/dev/null
-  containers+=("$name")
   state=
   for _ in $(seq 60); do
     state=$(docker exec "$name" systemctl is-system-running 2>/dev/null || true)
