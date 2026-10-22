@@ -91,6 +91,7 @@ pub fn system_roots_pem() -> Result<String, TlsError> {
         "/etc/ssl/certs/ca-certificates.crt",
         "/etc/pki/tls/certs/ca-bundle.crt",
         "/etc/ssl/cert.pem",
+        "/etc/ssl/ca-bundle.pem",
     ]
     .iter()
     .find_map(|path| std::fs::read_to_string(path).ok())
