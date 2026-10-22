@@ -151,53 +151,10 @@ pub fn parse_resolver(text: &str) -> (Option<&str>, Option<u16>) {
 /// `carte setup --check`.
 pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
     let mut report = Report::default();
-    let file = tilde(&env.resolver_file());
-    match facts.resolver(&env.machine.tld) {
-        _ if env.needs_resolver() && env.platform == Platform::Linux => {
-            linux::check_dns(&mut report, env);
-        }
-        _ if !env.needs_resolver() => report.push(
-            Status::Ok,
-            "resolver",
-            ".localhost resolves to loopback without one",
-        ),
-        None => report.push(Status::Missing, "resolver", format!("{file} is missing")),
-        Some(text) => {
-            let by = if text.contains("puma-dev") {
-                " (written by puma-dev)"
-            } else {
-                ""
-            };
-            match parse_resolver(text) {
-                (Some("127.0.0.1"), Some(port)) if port == env.machine.dns_port => report.push(
-                    Status::Ok,
-                    "resolver",
-                    format!("{file} points at 127.0.0.1 port {port}{by}"),
-                ),
-                (nameserver, port) => report.push(
-                    Status::Warn,
-                    "resolver",
-                    format!(
-                        "{file} points at {} port {}{by}; carte's DNS is 127.0.0.1 port {}",
-                        nameserver.unwrap_or("?"),
-                        port.map_or("53".to_string(), |p| p.to_string()),
-                        env.machine.dns_port
-                    ),
-                ),
-            }
-        }
-    }
-
-    for tld in super::leftover_resolvers(env, facts) {
-        report.push(
-            Status::Warn,
-            "resolver",
-            format!(
-                "{} isn't needed for .{}; `carte setup` removes it",
-                tilde(&env.resolver_dir.join(tld)),
-                env.machine.tld
-            ),
-        );
+    if let OsFacts::Linux(linux) = &facts.os {
+        super::resolved::check(&mut report, env, &linux.dns);
+    } else {
+        resolver_lines(&mut report, env, facts);
     }
     let previous = super::previous_tlds(env, facts);
     if !env.tld_configured && !previous.is_empty() {
@@ -304,6 +261,55 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
         port_line(&mut report, label, port, &users, protocol == "TCP" && ipv6);
     }
     report
+}
+
+/// The resolver files' lines in `carte setup --check` on macOS.
+fn resolver_lines(report: &mut Report, env: &SetupEnv, facts: &Facts) {
+    let file = tilde(&env.resolver_file());
+    match facts.resolver(&env.machine.tld) {
+        _ if !env.needs_resolver() => report.push(
+            Status::Ok,
+            "resolver",
+            ".localhost resolves to loopback without one",
+        ),
+        None => report.push(Status::Missing, "resolver", format!("{file} is missing")),
+        Some(text) => {
+            let by = if text.contains("puma-dev") {
+                " (written by puma-dev)"
+            } else {
+                ""
+            };
+            match parse_resolver(text) {
+                (Some("127.0.0.1"), Some(port)) if port == env.machine.dns_port => report.push(
+                    Status::Ok,
+                    "resolver",
+                    format!("{file} points at 127.0.0.1 port {port}{by}"),
+                ),
+                (nameserver, port) => report.push(
+                    Status::Warn,
+                    "resolver",
+                    format!(
+                        "{file} points at {} port {}{by}; carte's DNS is 127.0.0.1 port {}",
+                        nameserver.unwrap_or("?"),
+                        port.map_or("53".to_string(), |p| p.to_string()),
+                        env.machine.dns_port
+                    ),
+                ),
+            }
+        }
+    }
+
+    for tld in super::leftover_resolvers(env, facts) {
+        report.push(
+            Status::Warn,
+            "resolver",
+            format!(
+                "{} isn't needed for .{}; `carte setup` removes it",
+                tilde(&env.resolver_dir.join(tld)),
+                env.machine.tld
+            ),
+        );
+    }
 }
 
 fn port_line(report: &mut Report, label: &str, port: u16, users: &[PortUser], dual_stack: bool) {

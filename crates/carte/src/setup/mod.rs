@@ -4,6 +4,7 @@ pub mod check;
 pub mod linux;
 pub mod macos;
 pub mod plist;
+pub mod resolved;
 pub mod share;
 pub mod skill;
 pub mod trust_stores;
@@ -209,7 +210,7 @@ pub struct Facts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OsFacts {
     MacOs(MacFacts),
-    Linux(LinuxFacts),
+    Linux(Box<LinuxFacts>),
 }
 
 impl Facts {
@@ -259,7 +260,7 @@ impl Facts {
             )),
             os: match env.platform {
                 Platform::MacOs => OsFacts::MacOs(MacFacts::gather(env)),
-                Platform::Linux => OsFacts::Linux(LinuxFacts::gather(env)),
+                Platform::Linux => OsFacts::Linux(Box::new(LinuxFacts::gather(env))),
             },
         }
     }
@@ -312,11 +313,16 @@ pub fn previous_tlds(env: &SetupEnv, facts: &Facts) -> Vec<String> {
         .iter()
         .filter(|(_, text)| env.is_carte_resolver(text) || text.contains("puma-dev"))
         .map(|(tld, _)| tld.clone());
+    let from_linux = match &facts.os {
+        OsFacts::Linux(linux) => linux.dns.files.keys().cloned().collect(),
+        OsFacts::MacOs(_) => Vec::new(),
+    };
     facts
         .mac()
         .into_iter()
         .flat_map(|mac| mac.puma_dev.domains.iter().cloned())
         .chain(from_resolvers)
+        .chain(from_linux)
         .filter(|tld| tld != "localhost" && is_tld(tld))
         .collect::<BTreeSet<_>>()
         .into_iter()

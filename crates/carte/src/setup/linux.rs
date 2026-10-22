@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use crate::cli::prompt::tilde;
 
 use super::check::{PortUser, Report, Status};
+use super::resolved::{self, DnsFacts};
 use super::trust_stores::{self, TrustFacts};
 use super::units::{SERVICE, UNITS};
 use super::{Action, Facts, Plan, SetupEnv, Step};
@@ -72,6 +73,7 @@ pub struct LinuxFacts {
     /// Whether the loopback interface has `::1`.
     pub ipv6: bool,
     pub trust: TrustFacts,
+    pub dns: DnsFacts,
 }
 
 impl LinuxFacts {
@@ -116,6 +118,7 @@ impl LinuxFacts {
             port_start_files: port_start_files(&env.sysctl_file()),
             ipv6: has_ipv6_loopback(),
             trust: TrustFacts::gather(env),
+            dns: DnsFacts::gather(),
         }
     }
 
@@ -411,7 +414,8 @@ pub(super) fn plan_install(env: &SetupEnv, facts: &Facts, linux: &LinuxFacts) ->
         ),
     }
 
-    steps.extend(super::create_ca_step(facts));
+    resolved::install_steps(env, &linux.dns, &mut plan);
+    plan.steps.extend(super::create_ca_step(facts));
     trust_stores::install_steps(env, facts, &linux.trust, &mut plan);
     let steps = &mut plan.steps;
 
@@ -492,14 +496,6 @@ pub(super) fn plan_install(env: &SetupEnv, facts: &Facts, linux: &LinuxFacts) ->
         );
     }
 
-    if env.needs_resolver() {
-        plan.notes.push(format!(
-            "setup doesn't send .{tld} lookups to carte on Linux yet; point them at 127.0.0.1 port \
-             {port}, such as with dnsmasq's `server=/{tld}/127.0.0.1#{port}`",
-            tld = env.machine.tld,
-            port = env.machine.dns_port,
-        ));
-    }
     if facts.daemon_running && !linux.service_active() {
         plan.notes.push(format!(
             "a carte daemon is already running on {}; stop it first, or the service's daemon will refuse to start",
@@ -596,6 +592,7 @@ pub(super) fn plan_uninstall(env: &SetupEnv, facts: &Facts, linux: &LinuxFacts) 
         "Remove carte's sysctl setting for low ports",
         &mut plan.steps,
     );
+    resolved::uninstall_steps(&linux.dns, &mut plan);
     super::skill_uninstall_steps(env, facts, &mut plan);
     trust_stores::uninstall_steps(&linux.trust, &mut plan);
     super::ca_files_uninstall_step(facts, &mut plan);
@@ -680,18 +677,6 @@ pub(super) fn check_units(report: &mut Report, env: &SetupEnv, facts: &Facts, li
     }
 }
 
-/// The DNS line in `carte setup --check` for a TLD that needs one.
-pub(super) fn check_dns(report: &mut Report, env: &SetupEnv) {
-    report.push(
-        Status::Missing,
-        "resolver",
-        format!(
-            "setup doesn't send .{} lookups to carte on Linux yet; point them at 127.0.0.1 port {}",
-            env.machine.tld, env.machine.dns_port
-        ),
-    );
-}
-
 /// What to do when the daemon didn't come up behind systemd's sockets.
 pub fn fallback(env: &SetupEnv) -> String {
     format!(
@@ -733,7 +718,7 @@ pub(super) mod tests {
     pub(in crate::setup) fn on_linux(linux: LinuxFacts) -> Facts {
         Facts {
             ca_hash: Some(HASH.into()),
-            os: OsFacts::Linux(linux),
+            os: OsFacts::Linux(Box::new(linux)),
             ..fresh()
         }
     }

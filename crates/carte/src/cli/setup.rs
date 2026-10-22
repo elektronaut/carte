@@ -5,7 +5,7 @@ use anyhow::bail;
 use super::SetupArgs;
 use super::prompt::{self, tilde};
 use crate::paths::Paths;
-use crate::setup::{self, Facts, SetupEnv, check};
+use crate::setup::{self, Facts, Platform, SetupEnv, check};
 
 pub fn run(paths: &Paths, args: SetupArgs) -> anyhow::Result<ExitCode> {
     let mut env = SetupEnv::from_system(paths)?;
@@ -158,16 +158,20 @@ fn choose_tld(env: &SetupEnv, facts: &Facts, args: &SetupArgs) -> anyhow::Result
         "an earlier carte setup"
     };
     let old = &previous[0];
+    let through = match env.platform {
+        Platform::MacOs => format!("/etc/resolver/{old}"),
+        Platform::Linux => "systemd-resolved".to_string(),
+    };
     if args.dry_run || !prompt::interactive(false) {
         bail!(
             "{by} served apps under .{old}. Choose with `--tld {old}` to keep those hostnames \
-             (carte answers them through /etc/resolver/{old}), or `--tld localhost` to switch to \
+             (carte answers them through {through}), or `--tld localhost` to switch to \
              .localhost, which needs no resolver. Apps answer under .localhost either way."
         );
     }
     println!(
         "{by} served apps under .{old}. carte can keep those hostnames, through \
-         /etc/resolver/{old}, or switch to .localhost, which needs no resolver. Apps answer under \
+         {through}, or switch to .localhost, which needs no resolver. Apps answer under \
          .localhost either way.\n"
     );
     let keep = prompt::confirm(&format!("Keep .{old}?"), true)?;
