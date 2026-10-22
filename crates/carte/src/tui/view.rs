@@ -3588,7 +3588,7 @@ mod tests {
     }
 
     #[test]
-        fn theme_files_that_change_redraw_and_broken_ones_are_problems() {
+    fn theme_files_that_change_redraw_and_broken_ones_are_problems() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("acme.toml");
         std::fs::write(&file, "ok = \"cyan\"\n").unwrap();
@@ -3629,6 +3629,69 @@ mod tests {
         press(&mut app, now, KeyCode::Char('!'));
         let screen = draw(&mut app, 120, 18);
         assert!(screen.contains("acme.toml:1:"), "{screen}");
+    }
+
+    #[test]
+    fn a_broken_replacement_of_a_built_in_keeps_the_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("nord.toml");
+        std::fs::write(&file, "extends = \"nord\"\nerror = \"#ff0000\"\n").unwrap();
+        let mut app = busy_app();
+        let now = app.now;
+        app.saved_theme = Some("nord".into());
+        app.update(
+            Event::Themes(theme_files::load(dir.path(), Colors::Truecolor)),
+            now,
+        );
+        assert_eq!(app.theme.error, Color::Rgb(255, 0, 0));
+        std::fs::write(&file, "error = \"redish\"\n").unwrap();
+        app.update(
+            Event::Themes(theme_files::load(dir.path(), Colors::Truecolor)),
+            now,
+        );
+        assert_eq!(app.theme.error, Color::Rgb(255, 0, 0), "not the stock nord");
+    }
+
+    #[test]
+    fn a_saved_theme_applies_once_its_file_is_fixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("acme.toml");
+        std::fs::write(&file, "ok = \"greenish\"\n").unwrap();
+        let mut app = busy_app();
+        let now = app.now;
+        app.saved_theme = Some("acme".into());
+        app.update(
+            Event::Themes(theme_files::load(dir.path(), Colors::Truecolor)),
+            now,
+        );
+        assert_eq!(app.theme.id, "terminal");
+        std::fs::write(&file, "ok = \"cyan\"\n").unwrap();
+        app.update(
+            Event::Themes(theme_files::load(dir.path(), Colors::Truecolor)),
+            now,
+        );
+        assert_eq!(app.theme.id, "acme");
+        assert_eq!(app.theme.ok, Color::Cyan);
+    }
+
+    #[test]
+    fn the_picker_lists_theme_files_that_appear_while_it_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('T'));
+        press(&mut app, now, KeyCode::Down);
+        let hovered = app.theme.id.clone();
+        std::fs::write(dir.path().join("acme.toml"), "ok = \"cyan\"\n").unwrap();
+        app.update(
+            Event::Themes(theme_files::load(dir.path(), Colors::Truecolor)),
+            now,
+        );
+        let picker = app.picker.as_ref().unwrap();
+        assert!(picker.themes.iter().any(|t| t.id == "acme"));
+        assert_eq!(app.theme.id, hovered, "the preview stays");
+        press(&mut app, now, KeyCode::Esc);
+        assert_eq!(app.theme, Theme::terminal());
     }
 
     #[test]

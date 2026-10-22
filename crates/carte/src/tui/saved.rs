@@ -50,11 +50,11 @@ impl Saved {
 
 /// The theme picked this session, or else the one saved before, even when it no
 /// longer loads.
-pub fn theme_to_save(restored: Option<String>, app: &App) -> Option<String> {
+pub fn theme_to_save(app: &App) -> Option<String> {
     if app.picked_theme {
         Some(app.theme.id.clone())
     } else {
-        restored
+        app.saved_theme.clone()
     }
 }
 
@@ -143,16 +143,21 @@ mod tests {
         assert_eq!(restored.as_deref(), Some("gone"));
 
         let mut app = App::new(std::time::Instant::now());
+        app.saved_theme = restored;
+        app.set_themes(crate::tui::theme_files::load(
+            &dir.path().join("themes"),
+            crate::tui::theme::Colors::Truecolor,
+        ));
         assert_eq!(app.theme.id, "terminal", "an unknown id draws as terminal");
         let saved = Saved {
-            theme: theme_to_save(restored.clone(), &app),
+            theme: theme_to_save(&app),
             ..Saved::default()
         };
         store(&file, &saved).unwrap();
         assert_eq!(load(&file).theme.as_deref(), Some("gone"));
 
         app.picked_theme = true;
-        assert_eq!(theme_to_save(restored, &app).as_deref(), Some("terminal"));
+        assert_eq!(theme_to_save(&app).as_deref(), Some("terminal"));
     }
 
     #[test]

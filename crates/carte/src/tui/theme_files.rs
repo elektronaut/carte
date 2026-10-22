@@ -18,6 +18,8 @@ use super::theme::{self, Colors, Theme};
 pub struct Loaded {
     pub themes: Vec<Theme>,
     pub problems: Vec<String>,
+    /// The ids of files that don't load, built-in names among them.
+    pub broken: Vec<String>,
 }
 
 pub fn dir(config_dir: &Path) -> PathBuf {
@@ -134,7 +136,13 @@ pub fn load(dir: &Path, colors: Colors) -> Loaded {
         .flatten()
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|e| e == "toml"))
+        .filter(|path| {
+            path.extension().is_some_and(|e| e == "toml")
+                && !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with('.'))
+        })
         .collect();
     paths.sort();
     for path in paths {
@@ -160,14 +168,30 @@ pub fn load(dir: &Path, colors: Colors) -> Loaded {
         }
     }
 
-    let builtins = theme::builtins(colors);
-    let mut resolved = BTreeMap::new();
+    let mut resolver = Resolver {
+        files: &files,
+        broken: &broken,
+        builtins: theme::builtins(colors),
+        done: BTreeMap::new(),
+        problems: Vec::new(),
+    };
     for id in files.keys() {
-        match resolve(id, &files, &broken, &builtins) {
-            Ok(theme) => {
-                resolved.insert(id.clone(), theme);
+        resolver.resolve(id, &mut Vec::new());
+    }
+    let Resolver {
+        builtins,
+        done,
+        problems: chain_problems,
+        ..
+    } = resolver;
+    problems.extend(chain_problems);
+    let mut resolved = BTreeMap::new();
+    for (id, theme) in done {
+        match theme {
+            Some(theme) => {
+                resolved.insert(id, theme);
             }
-            Err(problem) => problems.push(problem),
+            None => broken.push(id),
         }
     }
     let mut themes: Vec<Theme> = builtins
@@ -175,64 +199,97 @@ pub fn load(dir: &Path, colors: Colors) -> Loaded {
         .map(|builtin| resolved.remove(&builtin.id).unwrap_or(builtin))
         .collect();
     themes.extend(resolved.into_values());
-    Loaded { themes, problems }
+    broken.sort();
+    problems.sort();
+    Loaded {
+        themes,
+        problems,
+        broken,
+    }
 }
 
-/// The theme of file `id`: its `extends` chain applied from the bottom up. A file
-/// that extends its own id builds on the built-in of that name.
-fn resolve(
-    id: &str,
-    files: &BTreeMap<String, File>,
-    broken: &[String],
-    builtins: &[Theme],
-) -> Result<Theme, String> {
-    let builtin = |name: &str| builtins.iter().find(|t| t.id == name).cloned();
-    let mut chain = vec![id.to_string()];
-    let base = loop {
-        let current = chain.last().expect("a file");
-        let file = &files[current];
-        let Some(extends) = &file.theme.extends else {
-            break Theme::terminal();
-        };
-        let name = extends.get_ref();
-        if name == current {
-            match builtin(name) {
-                Some(theme) => break theme,
-                None => {
-                    return Err(file.at_extends(&format!(
-                        "extends itself, and {name:?} isn't a built-in theme"
-                    )));
+/// Resolves each file once, so a problem is reported by the file it's in.
+struct Resolver<'a> {
+    files: &'a BTreeMap<String, File>,
+    broken: &'a [String],
+    builtins: Vec<Theme>,
+    /// Each resolved file's theme, or `None` when it doesn't load.
+    done: BTreeMap<String, Option<Theme>>,
+    problems: Vec<String>,
+}
+
+impl Resolver<'_> {
+    /// The theme of file `id`: what it extends, with its own roles on top. A file
+    /// that extends its own id builds on the built-in of that name. `stack` holds
+    /// the files being resolved that lead here, for finding cycles.
+    fn resolve(&mut self, id: &str, stack: &mut Vec<String>) -> Option<Theme> {
+        if let Some(done) = self.done.get(id) {
+            return done.clone();
+        }
+        let theme = self.build(id, stack);
+        self.done.insert(id.to_string(), theme.clone());
+        theme
+    }
+
+    fn builtin(&self, name: &str) -> Option<Theme> {
+        self.builtins.iter().find(|t| t.id == name).cloned()
+    }
+
+    fn build(&mut self, id: &str, stack: &mut Vec<String>) -> Option<Theme> {
+        let files = self.files;
+        let file = &files[id];
+        let base = match &file.theme.extends {
+            None => Theme::terminal(),
+            Some(extends) => {
+                let name = extends.get_ref();
+                if name == id {
+                    let Some(theme) = self.builtin(name) else {
+                        self.problems.push(file.at_extends(&format!(
+                            "extends itself, and {name:?} isn't a built-in theme"
+                        )));
+                        return None;
+                    };
+                    theme
+                } else if let Some(at) = stack.iter().position(|s| s == name) {
+                    let mut cycle = stack[at..].to_vec();
+                    cycle.extend([id.to_string(), name.clone()]);
+                    self.problems.push(
+                        file.at_extends(&format!("extends in a cycle: {}", cycle.join(" → "))),
+                    );
+                    return None;
+                } else if files.contains_key(name) {
+                    stack.push(id.to_string());
+                    let base = self.resolve(name, stack);
+                    stack.pop();
+                    let Some(base) = base else {
+                        self.problems.push(
+                            file.at_extends(&format!("extends {name:?}, which doesn't load")),
+                        );
+                        return None;
+                    };
+                    base
+                } else if let Some(theme) = self.builtin(name) {
+                    theme
+                } else if self.broken.contains(name) {
+                    self.problems
+                        .push(file.at_extends(&format!("extends {name:?}, which doesn't load")));
+                    return None;
+                } else {
+                    self.problems
+                        .push(file.at_extends(&format!("extends {name:?}, which isn't a theme")));
+                    return None;
                 }
             }
-        }
-        if chain.contains(name) {
-            chain.push(name.clone());
-            return Err(files[id].at_extends(&format!("extends in a cycle: {}", chain.join(" → "))));
-        }
-        if files.contains_key(name) {
-            chain.push(name.clone());
-            continue;
-        }
-        match builtin(name) {
-            Some(theme) => break theme,
-            None if broken.contains(name) => {
-                return Err(file.at_extends(&format!("extends {name:?}, which doesn't load")));
-            }
-            None => return Err(file.at_extends(&format!("extends {name:?}, which isn't a theme"))),
-        }
-    };
-    let mut theme = chain
-        .iter()
-        .rev()
-        .fold(base, |theme, name| files[name].theme.apply(theme));
-    let file = &files[id];
-    theme.id = id.to_string();
-    theme.label = match (&file.theme.label, builtin(id)) {
-        (Some(label), _) => label.clone(),
-        (None, Some(replaced)) => replaced.label,
-        (None, None) => id.to_string(),
-    };
-    Ok(theme)
+        };
+        let mut theme = file.theme.apply(base);
+        theme.id = id.to_string();
+        theme.label = match (&file.theme.label, self.builtin(id)) {
+            (Some(label), _) => label.clone(),
+            (None, Some(replaced)) => replaced.label,
+            (None, None) => id.to_string(),
+        };
+        Some(theme)
+    }
 }
 
 #[cfg(test)]
@@ -388,12 +445,58 @@ prefixes = ["#8bd5ca", "red"]
             loaded.themes.len(),
             theme::builtins(Colors::Truecolor).len()
         );
-        assert_eq!(loaded.problems.len(), 3, "{:?}", loaded.problems);
-        assert!(
-            loaded.problems[0].contains("acme.toml:1: extends in a cycle: acme → nova → acme"),
-            "{:?}",
-            loaded.problems
+        assert_eq!(
+            loaded.problems,
+            [
+                format!(
+                    "{}:1: extends \"nova\", which doesn't load",
+                    dir.path().join("acme.toml").display()
+                ),
+                format!(
+                    "{}:1: extends in a cycle: acme → nova → acme",
+                    dir.path().join("nova.toml").display()
+                ),
+                format!(
+                    "{}:1: extends \"acme\", which doesn't load",
+                    dir.path().join("shop.toml").display()
+                ),
+            ],
+            "the file that closes the cycle is blamed for it"
         );
+        assert_eq!(loaded.broken, ["acme", "nova", "shop"]);
+    }
+
+    #[test]
+    fn a_broken_parent_is_reported_once() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "acme.toml", "extends = \"nova\"\n");
+        write(dir.path(), "nova.toml", "extends = \"nowhere\"\n");
+        let loaded = load(dir.path(), Colors::Truecolor);
+        assert_eq!(loaded.problems.len(), 2, "{:?}", loaded.problems);
+        assert!(loaded.problems[0].ends_with("extends \"nova\", which doesn't load"));
+        assert!(loaded.problems[1].ends_with("extends \"nowhere\", which isn't a theme"));
+    }
+
+    #[test]
+    fn hidden_files_are_left_out() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "._shop.toml", "\u{0}\u{5}garbage");
+        write(dir.path(), ".#nova.toml", "not = toml = at all");
+        let loaded = load(dir.path(), Colors::Truecolor);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        assert_eq!(
+            loaded.themes.len(),
+            theme::builtins(Colors::Truecolor).len()
+        );
+    }
+
+    #[test]
+    fn a_broken_replacement_is_listed_as_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "nord.toml", "error = \"redish\"\n");
+        let loaded = load(dir.path(), Colors::Truecolor);
+        assert_eq!(loaded.broken, ["nord"]);
+        assert_eq!(loaded.problems.len(), 1);
     }
 
     #[test]
