@@ -79,6 +79,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     let hold = options.boot_timeout + Duration::from_secs(10);
     let http_sockets = activation::activate_socket("http")?;
     let https_sockets = activation::activate_socket("https")?;
+    activation::warn_unclaimed_sockets();
     let supervisor = supervisor::start(world, paths.clone(), Spawner::current()?, options);
 
     let loopback = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));

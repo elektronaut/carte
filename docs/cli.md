@@ -78,6 +78,16 @@ Commands keep working against it, but print a warning that names both
 versions and asks for `carte daemon restart`. A request the old daemon
 doesn't know, such as a command added since, fails with the same advice.
 
+`pin`, `disable` and their opposites last until the daemon restarts;
+`--save` writes them to the project file. It refuses for a project a
+template made, since the template's file applies to all its projects.
+
+`up` and `restart` print `ready <app@stack>` per instance once it answers.
+When one fails, they print why with its last log lines and exit with 5.
+Restarting a single process waits for its app.
+
+### Socket activation on Linux
+
 On Linux, `carte daemon` takes its listening sockets from systemd socket
 activation when systemd passes sockets named `http` and `https`, and binds
 the ports itself otherwise. A socket unit names all its sockets alike, so
@@ -100,15 +110,8 @@ WantedBy=sockets.target
 `carte-https.socket` is the same with port 443 and
 `FileDescriptorName=https`. `carte.service` runs `carte daemon`, with
 `Requires=` and `After=` naming both socket units. The order of the
-sockets varies; the daemon picks them by name.
-
-`pin`, `disable` and their opposites last until the daemon restarts;
-`--save` writes them to the project file. It refuses for a project a
-template made, since the template's file applies to all its projects.
-
-`up` and `restart` print `ready <app@stack>` per instance once it answers.
-When one fails, they print why with its last log lines and exit with 5.
-Restarting a single process waits for its app.
+sockets varies; the daemon picks them by name, and warns about sockets
+with other names.
 
 ### Prune
 
