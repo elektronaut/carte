@@ -272,7 +272,7 @@ fn render_input(theme: &Theme, frame: &mut Frame, inner: Rect, input: Input) -> 
         ])
         .areas(below);
         let style = if theme.bg == Color::Reset {
-            Style::new().fg(color).reversed()
+            Style::new().fg(color).patch(theme.line_selection())
         } else {
             theme.selection().fg(theme.fg)
         };
