@@ -142,10 +142,28 @@ pub fn own_cas(
 }
 
 /// Whether macOS trusts a leaf issued by the CA, checked read-only with `security verify-cert`.
+#[cfg(target_os = "macos")]
 pub fn is_trusted(ca: &CertificateAuthority) -> Result<bool, TlsError> {
     verify_leaf(ca, &format!("carte-trust-check.{}", ca.tlds()[0]), None)
 }
 
+/// Whether the system's CA bundle holds the CA's certificate.
+#[cfg(not(target_os = "macos"))]
+pub fn is_trusted(ca: &CertificateAuthority) -> Result<bool, TlsError> {
+    let roots = super::bundle::system_roots_pem()?;
+    Ok(bundle_holds(&roots, &super::ca::sha256_hex(ca.cert_der())))
+}
+
+/// Whether a PEM bundle holds the certificate with the SHA-256 `hash`.
+pub fn bundle_holds(bundle: &str, hash: &str) -> bool {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject;
+    CertificateDer::pem_slice_iter(bundle.as_bytes())
+        .filter_map(Result::ok)
+        .any(|der| super::ca::sha256_hex(&der) == hash)
+}
+
+#[cfg(target_os = "macos")]
 fn verify_leaf(
     ca: &CertificateAuthority,
     host: &str,
@@ -193,6 +211,21 @@ fn verify_leaf(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn finds_a_certificate_in_a_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ca =
+            CertificateAuthority::load_or_create(tmp.path(), "carte test CA", &["test"]).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other =
+            CertificateAuthority::load_or_create(other.path(), "carte test CA", &["test"]).unwrap();
+        let hash = crate::tls::ca::sha256_hex(ca.cert_der());
+        let bundle = format!("{}\n{}", other.cert_pem(), ca.cert_pem());
+        assert!(bundle_holds(&bundle, &hash));
+        assert!(!bundle_holds(other.cert_pem(), &hash));
+        assert!(!bundle_holds("", &hash));
+    }
 
     #[test]
     fn describes_the_trust_command() {

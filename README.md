@@ -22,9 +22,9 @@ carte starts the app, then stops it once you're done with it.
 
 carte runs on macOS and Linux. On Linux, `carte setup` runs the daemon
 as a systemd user service with
-[socket activation](docs/cli.md#socket-activation-on-linux), but doesn't
-yet trust its certificate authority or send lookups for a TLD other than
-`.localhost` to it; you do those yourself.
+[socket activation](docs/cli.md#socket-activation-on-linux) and trusts
+its certificate authority, but doesn't yet send lookups for a TLD other
+than `.localhost` to it; you do that yourself.
 
 ## Install
 
@@ -58,11 +58,16 @@ Setup does this once per machine, asking for your password where needed:
   root there, so setup also lowers `net.ipv4.ip_unprivileged_port_start`
   to 80 in `/etc/sysctl.d/50-carte.conf`, which applies to every program
   on the machine
+- on Linux, adds the certificate authority to the system's certificates
+  (`update-ca-certificates` or `update-ca-trust`) and, with `certutil`,
+  to the databases Chrome and each Firefox profile read. Snap and
+  Flatpak browsers keep their own; setup names them for you to import
+  it by hand
 
 Apps are served under `.localhost`, which needs no DNS setup;
 `carte setup --tld test` adds `.test`. `carte setup --check` reports
 what's in place, and `carte setup --uninstall` undoes it, removing only
-the CAs this install created from the keychain.
+the CAs this install created from the keychain or the Linux stores.
 
 If you set carte up before its CA was limited to HTTPS, run `carte
 setup` once after upgrading. It replaces the CA with one trusted for
