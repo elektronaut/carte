@@ -106,14 +106,8 @@ async fn event_loop(
     app.start_at = start_at;
     app.detach_keys = detach_keys;
     app.colors = colors;
+    app.saved_theme = restored.theme.clone();
     app.set_themes(theme_files::load(&themes_dir, colors));
-    let restored_theme = restored.theme.clone();
-    if let Some(theme) = restored_theme
-        .as_deref()
-        .and_then(|id| app.themes.iter().find(|t| t.id == id).cloned())
-    {
-        app.use_theme(theme);
-    }
     restored.apply(&mut app.fold);
     terminal.draw(|frame| view::render(frame, &mut app))?;
     while let Some(event) = rx.recv().await {
@@ -131,7 +125,7 @@ async fn event_loop(
         terminal.draw(|frame| view::render(frame, &mut app))?;
     }
     Ok(saved::Saved {
-        theme: saved::theme_to_save(restored_theme, &app),
+        theme: saved::theme_to_save(&app),
         ..saved::Saved::from_fold(&app.fold, &app.roots)
     })
 }

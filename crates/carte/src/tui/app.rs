@@ -243,6 +243,8 @@ pub struct App {
     pub colors: Colors,
     /// Whether a theme was picked this session.
     pub picked_theme: bool,
+    /// The theme `tui.json` names, used once its file loads.
+    pub saved_theme: Option<String>,
     pub picker: Option<ThemePicker>,
     /// The built-in and custom themes on offer.
     pub themes: Vec<Theme>,
@@ -290,6 +292,7 @@ impl App {
             theme: Theme::default(),
             colors: Colors::Truecolor,
             picked_theme: false,
+            saved_theme: None,
             picker: None,
             themes: theme::builtins(Colors::Truecolor),
             theme_problems: Vec::new(),
@@ -907,19 +910,46 @@ impl App {
         }
     }
 
-    pub fn use_theme(&mut self, theme: Theme) {
-        self.theme = self.drawable(theme);
-    }
-
-    /// Takes the themes as the files now are, and redraws with the current theme's
-    /// new version. A current theme whose file broke stays as it was.
+    /// Takes the themes as the files now are. The picker gets the new list;
+    /// otherwise the saved theme is drawn once it loads, or else the current
+    /// theme's new version. A theme whose file broke stays as it was.
     pub fn set_themes(&mut self, loaded: theme_files::Loaded) {
         self.theme_problems = loaded.problems;
         self.themes = loaded.themes;
-        if self.picker.is_none()
-            && let Some(theme) = self.themes.iter().find(|t| t.id == self.theme.id).cloned()
-        {
-            self.use_theme(theme);
+        let fresh = |app: &App, id: &str| {
+            if loaded.broken.iter().any(|b| b == id) {
+                return None;
+            }
+            let theme = app.themes.iter().find(|t| t.id == id)?.clone();
+            Some(app.drawable(theme))
+        };
+        if let Some(picker) = &self.picker {
+            let hovered = self.theme.id.clone();
+            let previous = picker.previous.id.clone();
+            let themes: Vec<Theme> = self
+                .themes
+                .iter()
+                .map(|t| self.drawable(t.clone()))
+                .collect();
+            let cursor = themes
+                .iter()
+                .position(|t| t.id == hovered)
+                .unwrap_or(picker.cursor.min(themes.len().saturating_sub(1)));
+            let previous = fresh(self, &previous).unwrap_or_else(|| picker.previous.clone());
+            self.theme = themes[cursor].clone();
+            self.picker = Some(ThemePicker {
+                themes,
+                cursor,
+                previous,
+            });
+            return;
+        }
+        let wanted = match &self.saved_theme {
+            Some(saved) if !self.picked_theme => saved.clone(),
+            _ => self.theme.id.clone(),
+        };
+        if let Some(theme) = fresh(self, &wanted) {
+            self.theme = theme;
         }
     }
 

@@ -296,10 +296,13 @@ reversed, since its colours are up to your terminal.
 
 ### Custom themes
 
-A file in `~/.config/carte/themes` adds a theme. Its name, without
-`.toml`, is the theme's id, and the theme appears in the `T` list after
-the built-ins. A file named like a built-in, such as `nord.toml`,
-replaces it.
+A file in `~/.config/carte/themes` adds a theme. The folder is in
+carte's config directory, so `CARTE_CONFIG_DIR` or `XDG_CONFIG_HOME`
+moves it (see [configuration](configuration.md)). A file's name,
+without `.toml`, is the theme's id, and the theme appears in the `T`
+list after the built-ins. A file named like a built-in, such as
+`nord.toml`, replaces it. Files whose names start with `.` are left
+out.
 
 ```toml
 # ~/.config/carte/themes/nova.toml
@@ -313,7 +316,9 @@ prefixes = ["#8bd5ca", "#c6a0f6", "#eed49f", "#8aadf4", "#f5bde6", "#a6da95"]
 `extends` names a built-in or another custom theme. Roles the file
 leaves out come from it, or from `terminal` without `extends`. A file
 that extends its own id, like `extends = "nord"` in `nord.toml`, builds
-on the built-in. `label` is the name in the list; it defaults to the id.
+on the built-in. `label` is the name in the list. It defaults to the
+built-in's label for a file that replaces one, and to the id
+otherwise.
 
 The built-in ids are `terminal`, `catppuccin-latte`,
 `catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`,
@@ -352,18 +357,23 @@ A colour is one of:
 - A number from 0 to 255, for the 256-colour palette.
 - `"reset"`. In `fg` and `bg`, it's the terminal's own colour. In any
   other role, it inherits: text takes `fg`, and a background leaves what
-  is under it.
+  is under it. In a theme with a `bg`, `selection_bg = "reset"` makes
+  the selected tree row look like the others.
 
-carte doesn't adjust custom themes for contrast, as it does the
-built-ins; the colours are drawn as written. At 256 colours, each one
+carte doesn't check or adjust custom themes for contrast, as it does
+the built-ins; the colours are drawn as written. At 256 colours, each one
 becomes the nearest of the 256. Roles a theme inherits from a built-in
 keep the built-in's adjustments.
 
 carte watches the folder, so a saved file shows at once, and redraws
 if it's the current theme. A file that doesn't parse, sets an unknown
 role or colour, or extends something that isn't a theme, including in
-a cycle, shows under `!` with its file and line. Its theme is left out
-of the list, and the TUI keeps the theme it has.
+a cycle, shows under `!` with its file and line. A file that extends
+it shows there too. Its theme is left out of the list, or for a file
+that replaces a built-in, the list has the built-in. If it's the
+current theme, the TUI keeps drawing the theme as it last loaded. A
+theme saved in `tui.json` whose file doesn't load is used as soon as
+the file is fixed.
 
 ## Saved state
 
