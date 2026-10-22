@@ -78,6 +78,28 @@ Commands keep working against it, but print a warning that names both
 versions and asks for `carte daemon restart`. A request the old daemon
 doesn't know, such as a command added since, fails with the same advice.
 
+On Linux, `carte daemon` takes its listening sockets from systemd socket
+activation when systemd passes sockets named `http` and `https`, and binds
+the ports itself otherwise. A socket unit names all its sockets alike, so
+each name needs its own unit. List the same ports as `http_port` and
+`https_port`; a user unit can only bind ports 80 and 443 once
+`net.ipv4.ip_unprivileged_port_start` is 80 or lower.
+
+```ini
+# ~/.config/systemd/user/carte-http.socket
+[Socket]
+ListenStream=127.0.0.1:80
+ListenStream=[::1]:80
+FileDescriptorName=http
+Service=carte.service
+
+[Install]
+WantedBy=sockets.target
+```
+
+`carte-https.socket` is the same with port 443 and
+`FileDescriptorName=https`, and `carte.service` runs `carte daemon`.
+
 `pin`, `disable` and their opposites last until the daemon restarts;
 `--save` writes them to the project file. It refuses for a project a
 template made, since the template's file applies to all its projects.

@@ -1,8 +1,8 @@
 //! The daemon: supervisor, proxy, DNS and the API socket, until a signal stops it.
 
+mod activation;
 mod api;
 pub mod attach;
-mod launchd;
 mod notifications;
 mod router;
 pub mod tunnel;
@@ -29,6 +29,8 @@ use crate::process::Spawner;
 use crate::proxy::{ListenerOptions, Proxy};
 use crate::supervisor::{self, Options, groups};
 use crate::tls::{self, CaOrigin, CertResolver, CertificateAuthority, CreateReason};
+
+pub use activation::take_systemd_sockets;
 
 /// Runs until a signal stops it. The caller holds [`lock`] until the runtime is gone.
 pub async fn run(paths: Paths) -> anyhow::Result<()> {
@@ -75,8 +77,8 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         options.teardown_recheck = recheck;
     }
     let hold = options.boot_timeout + Duration::from_secs(10);
-    let http_sockets = launchd::activate_socket("http")?;
-    let https_sockets = launchd::activate_socket("https")?;
+    let http_sockets = activation::activate_socket("http")?;
+    let https_sockets = activation::activate_socket("https")?;
     let supervisor = supervisor::start(world, paths.clone(), Spawner::current()?, options);
 
     let loopback = |port| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -111,7 +113,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
             paths.machine_config().display()
         )
     };
-    let http = launchd::proxy_listeners(
+    let http = activation::proxy_listeners(
         &proxy,
         "http",
         http_sockets,
@@ -120,7 +122,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
     )
     .await
     .with_context(|| bind_hint(machine.http_port))?;
-    let https = launchd::proxy_listeners(
+    let https = activation::proxy_listeners(
         &proxy,
         "https",
         https_sockets,
