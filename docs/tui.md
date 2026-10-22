@@ -113,8 +113,13 @@ of a shown app always show.
 `/` in the tree filters it by name. A match keeps its subtree, and its
 parents open to show it. `/` in the logs searches them: matches are
 highlighted, and `n` and `N` move to the next older and newer match.
-`enter` keeps the filter or search. `esc` clears the one in the
-focused pane.
+`ctrl-f` while you type switches the logs to a filter, which hides the
+lines without a match, and back. The tree only filters. The search
+works in the logs and events tabs, not the env.
+
+You type on a line at the bottom of the pane. In the logs, the line
+counts the matches. `enter` keeps the term, and the line stays while
+it's kept. `esc` clears the one in the focused pane.
 
 `ctrl-p` jumps to a project, stack, app or process by name, wherever it
 is in the tree. It focuses the tree and opens the folds above the row.
@@ -149,6 +154,7 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `1` `2` `3` | Show the logs, events or env tab |
 | `[` `]` | Previous, next tab |
 | `/` | Filter the tree, or search the logs |
+| `ctrl-f` | Filter or search the logs, while you type |
 | `n` `N` | Older, newer match (logs) |
 | `esc` | Clear the filter or search of the focused pane, or leave the zoom |
 | `a` | Show all, running or shared instances |

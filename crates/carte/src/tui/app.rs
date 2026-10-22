@@ -506,6 +506,7 @@ impl App {
                 };
                 if lines
                     && at.y >= top
+                    && usize::from(at.y - top) < self.logs.height
                     && let Some(seq) = self.logs.seq_at(usize::from(at.y - top))
                 {
                     self.selection = Some(Selection {
@@ -578,7 +579,7 @@ impl App {
                     self.end_selection();
                     self.focus = Focus::Tree;
                     let first = self.tree_area.y + 2;
-                    if at.y < first || at.y + 1 >= self.tree_area.bottom() {
+                    if at.y < first || usize::from(at.y - first) >= self.tree_height {
                         return;
                     }
                     let index = self.tree_offset + usize::from(at.y - first);
@@ -688,8 +689,12 @@ impl App {
             }
             (Intent::ClearFilter, _) => {
                 self.mode = Mode::Normal;
+                if self.focus == Focus::Logs {
+                    self.logs.filter = false;
+                }
                 self.edit_filter(|filter| filter.clear());
             }
+            (Intent::ToggleLogFilter, _) => self.logs.toggle_filter(),
             (Intent::FilterChar(c), _) => self.edit_filter(|filter| filter.push(c)),
             (Intent::FilterBackspace, _) => self.edit_filter(|filter| {
                 filter.pop();
@@ -1581,6 +1586,7 @@ mod tests {
             now,
         );
         app.tree_area = Rect::new(0, 0, 40, 20);
+        app.tree_height = 17;
         let commands = app.update(mouse(MouseEventKind::Down(MouseButton::Left), 5, 2), now);
         assert!(
             commands.contains(&Command::FetchServices("prod".into())),
@@ -1632,6 +1638,7 @@ mod tests {
     fn the_wheel_scrolls_the_pane_under_the_pointer() {
         let (mut app, now) = connected();
         app.tree_area = Rect::new(0, 0, 40, 20);
+        app.tree_height = 17;
         app.logs_area = Rect::new(40, 0, 40, 20);
         app.logs.height = 5;
         for i in 0..50 {
@@ -1671,6 +1678,7 @@ mod tests {
     fn dragging_over_the_logs_copies_whole_lines() {
         let (mut app, now) = connected();
         app.tree_area = Rect::new(0, 0, 40, 20);
+        app.tree_height = 17;
         app.logs_area = Rect::new(40, 0, 40, 7);
         app.logs.height = 5;
         let push = |app: &mut App, i: u64| {
@@ -1744,6 +1752,7 @@ mod tests {
     fn clicks_select_rows_focus_panes_and_fold() {
         let (mut app, now) = connected();
         app.tree_area = Rect::new(0, 0, 40, 20);
+        app.tree_height = 17;
         app.logs_area = Rect::new(40, 0, 40, 20);
         let click = |column, row| mouse(MouseEventKind::Down(MouseButton::Left), column, row);
 
@@ -1757,6 +1766,12 @@ mod tests {
         assert_ne!(app.rows.len(), rows, "clicking the selected row folds it");
         app.update(click(5, 0), now);
         assert_eq!(app.cursor, 2, "the border and header aren't rows");
+
+        app.tree_height = 3;
+        app.update(click(5, 5), now);
+        assert_eq!(app.cursor, 2, "rows under the filter box aren't clickable");
+        app.update(click(5, 3), now);
+        assert_eq!(app.cursor, 1);
     }
 
     #[test]
