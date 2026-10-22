@@ -271,7 +271,12 @@ fn render_input(theme: &Theme, frame: &mut Frame, inner: Rect, input: Input) -> 
             Constraint::Length(count.width() as u16),
         ])
         .areas(below);
-        let label = Span::styled(label, Style::new().fg(color).patch(theme.line_selection()));
+        let style = if theme.bg == Color::Reset {
+            Style::new().fg(color).reversed()
+        } else {
+            theme.selection().fg(theme.fg)
+        };
+        let label = Span::styled(label, style);
         frame.render_widget(Paragraph::new(label), label_area);
         frame.render_widget(Paragraph::new(count.fg(color)), count_area);
         text_area
@@ -1880,7 +1885,7 @@ mod tests {
     use super::*;
     use crate::tui::app::{Command, Event};
     use crate::tui::fixtures::{kube_sample, process, sample, shared_sample};
-    use crate::tui::theme::Colors;
+    use crate::tui::theme::{self, Colors};
     use crate::tui::theme_files;
 
     fn draw(app: &mut App, width: u16, height: u16) -> String {
@@ -3227,6 +3232,37 @@ mod tests {
         press(&mut app, now, KeyCode::Esc);
         let screen = draw(&mut app, 80, 24);
         assert!(!screen.contains(" filter  "), "{screen}");
+    }
+
+    #[test]
+    fn the_one_row_label_is_readable_in_every_theme() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('/'));
+        for c in "bill".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        for theme in theme::builtins(Colors::Truecolor) {
+            app.theme = theme;
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let cell = &terminal.backend().buffer()[(2, 9)];
+            assert_eq!(cell.symbol(), "f", "{}", app.theme.id);
+            if app.theme.bg == Color::Reset {
+                assert!(
+                    cell.modifier.contains(ratatui::style::Modifier::REVERSED),
+                    "{}",
+                    app.theme.id
+                );
+            } else {
+                assert_eq!(
+                    (cell.fg, cell.bg),
+                    (app.theme.fg, app.theme.selection_bg),
+                    "{}",
+                    app.theme.id
+                );
+            }
+        }
     }
 
     #[test]
