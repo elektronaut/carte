@@ -187,8 +187,8 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// On the selected row, `muted` text turns `selection_fg`, so it stays readable on
-/// the selection's background.
+/// On the selected row, `muted` text is drawn in `selection_fg` while the tree has
+/// the focus, and in `fg` under the unfocused, reversed selection.
 fn tree_row(
     theme: &Theme,
     app: &App,
@@ -196,6 +196,19 @@ fn tree_row(
     row: &tree::Row,
     selected: bool,
 ) -> Row<'static> {
+    let row_theme;
+    let theme = if selected {
+        row_theme = Theme {
+            muted: match app.focus {
+                Focus::Tree => theme.selection_fg,
+                Focus::Logs => theme.fg,
+            },
+            ..theme.clone()
+        };
+        &row_theme
+    } else {
+        theme
+    };
     let status = &node.status;
     let aggregate = matches!(
         node.id(),
@@ -258,17 +271,9 @@ fn tree_row(
     } else {
         (String::new(), String::new())
     };
-    let mut detail = vec![detail];
-    if selected {
-        for span in spans.iter_mut().chain(&mut detail) {
-            if span.style.fg == Some(theme.muted) {
-                span.style.fg = Some(theme.selection_fg);
-            }
-        }
-    }
     Row::new([
         Cell::from(Line::from(spans)),
-        Cell::from(Line::from(detail)),
+        Cell::from(detail),
         Cell::from(Line::from(cpu).right_aligned()),
         Cell::from(Line::from(memory).right_aligned()),
     ])
@@ -1446,24 +1451,33 @@ mod tests {
             .iter()
             .position(|row| tree::node(&app.roots, &row.path).label == "worker")
             .unwrap();
-        let unselected = draw_cells(&mut app, "worker");
-        assert_eq!(unselected.fg, app.theme.muted, "a disabled label is muted");
+        let theme = app.theme.clone();
+        for text in ["worker", "disabled"] {
+            let unselected = draw_cell(&mut app, text);
+            assert_eq!(unselected.fg, theme.muted, "{text} is muted");
+        }
         while app.cursor < worker {
             press(&mut app, now, KeyCode::Down);
         }
-        let theme = app.theme.clone();
-        let focused = draw_cells(&mut app, "worker");
-        assert_eq!(focused.bg, theme.selection_bg, "the row is selected");
-        assert_ne!(focused.fg, theme.selection_bg);
-        assert_eq!(focused.fg, theme.selection_fg);
+        for text in ["worker", "disabled"] {
+            let focused = draw_cell(&mut app, text);
+            assert_eq!(focused.bg, theme.selection_bg, "{text} is selected");
+            assert_ne!(focused.fg, theme.selection_bg);
+            assert_eq!(focused.fg, theme.selection_fg);
+        }
         press(&mut app, now, KeyCode::Tab);
-        let unfocused = draw_cells(&mut app, "worker");
-        assert!(unfocused.modifier.contains(Modifier::REVERSED));
-        assert_eq!(unfocused.fg, theme.selection_fg);
+        for text in ["worker", "disabled"] {
+            let unfocused = draw_cell(&mut app, text);
+            assert!(unfocused.modifier.contains(Modifier::REVERSED));
+            assert_eq!(
+                unfocused.fg, theme.fg,
+                "{text} reverses like the rest of the row"
+            );
+        }
     }
 
     /// The first cell of `text` in the tree.
-    fn draw_cells(app: &mut App, text: &str) -> ratatui::buffer::Cell {
+    fn draw_cell(app: &mut App, text: &str) -> ratatui::buffer::Cell {
         let (width, height) = (120, 18);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| render(frame, app)).unwrap();

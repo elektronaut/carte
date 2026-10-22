@@ -26,7 +26,7 @@ pub struct Theme {
     pub paused: Color,
     /// The background of the selected tree row while the tree has the focus.
     pub selection_bg: Color,
-    /// What `muted` text becomes on the selected tree row.
+    /// What `muted` text becomes on the selected tree row while the tree has the focus.
     pub selection_fg: Color,
     /// Search matches in the logs. A background of `Color::Reset` leaves it as it is.
     pub match_fg: Color,
