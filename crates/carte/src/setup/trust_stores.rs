@@ -116,7 +116,8 @@ impl TrustFacts {
                 others,
             }
         });
-        let certutil = find_program("certutil").map(|path| path.to_string_lossy().into_owned());
+        let certutil =
+            find_user_program("certutil").map(|path| path.to_string_lossy().into_owned());
         let nss = nss_dbs(&env.home, &on_path)
             .into_iter()
             .map(|(name, dir)| {
@@ -208,6 +209,18 @@ pub fn find_program(program: &str) -> Option<PathBuf> {
         ]
         .map(PathBuf::from),
     )
+}
+
+/// Where a program setup runs as the user is: in the system's directories, then on
+/// `PATH`, for one installed with Nix or Homebrew.
+pub fn find_user_program(program: &str) -> Option<PathBuf> {
+    find_program(program).or_else(|| {
+        let path = std::env::var_os("PATH")?;
+        find_in(
+            program,
+            std::env::split_paths(&path).filter(|dir| dir.is_absolute()),
+        )
+    })
 }
 
 fn find_in(program: &str, dirs: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
@@ -482,7 +495,7 @@ pub(super) fn uninstall_steps(trust: &TrustFacts, plan: &mut Plan) {
                 .collect();
             if !dbs.is_empty() {
                 plan.notes.push(format!(
-                    "certutil isn't installed, so entries named carte-<hash> are left in the \
+                    "certutil isn't installed, so entries named carte-<hash> may be left in the \
                      certificate databases of {}; remove them in the browsers' certificate \
                      settings, or install certutil and run `carte setup --uninstall` again",
                     dbs.join(", ")
@@ -806,7 +819,7 @@ mod tests {
         let plan = plan_uninstall(&env, &without_certutil);
         assert!(
             plan.notes.iter().any(|n| n.starts_with(
-                "certutil isn't installed, so entries named carte-<hash> are left in the \
+                "certutil isn't installed, so entries named carte-<hash> may be left in the \
                  certificate databases of Chrome and Chromium"
             )),
             "{:?}",

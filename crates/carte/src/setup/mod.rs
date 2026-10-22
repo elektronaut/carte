@@ -682,6 +682,17 @@ fn with_new_ca_hash(command: &CommandLine, env: &SetupEnv) -> anyhow::Result<Com
     })
 }
 
+/// The program sudo runs: on Linux the system's, by absolute path, so it doesn't
+/// depend on sudo's `secure_path`.
+fn sudo_program(program: &str, env: &SetupEnv) -> PathBuf {
+    match env.platform {
+        Platform::Linux if !program.contains('/') => {
+            trust_stores::find_program(program).unwrap_or_else(|| PathBuf::from(program))
+        }
+        _ => PathBuf::from(program),
+    }
+}
+
 /// Runs the steps in order and stops at the first that fails.
 pub fn execute(steps: &[Step], env: &SetupEnv) -> anyhow::Result<()> {
     for (i, step) in steps.iter().enumerate() {
@@ -711,7 +722,9 @@ fn run_step(step: &Step, env: &SetupEnv) -> anyhow::Result<()> {
             let command = &with_new_ca_hash(command, env)?;
             let mut process = if *sudo {
                 let mut process = std::process::Command::new("sudo");
-                process.arg(&command.program).args(&command.args);
+                process
+                    .arg(sudo_program(&command.program, env))
+                    .args(&command.args);
                 process
             } else {
                 command.command()
@@ -990,6 +1003,26 @@ pub(super) mod tests {
                 dir: SkillDir::Managed { current: true },
                 link: SkillLink::Ours,
             }
+        );
+    }
+
+    #[test]
+    fn runs_sudo_programs_by_absolute_path_on_linux() {
+        let mac = env(Path::new("/r"));
+        assert_eq!(sudo_program("rm", &mac), Path::new("rm"));
+        let linux = SetupEnv {
+            platform: Platform::Linux,
+            ..mac
+        };
+        let rm = sudo_program("rm", &linux);
+        assert!(rm.is_absolute() && rm.ends_with("rm"), "{}", rm.display());
+        assert_eq!(
+            sudo_program("/usr/sbin/update-ca-certificates", &linux),
+            Path::new("/usr/sbin/update-ca-certificates")
+        );
+        assert_eq!(
+            sudo_program("no-such-carte-program", &linux),
+            Path::new("no-such-carte-program")
         );
     }
 
