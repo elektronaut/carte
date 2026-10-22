@@ -71,14 +71,15 @@ The details say what the selected row is doing, what keeps it running,
 its address and share, and its latest event.
 
 Below the details, the pane's top border lists its tabs: `1 logs`,
-`2 events` and `3 env`. The current tab is highlighted. A tab that
-doesn't apply to the selection, such as env on a folder, is dimmed.
-`1` to `3` pick a tab, and `[` and `]` go to the previous and next.
+`2 events`, `3 env` and `5 requests`. The current tab is highlighted.
+A tab that doesn't apply to the selection, such as env on a folder, is
+dimmed. The number keys pick a tab, and `[` and `]` go to the previous
+and next.
 Picking a tab doesn't move the focus, so you can move through the tree
 and watch each row's tab.
 
-Each tab shows the selection. With nothing selected, events are
-machine-wide.
+Each tab shows the selection. With nothing selected, or a folder,
+events and requests are machine-wide.
 
 The logs of a project, stack or app merge the logs of its processes.
 Each line starts with its process's name in a colour of its own.
@@ -94,6 +95,24 @@ process that serves HTTP, and says so; select a process to see
 another's. An app with several processes and none serving HTTP lists
 them to pick from. `3` on the env tab fetches it again, as the env can
 change when a process starts.
+
+The requests tab lists the requests carte's proxy answered, the latest
+1000 at most: the time, method, path, status, and how long it took. A
+request whose client went away first says `cancelled`. `↗` marks a
+request that came through a share. New requests follow at the bottom.
+`↑` selects a request and stops that; `G` follows again.
+
+`enter` opens the selected request, or the newest: the request line
+and status, the host, which app and process answered and from which
+checkout, whether the host was an alias, apps it warmed, how long carte
+held it and how long the app took, the visitor of a shared request, and
+the request and response headers in full. carte keeps no bodies, and
+cuts very long headers short; the request says when it did. `esc` goes
+back to the list.
+
+Zoomed with `z`, the requests tab shows the list on the left and the
+selected request, or the newest, on the right. The wheel over the
+request scrolls it.
 
 ## Show filter
 
@@ -148,11 +167,12 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `↑` `↓`, `j` `k` | Move in the tree, or scroll the tab |
 | `←` `→`, `h` `l` | Close, open the selected row (tree). `←` `h` in the tabs moves to the tree |
 | `enter`, `space` | Close or open the selected row (tree) |
-| `g` `G`, `Home` `End` | Top, bottom. `G` in the logs follows new lines |
+| `g` `G`, `Home` `End` | Top, bottom. `G` in the logs and requests follows new ones |
 | `PgUp` `PgDn` | Page up, down |
 | `tab` | Switch between the tree and the tabs |
-| `1` `2` `3` | Show the logs, events or env tab |
+| `1` `2` `3` `5` | Show the logs, events, env or requests tab |
 | `[` `]` | Previous, next tab |
+| `enter`, `esc` | Open a request, back to the list (requests) |
 | `/` | Filter the tree, or search the logs |
 | `ctrl-f` | Filter or search the logs, while you type |
 | `n` `N` | Older, newer match (logs) |
@@ -209,6 +229,7 @@ Any key closes the help and the problems.
 | Click the problem count or `tunnel down` | List the problems |
 | Click a pane | Focus it |
 | Click a tab's name | Show that tab |
+| Click a request | Select it |
 | Wheel over the tree | Move the selection |
 | Wheel over the tabs | Scroll the current tab |
 | Drag over the logs | Select lines; releasing copies them |

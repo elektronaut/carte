@@ -9,18 +9,25 @@ pub enum Tab {
     Logs,
     Events,
     Env,
+    Requests,
 }
 
 impl Tab {
-    /// In the order the border lists them, numbered from 1.
-    pub const ALL: [Tab; 3] = [Tab::Logs, Tab::Events, Tab::Env];
+    /// In the order the border lists them.
+    pub const ALL: [Tab; 4] = [Tab::Logs, Tab::Events, Tab::Env, Tab::Requests];
 
+    /// The key that picks it; 4 is kept for the config tab.
     pub fn number(self) -> u8 {
-        Tab::ALL.iter().position(|&t| t == self).unwrap_or(0) as u8 + 1
+        match self {
+            Tab::Logs => 1,
+            Tab::Events => 2,
+            Tab::Env => 3,
+            Tab::Requests => 5,
+        }
     }
 
     pub fn from_number(number: u8) -> Option<Tab> {
-        Tab::ALL.get(usize::from(number).checked_sub(1)?).copied()
+        Tab::ALL.into_iter().find(|tab| tab.number() == number)
     }
 
     pub fn name(self) -> &'static str {
@@ -28,14 +35,15 @@ impl Tab {
             Tab::Logs => "logs",
             Tab::Events => "events",
             Tab::Env => "env",
+            Tab::Requests => "requests",
         }
     }
 
     /// The tab `delta` places along, wrapping around.
     pub fn step(self, delta: isize) -> Tab {
         let count = Tab::ALL.len() as isize;
-        let index = (isize::from(self.number()) - 1 + delta).rem_euclid(count);
-        Tab::ALL[index as usize]
+        let at = Tab::ALL.iter().position(|&t| t == self).unwrap_or(0) as isize;
+        Tab::ALL[(at + delta).rem_euclid(count) as usize]
     }
 
     /// Whether the tab has something to show for the selection, `None` when nothing
@@ -43,7 +51,7 @@ impl Tab {
     pub fn applies(self, id: Option<&NodeId>, kube: bool) -> bool {
         match self {
             Tab::Logs => id.is_some_and(|id| !matches!(id, NodeId::Folder { .. })),
-            Tab::Events => true,
+            Tab::Events | Tab::Requests => true,
             Tab::Env => {
                 !kube && matches!(id, Some(NodeId::Instance { .. } | NodeId::Process { .. }))
             }
@@ -98,12 +106,14 @@ mod tests {
 
     #[test]
     fn tabs_are_numbered_and_step_around() {
-        assert_eq!(Tab::ALL.map(Tab::number), [1, 2, 3]);
+        assert_eq!(Tab::ALL.map(Tab::number), [1, 2, 3, 5]);
         assert_eq!(Tab::from_number(3), Some(Tab::Env));
+        assert_eq!(Tab::from_number(5), Some(Tab::Requests));
         assert_eq!(Tab::from_number(0), None);
         assert_eq!(Tab::from_number(4), None);
-        assert_eq!(Tab::Logs.step(-1), Tab::Env);
-        assert_eq!(Tab::Env.step(1), Tab::Logs);
+        assert_eq!(Tab::Logs.step(-1), Tab::Requests);
+        assert_eq!(Tab::Env.step(1), Tab::Requests);
+        assert_eq!(Tab::Requests.step(1), Tab::Logs);
         assert_eq!(Tab::Logs.step(1), Tab::Events);
     }
 
