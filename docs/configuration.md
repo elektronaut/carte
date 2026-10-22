@@ -50,10 +50,10 @@ detach_key = "ctrl-q d"
 
 | Key | Default | |
 | --- | --- | --- |
-| `tld` | `"localhost"` | The top-level domain apps are served under. `carte setup` refuses one that isn't dot-separated letters, digits and hyphens, such as `".test"` or a path, until `carte setup --tld <tld>` replaces it. Any other (like `"test"`) needs `/etc/resolver/<tld>`, which `carte setup` writes; apps answer under `.localhost` too |
+| `tld` | `"localhost"` | The top-level domain apps are served under. `carte setup` refuses one that isn't dot-separated letters, digits and hyphens, such as `".test"` or a path, until `carte setup --tld <tld>` replaces it. Any other (like `"test"`) needs `/etc/resolver/<tld>` on macOS, or on Linux a systemd-resolved DNS delegate (systemd 258 and later) or drop-in, which `carte setup` writes; apps answer under `.localhost` too |
 | `http_port` | `80` | Plain HTTP |
 | `https_port` | `443` | HTTPS |
-| `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` points to for a `tld` other than `localhost` |
+| `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` or systemd-resolved points to for a `tld` other than `localhost` |
 | `idle_timeout` | `"15m"` | How long an app runs without traffic before it's stopped; projects can override it. An app with a process at a [debugger prompt](cli.md#attach) doesn't stop |
 | `teardown_delay` | `"10m"` | How long a stack's worktrees must stay gone before its [teardown](#teardown) runs; projects can override it |
 | `notifications` | `true` | Desktop [notifications](#notifications) when a process crashes, carte gives up on it, or it stops at a debugger prompt |
