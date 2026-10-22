@@ -122,7 +122,8 @@ depends_on = ["billing", "accounts"]
 
 A repo can also carry its own defaults in a `carte.toml`.
 
-[docs/configuration.md](docs/configuration.md) describes every setting.
+[docs/configuration.md](docs/configuration.md) is the reference for every
+setting.
 
 ## Worktrees and stacks
 
@@ -185,7 +186,7 @@ The Service `grafana` in the `monitoring` namespace is then at
 `https://grafana.prod.localhost` if no other namespace has a `grafana`.
 
 `carte import kube` writes a project file for each context you pick. See
-[Kube projects](docs/kubernetes.md).
+[Kubernetes](docs/kubernetes.md).
 
 ## Configuration
 
