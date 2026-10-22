@@ -114,12 +114,14 @@ it again. It needs Docker, and runs in CI for pull requests that touch setup
 and once a week.
 
 The containers run with `--privileged`, which systemd needs. Most kernel
-settings under `/proc/sys` aren't per container, so a write there would change
-the Docker host and every other container on it. The images therefore have no
-distribution sysctl files and no `systemd-sysctl.service`, and only
-`/proc/sys/net`, which belongs to the container's network namespace, is
-writable. The test stops if the rest is writable, and checks that
-`sysctl --system` reads only carte's file.
+settings under `/proc/sys` and `/sys` aren't per container, so a write there
+would change the Docker host and every other container on it. The images
+therefore have no distribution sysctl files, and mask `systemd-sysctl.service`,
+`systemd-binfmt.service` and the units that mount binfmt_misc, debugfs,
+tracefs, configfs and fusectl. Only `/proc/sys/net`, which belongs to the
+container's network namespace, and the container's own `/sys/fs/cgroup` are
+writable. The test stops if that isn't so, and checks that `sysctl --system`
+reads only carte's file.
 
 ```sh
 scripts/linux-e2e/run.sh                   # every distribution

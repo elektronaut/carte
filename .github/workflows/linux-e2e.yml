@@ -5,9 +5,12 @@ name: Linux setup end-to-end
 on:
   pull_request:
     paths:
+      - crates/carte-core/**
+      - crates/carte-api/**
       - crates/carte/src/setup/**
       - crates/carte/src/tls/**
-      - crates/carte/src/daemon/activation.rs
+      - crates/carte/src/proxy/**
+      - crates/carte/src/daemon/**
       - crates/carte/src/cli/setup.rs
       - crates/carte/src/cli/control.rs
       - crates/carte/src/dns.rs

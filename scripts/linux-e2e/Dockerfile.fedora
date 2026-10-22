@@ -7,9 +7,12 @@ RUN useradd -m -s /bin/bash dev && echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudo
 # Readable by root without CAP_DAC_OVERRIDE, which Ubuntu hosts' AppArmor
 # profile for unix_chkpwd denies; with mode 000, PAM can't start dev's sessions.
 RUN chmod 0400 /etc/shadow
-# No distribution sysctl files, so `sysctl --system` applies only carte's.
+# No distribution sysctl files, so `sysctl --system` applies only carte's, and
+# no units that change or mount the host kernel's shared settings.
 RUN rm -f /usr/lib/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf /etc/sysctl.d/*.conf /etc/sysctl.conf \
- && systemctl mask systemd-sysctl.service
+ && systemctl mask systemd-sysctl.service systemd-binfmt.service \
+    proc-sys-fs-binfmt_misc.automount proc-sys-fs-binfmt_misc.mount \
+    sys-kernel-config.mount sys-kernel-debug.mount sys-kernel-tracing.mount sys-fs-fuse-connections.mount
 COPY boot.sh /usr/local/sbin/boot
 STOPSIGNAL SIGRTMIN+3
 CMD ["/usr/local/sbin/boot"]
