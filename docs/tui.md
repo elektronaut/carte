@@ -10,12 +10,12 @@ every second.
 
 ## Panes
 
-The tree is on the left. The selected row's details and logs are on
-the right, the details above the logs. A status line and a line of
+The tree is on the left. The selected row's details and tabs are on
+the right, the details above the tabs. A status line and a line of
 keys sit below them. In a terminal narrower than 110 columns, the tree
 is on top instead.
 
-`tab` moves the focus between the tree and the logs. The focused pane
+`tab` moves the focus between the tree and the tabs. The focused pane
 has a blue border. The keys at the bottom are the most used ones for
 the focused pane. While there are problems, or the share tunnel is
 down, the keys start with `! problems`.
@@ -60,18 +60,35 @@ Apps and processes can carry badges after their name:
 | `gave up` | carte stopped restarting a crashing process |
 | `!` | Has a problem; `!` lists them |
 
-### Details and logs
+### Details and tabs
 
 The details say what the selected row is doing, what keeps it running,
 its address and share, and its latest event.
 
-The logs of a project, stack or app merge the logs of its processes.
-Each line starts with its process's name in a colour of its own. `e`
-switches the pane to the selection's events, such as starts, stops and
-crashes, and back.
+Below the details, the pane's top border lists its tabs: `1 logs`,
+`2 events` and `3 env`. The current tab is highlighted. A tab that
+doesn't apply to the selection, such as env on a folder, is dimmed.
+`1` to `3` pick a tab, and `[` and `]` go to the previous and next.
+Picking a tab doesn't move the focus, so you can move through the tree
+and watch each row's tab.
 
-The logs follow new lines. Scrolling up stops that, and the title shows
-how far up you are. `G` follows again.
+Each tab shows the selection. With nothing selected, events are
+machine-wide.
+
+The logs of a project, stack or app merge the logs of its processes.
+Each line starts with its process's name in a colour of its own.
+
+The events are the selection's starts, stops, crashes and the like.
+
+The logs and events follow new lines. Scrolling up stops that, and the
+border shows how far up you are. `G` follows again.
+
+The env tab shows a process's env: each variable, its value and where
+it came from. Values aren't masked. On an app, it shows the env of the
+process that serves HTTP, and says so; select a process to see
+another's. An app with several processes and none serving HTTP lists
+them to pick from. `3` on the env tab fetches it again, as the env can
+change when a process starts.
 
 ## Show filter
 
@@ -118,17 +135,18 @@ closed row moves to its parent, and `→` on an open row moves into it.
 
 | Key | Does |
 | --- | --- |
-| `↑` `↓`, `j` `k` | Move in the tree, or scroll the logs |
-| `←` `→`, `h` `l` | Close, open the selected row (tree). `←` `h` in the logs moves to the tree |
+| `↑` `↓`, `j` `k` | Move in the tree, or scroll the tab |
+| `←` `→`, `h` `l` | Close, open the selected row (tree). `←` `h` in the tabs moves to the tree |
 | `enter`, `space` | Close or open the selected row (tree) |
 | `g` `G`, `Home` `End` | Top, bottom. `G` in the logs follows new lines |
 | `PgUp` `PgDn` | Page up, down |
-| `tab` | Switch between the tree and the logs |
+| `tab` | Switch between the tree and the tabs |
+| `1` `2` `3` | Show the logs, events or env tab |
+| `[` `]` | Previous, next tab |
 | `/` | Filter the tree, or search the logs |
 | `n` `N` | Older, newer match (logs) |
 | `esc` | Clear the filter or search of the focused pane |
 | `a` | Show all, running or shared instances |
-| `e` | Show logs or events |
 | `-` | Mark the logs with the time |
 | `m` | Mouse on or off |
 | `ctrl-p` | Jump to a project, stack, app or process |
@@ -148,7 +166,6 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `W` | Share behind a password |
 | `O` | Open the shared address |
 | `y` `Y` | Copy the address, the shared address |
-| `v` | View the env |
 | `t` | Type into the process, like at a debugger prompt |
 
 `S` acts on the selected process, or on the one process below the
@@ -169,8 +186,7 @@ shows the prompt and what you've typed.
 | `?` | Show the keys |
 | `q`, `ctrl-c` | Quit |
 
-Any key closes the help and the problems. The env scrolls with the
-navigation keys and `space`, and other keys close it.
+Any key closes the help and the problems.
 
 ## Mouse
 
@@ -180,8 +196,9 @@ navigation keys and `space`, and other keys close it.
 | Click the selected row | Close or open it |
 | Click the problem count or `tunnel down` | List the problems |
 | Click a pane | Focus it |
+| Click a tab's name | Show that tab |
 | Wheel over the tree | Move the selection |
-| Wheel over the logs | Scroll them |
+| Wheel over the tabs | Scroll the current tab |
 | Drag over the logs | Select lines; releasing copies them |
 
 `m` turns the mouse off, so the terminal's own selection works, and on

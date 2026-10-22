@@ -17,8 +17,6 @@ pub enum Mode {
     Confirm(Confirm),
     Help,
     Problems,
-    /// The selected process's env.
-    Env,
     /// Typing a name to jump to.
     Jump,
     /// Typing into the selected process.
@@ -65,8 +63,10 @@ pub enum Intent {
     FilterDone,
     CycleShow,
     ToggleMouse,
-    /// Switch the log pane between logs and events.
-    ToggleEvents,
+    /// Show the tab with this number below the details.
+    PickTab(u8),
+    /// Show the tab this many places along.
+    StepTab(isize),
     Control(Control),
     StopIdle,
     StopAll,
@@ -76,7 +76,6 @@ pub enum Intent {
     Mark,
     CopyUrl,
     CopyPublicUrl,
-    ShowEnv,
     StartJump,
     /// Moves to the next older match of the logs search, or the next newer one.
     FindMatch {
@@ -111,7 +110,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("n N", "older, newer match in the logs"),
             ("esc", "clear the filter or search"),
             ("a", "show all, running or shared"),
-            ("e", "show logs or events"),
+            ("1 2 3", "show logs, events, env"),
+            ("[ ]", "previous, next tab"),
             ("drag", "copy log lines"),
             ("-", "mark the logs with the time"),
             ("m", "mouse on or off"),
@@ -132,7 +132,6 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("W", "share behind a password"),
             ("O", "open the shared address"),
             ("y Y", "copy the address, the shared address"),
-            ("v", "view the env"),
             ("t", "type into the process, like at a debugger prompt"),
         ],
     ),
@@ -177,15 +176,6 @@ pub fn intent(mode: &Mode, focus: Focus, key: KeyEvent) -> Option<Intent> {
             _ => Intent::Close,
         }),
         Mode::Help | Mode::Problems => Some(Intent::Close),
-        Mode::Env => Some(match key.code {
-            KeyCode::Down | KeyCode::Char('j') => Intent::Move(1),
-            KeyCode::Up | KeyCode::Char('k') => Intent::Move(-1),
-            KeyCode::PageDown | KeyCode::Char(' ') => Intent::PageDown,
-            KeyCode::PageUp => Intent::PageUp,
-            KeyCode::Home | KeyCode::Char('g') => Intent::Top,
-            KeyCode::End | KeyCode::Char('G') => Intent::Bottom,
-            _ => Intent::Close,
-        }),
         Mode::Normal => normal(focus, key),
         Mode::Type => Some(Intent::Typed(key)),
     }
@@ -226,13 +216,14 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('-') => Some(Intent::Mark),
         KeyCode::Char('y') => Some(Intent::CopyUrl),
         KeyCode::Char('Y') => Some(Intent::CopyPublicUrl),
-        KeyCode::Char('v') => Some(Intent::ShowEnv),
         KeyCode::Char('w') => Some(Intent::Share { auth: false }),
         KeyCode::Char('W') => Some(Intent::Share { auth: true }),
         KeyCode::Char('I') => Some(Intent::StopIdle),
         KeyCode::Char('X') => Some(Intent::StopAll),
         KeyCode::Char('a') => Some(Intent::CycleShow),
-        KeyCode::Char('e') => Some(Intent::ToggleEvents),
+        KeyCode::Char(c @ '1'..='5') => Some(Intent::PickTab(c as u8 - b'0')),
+        KeyCode::Char('[') => Some(Intent::StepTab(-1)),
+        KeyCode::Char(']') => Some(Intent::StepTab(1)),
         KeyCode::Char('m') => Some(Intent::ToggleMouse),
         KeyCode::Char('t') => Some(Intent::StartTyping),
         _ => None,
@@ -353,6 +344,28 @@ mod tests {
         for mode in [Mode::Normal, Mode::Filter, Mode::Help] {
             assert_eq!(intent(&mode, Focus::Logs, ctrl_c), Some(Intent::Quit));
         }
+    }
+
+    #[test]
+    fn number_keys_pick_tabs_in_either_pane() {
+        for focus in [Focus::Tree, Focus::Logs] {
+            assert_eq!(
+                intent(&Mode::Normal, focus, key(KeyCode::Char('3'))),
+                Some(Intent::PickTab(3))
+            );
+            assert_eq!(
+                intent(&Mode::Normal, focus, key(KeyCode::Char(']'))),
+                Some(Intent::StepTab(1))
+            );
+        }
+        assert_eq!(
+            intent(&Mode::Normal, Focus::Tree, key(KeyCode::Char('6'))),
+            None
+        );
+        assert_eq!(
+            intent(&Mode::Filter, Focus::Tree, key(KeyCode::Char('1'))),
+            Some(Intent::FilterChar('1'))
+        );
     }
 
     #[test]

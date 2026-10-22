@@ -19,6 +19,7 @@ mod input;
 mod jump;
 mod logs;
 mod saved;
+mod tabs;
 mod target;
 mod tasks;
 mod theme;
