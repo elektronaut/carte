@@ -185,7 +185,7 @@ The Service `grafana` in the `monitoring` namespace is then at
 `https://grafana.prod.localhost` if no other namespace has a `grafana`.
 
 `carte import kube` writes a project file for each context you pick. See
-[Kube projects](docs/configuration.md#kube-projects).
+[Kube projects](docs/kubernetes.md).
 
 ## Configuration
 
