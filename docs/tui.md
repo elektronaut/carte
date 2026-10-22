@@ -294,6 +294,77 @@ status colours stay apart, but a hue can shift a little, since the
 `terminal` draws selected log lines and the jump prompt's pick
 reversed, since its colours are up to your terminal.
 
+### Custom themes
+
+A file in `~/.config/carte/themes` adds a theme. Its name, without
+`.toml`, is the theme's id, and the theme appears in the `T` list after
+the built-ins. A file named like a built-in, such as `nord.toml`,
+replaces it.
+
+```toml
+# ~/.config/carte/themes/nova.toml
+extends = "catppuccin-mocha"
+label = "Nova"
+accent = "#f5a97f"
+muted = "bright-black"
+prefixes = ["#8bd5ca", "#c6a0f6", "#eed49f", "#8aadf4", "#f5bde6", "#a6da95"]
+```
+
+`extends` names a built-in or another custom theme. Roles the file
+leaves out come from it, or from `terminal` without `extends`. A file
+that extends its own id, like `extends = "nord"` in `nord.toml`, builds
+on the built-in. `label` is the name in the list; it defaults to the id.
+
+The built-in ids are `terminal`, `catppuccin-latte`,
+`catppuccin-frappe`, `catppuccin-macchiato`, `catppuccin-mocha`,
+`tokyonight-night`, `tokyonight-day`, `gruvbox-dark`, `gruvbox-light`,
+`dracula`, `alucard`, `nord`, `solarized-dark`, `solarized-light`,
+`rose-pine` and `rose-pine-dawn`.
+
+Every role is optional:
+
+| Role | Colours |
+| --- | --- |
+| `fg` | Text |
+| `bg` | The background of the whole screen |
+| `muted` | Secondary text, fold markers, stopped and disabled things |
+| `accent` | Keys in the help and the key line, stacks, pins |
+| `border` | Pane borders |
+| `border_focus` | The focused pane's border |
+| `ok` | Running and ready, notices |
+| `warn` | Starting, stopping, suspended, scroll positions, prompts |
+| `error` | Crashes, problems, errors |
+| `shared` | Shares and the tunnel |
+| `paused` | A process at a debugger prompt |
+| `selection_bg` | The selected tree row, selected log lines and the jump prompt's pick |
+| `selection_fg` | Secondary text on the selected tree row |
+| `match_fg`, `match_bg` | Search matches in the logs |
+| `match_current_fg`, `match_current_bg` | Matches on the current match's line |
+| `prefixes` | Process names in merged logs, a list used in turn |
+
+A colour is one of:
+
+- `"#rrggbb"`.
+- An ANSI name: `black`, `red`, `green`, `yellow`, `blue`, `magenta`,
+  `cyan`, `gray`, and `bright-black` to `bright-white`. `gray` is ANSI
+  7, and `white` is the same as `bright-white`, ANSI 15. Your terminal
+  decides how these look.
+- A number from 0 to 255, for the 256-colour palette.
+- `"reset"`. In `fg` and `bg`, it's the terminal's own colour. In any
+  other role, it inherits: text takes `fg`, and a background leaves what
+  is under it.
+
+carte doesn't adjust custom themes for contrast, as it does the
+built-ins; the colours are drawn as written. At 256 colours, each one
+becomes the nearest of the 256. Roles a theme inherits from a built-in
+keep the built-in's adjustments.
+
+carte watches the folder, so a saved file shows at once, and redraws
+if it's the current theme. A file that doesn't parse, sets an unknown
+role or colour, or extends something that isn't a theme, including in
+a cycle, shows under `!` with its file and line. Its theme is left out
+of the list, and the TUI keeps the theme it has.
+
 ## Saved state
 
 The terminal UI remembers some choices between sessions, in `tui.json`

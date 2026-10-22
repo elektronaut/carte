@@ -443,6 +443,7 @@ fn raw_builtins() -> Vec<Theme> {
 }
 
 /// The built-in theme with this id.
+#[cfg(test)]
 pub fn named(id: &str, colors: Colors) -> Option<Theme> {
     builtins(colors).into_iter().find(|theme| theme.id == id)
 }

@@ -145,8 +145,8 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         }
         title.push(Span::raw(what).fg(color));
     }
-    if !snapshot.problems.is_empty() {
-        let count = snapshot.problems.len();
+    if !snapshot.problems.is_empty() || !app.theme_problems.is_empty() {
+        let count = snapshot.problems.len() + app.theme_problems.len();
         let noun = if count == 1 { "problem" } else { "problems" };
         problems_from.get_or_insert(width(&title));
         title.push(Span::raw(format!("· {count} {noun} ")).fg(theme.error));
@@ -1440,16 +1440,17 @@ fn status_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
     Line::default()
 }
 
-/// Problems the daemon reports, or a tunnel that is down while something is shared,
-/// as the tree's title shows them.
+/// Problems the daemon reports, theme files that don't load, or a tunnel that is
+/// down while something is shared, as the tree's title shows them.
 fn has_problems(app: &App) -> bool {
-    app.snapshot.as_ref().is_some_and(|s| {
-        !s.problems.is_empty()
-            || (!s.shares.is_empty()
-                && s.tunnel
-                    .as_ref()
-                    .is_some_and(|t| t.state == TunnelState::Failed))
-    })
+    !app.theme_problems.is_empty()
+        || app.snapshot.as_ref().is_some_and(|s| {
+            !s.problems.is_empty()
+                || (!s.shares.is_empty()
+                    && s.tunnel
+                        .as_ref()
+                        .is_some_and(|t| t.state == TunnelState::Failed))
+        })
 }
 
 /// The most used keys for the focused pane, as many as fit in `width`, after
@@ -1785,7 +1786,7 @@ fn render_problems(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
         .as_ref()
         .and_then(|s| s.tunnel.as_ref())
         .filter(|t| t.state == TunnelState::Failed);
-    let mut lines = if problems.is_empty() && tunnel.is_none() {
+    let mut lines = if problems.is_empty() && tunnel.is_none() && app.theme_problems.is_empty() {
         vec![Line::from("No problems.")]
     } else {
         problems
@@ -1812,6 +1813,12 @@ fn render_problems(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(vec![
             Span::raw(format!("{} tunnel: ", tunnel.provider)).bold(),
             Span::raw(tunnel.message.clone().unwrap_or_default()),
+        ]));
+    }
+    for problem in &app.theme_problems {
+        lines.push(Line::from(vec![
+            Span::raw("theme: ").bold(),
+            Span::raw(problem.clone()),
         ]));
     }
     popup(theme, frame, area, "problems", lines);
@@ -1873,6 +1880,8 @@ mod tests {
     use super::*;
     use crate::tui::app::{Command, Event};
     use crate::tui::fixtures::{kube_sample, process, sample, shared_sample};
+    use crate::tui::theme::Colors;
+    use crate::tui::theme_files;
 
     fn draw(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -3579,9 +3588,53 @@ mod tests {
     }
 
     #[test]
+        fn theme_files_that_change_redraw_and_broken_ones_are_problems() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("acme.toml");
+        std::fs::write(&file, "ok = \"cyan\"\n").unwrap();
+        let mut app = busy_app();
+        let now = app.now;
+        app.update(
+            Event::Themes(theme_files::load(dir.path(), Colors::Truecolor)),
+            now,
+        );
+        press(&mut app, now, KeyCode::Char('T'));
+        press(&mut app, now, KeyCode::End);
+        while app.theme.id != "acme" {
+            press(&mut app, now, KeyCode::Down);
+        }
+        press(&mut app, now, KeyCode::Enter);
+        assert_eq!(app.theme.ok, Color::Cyan);
+
+        std::fs::write(&file, "ok = \"green\"\n").unwrap();
+        app.update(
+            Event::Themes(theme_files::load(dir.path(), Colors::Truecolor)),
+            now,
+        );
+        assert_eq!(
+            app.theme.ok,
+            Color::Green,
+            "the current theme follows its file"
+        );
+
+        std::fs::write(&file, "ok = \"greenish\"\n").unwrap();
+        app.update(
+            Event::Themes(theme_files::load(dir.path(), Colors::Truecolor)),
+            now,
+        );
+        assert_eq!(app.theme.ok, Color::Green, "a broken file keeps the theme");
+        let screen = draw(&mut app, 120, 18);
+        assert!(screen.contains("2 problems"), "{screen}");
+        assert!(screen.contains(" ! problems"), "{screen}");
+        press(&mut app, now, KeyCode::Char('!'));
+        let screen = draw(&mut app, 120, 18);
+        assert!(screen.contains("acme.toml:1:"), "{screen}");
+    }
+
+    #[test]
     fn without_truecolor_themes_draw_in_256_colours() {
         let mut app = busy_app();
-        app.colors = crate::tui::theme::Colors::Indexed;
+        app.colors = Colors::Indexed;
         let now = app.now;
         press(&mut app, now, KeyCode::Char('T'));
         press(&mut app, now, KeyCode::Down);

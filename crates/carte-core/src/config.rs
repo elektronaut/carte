@@ -48,7 +48,7 @@ impl ConfigError {
         }
     }
 
-    fn parse(path: &Path, text: &str, err: toml::de::Error) -> Self {
+    pub fn parse(path: &Path, text: &str, err: toml::de::Error) -> Self {
         let Some(span) = err.span() else {
             return ConfigError::Parse {
                 path: path.to_path_buf(),
