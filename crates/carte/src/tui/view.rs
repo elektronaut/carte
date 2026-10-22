@@ -271,7 +271,8 @@ fn render_input(theme: &Theme, frame: &mut Frame, inner: Rect, input: Input) -> 
             Constraint::Length(count.width() as u16),
         ])
         .areas(below);
-        frame.render_widget(Paragraph::new(label.fg(color).reversed()), label_area);
+        let label = Span::styled(label, Style::new().fg(color).patch(theme.line_selection()));
+        frame.render_widget(Paragraph::new(label), label_area);
         frame.render_widget(Paragraph::new(count.fg(color)), count_area);
         text_area
     };
