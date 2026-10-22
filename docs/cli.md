@@ -49,7 +49,7 @@ address inside it when given one.
 | Command | |
 | --- | --- |
 | `carte ls [-a]` | Running instances, with URL and notes, like processes that are down and when they restart; `--all` includes stopped ones |
-| `carte status [address]` | URL, state, public URL, processes, holds, idle time and last error of an app; a crashed process shows when it restarts, and a process that serves [paths](paths.md) shows them |
+| `carte status [address]` | URL, state, public URL, processes, holds, idle time and last error of an app; a crashed process shows when it restarts, and a process that serves [paths](dev-servers.md) shows them |
 | `carte up [address] [--no-wait]` | Start, and wait until ready |
 | `carte restart [address] [--no-wait]` | Restart, and wait until ready |
 | `carte down [address]` | Stop |
@@ -358,8 +358,8 @@ An **Instance** is:
 | `app`, `stack`, `checkout` | Names; `checkout` is `main` for an app running from its main checkout in another stack |
 | `checkout_path` | Where its code is |
 | `url`, `public_url` | `public_url` is null unless shared |
-| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](paths.md), is waiting to restart after a crash or to pass its readiness check again), `paused` (one of those waits at a debugger prompt), `suspended` (one of those was stopped by a signal), `stopping` or `crashed` |
-| `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](paths.md) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `paused` (at a debugger prompt), `suspended` (stopped by a signal, such as `SIGSTOP`), `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
+| `state` | `stopped`, `starting`, `ready`, `restarting` (its web process, or a process that serves [paths](dev-servers.md), is waiting to restart after a crash or to pass its readiness check again), `paused` (one of those waits at a debugger prompt), `suspended` (one of those was stopped by a signal), `stopping` or `crashed` |
+| `processes` | `[{ name, state, policy, temporary, pid, port, http, paths, restarts, memory_bytes, cpu_percent, gave_up, restart_in_secs }]`; `paths` lists the [paths](dev-servers.md) a process serves, left out when it serves none; `state` is `stopped`, `starting`, `running`, `paused` (at a debugger prompt), `suspended` (stopped by a signal, such as `SIGSTOP`), `stopping`, `exited`, `disabled` or `done` (a task that finished), `policy` is `auto`, `pinned` or `disabled`, `gave_up` is true once carte stopped restarting a process that kept crashing, and `restart_in_secs` is the wait before a crashed process restarts, left out when none is waiting |
 | `holds` | What keeps it running: `{ kind: "pinned" \| "requests" \| "connections" \| "dependent" \| "exec" \| "paused" \| "suspended", … }`; `exec` counts `carte exec` commands still running, `paused` names a process waiting at a debugger prompt, and `suspended` one stopped by a signal |
 | `idle_in_secs` | Until idle shutdown, when counting down |
 | `last_error`, `last_event` | Null when there's none |

@@ -31,7 +31,7 @@ The other pages cover project files and what's in them:
   and hostnames, and per-app settings
 - [Processes](processes.md): services and tasks, crashes, notifications,
   teardown, Node apps and policies
-- [Paths](paths.md): dev servers that serve paths on an app's hostname,
+- [Dev servers](dev-servers.md): dev servers that serve paths on an app's hostname,
   like vite_ruby's or Shakapacker's
 - [Environment](environment.md): how each process's environment is built,
   instance directories, env templates and env files
