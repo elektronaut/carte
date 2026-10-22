@@ -20,11 +20,9 @@ carte starts the app, then stops it once you're done with it.
 - **Kubernetes Services** at hostnames like
   `https://grafana.monitoring.prod.localhost`, forwarded when you visit.
 
-carte runs on macOS and Linux. On Linux, `carte setup` uses systemd to
-run the daemon, with
-[socket activation](docs/cli.md#socket-activation-on-linux), and
-systemd-resolved for a TLD other than `.localhost`; without them, it
-says what to set up yourself.
+carte runs on macOS and Linux. On Linux, `carte setup` runs the daemon
+as a systemd user service. A TLD other than `.localhost` also needs
+systemd-resolved; without it, setup tells you what to configure instead.
 
 ## Install
 
