@@ -20,10 +20,11 @@ carte starts the app, then stops it once you're done with it.
 - **Kubernetes Services** at hostnames like
   `https://grafana.monitoring.prod.localhost`, forwarded when you visit.
 
-carte runs on macOS and Linux. `carte setup` is macOS-only for now, so on
-Linux you run `carte daemon` as a service, optionally with
-[systemd socket activation](docs/cli.md#socket-activation-on-linux), and trust its
-certificate authority yourself.
+carte runs on macOS and Linux. On Linux, `carte setup` runs the daemon
+as a systemd user service with
+[socket activation](docs/cli.md#socket-activation-on-linux), but doesn't
+yet trust its certificate authority or send lookups for a TLD other than
+`.localhost` to it; you do those yourself.
 
 ## Install
 
@@ -52,6 +53,11 @@ Setup does this once per machine, asking for your password where needed:
   the TLDs carte serves, and trusts it for HTTPS only
 - installs a LaunchAgent that runs the daemon on ports 80 and 443, on
   127.0.0.1 and ::1
+- on Linux, installs systemd user units in its place: a socket unit for
+  each port and a service that runs the daemon. Ports below 1024 need
+  root there, so setup also lowers `net.ipv4.ip_unprivileged_port_start`
+  to 80 in `/etc/sysctl.d/50-carte.conf`, which applies to every program
+  on the machine
 
 Apps are served under `.localhost`, which needs no DNS setup;
 `carte setup --tld test` adds `.test`. `carte setup --check` reports

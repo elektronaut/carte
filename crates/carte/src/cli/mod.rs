@@ -89,14 +89,14 @@ pub enum Command {
     /// Remove state folders, run directories and pidfiles of stacks, apps and
     /// projects that no longer exist.
     Prune(PruneArgs),
-    /// Set up this Mac: DNS resolver, CA trust and the daemon's LaunchAgent.
+    /// Set up this machine: DNS for the TLD, CA trust and the daemon's service.
     Setup(SetupArgs),
     /// Create projects from another tool's setup.
     #[command(subcommand)]
     Import(ImportCommand),
     /// Watch and control everything in a terminal UI.
     Tui,
-    /// Run the daemon in the foreground, or manage the one launchd runs.
+    /// Run the daemon in the foreground, or manage the one launchd or systemd runs.
     Daemon {
         #[command(subcommand)]
         command: Option<DaemonCommand>,
@@ -287,7 +287,7 @@ pub struct SetupArgs {
     /// Report what is set up, read-only.
     #[arg(long, conflicts_with_all = ["dry_run", "uninstall"])]
     pub check: bool,
-    /// Undo setup: LaunchAgent, resolver file and the local CA.
+    /// Undo setup: the daemon's service, DNS for the TLD and the local CA.
     #[arg(long)]
     pub uninstall: bool,
     /// Set up sharing under this domain: a Cloudflare zone, or your ngrok dev domain
@@ -369,7 +369,7 @@ pub enum ProjectCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum DaemonCommand {
-    /// Restart the daemon launchd runs, so it picks up a new build or `[share]` changes.
+    /// Restart the daemon launchd or systemd runs, so it picks up a new build or `[share]` changes.
     Restart,
 }
 
