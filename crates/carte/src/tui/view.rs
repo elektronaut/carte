@@ -1584,12 +1584,16 @@ fn render_themes(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = &app.picker else {
         return;
     };
+    const SWATCH: usize = 10;
+    let room = usize::from(area.width.saturating_sub(4));
+    let swatches = room >= SWATCH + 12;
     let width = picker
         .themes
         .iter()
         .map(|t| t.label.chars().count())
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(room.saturating_sub(2 + if swatches { SWATCH } else { 0 }));
     let shown = usize::from(area.height.saturating_sub(4)).max(1);
     let first = picker.cursor.saturating_sub(shown - 1);
     let mut lines: Vec<Line<'static>> = picker
@@ -1604,13 +1608,17 @@ fn render_themes(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 "  "
             };
-            let mut spans = vec![Span::raw(format!("{mark}{:width$}  ", t.label))];
-            let swatch = Style::new().bg(t.bg);
-            spans.push(Span::styled(" ", swatch));
-            for color in [t.fg, t.accent, t.ok, t.warn, t.error, t.shared] {
-                spans.push(Span::styled("●", swatch.fg(color)));
+            let label: String = t.label.chars().take(width).collect();
+            let mut spans = vec![Span::raw(format!("{mark}{label:width$}"))];
+            if swatches {
+                let swatch = Style::new().bg(t.bg);
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(" ", swatch));
+                for color in [t.fg, t.accent, t.ok, t.warn, t.error, t.shared] {
+                    spans.push(Span::styled("●", swatch.fg(color)));
+                }
+                spans.push(Span::styled(" ", swatch));
             }
-            spans.push(Span::styled(" ", swatch));
             let line = Line::from(spans);
             if i == picker.cursor {
                 line.style(theme.line_selection())
@@ -1620,9 +1628,11 @@ fn render_themes(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     lines.push(Line::default());
-    lines.push(Line::from(
-        "↑↓ preview · enter keeps · esc goes back · • current".fg(theme.muted),
-    ));
+    let hint: String = "↑↓ preview · enter keeps · esc goes back · • current"
+        .chars()
+        .take(room)
+        .collect();
+    lines.push(Line::from(hint.fg(theme.muted)));
     popup(theme, frame, area, "theme", lines);
 }
 
@@ -2852,7 +2862,10 @@ mod tests {
         let theme = Theme::terminal();
         let logs = cell(&mut app, "1 logs");
         assert_eq!(logs.fg, theme.accent);
-        assert!(logs.modifier.contains(Modifier::BOLD), "the current tab");
+        assert!(
+            logs.modifier.contains(ratatui::style::Modifier::BOLD),
+            "the current tab"
+        );
         assert_eq!(cell(&mut app, "2 events").fg, theme.fg);
         assert_eq!(
             cell(&mut app, "3 env").fg,
@@ -3548,6 +3561,20 @@ mod tests {
             "the pick stays in view\n{screen}"
         );
         assert!(!screen.contains("• Terminal"), "{screen}");
+    }
+
+    #[test]
+    fn the_theme_picker_fits_a_narrow_terminal() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('T'));
+        for _ in 0..15 {
+            press(&mut app, now, KeyCode::Down);
+        }
+        let screen = draw(&mut app, 20, 12);
+        assert!(screen.contains("Rosé Pine Daw"), "{screen}");
+        let screen = draw(&mut app, 12, 12);
+        assert!(screen.contains("Rosé"), "{screen}");
     }
 
     #[test]

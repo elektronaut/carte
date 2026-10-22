@@ -238,7 +238,7 @@ pub struct App {
     pub typing: Option<Typing>,
     pub theme: Theme,
     pub colors: Colors,
-    /// The theme was picked this session, so it's the one to save.
+    /// Whether a theme was picked this session.
     pub picked_theme: bool,
     pub picker: Option<ThemePicker>,
     typing_sessions: u64,

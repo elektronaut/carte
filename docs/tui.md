@@ -245,8 +245,9 @@ again.
 
 ## Themes
 
-`T` lists the colour themes, with a `•` next to the current one.
-Moving through the list shows each theme on the whole screen at once.
+`T` lists the colour themes, with a `•` next to the current one and
+the highlighted one drawn like a selected row. Moving the highlight
+shows each theme on the whole screen at once.
 `enter` keeps it. `esc`, `q` and `T` go back to the theme you had, and
 `ctrl-c` goes back to it and quits.
 
@@ -275,16 +276,20 @@ they read on the theme's background and on the selection:
 
 - Text has a contrast of at least 4.5:1.
 - Status colours, such as running, starting and crashed, the accent
-  and process names have at least 3:1. They are darkened or lightened,
-  which keeps their hue.
-- Secondary text has at least 3:1, and moves toward the text colour.
-- No text colour moves more than halfway to black, white or the text
-  colour.
-- A pane's border moves toward the background where it is too close to
-  the focused pane's border.
+  and process names have at least 3:1. They are darkened or lightened
+  by at most half the way to black or white, which keeps their hue.
+- Secondary text has at least 3:1. It moves toward the text colour, by
+  at most 60% of the way.
+- Search matches have at least 4.5:1 against their background, which
+  is darkened or lightened away from the text.
+- The focused pane's border has at least 3:1 against the background
+  and 1.5:1 against the other borders, which move toward the
+  background where needed.
 
-At 256 colours, carte adjusts again for the nearest colours, so the
-same contrast holds.
+At 256 colours, each colour becomes the closest of the 256 that keeps
+the same contrast. Colours stay colours, greys stay greys, and the
+status colours stay apart, but a hue can shift a little, since the
+256 colours have few shades of each.
 
 `terminal` draws selected log lines and the jump prompt's pick
 reversed, since its colours are up to your terminal.
