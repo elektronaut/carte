@@ -1341,7 +1341,7 @@ fn render_logs(theme: &Theme, frame: &mut Frame, mut inner: Rect, app: &mut App)
         if selected {
             line_rows = line_rows
                 .into_iter()
-                .map(|line| line.patch_style(theme.selection()))
+                .map(|line| line.patch_style(theme.line_selection()))
                 .collect();
         }
         rows.extend(line_rows);
@@ -1590,12 +1590,21 @@ fn render_themes(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
         .map(|t| t.label.chars().count())
         .max()
         .unwrap_or(0);
+    let shown = usize::from(area.height.saturating_sub(4)).max(1);
+    let first = picker.cursor.saturating_sub(shown - 1);
     let mut lines: Vec<Line<'static>> = picker
         .themes
         .iter()
         .enumerate()
+        .skip(first)
+        .take(shown)
         .map(|(i, t)| {
-            let mut spans = vec![Span::raw(format!("{:width$}  ", t.label))];
+            let mark = if t.id == picker.previous.id {
+                "• "
+            } else {
+                "  "
+            };
+            let mut spans = vec![Span::raw(format!("{mark}{:width$}  ", t.label))];
             let swatch = Style::new().bg(t.bg);
             spans.push(Span::styled(" ", swatch));
             for color in [t.fg, t.accent, t.ok, t.warn, t.error, t.shared] {
@@ -1604,7 +1613,7 @@ fn render_themes(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled(" ", swatch));
             let line = Line::from(spans);
             if i == picker.cursor {
-                line.style(theme.selection())
+                line.style(theme.line_selection())
             } else {
                 line
             }
@@ -1612,7 +1621,7 @@ fn render_themes(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     lines.push(Line::default());
     lines.push(Line::from(
-        "↑↓ preview · enter keeps · esc goes back".fg(theme.muted),
+        "↑↓ preview · enter keeps · esc goes back · • current".fg(theme.muted),
     ));
     popup(theme, frame, area, "theme", lines);
 }
@@ -1637,7 +1646,7 @@ fn render_jump(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     for (i, candidate) in found.iter().enumerate().skip(first).take(shown) {
         let line = Line::from(format!("  {}", candidate.name));
         lines.push(if i == prompt.cursor {
-            line.style(theme.selection())
+            line.style(theme.line_selection())
         } else {
             line
         });
@@ -3504,9 +3513,47 @@ mod tests {
     }
 
     #[test]
+    fn the_theme_picker_goes_back_on_q_t_and_ctrl_c() {
+        let mut app = busy_app();
+        let now = app.now;
+        for close in [
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        ] {
+            press(&mut app, now, KeyCode::Char('T'));
+            press(&mut app, now, KeyCode::Down);
+            assert_ne!(app.theme, Theme::terminal());
+            app.update(Event::Key(close), now);
+            assert_eq!(app.theme, Theme::terminal(), "{close:?} goes back");
+            assert!(app.picker.is_none());
+        }
+        assert!(app.quit, "ctrl-c quits");
+        assert!(!app.picked_theme, "nothing was picked");
+    }
+
+    #[test]
+    fn the_theme_picker_scrolls_and_marks_the_current_theme() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('T'));
+        let screen = draw(&mut app, 100, 12);
+        assert!(screen.contains("• Terminal"), "{screen}");
+        for _ in 0..15 {
+            press(&mut app, now, KeyCode::Down);
+        }
+        let screen = draw(&mut app, 100, 12);
+        assert!(
+            screen.contains("Rosé Pine Dawn"),
+            "the pick stays in view\n{screen}"
+        );
+        assert!(!screen.contains("• Terminal"), "{screen}");
+    }
+
+    #[test]
     fn without_truecolor_themes_draw_in_256_colours() {
         let mut app = busy_app();
-        app.truecolor = false;
+        app.colors = crate::tui::theme::Colors::Indexed;
         let now = app.now;
         press(&mut app, now, KeyCode::Char('T'));
         press(&mut app, now, KeyCode::Down);

@@ -84,9 +84,19 @@ impl Theme {
         Style::new().fg(self.fg).bg(self.bg)
     }
 
-    /// A selected row or line.
+    /// The selected tree row.
     pub fn selection(&self) -> Style {
         on(Style::new(), self.selection_bg)
+    }
+
+    /// A selected log line or pick in a list. A theme that leaves the background to
+    /// the terminal reverses it, which reads on any palette.
+    pub fn line_selection(&self) -> Style {
+        if self.bg == Color::Reset {
+            Style::new().reversed()
+        } else {
+            self.selection()
+        }
     }
 
     /// A search match in the logs; `current` on the current match's line.
@@ -172,21 +182,26 @@ impl Theme {
         .chain(self.prefixes.iter_mut())
     }
 
-    /// Moves each text colour that is too faint on `bg` or `selection_bg` toward
-    /// `fg`, and `fg` itself toward black or white, in steps of 1%, until it reaches
-    /// the contrast `contrast_failures` asks for. Search match backgrounds move away
-    /// from their text instead.
-    fn legible(mut self) -> Self {
+    /// The theme as `colors` draws it, with each colour that is too faint moved by
+    /// the fewest whole percent, up to `MAX_SHIFT`, that reach the contrast
+    /// `contrast_failures` asks for. `fg` and the hues move toward black or white,
+    /// which keeps their hue; `muted` and `selection_fg` move toward `fg`, and
+    /// `border` toward `bg`. Search match backgrounds move away from their text.
+    fn legible(mut self, colors: Colors) -> Self {
         let backs = [self.bg, self.selection_bg];
-        let extreme = if luminance(self.bg).is_some_and(|l| l > 0.18) {
-            Color::Rgb(0, 0, 0)
-        } else {
-            Color::Rgb(255, 255, 255)
-        };
-        self.fg = toward(self.fg, extreme, FG_CONTRAST, &backs);
+        let away = away_from(self.bg);
+        self.fg = toward(self.fg, away, FG_CONTRAST, &backs, colors, MAX_SHIFT);
         let fg = self.fg;
+        self.muted = toward(self.muted, fg, ROLE_CONTRAST, &backs, colors, MAX_SHIFT);
+        self.selection_fg = toward(
+            self.selection_fg,
+            fg,
+            ROLE_CONTRAST,
+            &[self.selection_bg],
+            colors,
+            MAX_SHIFT,
+        );
         for role in [
-            &mut self.muted,
             &mut self.accent,
             &mut self.ok,
             &mut self.warn,
@@ -197,38 +212,60 @@ impl Theme {
         .into_iter()
         .chain(self.prefixes.iter_mut())
         {
-            *role = toward(*role, fg, ROLE_CONTRAST, &backs);
+            *role = toward(*role, away, ROLE_CONTRAST, &backs, colors, MAX_SHIFT);
         }
-        self.selection_fg = toward(self.selection_fg, fg, ROLE_CONTRAST, &[self.selection_bg]);
-        self.border_focus = toward(self.border_focus, fg, ROLE_CONTRAST, &[self.bg]);
+        self.border_focus = toward(
+            self.border_focus,
+            away,
+            ROLE_CONTRAST,
+            &[self.bg],
+            colors,
+            MAX_SHIFT,
+        );
+        self.border = toward(
+            self.border,
+            self.bg,
+            BORDER_CONTRAST,
+            &[self.border_focus],
+            colors,
+            100,
+        );
         for (text, back) in [
-            (self.match_fg, &mut self.match_bg),
-            (self.match_current_fg, &mut self.match_current_bg),
+            (&mut self.match_fg, &mut self.match_bg),
+            (&mut self.match_current_fg, &mut self.match_current_bg),
         ] {
-            let away = if luminance(text).is_some_and(|l| l > 0.18) {
-                Color::Rgb(0, 0, 0)
-            } else {
-                Color::Rgb(255, 255, 255)
-            };
-            *back = toward(*back, away, FG_CONTRAST, &[text]);
+            *back = toward(
+                *back,
+                away_from(*text),
+                FG_CONTRAST,
+                &[*text],
+                colors,
+                MAX_SHIFT,
+            );
         }
-        self
+        match colors {
+            Colors::Truecolor => self,
+            Colors::Indexed => self.indexed(),
+        }
     }
 
-    #[cfg(test)]
     /// Pairs below the contrast this theme should have, as `role on background
-    /// ratio`; empty for themes of ANSI colours, whose values the terminal decides.
+    /// ratio`. Pairs with an ANSI colour are left out, since the terminal decides
+    /// its value.
+    #[cfg(test)]
     pub fn contrast_failures(&self) -> Vec<String> {
+        let text = |c: Color| if c == Color::Reset { self.fg } else { c };
+        let back = |c: Color| if c == Color::Reset { self.bg } else { c };
         let mut failures = Vec::new();
-        let mut check = |name: &str, text: Color, back_name: &str, back: Color, need: f64| {
-            if let Some(ratio) = contrast(text, back)
+        let mut check = |name: &str, color: Color, back_name: &str, under: Color, need: f64| {
+            if let Some(ratio) = contrast(text(color), back(under))
                 && ratio < need
             {
                 failures.push(format!("{name} on {back_name} {ratio:.2}"));
             }
         };
-        for (back_name, back) in [("bg", self.bg), ("selection_bg", self.selection_bg)] {
-            check("fg", self.fg, back_name, back, FG_CONTRAST);
+        for (back_name, under) in [("bg", self.bg), ("selection_bg", self.selection_bg)] {
+            check("fg", self.fg, back_name, under, FG_CONTRAST);
             for (name, role) in [
                 ("muted", self.muted),
                 ("accent", self.accent),
@@ -238,14 +275,14 @@ impl Theme {
                 ("shared", self.shared),
                 ("paused", self.paused),
             ] {
-                check(name, role, back_name, back, ROLE_CONTRAST);
+                check(name, role, back_name, under, ROLE_CONTRAST);
             }
             for (i, prefix) in self.prefixes.iter().enumerate() {
                 check(
                     &format!("prefix {i}"),
                     *prefix,
                     back_name,
-                    back,
+                    under,
                     ROLE_CONTRAST,
                 );
             }
@@ -263,6 +300,13 @@ impl Theme {
             "bg",
             self.bg,
             ROLE_CONTRAST,
+        );
+        check(
+            "border_focus",
+            self.border_focus,
+            "border",
+            self.border,
+            BORDER_CONTRAST,
         );
         check(
             "match_fg",
@@ -288,8 +332,70 @@ impl Default for Theme {
     }
 }
 
+/// Whether colours are drawn as they are or as the nearest of 256.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colors {
+    Truecolor,
+    Indexed,
+}
+
+impl Colors {
+    /// Whether the terminal says it shows 24-bit colour.
+    pub fn detect() -> Self {
+        if std::env::var("COLORTERM").is_ok_and(|v| v == "truecolor" || v == "24bit") {
+            Colors::Truecolor
+        } else {
+            Colors::Indexed
+        }
+    }
+
+    fn quantize(self, color: Color) -> Color {
+        match self {
+            Colors::Truecolor => color,
+            Colors::Indexed => nearest_indexed(color),
+        }
+    }
+}
+
+/// Every built-in theme, `terminal` first, legible in `colors`.
+pub fn builtins(colors: Colors) -> Vec<Theme> {
+    let mut themes = vec![Theme::terminal()];
+    themes.extend(raw_builtins().into_iter().map(|t| t.legible(colors)));
+    themes
+}
+
+/// The built-ins other than `terminal`, as their palettes have them.
+fn raw_builtins() -> Vec<Theme> {
+    vec![
+        catppuccin("latte", "Latte", &LATTE, LATTE.subtext0),
+        catppuccin("frappe", "Frappé", &FRAPPE, FRAPPE.overlay2),
+        catppuccin("macchiato", "Macchiato", &MACCHIATO, MACCHIATO.overlay2),
+        catppuccin("mocha", "Mocha", &MOCHA, MOCHA.overlay2),
+        tokyonight_night(),
+        tokyonight_day(),
+        gruvbox_dark(),
+        gruvbox_light(),
+        dracula(),
+        alucard(),
+        nord(),
+        solarized_dark(),
+        solarized_light(),
+        rose_pine(),
+        rose_pine_dawn(),
+    ]
+}
+
+/// The built-in theme with this id.
+pub fn named(id: &str, colors: Colors) -> Option<Theme> {
+    builtins(colors).into_iter().find(|theme| theme.id == id)
+}
+
 const FG_CONTRAST: f64 = 4.5;
 const ROLE_CONTRAST: f64 = 3.0;
+/// Between `border_focus` and `border`, so the focused pane stands out.
+const BORDER_CONTRAST: f64 = 1.5;
+/// How far, in percent, `legible` may move a colour.
+const MAX_SHIFT: u8 = 50;
 
 fn on(style: Style, bg: Color) -> Style {
     if bg == Color::Reset {
@@ -299,47 +405,20 @@ fn on(style: Style, bg: Color) -> Style {
     }
 }
 
-/// Every built-in theme, `terminal` first.
-pub fn builtins() -> Vec<Theme> {
-    let mut themes = vec![Theme::terminal()];
-    themes.extend(
-        [
-            catppuccin("latte", "Latte", &LATTE, LATTE.subtext0),
-            catppuccin("frappe", "Frappé", &FRAPPE, FRAPPE.overlay2),
-            catppuccin("macchiato", "Macchiato", &MACCHIATO, MACCHIATO.overlay2),
-            catppuccin("mocha", "Mocha", &MOCHA, MOCHA.overlay2),
-            tokyonight_night(),
-            tokyonight_day(),
-            gruvbox_dark(),
-            gruvbox_light(),
-            dracula(),
-            alucard(),
-            nord(),
-            solarized_dark(),
-            solarized_light(),
-            rose_pine(),
-            rose_pine_dawn(),
-        ]
-        .into_iter()
-        .map(Theme::legible),
-    );
-    themes
-}
-
-/// The built-in theme with this id.
-pub fn named(id: &str) -> Option<Theme> {
-    builtins().into_iter().find(|theme| theme.id == id)
-}
-
-/// Whether the terminal says it shows 24-bit colour.
-pub fn truecolor() -> bool {
-    std::env::var("COLORTERM").is_ok_and(|v| v == "truecolor" || v == "24bit")
-}
-
 const fn hex(rgb: u32) -> Color {
     Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
+/// Black next to light colours, white next to dark ones.
+fn away_from(color: Color) -> Color {
+    if luminance(color).is_some_and(|l| l > 0.18) {
+        Color::Rgb(0, 0, 0)
+    } else {
+        Color::Rgb(255, 255, 255)
+    }
+}
+
+/// `top` over `under` at `alpha`; ANSI colours stay as `under` has them.
 fn blend(top: Color, under: Color, alpha: f64) -> Color {
     match (top, under) {
         (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
@@ -347,27 +426,31 @@ fn blend(top: Color, under: Color, alpha: f64) -> Color {
                 |a: u8, b: u8| (f64::from(a) * alpha + f64::from(b) * (1.0 - alpha)).round() as u8;
             Color::Rgb(mix(r1, r2), mix(g1, g2), mix(b1, b2))
         }
-        _ => top,
+        _ => under,
     }
 }
 
-/// `color` moved toward `goal` by the fewest whole percent that give it `need`
-/// against every one of `backs`.
-fn toward(color: Color, goal: Color, need: f64, backs: &[Color]) -> Color {
-    (0..=100)
+/// `color` moved toward `goal` by the fewest whole percent, up to `max`, that
+/// give it `need` against every one of `backs` once `colors` draws them. Unmoved
+/// when no shift is enough.
+fn toward(color: Color, goal: Color, need: f64, backs: &[Color], colors: Colors, max: u8) -> Color {
+    (0..=max)
         .map(|percent| blend(goal, color, f64::from(percent) / 100.0))
         .find(|candidate| {
-            backs
-                .iter()
-                .all(|back| contrast(*candidate, *back).is_none_or(|ratio| ratio >= need))
+            backs.iter().all(|back| {
+                contrast(colors.quantize(*candidate), colors.quantize(*back))
+                    .is_none_or(|ratio| ratio >= need)
+            })
         })
-        .unwrap_or(goal)
+        .unwrap_or(color)
 }
 
-/// WCAG relative luminance.
+/// WCAG relative luminance, for truecolor and the 256 colours from 16 up.
 fn luminance(color: Color) -> Option<f64> {
-    let Color::Rgb(r, g, b) = color else {
-        return None;
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Indexed(index @ 16..) => xterm(index),
+        _ => return None,
     };
     let channel = |c: u8| {
         let c = f64::from(c) / 255.0;
@@ -380,7 +463,7 @@ fn luminance(color: Color) -> Option<f64> {
     Some(0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b))
 }
 
-/// WCAG contrast ratio, for truecolor pairs.
+/// WCAG contrast ratio, for colours with a known value.
 fn contrast(a: Color, b: Color) -> Option<f64> {
     let (a, b) = (luminance(a)?, luminance(b)?);
     Some((a.max(b) + 0.05) / (a.min(b) + 0.05))
@@ -584,7 +667,7 @@ fn tokyonight_day() -> Theme {
         label: "Tokyo Night Day".into(),
         fg: hex(0x3760bf),
         bg,
-        muted: hex(0x848cb5),
+        muted: hex(0x68709a),
         accent: blue,
         border: hex(0xa8aecb),
         border_focus: hex(0x4094a3),
@@ -593,7 +676,7 @@ fn tokyonight_day() -> Theme {
         error: hex(0xf52a65),
         shared: hex(0x9854f1),
         paused: orange,
-        selection_bg: hex(0xb7c1e3),
+        selection_bg: hex(0xc4c8da),
         selection_fg: hex(0x6172b0),
         match_fg: bg,
         match_bg: hex(0x7890dd),
@@ -961,16 +1044,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_built_in_is_legible() {
-        for theme in builtins() {
-            let failures = theme.contrast_failures();
-            assert!(failures.is_empty(), "{}: {failures:?}", theme.id);
+    fn every_built_in_is_legible_in_truecolor_and_256_colours() {
+        for colors in [Colors::Truecolor, Colors::Indexed] {
+            for theme in builtins(colors) {
+                let failures = theme.contrast_failures();
+                assert!(failures.is_empty(), "{} {colors:?}: {failures:?}", theme.id);
+            }
         }
     }
 
     #[test]
+    fn a_colour_far_off_its_contrast_isnt_moved() {
+        let theme = Theme {
+            warn: hex(0xffffff),
+            ..raw_builtins().remove(0)
+        }
+        .legible(Colors::Truecolor);
+        assert_eq!(theme.warn, hex(0xffffff), "white on Latte's light base");
+        assert!(!theme.contrast_failures().is_empty());
+    }
+
+    #[test]
+    fn ansi_colours_are_left_alone() {
+        let theme = Theme {
+            fg: hex(0xc0caf5),
+            bg: hex(0x1a1b26),
+            selection_bg: hex(0x283457),
+            ..Theme::terminal()
+        }
+        .legible(Colors::Truecolor);
+        assert_eq!(theme.muted, Color::DarkGray);
+        assert_eq!(theme.match_bg, Color::Reset);
+        assert_eq!(theme.prefixes, Theme::terminal().prefixes);
+    }
+
+    #[test]
+    fn a_reset_match_background_is_checked_against_bg() {
+        let theme = Theme {
+            fg: hex(0xffffff),
+            bg: hex(0xffffff),
+            selection_bg: hex(0xffffff),
+            match_fg: hex(0xfefefe),
+            match_bg: Color::Reset,
+            ..Theme::terminal()
+        };
+        assert!(
+            theme
+                .contrast_failures()
+                .iter()
+                .any(|f| f.starts_with("match_fg on match_bg")),
+            "{:?}",
+            theme.contrast_failures()
+        );
+    }
+
+    #[test]
+    fn selected_lines_reverse_only_without_a_painted_background() {
+        use ratatui::style::Modifier;
+        assert!(
+            Theme::terminal()
+                .line_selection()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        let nord = named("nord", Colors::Truecolor).unwrap();
+        assert_eq!(nord.line_selection(), Style::new().bg(nord.selection_bg));
+    }
+
+    #[test]
     fn ids_are_unique_and_terminal_comes_first() {
-        let themes = builtins();
+        let themes = builtins(Colors::Truecolor);
         assert_eq!(themes[0], Theme::terminal());
         let mut ids: Vec<&str> = themes.iter().map(|t| t.id.as_str()).collect();
         ids.sort_unstable();
@@ -989,7 +1132,7 @@ mod tests {
 
     #[test]
     fn without_truecolor_every_role_is_one_of_256() {
-        let theme = named("catppuccin-mocha").unwrap().indexed();
+        let theme = named("catppuccin-mocha", Colors::Indexed).unwrap();
         let mut copy = theme.clone();
         assert!(copy.roles_mut().all(|c| matches!(c, Color::Indexed(16..))));
         assert_eq!(nearest_indexed(hex(0xffffff)), Color::Indexed(231));
