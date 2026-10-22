@@ -43,7 +43,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
     frame.render_widget(status_line(theme, app, status.width), status);
     frame.render_widget(
-        footer_line(theme, app.focus, app.events, footer.width),
+        footer_line(
+            theme,
+            app.focus,
+            app.events,
+            has_problems(app),
+            footer.width,
+        ),
         footer,
     );
 
@@ -120,7 +126,7 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         let (word, color) = match tunnel.state {
             TunnelState::Connected => ("online", theme.shared),
             TunnelState::Starting => ("connecting", theme.warn),
-            TunnelState::Failed => ("tunnel down (!)", theme.error),
+            TunnelState::Failed => ("tunnel down", theme.error),
             TunnelState::Idle => ("", theme.muted),
             TunnelState::Unknown => ("tunnel unknown", theme.muted),
         };
@@ -131,10 +137,15 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         };
         title.push(Span::raw(what).fg(color));
     }
+    app.problems_area = Rect::default();
     if !snapshot.problems.is_empty() {
         let count = snapshot.problems.len();
         let noun = if count == 1 { "problem" } else { "problems" };
-        title.push(Span::raw(format!("· {count} {noun} (!) ")).fg(theme.error));
+        let text = format!("· {count} {noun} ");
+        let before: usize = title.iter().map(Span::width).sum();
+        let x = area.x + 1 + u16::try_from(before).unwrap_or(u16::MAX);
+        app.problems_area = Rect::new(x, area.y, text.chars().count() as u16, 1).intersection(area);
+        title.push(Span::raw(text).fg(theme.error));
     }
     let block = pane(theme, Line::from(title), app.focus == Focus::Tree);
     app.tree_height = block.inner(area).height.saturating_sub(1) as usize;
@@ -990,8 +1001,25 @@ fn status_line(theme: &Theme, app: &App, width: u16) -> Line<'static> {
     Line::default()
 }
 
-/// The most used keys for the focused pane, as many as fit in `width`.
-fn footer_line(theme: &Theme, focus: Focus, events: bool, width: u16) -> Line<'static> {
+/// Problems the daemon reports, or a tunnel that is down.
+fn has_problems(app: &App) -> bool {
+    app.snapshot.as_ref().is_some_and(|s| {
+        !s.problems.is_empty()
+            || s.tunnel
+                .as_ref()
+                .is_some_and(|t| t.state == TunnelState::Failed)
+    })
+}
+
+/// The most used keys for the focused pane, as many as fit in `width`, after
+/// `! problems` while there are any.
+fn footer_line(
+    theme: &Theme,
+    focus: Focus,
+    events: bool,
+    problems: bool,
+    width: u16,
+) -> Line<'static> {
     let other = if events { "logs" } else { "events" };
     let keys: &[(&str, &str)] = match focus {
         Focus::Tree => &[
@@ -1019,16 +1047,24 @@ fn footer_line(theme: &Theme, focus: Focus, events: bool, width: u16) -> Line<'s
             ("tab", "tree"),
         ],
     };
+    let problems = problems.then_some(("!", "problems", theme.error, Some(theme.error)));
+    let keys = keys
+        .iter()
+        .map(|&(key, what)| (key, what, theme.accent, None));
     let mut spans = vec![Span::raw(" ")];
     let mut used = 1;
-    for (key, what) in keys {
+    for (key, what, key_color, color) in problems.into_iter().chain(keys) {
         let entry = key.chars().count() + 1 + what.chars().count();
         if used + entry > usize::from(width) {
             break;
         }
         used += entry + 2;
-        spans.push(Span::raw(*key).fg(theme.accent).bold());
-        spans.push(Span::raw(format!(" {what}  ")));
+        spans.push(Span::raw(key).fg(key_color).bold());
+        let what = Span::raw(format!(" {what}  "));
+        spans.push(match color {
+            Some(color) => what.fg(color),
+            None => what,
+        });
     }
     Line::from(spans)
 }
@@ -1410,7 +1446,7 @@ mod tests {
         assert_eq!(
             screen,
             "\
-╭ carte · 2 running · 1 problem (!) ─────────────────╮╭ nova-billing@main ─────────────────────────────────────────────╮
+╭ carte · 2 running · 1 problem ─────────────────────╮╭ nova-billing@main ─────────────────────────────────────────────╮
 │                                         CPU   MEM  ││● running · https://nova-billing.test                           │
 │▾ ✖ nova !              2/4                 3%  412M││checkout main · /work/nova-billing                              │
 │  ▾ ✖ main              1/2                 3%  412M││worker pinned until the daemon restarts                         │
@@ -1427,7 +1463,7 @@ mod tests {
 │                                                    ││                                                                │
 ╰────────────────────────────────────────────────────╯╰────────────────────────────────────────────────────────────────╯
 
- ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  tab logs"
+ ! problems  ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show  d disable  tab logs"
         );
     }
 
@@ -1493,6 +1529,55 @@ mod tests {
             }
         }
         panic!("{text} isn't drawn");
+    }
+
+    #[test]
+    fn the_footer_leads_with_problems_and_a_click_on_their_count_lists_them() {
+        let mut app = busy_app();
+        let now = app.now;
+        let (width, height) = (120, 18);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        for focus in [Focus::Tree, Focus::Logs] {
+            app.focus = focus;
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let footer: String = (0..12).map(|x| buffer[(x, height - 1)].symbol()).collect();
+            assert_eq!(footer, " ! problems ", "{focus:?}");
+            assert_eq!(buffer[(1, height - 1)].fg, app.theme.error);
+            assert_eq!(buffer[(4, height - 1)].fg, app.theme.error);
+        }
+
+        let buffer = terminal.backend().buffer();
+        let title: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+        let at = title.find("1 problem").expect(&title);
+        let x = title[..at].chars().count() as u16;
+        let click = |column| {
+            Event::Mouse(ratatui::crossterm::event::MouseEvent {
+                kind: ratatui::crossterm::event::MouseEventKind::Down(
+                    ratatui::crossterm::event::MouseButton::Left,
+                ),
+                column,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.update(click(2), now);
+        assert_eq!(
+            app.mode,
+            Mode::Normal,
+            "the rest of the title isn't a button"
+        );
+        app.update(click(x + 3), now);
+        assert_eq!(app.mode, Mode::Problems);
+
+        press(&mut app, now, KeyCode::Esc);
+        let mut snapshot = app.snapshot.clone().unwrap();
+        snapshot.problems.clear();
+        app.update(Event::Snapshot(Box::new(snapshot)), now);
+        let screen = draw(&mut app, width, height);
+        assert!(!screen.contains("problem"), "{screen}");
+        app.update(click(x + 3), now);
+        assert_eq!(app.mode, Mode::Normal, "nothing to click without problems");
     }
 
     #[test]
@@ -1693,7 +1778,7 @@ mod tests {
         assert_eq!(
             screen,
             "\
-╭ carte · 2 running · 1 problem (!) ───────────────────────────────────────────╮
+╭ carte · 2 running · 1 problem ───────────────────────────────────────────────╮
 │                                                                   CPU   MEM  │
 │▾ ✖ nova !                                        2/4                 3%  412M│
 │  ▾ ✖ main                                        1/2                 3%  412M│
@@ -1716,7 +1801,7 @@ mod tests {
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 
- ? help  q quit  s start  x stop  r restart  p pin  w share  / filter  a show"
+ ! problems  ? help  q quit  s start  x stop  r restart  p pin  w share"
         );
     }
 

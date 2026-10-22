@@ -195,6 +195,8 @@ pub struct App {
     pub tree_area: Rect,
     pub tree_offset: usize,
     pub logs_area: Rect,
+    /// Where the tree's title counts problems; empty while there are none.
+    pub problems_area: Rect,
     pub selection: Option<Selection>,
     pub env: Option<EnvView>,
     pub jump: Option<Jump>,
@@ -233,6 +235,7 @@ impl App {
             tree_area: Rect::default(),
             tree_offset: 0,
             logs_area: Rect::default(),
+            problems_area: Rect::default(),
             selection: None,
             env: None,
             jump: None,
@@ -465,8 +468,9 @@ impl App {
     }
 
     /// The wheel scrolls the pane under the pointer; a click focuses a pane, selects a
-    /// tree row, or folds and unfolds the row that is already selected. Dragging over
-    /// the logs selects lines and releasing copies them.
+    /// tree row, or folds and unfolds the row that is already selected. Clicking the
+    /// problem count lists the problems. Dragging over the logs selects lines and
+    /// releasing copies them.
     fn mouse(&mut self, event: MouseEvent, commands: &mut Vec<Command>) {
         let at = Position::new(event.column, event.row);
         match event.kind {
@@ -536,7 +540,9 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.logs_area.contains(at) {
+                if self.problems_area.contains(at) {
+                    self.mode = Mode::Problems;
+                } else if self.logs_area.contains(at) {
                     self.focus = Focus::Logs;
                 } else if self.tree_area.contains(at) {
                     self.end_selection();

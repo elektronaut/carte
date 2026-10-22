@@ -17,7 +17,8 @@ is on top instead.
 
 `tab` moves the focus between the tree and the logs. The focused pane
 has a blue border. The keys at the bottom are the most used ones for
-the focused pane.
+the focused pane. While there are problems, they start with
+`! problems`.
 
 ### Tree
 
@@ -28,8 +29,9 @@ project shows the app on the project's row. An app with a single
 process has no process row. Folders never merge, and nothing merges
 inside a [kube project](kubernetes.md).
 
-The title counts running instances, shares and problems. The `CPU` and
-`MEM` columns cover everything running below a row.
+The title counts running instances, shares and problems. Clicking the
+problem count lists the problems. The `CPU` and `MEM` columns cover
+everything running below a row.
 
 Each row starts with a symbol for its state:
 
@@ -176,6 +178,7 @@ navigation keys and `space`, and other keys close it.
 | --- | --- |
 | Click a row | Select it |
 | Click the selected row | Close or open it |
+| Click the problem count | List the problems |
 | Click a pane | Focus it |
 | Wheel over the tree | Move the selection |
 | Wheel over the logs | Scroll them |
