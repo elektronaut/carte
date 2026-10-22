@@ -36,7 +36,7 @@ use lookup::PodTarget;
 pub use lookup::{ContainerInfo, EndpointInfo, PortInfo, ServiceInfo, SliceInfo};
 
 use crate::proxy::{
-    ActivityGuard, BoxFuture, Dial, Dialer, ErrorPage, Route, UpstreamError, UpstreamStream,
+    ActivityGuard, BoxFuture, Dial, Dialer, ErrorPage, Route, Trace, UpstreamError, UpstreamStream,
 };
 use crate::supervisor::Handle;
 
@@ -240,9 +240,13 @@ impl Kube {
 
     /// Resolves the target to a running forward, opening one when needed.
     pub async fn route(&self, target: KubeTarget) -> Route {
-        match tokio::time::timeout(self.inner.outer_timeout(), self.inner.clone().route(target))
-            .await
-        {
+        self.route_traced(target, &Trace::new()).await
+    }
+
+    /// Like [`Kube::route`], noting the Service the request is for in `trace`.
+    pub async fn route_traced(&self, target: KubeTarget, trace: &Trace) -> Route {
+        let route = self.inner.clone().route(target, trace);
+        match tokio::time::timeout(self.inner.outer_timeout(), route).await {
             Ok(Ok(route)) => route,
             Ok(Err(page)) => Route::Error(page),
             Err(_) => Route::Error(api_page(&ApiError::Timeout(self.inner.timeout))),
@@ -596,8 +600,16 @@ impl Kube {
 }
 
 impl Inner {
-    async fn route(self: Arc<Self>, target: KubeTarget) -> Result<Route, ErrorPage> {
+    async fn route(self: Arc<Self>, target: KubeTarget, trace: &Trace) -> Result<Route, ErrorPage> {
         let key = self.clone().start_target(target).await?;
+        trace.note(|resolution| {
+            resolution.subject = Some(carte_api::EventSubject {
+                project: key.project.clone(),
+                stack: Some(key.namespace.clone()),
+                app: Some(key.service.clone()),
+                process: None,
+            });
+        });
         let dialer = self.acquire(&key).ok_or_else(|| {
             ErrorPage::new(
                 StatusCode::SERVICE_UNAVAILABLE,

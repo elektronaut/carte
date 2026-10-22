@@ -2585,3 +2585,237 @@ fn attach_stops_on_a_signal_while_the_daemon_doesnt_answer() {
     let status = attach.wait().unwrap();
     assert_eq!(status.code(), Some(128 + 15), "{status:?}");
 }
+
+/// The requests the proxy kept for an address in the acme project (`None` for all),
+/// oldest first.
+fn proxied(daemon: &Daemon, address: Option<&str>, tail: usize) -> Vec<carte_api::ProxiedRequest> {
+    let request = carte_api::RequestsRequest {
+        target: address.map(|address| carte_api::Address {
+            address: address.into(),
+            cwd: None,
+            project: Some("acme".into()),
+        }),
+        follow: false,
+        tail: Some(tail),
+    };
+    let (head, body) = api_request(
+        daemon,
+        "POST",
+        carte_api::paths::REQUESTS,
+        &serde_json::to_string(&request).unwrap(),
+    );
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
+    dechunk(&body)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The body of a chunked response.
+fn dechunk(body: &str) -> String {
+    let mut rest = body;
+    let mut out = String::new();
+    while let Some((size, after)) = rest.split_once("\r\n") {
+        let size = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+        if size == 0 {
+            break;
+        }
+        out.push_str(&after[..size]);
+        rest = &after[size + 2..];
+    }
+    out
+}
+
+fn header<'a>(headers: &'a [carte_api::Header], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|h| h.name == name)
+        .map(|h| h.value.as_str())
+}
+
+#[test]
+fn the_proxy_keeps_its_requests_with_their_route_timings_and_headers() {
+    let fixture = fixture().display().to_string();
+    let daemon = Daemon::start_prepared(
+        &format!(
+            "\n[apps.acme-web]\nserve_files = \"public\"\n\n[apps.acme-web.processes.web.env]\nFIXTURE_BOOT_DELAY_MS = \"600\"\n\n[apps.broken]\npath = \"broken\"\n\n[apps.broken.processes.web]\ncommand = \"FIXTURE_CRASH=3 exec {fixture}\"\n"
+        ),
+        |work| {
+            std::fs::create_dir_all(work.join("acme-web/public")).unwrap();
+            std::fs::write(work.join("acme-web/public/robots.txt"), "User-agent: *\n").unwrap();
+            std::fs::create_dir_all(work.join("broken")).unwrap();
+        },
+    );
+
+    let robots = daemon.request("web.acme.test", "/robots.txt");
+    assert!(robots.starts_with("HTTP/1.1 200"), "{robots}");
+    let page = daemon.request_with(
+        "127.0.0.1",
+        "web.acme.test",
+        "/",
+        &[("X-Request-Marker", "boot")],
+    );
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+    let missing = daemon.request("nope.acme.test", "/");
+    assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
+    let broken = daemon.request("broken.acme.test", "/");
+    assert!(broken.starts_with("HTTP/1.1 502"), "{broken}");
+
+    let all = proxied(&daemon, None, 100);
+    assert_eq!(
+        all.iter()
+            .map(|r| (r.host.as_str(), r.path.as_str(), r.status))
+            .collect::<Vec<_>>(),
+        [
+            ("web.acme.test", "/robots.txt", 200),
+            ("web.acme.test", "/", 200),
+            ("nope.acme.test", "/", 404),
+            ("broken.acme.test", "/", 502),
+        ]
+    );
+    assert!(all.windows(2).all(|w| w[0].seq < w[1].seq));
+    assert!(all.iter().all(|r| r.method == "GET" && !r.shared));
+
+    let [file, booted, nothing, crashed] = all.as_slice() else {
+        unreachable!()
+    };
+    let path = daemon.root.join("work/acme-web/public/robots.txt");
+    assert_eq!(file.route.served, carte_api::Served::File { path });
+    assert_eq!(file.upstream_ms, None);
+    let subject = file.subject.as_ref().unwrap();
+    assert_eq!(
+        (subject.app.as_deref(), subject.stack.as_deref()),
+        (Some("acme-web"), Some("main"))
+    );
+    assert_eq!(subject.process, None);
+    assert_eq!(file.route.checkout.as_deref(), Some("main"));
+
+    assert!(booted.held_ms >= 500, "held for the boot: {booted:?}");
+    assert!(booted.upstream_ms.is_some());
+    assert!(matches!(
+        booted.route.served,
+        carte_api::Served::Process { .. }
+    ));
+    assert_eq!(
+        booted.subject.as_ref().unwrap().process.as_deref(),
+        Some("web")
+    );
+    assert_eq!(
+        header(&booted.request_headers, "x-request-marker"),
+        Some("boot")
+    );
+    assert_eq!(
+        header(&booted.response_headers, "x-fixture-name"),
+        Some("web")
+    );
+
+    assert_eq!(nothing.subject, None);
+    assert!(matches!(
+        &nothing.route.served,
+        carte_api::Served::Page { title } if title == "No app here"
+    ));
+
+    assert_eq!(
+        crashed.subject.as_ref().unwrap().app.as_deref(),
+        Some("broken")
+    );
+    assert!(
+        matches!(&crashed.route.served, carte_api::Served::Page { .. }),
+        "{crashed:?}"
+    );
+
+    let web: Vec<String> = proxied(&daemon, Some("web"), 100)
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    assert_eq!(web, ["/robots.txt", "/"]);
+    let web_process: Vec<String> = proxied(&daemon, Some("web/web"), 100)
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    assert_eq!(web_process, ["/robots.txt", "/"]);
+    let worker: Vec<String> = proxied(&daemon, Some("web/worker"), 100)
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
+    assert_eq!(
+        worker,
+        ["/robots.txt"],
+        "what no process answered counts for each"
+    );
+    assert_eq!(proxied(&daemon, Some("broken"), 100).len(), 1);
+    assert_eq!(proxied(&daemon, None, 2).len(), 2);
+
+    let socket = carte::paths::Paths::under(&daemon.root).socket();
+    let mut follow = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+    follow
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let body = r#"{"target":{"address":"web","cwd":null,"project":"acme"},"follow":true,"tail":0}"#;
+    write!(
+        follow,
+        "POST {} HTTP/1.1\r\nHost: carte\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{body}",
+        carte_api::paths::REQUESTS,
+        body.len()
+    )
+    .unwrap();
+    let mut head = [0u8; 1024];
+    let read = follow.read(&mut head).unwrap();
+    assert!(
+        String::from_utf8_lossy(&head[..read]).starts_with("HTTP/1.1 200"),
+        "{}",
+        String::from_utf8_lossy(&head[..read])
+    );
+    daemon.request("broken.acme.test", "/unwatched");
+    daemon.request("web.acme.test", "/followed");
+    let mut seen = String::new();
+    while !seen.contains("/followed") {
+        let mut chunk = [0u8; 4096];
+        let read = follow.read(&mut chunk).unwrap();
+        assert!(read > 0, "the follow ended: {seen}");
+        seen.push_str(&String::from_utf8_lossy(&chunk[..read]));
+    }
+    assert!(!seen.contains("/unwatched"), "{seen}");
+}
+
+#[test]
+fn the_proxy_keeps_the_latest_thousand_requests() {
+    let daemon = Daemon::start();
+    for i in 0..1010 {
+        let response = daemon.request("nope.acme.test", &format!("/{i}"));
+        assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+    }
+    let kept = proxied(&daemon, None, 5000);
+    assert_eq!(kept.len(), 1000);
+    assert_eq!(kept[0].path, "/10");
+    assert_eq!(kept[999].path, "/1009");
+    assert_eq!(kept[999].seq, 1010);
+}
+
+#[test]
+fn the_proxy_keeps_shared_requests_with_the_visitor_address() {
+    let daemon = Daemon::start_sharing_websockets();
+    daemon.run(&["share", "web"]);
+    let host = "web--acme.share.example";
+    let _socket = daemon.shared_websocket(host);
+    let response = daemon.public_raw(&format!(
+        "GET /visit HTTP/1.1\r\nHost: {host}\r\nX-Forwarded-For: 127.0.0.1, 203.0.113.9\r\n"
+    ));
+    assert!(response.starts_with("HTTP/1.1"), "{response}");
+
+    let all = proxied(&daemon, Some("web"), 100);
+    let [websocket, visit] = all.as_slice() else {
+        panic!("{all:?}")
+    };
+    assert!(websocket.shared && websocket.websocket, "{websocket:?}");
+    assert_eq!(websocket.status, 101);
+    assert_eq!(websocket.visitor, None);
+    assert!(matches!(
+        websocket.route.served,
+        carte_api::Served::Process { .. }
+    ));
+    assert_eq!(visit.path, "/visit");
+    assert!(visit.shared && !visit.websocket);
+    assert_eq!(visit.visitor.as_deref(), Some("203.0.113.9"));
+}

@@ -45,6 +45,65 @@ pub struct RouteRequest<'a> {
     /// `Sec-Purpose`, or the older `Purpose`, lowercased: `prefetch` for a page the
     /// browser loads before you open it.
     pub purpose: Option<&'a str>,
+    /// Where the router notes what it found out, for the request log.
+    pub trace: &'a Trace,
+}
+
+/// What a router found out about a request while routing it.
+#[derive(Debug, Default)]
+pub struct Resolution {
+    /// The instance or Service it is for, and the process that answers it.
+    pub subject: Option<carte_api::EventSubject>,
+    /// `main` or the stack of the checkout the instance runs from.
+    pub checkout: Option<String>,
+    pub via_alias: bool,
+    /// Apps the request started ahead.
+    pub warmed: Vec<String>,
+}
+
+/// A request's [`Resolution`], filled in by the router.
+#[derive(Debug, Default)]
+pub struct Trace(std::sync::Mutex<Resolution>);
+
+impl Trace {
+    pub const fn new() -> Self {
+        Trace(std::sync::Mutex::new(Resolution {
+            subject: None,
+            checkout: None,
+            via_alias: false,
+            warmed: Vec::new(),
+        }))
+    }
+
+    pub fn note(&self, note: impl FnOnce(&mut Resolution)) {
+        note(&mut self.0.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+
+    pub fn into_inner(self) -> Resolution {
+        self.0.into_inner().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A request the proxy answered, for [`Router::handled`].
+#[derive(Debug)]
+pub struct Handled {
+    pub at: std::time::SystemTime,
+    pub kind: ListenerKind,
+    /// The visitor's addresses, for a request through a share.
+    pub visitor: Option<String>,
+    pub method: http::Method,
+    pub host: String,
+    pub path: String,
+    pub status: StatusCode,
+    /// How long routing took, waiting for a boot included.
+    pub held: std::time::Duration,
+    /// How long the upstream took to send its response's head.
+    pub upstream: Option<std::time::Duration>,
+    pub websocket: bool,
+    pub served: carte_api::Served,
+    pub resolution: Resolution,
+    pub request_headers: http::HeaderMap,
+    pub response_headers: http::HeaderMap,
 }
 
 pub enum Route {
@@ -173,6 +232,12 @@ pub trait Router: Send + Sync + 'static {
     /// pending, so it must not own the boot: spawn the boot separately and only
     /// await its readiness here.
     fn route<'a>(&'a self, request: RouteRequest<'a>) -> BoxFuture<'a, Route>;
+
+    /// Called once the proxy has the head of a request's response, with what it
+    /// knows about the request. Runs on the request's path, so it must be quick.
+    fn handled(&self, request: Handled) {
+        let _ = request;
+    }
 
     /// Resolves when a connection opened now on a listener of `kind` should close,
     /// once its requests in flight are done, because a route it could have used

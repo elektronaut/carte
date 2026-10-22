@@ -3,8 +3,10 @@ use std::error::Error as _;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
+use carte_api::Served;
 use http::header::{CONNECTION, CONTENT_TYPE, COOKIE, HOST, HeaderName, ORIGIN, REFERER, UPGRADE};
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::{BodyExt, Empty, Full};
@@ -19,8 +21,8 @@ use super::body::{ClosingBody, GuardedBody, ProxyBody, boxed};
 use super::cookies::strip_cookie_domains;
 use super::upstream::{DialConnector, LoopbackConnector};
 use super::{
-    ActivityGuard, BoxFuture, Dialer, ErrorPage, ListenerKind, Route, RouteRequest, Router,
-    UpstreamError,
+    ActivityGuard, BoxFuture, Dialer, ErrorPage, Handled, ListenerKind, Route, RouteRequest,
+    Router, Trace, UpstreamError,
 };
 
 pub(crate) struct Shared {
@@ -80,24 +82,111 @@ const HOP_BY_HOP: [&str; 9] = [
     "upgrade",
 ];
 
+/// A response, and how it came about, for the request log.
+struct Answer {
+    response: Response<ProxyBody>,
+    /// How long the router took.
+    held: Duration,
+    served: Served,
+    upstream: Option<Duration>,
+    websocket: bool,
+}
+
+impl Answer {
+    fn page(page: &ErrorPage, kind: ListenerKind, request_headers: &HeaderMap) -> Self {
+        Answer {
+            response: render(page, kind, request_headers),
+            held: Duration::ZERO,
+            served: Served::Page {
+                title: page.title.clone(),
+            },
+            upstream: None,
+            websocket: false,
+        }
+    }
+}
+
 pub(crate) async fn handle(
     shared: Arc<Shared>,
     inbound: Arc<Inbound>,
-    mut request: Request<Incoming>,
+    request: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, Infallible> {
-    let Some(host) = request_host(&request) else {
-        let page = ErrorPage::new(
-            StatusCode::BAD_REQUEST,
-            "No host",
-            "The request has no Host header, so carte can't tell which app it is for.",
-        );
-        return Ok(render(&page, inbound.kind, request.headers()));
-    };
+    let at = SystemTime::now();
+    let request_headers = request.headers().clone();
+    let method = request.method().clone();
     let path = request
         .uri()
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "/".into());
+    let visitor = (inbound.kind == ListenerKind::Share)
+        .then(|| visitor_addresses(&request_headers).join(", "))
+        .filter(|addresses| !addresses.is_empty());
+    let trace = Trace::new();
+    let (host, answer) = match request_host(&request) {
+        Some(host) => {
+            let routed = Routed {
+                headers: &request_headers,
+                trace: &trace,
+                host: &host,
+                path: &path,
+            };
+            let answer = route(&shared, &inbound, routed, request).await;
+            (host, answer)
+        }
+        None => {
+            let page = ErrorPage::new(
+                StatusCode::BAD_REQUEST,
+                "No host",
+                "The request has no Host header, so carte can't tell which app it is for.",
+            );
+            (
+                String::new(),
+                Answer::page(&page, inbound.kind, &request_headers),
+            )
+        }
+    };
+    shared.router.handled(Handled {
+        at,
+        kind: inbound.kind,
+        visitor,
+        method,
+        host,
+        path,
+        status: answer.response.status(),
+        held: answer.held,
+        upstream: answer.upstream,
+        websocket: answer.websocket,
+        served: answer.served,
+        resolution: trace.into_inner(),
+        request_headers,
+        response_headers: answer.response.headers().clone(),
+    });
+    Ok(answer.response)
+}
+
+/// What [`route`] borrows from [`handle`].
+#[derive(Clone, Copy)]
+struct Routed<'a> {
+    /// The request's headers as received.
+    headers: &'a HeaderMap,
+    trace: &'a Trace,
+    host: &'a str,
+    path: &'a str,
+}
+
+async fn route(
+    shared: &Shared,
+    inbound: &Inbound,
+    routed: Routed<'_>,
+    mut request: Request<Incoming>,
+) -> Answer {
+    let Routed {
+        headers: request_headers,
+        trace,
+        host,
+        path,
+    } = routed;
     let authorization = request
         .headers()
         .get(http::header::AUTHORIZATION)
@@ -117,11 +206,11 @@ pub(crate) async fn handle(
     let fetch_dest = header("sec-fetch-dest");
     let purpose = header("sec-purpose").or_else(|| header("purpose"));
     let route_request = RouteRequest {
-        host: &host,
+        host,
         tls: inbound.tls,
         kind: inbound.kind,
         method: &method,
-        path: &path,
+        path,
         authorization: authorization.as_deref(),
         referrer: referrer.as_deref(),
         opaque_origin: header("origin").as_deref() == Some("null"),
@@ -129,10 +218,13 @@ pub(crate) async fn handle(
         fetch_mode: fetch_mode.as_deref(),
         fetch_dest: fetch_dest.as_deref(),
         purpose: purpose.as_deref(),
+        trace,
     };
+    let started = Instant::now();
     let route = shared.router.route(route_request).await;
-    Ok(match route {
-        Route::Error(page) => render(&page, inbound.kind, request.headers()),
+    let held = started.elapsed();
+    let mut answer = match route {
+        Route::Error(page) => Answer::page(&page, inbound.kind, request_headers),
         Route::Upstream {
             port,
             guard,
@@ -141,35 +233,68 @@ pub(crate) async fn handle(
             if checked_authorization {
                 request.headers_mut().remove(http::header::AUTHORIZATION);
             }
-            let upstream = Upstream::Port(port);
-            forward(&shared, &inbound, route_request, upstream, guard, request).await
+            let forwarding = Forwarding {
+                route_request,
+                request_headers,
+                upstream: Upstream::Port(port),
+            };
+            forward(shared, inbound, forwarding, guard, request).await
         }
         Route::Dialed { dialer, guard } => {
-            let upstream = Upstream::Dialed(&dialer);
-            forward(&shared, &inbound, route_request, upstream, guard, request).await
+            let forwarding = Forwarding {
+                route_request,
+                request_headers,
+                upstream: Upstream::Dialed(&dialer),
+            };
+            forward(shared, inbound, forwarding, guard, request).await
         }
         Route::File { path, guard } => {
             let (closed, body_closed) = (guard.closed(), guard.closed());
             let respond = super::files::respond(&path, request.method(), request.headers(), guard);
-            match until_closed(closed, respond).await {
-                Ok(response) => closing(response, body_closed),
-                Err(page) => render(&page, inbound.kind, request.headers()),
+            let responded = until_closed(closed, respond).await;
+            match responded {
+                Ok(response) => Answer {
+                    response: closing(response, body_closed),
+                    held: Duration::ZERO,
+                    served: Served::File { path },
+                    upstream: None,
+                    websocket: false,
+                },
+                Err(page) => Answer::page(&page, inbound.kind, request_headers),
             }
         }
-    })
+    };
+    answer.held = held;
+    answer
+}
+
+/// A request on its way to an upstream.
+struct Forwarding<'a> {
+    route_request: RouteRequest<'a>,
+    /// The request's headers as received.
+    request_headers: &'a HeaderMap,
+    upstream: Upstream<'a>,
 }
 
 async fn forward(
     shared: &Shared,
     inbound: &Inbound,
-    route_request: RouteRequest<'_>,
-    upstream: Upstream<'_>,
+    forwarding: Forwarding<'_>,
     mut guard: Box<dyn ActivityGuard>,
     mut request: Request<Incoming>,
-) -> Response<ProxyBody> {
-    let request_headers = request.headers().clone();
+) -> Answer {
+    let Forwarding {
+        route_request,
+        request_headers,
+        upstream,
+    } = forwarding;
+    let page = |page: &ErrorPage, waited: Option<Duration>| Answer {
+        upstream: waited,
+        ..Answer::page(page, inbound.kind, request_headers)
+    };
     let h2_websocket = is_h2_websocket(&request);
     let upgrade = h2_websocket || is_upgrade(request.headers());
+    let websocket = h2_websocket || (upgrade && is_websocket(request.headers()));
     let downstream = upgrade.then(|| hyper::upgrade::on(&mut request));
 
     strip_hop_by_hop(request.headers_mut(), upgrade);
@@ -189,6 +314,7 @@ async fn forward(
     if let Ok(host) = HeaderValue::from_str(route_request.host) {
         request.headers_mut().insert(HOST, host);
     }
+    let started = Instant::now();
     let sent = match upstream {
         Upstream::Port(port) => {
             *request.uri_mut() = upstream_uri(port, request.uri());
@@ -202,8 +328,9 @@ async fn forward(
 
     let sent = match until_closed(guard.closed(), sent).await {
         Ok(sent) => sent,
-        Err(page) => return render(&page, inbound.kind, &request_headers),
+        Err(closed) => return page(&closed, Some(started.elapsed())),
     };
+    let waited = Some(started.elapsed());
     let mut response = match sent {
         Ok(response) => response,
         Err(error) => {
@@ -214,12 +341,22 @@ async fn forward(
             } else {
                 UpstreamError::Request(error_chain(&error))
             };
-            let page = match upstream {
+            let failed = match upstream {
                 Upstream::Port(port) => shared.router.upstream_failed(route_request, port, &error),
                 Upstream::Dialed(dialer) => dialer.failed(&error),
             };
-            return render(&page, inbound.kind, &request_headers);
+            return page(&failed, waited);
         }
+    };
+    let answer = |response: Response<ProxyBody>| Answer {
+        response,
+        held: Duration::ZERO,
+        served: match upstream {
+            Upstream::Port(port) => Served::Process { port },
+            Upstream::Dialed(_) => Served::Forward,
+        },
+        upstream: waited,
+        websocket,
     };
 
     if let (Some(downstream), StatusCode::SWITCHING_PROTOCOLS) = (downstream, response.status()) {
@@ -264,7 +401,7 @@ async fn forward(
                 () = &mut closed => {}
             }
         });
-        return response.map(|_| boxed(Empty::new()));
+        return answer(response.map(|_| boxed(Empty::new())));
     }
 
     strip_hop_by_hop(response.headers_mut(), false);
@@ -285,18 +422,21 @@ async fn forward(
             Ok(collected) => collected
                 .map(|collected| collected.to_bytes())
                 .unwrap_or_default(),
-            Err(page) => return render(&page, inbound.kind, &request_headers),
+            Err(closed) => return page(&closed, waited),
         };
-        if let Some(page) = host_check_page(&bytes, route_request.host) {
-            return render(&page, inbound.kind, &request_headers);
+        if let Some(refused) = host_check_page(&bytes, route_request.host) {
+            return page(&refused, waited);
         }
-        return Response::from_parts(parts, boxed(GuardedBody::new(Full::new(bytes), guard)));
+        return answer(Response::from_parts(
+            parts,
+            boxed(GuardedBody::new(Full::new(bytes), guard)),
+        ));
     }
     let closed = guard.closed();
-    closing(
+    answer(closing(
         response.map(|body| boxed(GuardedBody::new(body, guard))),
         closed,
-    )
+    ))
 }
 
 /// Runs `work` unless `closed` resolves first, which gives the page to answer with.
@@ -404,6 +544,15 @@ fn connection_tokens(headers: &HeaderMap) -> impl Iterator<Item = String> + '_ {
 
 fn is_upgrade(headers: &HeaderMap) -> bool {
     headers.contains_key(UPGRADE) && connection_tokens(headers).any(|token| token == "upgrade")
+}
+
+fn is_websocket(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(UPGRADE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|protocol| protocol.trim().eq_ignore_ascii_case("websocket"))
 }
 
 /// An HTTP/2 extended CONNECT for a WebSocket (RFC 8441).
@@ -545,7 +694,17 @@ fn add_forwarded_headers(headers: &mut HeaderMap, inbound: &Inbound, request: Ro
 /// The `X-Forwarded-For` addresses a tunnel sent, without local or malformed ones;
 /// `192.0.2.1` (TEST-NET-1) stands in for the visitor when none are left.
 fn visitor_chain(headers: &HeaderMap) -> String {
-    let addresses: Vec<String> = headers
+    let addresses = visitor_addresses(headers);
+    if addresses.is_empty() {
+        "192.0.2.1".into()
+    } else {
+        addresses.join(", ")
+    }
+}
+
+/// The `X-Forwarded-For` addresses a tunnel sent, without local or malformed ones.
+fn visitor_addresses(headers: &HeaderMap) -> Vec<String> {
+    headers
         .get_all("x-forwarded-for")
         .iter()
         .filter_map(|value| value.to_str().ok())
@@ -553,12 +712,7 @@ fn visitor_chain(headers: &HeaderMap) -> String {
         .filter_map(|address| address.trim().parse::<IpAddr>().ok())
         .filter(|ip| !is_local_address(*ip))
         .map(|ip| ip.to_string())
-        .collect();
-    if addresses.is_empty() {
-        "192.0.2.1".into()
-    } else {
-        addresses.join(", ")
-    }
+        .collect()
 }
 
 /// Whether `ip` is loopback or unspecified, also as the IPv4 address inside an

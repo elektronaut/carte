@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use carte_api::{Credentials, ExternalRequest, ProcessState, ProcessStatus, Snapshot};
+use carte_api::{
+    Credentials, EventSubject, ExternalRequest, ProcessState, ProcessStatus, Snapshot,
+};
 use carte_core::kube::{self, KubeTarget};
 use carte_core::model::{InstanceKey, World, path_match};
 use carte_core::naming;
@@ -11,7 +13,8 @@ use http::StatusCode;
 
 use crate::kube::Kube;
 use crate::proxy::{
-    ActivityGuard, BoxFuture, ErrorPage, ListenerKind, Route, RouteRequest, Router, UpstreamError,
+    ActivityGuard, BoxFuture, ErrorPage, Handled, ListenerKind, Route, RouteRequest, Router,
+    UpstreamError,
 };
 use crate::supervisor::{Activity, Handle, share};
 
@@ -20,6 +23,7 @@ use crate::supervisor::{Activity, Handle, share};
 pub struct DaemonRouter {
     pub supervisor: SupervisorRouter,
     pub kube: Kube,
+    pub requests: std::sync::Arc<super::requests::RequestLog>,
 }
 
 impl DaemonRouter {
@@ -51,6 +55,15 @@ impl Router for DaemonRouter {
                     ));
                 }
             };
+            request.trace.note(|resolution| {
+                resolution.subject = Some(EventSubject {
+                    project: target.project.clone(),
+                    stack: target.namespace.clone(),
+                    app: Some(target.service.clone()),
+                    process: None,
+                });
+                resolution.via_alias = target.via_alias;
+            });
             let world = self.supervisor.supervisor.world();
             if let Some(from) = foreign_origin(&world, &request) {
                 return Route::Error(ErrorPage::new(
@@ -62,8 +75,12 @@ impl Router for DaemonRouter {
                     ),
                 ));
             }
-            self.kube.route(target).await
+            self.kube.route_traced(target, request.trace).await
         })
+    }
+
+    fn handled(&self, request: Handled) {
+        self.requests.push(request);
     }
 
     fn upstream_failed(
@@ -152,7 +169,12 @@ impl Router for SupervisorRouter {
                     .and_then(|host| naming::resolve_host(&world, host).ok())
                     .map(|resolved| resolved.key);
                 match naming::resolve_host(&world, request.host) {
-                    Ok(resolved) => resolved.key,
+                    Ok(resolved) => {
+                        request
+                            .trace
+                            .note(|resolution| resolution.via_alias = resolved.via_alias);
+                        resolved.key
+                    }
                     Err(not_found) => {
                         return Route::Error(ErrorPage::new(
                             StatusCode::NOT_FOUND,
@@ -162,6 +184,7 @@ impl Router for SupervisorRouter {
                     }
                 }
             };
+            note_instance(&world, &key, request);
             match served_files(&world, &key, request) {
                 Some(Served::File(path)) => {
                     return Route::File {
@@ -200,16 +223,24 @@ impl Router for SupervisorRouter {
                 {
                     Route::Error(not_shared())
                 }
-                Ok(Ok(upstream)) => Route::Upstream {
-                    port: upstream.port,
-                    guard: Box::new(Guard::new(
-                        self.supervisor.clone(),
-                        key,
-                        Some(upstream.boot),
-                        shared,
-                    )),
-                    checked_authorization,
-                },
+                Ok(Ok(upstream)) => {
+                    request.trace.note(|resolution| {
+                        if let Some(subject) = &mut resolution.subject {
+                            subject.process = upstream.process;
+                        }
+                        resolution.warmed = upstream.warmed;
+                    });
+                    Route::Upstream {
+                        port: upstream.port,
+                        guard: Box::new(Guard::new(
+                            self.supervisor.clone(),
+                            key,
+                            Some(upstream.boot),
+                            shared,
+                        )),
+                        checked_authorization,
+                    }
+                }
                 Ok(Err(failure)) if failure.is_not_running() => {
                     Route::Error(not_started(&key, foreign.as_deref().unwrap_or("A page")))
                 }
@@ -378,6 +409,23 @@ fn not_shared() -> ErrorPage {
     )
 }
 
+/// Notes the instance a request is for, and the checkout it runs from.
+fn note_instance(world: &World, key: &InstanceKey, request: RouteRequest<'_>) {
+    let checkout = world.project(&key.project).and_then(|state| {
+        let app = state.project.app(&key.app)?;
+        state.checkout(app, &key.stack)
+    });
+    request.trace.note(|resolution| {
+        resolution.subject = Some(EventSubject {
+            project: key.project.clone(),
+            stack: Some(key.stack.slug().to_string()),
+            app: Some(key.app.clone()),
+            process: None,
+        });
+        resolution.checkout = checkout.map(|checkout| checkout.slug().to_string());
+    });
+}
+
 enum Served {
     File(std::path::PathBuf),
     /// The app only serves files, and this one isn't there.
@@ -504,7 +552,9 @@ mod tests {
             fetch_mode,
             fetch_dest,
             purpose: None,
+            trace: &TRACE,
         };
+        static TRACE: crate::proxy::Trace = crate::proxy::Trace::new();
         let get: &'static http::Method = Box::leak(Box::new(get));
         let post: &'static http::Method = Box::leak(Box::new(post));
         let allowed = [

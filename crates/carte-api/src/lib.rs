@@ -27,6 +27,8 @@ pub mod paths {
     pub const UNSHARE: &str = "/v1/unshare";
     /// Newline-delimited JSON `Event`s.
     pub const EVENTS: &str = "/v1/events";
+    /// POST a `RequestsRequest`: newline-delimited JSON `ProxiedRequest`s.
+    pub const REQUESTS: &str = "/v1/requests";
     /// GET lists leftovers as a `PruneList`; POST a `PruneRequest` removes them.
     pub const PRUNE: &str = "/v1/prune";
     /// POST an `Address`: keeps that running instance from idling out until the client
@@ -677,6 +679,97 @@ impl EventKind {
             EventKind::Unknown => "unknown",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestsRequest {
+    /// Requests for this and everything under it; `None` for every request.
+    pub target: Option<Address>,
+    pub follow: bool,
+    /// Requests from the buffer to send before following: 100 by default.
+    pub tail: Option<usize>,
+}
+
+/// A request carte's proxy answered. The daemon keeps the latest ones in memory,
+/// without their bodies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxiedRequest {
+    /// Increases by one per request while the daemon runs.
+    pub seq: u64,
+    /// When it arrived, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    /// The instance it was for, and the process that answered it; `None` when the
+    /// hostname names nothing. A kube Service's stack is its namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<EventSubject>,
+    pub method: String,
+    /// The path and query.
+    pub path: String,
+    /// The `Host` header, port included.
+    pub host: String,
+    pub status: u16,
+    /// From its arrival until carte knew where to send it, waiting for a boot
+    /// included.
+    pub held_ms: u64,
+    /// From sending it on until the response's head came back; `None` when carte
+    /// answered it itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ms: Option<u64>,
+    /// It came from the internet, through a share.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared: bool,
+    /// The visitor's addresses as the tunnel gave them, for a shared request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visitor: Option<String>,
+    /// It asked to become a WebSocket.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub websocket: bool,
+    pub route: RequestRoute,
+    /// As received.
+    pub request_headers: Vec<Header>,
+    /// As sent to the client.
+    pub response_headers: Vec<Header>,
+}
+
+/// How a request found its way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestRoute {
+    /// The checkout the instance runs from: the stack's worktree, or `main` for an
+    /// app the stack has no worktree of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<String>,
+    /// The hostname is one of the app's `aliases`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub via_alias: bool,
+    pub served: Served,
+    /// Apps it started ahead, as the first request its instance got, because they
+    /// usually open next.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warmed: Vec<String>,
+}
+
+/// What answered a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "by")]
+pub enum Served {
+    /// The process listening on `port`.
+    Process { port: u16 },
+    /// A kube Service, through its port-forward.
+    Forward,
+    /// A file from the app's `serve_files` folder.
+    File { path: PathBuf },
+    /// carte's own page, such as while the app is down or failed to start.
+    Page { title: String },
+    /// Sent by a newer daemon than this client knows.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Header {
+    pub name: String,
+    /// Bytes that aren't UTF-8 are replaced.
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
