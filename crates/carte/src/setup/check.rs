@@ -11,7 +11,7 @@ use crate::cli::prompt::tilde;
 
 use super::plist::LABEL;
 use super::skill::{SkillDir, SkillLink};
-use super::{CaState, Facts, OsFacts, SetupEnv, macos};
+use super::{CaState, Facts, OsFacts, Platform, SetupEnv, linux, macos};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -114,8 +114,12 @@ pub fn parse_lsof(output: &str) -> Vec<PortUser> {
     users
 }
 
-/// Who listens on `port` (`TCP`) or has it bound (`UDP`); empty when lsof isn't there.
-pub fn port_users(protocol: &str, port: u16) -> Vec<PortUser> {
+/// Who listens on `port` (`TCP`) or has it bound (`UDP`), from lsof on macOS and ss
+/// on Linux; empty when that isn't there.
+pub fn port_users(platform: Platform, protocol: &str, port: u16) -> Vec<PortUser> {
+    if platform == Platform::Linux {
+        return linux::port_users(protocol, port);
+    }
     let mut command = Command::new("lsof");
     command.args(["-nP", &format!("-i{protocol}:{port}"), "-Fpcn"]);
     if protocol == "TCP" {
@@ -149,6 +153,9 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
     let mut report = Report::default();
     let file = tilde(&env.resolver_file());
     match facts.resolver(&env.machine.tld) {
+        _ if env.needs_resolver() && env.platform == Platform::Linux => {
+            linux::check_dns(&mut report, env);
+        }
         _ if !env.needs_resolver() => report.push(
             Status::Ok,
             "resolver",
@@ -231,6 +238,7 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
 
     match &facts.os {
         OsFacts::MacOs(mac) => macos::check_agent(&mut report, env, mac),
+        OsFacts::Linux(linux) => linux::check_units(&mut report, env, linux),
     }
     report.push(
         if facts.daemon_running {
@@ -279,16 +287,21 @@ pub fn check(env: &SetupEnv, facts: &Facts) -> Report {
 
     match &facts.os {
         OsFacts::MacOs(mac) => macos::check_puma_dev(&mut report, env, mac),
+        OsFacts::Linux(_) => {}
     }
 
+    let ipv6 = match &facts.os {
+        OsFacts::MacOs(_) => true,
+        OsFacts::Linux(linux) => linux.ipv6,
+    };
     let machine = &env.machine;
     for (label, protocol, port) in [
         ("http port", "TCP", machine.http_port),
         ("https port", "TCP", machine.https_port),
         ("dns port", "UDP", machine.dns_port),
     ] {
-        let users = port_users(protocol, port);
-        port_line(&mut report, label, port, &users, protocol == "TCP");
+        let users = port_users(env.platform, protocol, port);
+        port_line(&mut report, label, port, &users, protocol == "TCP" && ipv6);
     }
     report
 }
@@ -347,19 +360,25 @@ pub fn verify(env: &SetupEnv) -> Report {
         ),
     }
 
+    let (holder, ipv6) = match env.platform {
+        Platform::MacOs => ("launchd", true),
+        Platform::Linux => ("systemd", linux::has_ipv6_loopback()),
+    };
     let machine = &env.machine;
     for (label, port) in [
         ("http port", machine.http_port),
         ("https port", machine.https_port),
     ] {
-        let users = port_users("TCP", port);
-        port_line(&mut report, label, port, &users, true);
+        let users = port_users(env.platform, "TCP", port);
+        port_line(&mut report, label, port, &users, ipv6);
         if users.iter().any(|u| u.is_carte() && !u.loopback_only()) {
             report.push(
                 Status::Warn,
                 "",
-                "launchd listens on every interface: carte refuses connections from other \
-                 machines, but they can still open TCP connections to this port",
+                format!(
+                    "{holder} listens on every interface: carte refuses connections from other \
+                     machines, but they can still open TCP connections to this port"
+                ),
             );
         }
     }
@@ -407,8 +426,11 @@ fn http_status_line(addr: SocketAddr, host: &str) -> std::io::Result<String> {
     }
 }
 
-/// What to do when the daemon didn't come up behind launchd's sockets.
+/// What to do when the daemon didn't come up behind launchd's or systemd's sockets.
 pub fn fallback(env: &SetupEnv) -> String {
+    if env.platform == Platform::Linux {
+        return linux::fallback(env);
+    }
     format!(
         "- `launchctl print gui/{uid}/{LABEL}` shows whether launchd started carte and why it stopped; \
          its log is {log}.\n\

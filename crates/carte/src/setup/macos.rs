@@ -540,6 +540,7 @@ pub(super) fn check_puma_dev(report: &mut Report, env: &SetupEnv, mac: &MacFacts
         );
     }
 }
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;

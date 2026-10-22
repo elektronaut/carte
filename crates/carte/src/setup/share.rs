@@ -8,7 +8,8 @@ use carte_core::env::{CommandRunner, SystemRunner};
 use toml_edit::{DocumentMut, Item, Table, value};
 
 use super::plist::LABEL;
-use super::{Action, Plan, SetupEnv, Step};
+use super::units::SERVICE;
+use super::{Action, Plan, Platform, SetupEnv, Step};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -82,10 +83,15 @@ impl ShareFacts {
                 .is_some_and(|o| String::from_utf8_lossy(&o.stdout).contains("\"id\"")),
             _ => false,
         };
-        let daemon_loaded = std::process::Command::new("launchctl")
-            .args(["print", &format!("gui/{}/{LABEL}", env.uid)])
-            .output()
-            .is_ok_and(|o| o.status.success());
+        let daemon_loaded = match env.platform {
+            Platform::MacOs => std::process::Command::new("launchctl")
+                .args(["print", &format!("gui/{}/{LABEL}", env.uid)])
+                .output(),
+            Platform::Linux => std::process::Command::new("systemctl")
+                .args(["--user", "is-active", "--quiet", SERVICE])
+                .output(),
+        }
+        .is_ok_and(|o| o.status.success());
         ShareFacts {
             provider,
             program,
@@ -136,17 +142,22 @@ pub fn plan(
         });
     }
     let mut notes = Vec::new();
-    if facts.daemon_loaded {
-        steps.push(Step::run(
-            "Restart the daemon so it starts the share listener",
+    let restart = "Restart the daemon so it starts the share listener";
+    match (facts.daemon_loaded, env.platform) {
+        (true, Platform::MacOs) => steps.push(Step::run(
+            restart,
             "launchctl",
             &["kickstart", "-k", &format!("gui/{}/{LABEL}", env.uid)],
-        ));
-    } else {
-        notes.push(
+        )),
+        (true, Platform::Linux) => steps.push(super::linux::restart_step(restart)),
+        (false, Platform::MacOs) => notes.push(
             "the daemon isn't running from its LaunchAgent; restart it yourself to start sharing"
                 .into(),
-        );
+        ),
+        (false, Platform::Linux) => notes.push(
+            "the daemon isn't running from its user service; restart it yourself to start sharing"
+                .into(),
+        ),
     }
     notes.push(match facts.provider {
         Provider::Cloudflare => format!(
@@ -232,6 +243,7 @@ mod tests {
 
     fn env(root: &Path) -> SetupEnv {
         SetupEnv {
+            platform: Platform::MacOs,
             paths: Paths::under(root),
             machine: Default::default(),
             home: root.join("home"),
@@ -240,6 +252,8 @@ mod tests {
             resolver_dir: root.join("resolver"),
             launch_agents_dir: root.join("agents"),
             puma_dev_dir: root.join("puma-dev"),
+            systemd_user_dir: root.join("systemd"),
+            sysctl_dir: root.join("sysctl.d"),
             tld_configured: false,
         }
     }

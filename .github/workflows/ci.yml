@@ -27,7 +27,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
-  # Linux runs the whole suite, though `carte setup` is macOS-only for now.
+  # Linux runs the whole suite.
   test:
     name: Test (${{ matrix.os }})
     strategy:

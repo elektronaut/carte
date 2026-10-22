@@ -58,40 +58,76 @@ pub fn daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
 }
 
 pub fn restart_daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
-    use crate::setup::plist::{LABEL, runs_with_state};
-    if !cfg!(target_os = "macos") {
-        bail!("`carte daemon restart` restarts carte's LaunchAgent, which only exists on macOS");
-    }
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let service = format!("gui/{}/{LABEL}", unsafe { libc::getuid() });
-    if !crate::setup::macos::launchd_loaded(&service) {
-        bail!("carte's LaunchAgent isn't loaded; run `carte setup` to install it");
-    }
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_default();
-    let plist = std::fs::read_to_string(home.join(format!("Library/LaunchAgents/{LABEL}.plist")))
-        .unwrap_or_default();
-    if !runs_with_state(&plist, &paths.state_dir) {
+    let main_pid: Box<dyn Fn() -> Option<u32>> = if cfg!(target_os = "macos") {
+        use crate::setup::plist::{LABEL, runs_with_state};
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let service = format!("gui/{}/{LABEL}", unsafe { libc::getuid() });
+        if !crate::setup::macos::launchd_loaded(&service) {
+            bail!("carte's LaunchAgent isn't loaded; run `carte setup` to install it");
+        }
+        let plist =
+            std::fs::read_to_string(home.join(format!("Library/LaunchAgents/{LABEL}.plist")))
+                .unwrap_or_default();
+        if !runs_with_state(&plist, &paths.state_dir) {
+            bail!(
+                "carte's LaunchAgent doesn't run the daemon for {}; restart that one yourself",
+                paths.state_dir.display()
+            );
+        }
+        let before = crate::setup::macos::launchd_pid(&service);
+        let status = std::process::Command::new("launchctl")
+            .args(["kickstart", "-k", &service])
+            .status()?;
+        if !status.success() {
+            bail!("`launchctl kickstart -k {service}` failed");
+        }
+        Box::new(move || {
+            crate::setup::macos::launchd_pid(&service).filter(|pid| Some(*pid) != before)
+        })
+    } else if cfg!(target_os = "linux") {
+        use crate::setup::linux::main_pid;
+        use crate::setup::units::{SERVICE, runs_with_state};
+        let active = std::process::Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", SERVICE])
+            .status()
+            .is_ok_and(|s| s.success());
+        if !active {
+            bail!(
+                "carte's user service isn't running; `systemctl --user start {SERVICE}` starts it, or `carte setup` installs it"
+            );
+        }
+        let env = crate::setup::SetupEnv::from_system(paths)?;
+        let Ok(unit) = std::fs::read_to_string(env.unit_path(SERVICE)) else {
+            bail!("carte's user service isn't installed; run `carte setup` to install it");
+        };
+        if !runs_with_state(&unit, &paths.state_dir) {
+            bail!(
+                "carte's user service doesn't run the daemon for {}; restart that one yourself",
+                paths.state_dir.display()
+            );
+        }
+        let before = main_pid(SERVICE);
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "restart", SERVICE])
+            .status()?;
+        if !status.success() {
+            bail!("`systemctl --user restart {SERVICE}` failed");
+        }
+        Box::new(move || main_pid(SERVICE).filter(|pid| Some(*pid) != before))
+    } else {
         bail!(
-            "carte's LaunchAgent doesn't run the daemon for {}; restart that one yourself",
-            paths.state_dir.display()
+            "`carte daemon restart` restarts carte's LaunchAgent or systemd service, which only exist on macOS and Linux"
         );
-    }
-    let before = crate::setup::macos::launchd_pid(&service);
-    let status = std::process::Command::new("launchctl")
-        .args(["kickstart", "-k", &service])
-        .status()?;
-    if !status.success() {
-        bail!("`launchctl kickstart -k {service}` failed");
-    }
+    };
     let client = Client::new(&paths.socket());
     let runtime = runtime()?;
     let started = std::time::Instant::now();
     loop {
-        let pid = crate::setup::macos::launchd_pid(&service);
+        let pid = main_pid();
         if pid.is_some()
-            && pid != before
             && runtime
                 .block_on(client.get::<Snapshot>(paths::SNAPSHOT))
                 .is_ok()

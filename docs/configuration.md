@@ -12,7 +12,7 @@ The config directory is `~/.config/carte` and carte's state (logs, the
 CA, pidfiles, instance data) lives in `~/.local/state/carte`, or under
 `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` when set. `CARTE_CONFIG_DIR`
 and `CARTE_STATE_HOME` set them directly; `carte setup` writes both into
-the daemon's LaunchAgent.
+the daemon's LaunchAgent, or its systemd user service on Linux.
 
 Every key is optional unless noted. Unknown keys are errors, so a typo is
 reported instead of ignored.

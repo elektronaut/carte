@@ -1,10 +1,12 @@
 //! `carte setup`: the one-time machine changes, planned as data and shown before they run.
 
 pub mod check;
+pub mod linux;
 pub mod macos;
 pub mod plist;
 pub mod share;
 pub mod skill;
+pub mod units;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -24,12 +26,31 @@ use crate::dns;
 use crate::paths::Paths;
 use crate::tls::trust::{self, CommandLine};
 use crate::tls::{CertificateAuthority, CreateReason};
+use linux::LinuxFacts;
 use macos::MacFacts;
 use skill::{SkillDir, SkillFacts, SkillLink};
+
+/// The operating systems setup knows how to set up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    MacOs,
+    Linux,
+}
+
+impl Platform {
+    pub fn current() -> Self {
+        if cfg!(target_os = "linux") {
+            Platform::Linux
+        } else {
+            Platform::MacOs
+        }
+    }
+}
 
 /// Where setup looks and writes; tests point every path at a temp dir.
 #[derive(Debug, Clone)]
 pub struct SetupEnv {
+    pub platform: Platform,
     pub paths: Paths,
     pub machine: MachineConfig,
     pub home: PathBuf,
@@ -38,6 +59,9 @@ pub struct SetupEnv {
     pub resolver_dir: PathBuf,
     pub launch_agents_dir: PathBuf,
     pub puma_dev_dir: PathBuf,
+    /// Where systemd looks for the user's units.
+    pub systemd_user_dir: PathBuf,
+    pub sysctl_dir: PathBuf,
     /// Whether `config.toml` sets `tld`, rather than leaving it to the default.
     pub tld_configured: bool,
 }
@@ -57,7 +81,13 @@ impl SetupEnv {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("/etc/resolver"));
+        let systemd_user_dir = linux::systemd_user_dir(
+            &home,
+            linux::manager_environment().as_deref(),
+            std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        );
         Ok(Self {
+            platform: Platform::current(),
             paths: paths.clone(),
             machine,
             // SAFETY: getuid has no preconditions and cannot fail.
@@ -66,6 +96,8 @@ impl SetupEnv {
             resolver_dir,
             launch_agents_dir: home.join("Library/LaunchAgents"),
             puma_dev_dir: home.join(".puma-dev"),
+            systemd_user_dir,
+            sysctl_dir: PathBuf::from("/etc/sysctl.d"),
             home,
             tld_configured,
         })
@@ -176,6 +208,7 @@ pub struct Facts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OsFacts {
     MacOs(MacFacts),
+    Linux(LinuxFacts),
 }
 
 impl Facts {
@@ -223,7 +256,10 @@ impl Facts {
                 &env.skill_link(),
                 &env.claude_dir(),
             )),
-            os: OsFacts::MacOs(MacFacts::gather(env)),
+            os: match env.platform {
+                Platform::MacOs => OsFacts::MacOs(MacFacts::gather(env)),
+                Platform::Linux => OsFacts::Linux(LinuxFacts::gather(env)),
+            },
         }
     }
 
@@ -235,6 +271,7 @@ impl Facts {
     pub fn mac(&self) -> Option<&MacFacts> {
         match &self.os {
             OsFacts::MacOs(mac) => Some(mac),
+            OsFacts::Linux(_) => None,
         }
     }
 }
@@ -330,10 +367,15 @@ pub fn set_tld(plan: &mut Plan, env: &SetupEnv, facts: &Facts) -> anyhow::Result
 /// Restarts a running daemon before the plan verifies, unless the plan already starts
 /// or restarts it.
 fn restart_daemon(plan: &mut Plan, env: &SetupEnv, facts: &Facts, description: &str) {
-    let (loaded, starts, restart): (_, fn(&Step) -> bool, _) = match &facts.os {
-        OsFacts::MacOs(mac) => (mac.agent_loaded, macos::starts_daemon, macos::restart_step),
+    let loaded = match &facts.os {
+        OsFacts::MacOs(mac) => mac.agent_loaded,
+        OsFacts::Linux(linux) => linux.unit(units::SERVICE).active(),
     };
-    if !loaded || plan.steps.iter().any(starts) {
+    let starts = match &facts.os {
+        OsFacts::MacOs(_) => plan.steps.iter().any(macos::starts_daemon),
+        OsFacts::Linux(linux) => linux::starts_daemon(&plan.steps, linux),
+    };
+    if !loaded || starts {
         return;
     }
     let verify = plan
@@ -341,7 +383,11 @@ fn restart_daemon(plan: &mut Plan, env: &SetupEnv, facts: &Facts, description: &
         .iter()
         .position(|s| s.action == Action::Verify)
         .unwrap_or(plan.steps.len());
-    plan.steps.insert(verify, restart(env, description));
+    let restart = match &facts.os {
+        OsFacts::MacOs(_) => macos::restart_step(env, description),
+        OsFacts::Linux(_) => linux::restart_step(description),
+    };
+    plan.steps.insert(verify, restart);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,12 +541,14 @@ impl Plan {
 pub fn plan_install(env: &SetupEnv, facts: &Facts) -> Plan {
     match &facts.os {
         OsFacts::MacOs(mac) => macos::plan_install(env, facts, mac),
+        OsFacts::Linux(linux) => linux::plan_install(env, facts, linux),
     }
 }
 
 pub fn plan_uninstall(env: &SetupEnv, facts: &Facts) -> Plan {
     match &facts.os {
         OsFacts::MacOs(mac) => macos::plan_uninstall(env, facts, mac),
+        OsFacts::Linux(linux) => linux::plan_uninstall(env, facts, linux),
     }
 }
 
@@ -717,6 +765,7 @@ pub(super) mod tests {
 
     pub(in crate::setup) fn env(root: &Path) -> SetupEnv {
         SetupEnv {
+            platform: Platform::MacOs,
             paths: Paths::under(root),
             machine: MachineConfig::default(),
             home: root.join("home"),
@@ -725,6 +774,8 @@ pub(super) mod tests {
             resolver_dir: root.join("resolver"),
             launch_agents_dir: root.join("home/Library/LaunchAgents"),
             puma_dev_dir: root.join("home/.puma-dev"),
+            systemd_user_dir: root.join("home/.config/systemd/user"),
+            sysctl_dir: root.join("sysctl.d"),
             tld_configured: false,
         }
     }

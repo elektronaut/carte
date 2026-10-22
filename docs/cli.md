@@ -71,12 +71,13 @@ address inside it when given one.
 | `carte import kube [--folder F] [--kubeconfig FILE]` | Create a [kube project](configuration.md#kube-projects) for each kubeconfig context you pick |
 | `carte tui` | The terminal UI |
 | `carte daemon` | Run the daemon in the foreground. It refuses to start while another daemon with the same state directory is running or still stopping |
-| `carte daemon restart` | Restart the daemon launchd runs, after installing a new build or changing `[share]`. Running apps stop and start again on their next request |
+| `carte daemon restart` | Restart the daemon launchd or systemd runs, after installing a new build or changing `[share]`. Running apps stop and start again on their next request |
 
-After an upgrade, launchd keeps running the old daemon until it restarts.
-Commands keep working against it, but print a warning that names both
-versions and asks for `carte daemon restart`. A request the old daemon
-doesn't know, such as a command added since, fails with the same advice.
+After an upgrade, launchd or systemd keeps running the old daemon until
+it restarts. Commands keep working against it, but print a warning that
+names both versions and asks for `carte daemon restart`. A request the
+old daemon doesn't know, such as a command added since, fails with the
+same advice.
 
 `pin`, `disable` and their opposites last until the daemon restarts;
 `--save` writes them to the project file. It refuses for a project a
@@ -112,6 +113,10 @@ WantedBy=sockets.target
 `Requires=` and `After=` naming both socket units. The order of the
 sockets varies; the daemon picks them by name, and warns about sockets
 with other names.
+
+`carte setup` writes these three units, with the ports from
+`config.toml`, and the sysctl drop-in `/etc/sysctl.d/50-carte.conf` when
+the ports need it; `carte setup --uninstall` removes them.
 
 ### Prune
 
