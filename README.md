@@ -20,9 +20,7 @@ carte starts the app, then stops it once you're done with it.
 - **Kubernetes Services** at hostnames like
   `https://grafana.monitoring.prod.localhost`, forwarded when you visit.
 
-carte runs on macOS and Linux. On Linux, `carte setup` runs the daemon
-as a systemd user service. A TLD other than `.localhost` also needs
-systemd-resolved; without it, setup tells you what to configure instead.
+carte runs on macOS and Linux.
 
 ## Install
 
@@ -49,28 +47,14 @@ Setup does this once per machine, asking for your password where needed:
 
 - creates a local certificate authority that can sign only names under
   the TLDs carte serves, and trusts it for HTTPS only
-- installs a LaunchAgent that runs the daemon on ports 80 and 443, on
-  127.0.0.1 and ::1
-- on Linux, installs systemd user units in its place: a socket unit for
-  each port and a service that runs the daemon. Ports below 1024 need
-  root there, so setup also lowers `net.ipv4.ip_unprivileged_port_start`
-  to 80 in `/etc/sysctl.d/50-carte.conf`, which applies to every program
-  on the machine
-- on Linux, adds the certificate authority to the system's certificates
-  (`update-ca-certificates` or `update-ca-trust`) and, with `certutil`,
-  to the databases Chrome and each Firefox profile read. Snap and
-  Flatpak browsers keep their own; setup names them for you to import
-  it by hand
-- for a TLD other than `.localhost`, sends its lookups to carte: through
-  `/etc/resolver/<tld>` on macOS, and on Linux through a systemd-resolved
-  DNS delegate (systemd 258 and later) or, on older versions where it
-  leaves other lookups alone, a drop-in. Where neither fits, setup says
-  what to configure, such as a dnsmasq line
+- runs the daemon on ports 80 and 443, on 127.0.0.1 and ::1: from a
+  LaunchAgent on macOS, and from systemd user units on Linux, where it
+  also lets every program bind ports from 80 up
 
 Apps are served under `.localhost`, which needs no DNS setup;
 `carte setup --tld test` adds `.test`. `carte setup --check` reports
 what's in place, and `carte setup --uninstall` undoes it, removing only
-the CAs this install created from the keychain or the Linux stores.
+the CAs this install created.
 
 If you set carte up before its CA was limited to HTTPS, run `carte
 setup` once after upgrading. It replaces the CA with one trusted for
