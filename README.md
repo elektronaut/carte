@@ -22,7 +22,7 @@ carte starts the app, then stops it once you're done with it.
 
 carte runs on macOS and Linux. `carte setup` is macOS-only for now, so on
 Linux you run `carte daemon` as a service, optionally with
-[systemd socket activation](docs/cli.md#commands), and trust its
+[systemd socket activation](docs/cli.md#socket-activation-on-linux), and trust its
 certificate authority yourself.
 
 ## Install

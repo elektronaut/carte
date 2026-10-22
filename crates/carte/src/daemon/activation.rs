@@ -42,6 +42,14 @@ pub async fn proxy_listeners(
             let listener = proxy.listen(socket, options.clone())?;
             if let Ok(local) = listener.local_addr() {
                 info!("listening on {local} (socket {name:?} from {manager})");
+                if let Some(port) = addrs.first().map(SocketAddr::port)
+                    && local.port() != port
+                {
+                    warn!(
+                        "socket {name:?} from {manager} is on port {}, but URLs use port {port} from the machine config",
+                        local.port()
+                    );
+                }
             }
             Ok(listener)
         })
@@ -99,49 +107,80 @@ pub fn take_systemd_sockets() {
         // SAFETY: the caller runs no other threads yet.
         unsafe { std::env::remove_var(key) };
     }
-    let sockets = match systemd_sockets(
-        std::process::id(),
-        pid.as_deref(),
-        fds.as_deref(),
-        names.as_deref(),
-    ) {
-        Ok(sockets) => sockets,
+    let count = match systemd_socket_count(std::process::id(), pid.as_deref(), fds.as_deref()) {
+        Ok(count) => count,
         Err(err) => {
             warn!("ignoring the sockets from systemd: {err}");
             return;
         }
     };
-    for (_, fd) in &sockets {
-        if let Err(err) = crate::process::set_cloexec(*fd, true) {
-            warn!("couldn't mark socket {fd} from systemd close-on-exec: {err}");
+    let mut sockets = match systemd_sockets(count, names.as_deref()) {
+        Ok(sockets) => sockets,
+        Err(err) => {
+            warn!("ignoring the sockets from systemd: {err}");
+            Vec::new()
+        }
+    };
+    let mut open = Vec::new();
+    for fd in (3..).take(count) {
+        match crate::process::set_cloexec(fd, true) {
+            Ok(()) => open.push(fd),
+            Err(err) => warn!("ignoring socket {fd} from systemd: {err}"),
         }
     }
+    sockets.retain(|(_, fd)| open.contains(fd));
     *SYSTEMD_SOCKETS.lock().unwrap_or_else(|e| e.into_inner()) = sockets;
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn take_systemd_sockets() {}
 
-/// The descriptors systemd passed to `pid`, from fd 3 on, with their names; empty
-/// when the variables are missing or meant for another process.
+/// Warns about the sockets systemd passed that no [`activate_socket`] took.
+#[cfg(target_os = "linux")]
+pub fn warn_unclaimed_sockets() {
+    let sockets = std::mem::take(&mut *SYSTEMD_SOCKETS.lock().unwrap_or_else(|e| e.into_inner()));
+    for (name, fd) in sockets {
+        warn!(
+            "ignoring socket {name:?} from systemd (fd {fd}); \
+             set FileDescriptorName=http or https in its socket unit"
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn warn_unclaimed_sockets() {}
+
+/// How many descriptors systemd passed to `pid` from `LISTEN_PID` and `LISTEN_FDS`;
+/// none when the variables are missing or meant for another process.
 #[cfg(any(target_os = "linux", test))]
-fn systemd_sockets(
+fn systemd_socket_count(
     pid: u32,
     listen_pid: Option<&str>,
     listen_fds: Option<&str>,
-    listen_fdnames: Option<&str>,
-) -> Result<Vec<(String, RawFd)>, String> {
+) -> Result<usize, String> {
     let (Some(listen_pid), Some(listen_fds)) = (listen_pid, listen_fds) else {
-        return Ok(Vec::new());
+        return Ok(0);
     };
     if listen_pid.parse::<u32>().ok() != Some(pid) {
-        return Ok(Vec::new());
+        return Ok(0);
     }
-    let count: usize = listen_fds
+    listen_fds
         .parse()
         .ok()
         .filter(|count| *count <= 1024)
-        .ok_or_else(|| format!("LISTEN_FDS={listen_fds:?} isn't a number of sockets"))?;
+        .ok_or_else(|| format!("LISTEN_FDS={listen_fds:?} isn't a number of sockets"))
+}
+
+/// The `count` descriptors systemd passed, from fd 3 on, with their names from
+/// `LISTEN_FDNAMES`.
+#[cfg(any(target_os = "linux", test))]
+fn systemd_sockets(
+    count: usize,
+    listen_fdnames: Option<&str>,
+) -> Result<Vec<(String, RawFd)>, String> {
+    if count == 0 {
+        return Ok(Vec::new());
+    }
     let names: Vec<&str> = match listen_fdnames {
         Some(names) => names.split(':').collect(),
         None => vec!["unknown"; count],
@@ -260,34 +299,35 @@ mod tests {
 
     #[test]
     fn systemd_sockets_need_both_variables() {
-        assert_eq!(systemd_sockets(42, None, None, None), Ok(Vec::new()));
-        assert_eq!(systemd_sockets(42, Some("42"), None, None), Ok(Vec::new()));
-        assert_eq!(
-            systemd_sockets(42, None, Some("1"), Some("http")),
-            Ok(Vec::new())
-        );
+        assert_eq!(systemd_socket_count(42, None, None), Ok(0));
+        assert_eq!(systemd_socket_count(42, Some("42"), None), Ok(0));
+        assert_eq!(systemd_socket_count(42, None, Some("1")), Ok(0));
+        assert_eq!(systemd_socket_count(42, Some("42"), Some("2")), Ok(2));
     }
 
     #[test]
     fn systemd_sockets_for_another_process_are_ignored() {
-        assert_eq!(
-            systemd_sockets(42, Some("43"), Some("1"), Some("http")),
-            Ok(Vec::new())
-        );
-        assert_eq!(
-            systemd_sockets(42, Some("nova"), Some("1"), Some("http")),
-            Ok(Vec::new())
-        );
+        assert_eq!(systemd_socket_count(42, Some("43"), Some("1")), Ok(0));
+        assert_eq!(systemd_socket_count(42, Some("nova"), Some("1")), Ok(0));
+        assert_eq!(systemd_socket_count(42, Some("43"), Some("many")), Ok(0));
+    }
+
+    #[test]
+    fn systemd_socket_count_must_be_a_number() {
+        assert!(systemd_socket_count(42, Some("42"), Some("-1")).is_err());
+        assert!(systemd_socket_count(42, Some("42"), Some("many")).is_err());
+        assert!(systemd_socket_count(42, Some("42"), Some("100000")).is_err());
+        assert_eq!(systemd_socket_count(42, Some("42"), Some("0")), Ok(0));
     }
 
     #[test]
     fn systemd_sockets_are_named_from_fd_3() {
         assert_eq!(
-            systemd_sockets(42, Some("42"), Some("2"), Some("http:https")),
+            systemd_sockets(2, Some("http:https")),
             Ok(named(&[("http", 3), ("https", 4)]))
         );
         assert_eq!(
-            systemd_sockets(42, Some("42"), Some("3"), Some("https:http:http")),
+            systemd_sockets(3, Some("https:http:http")),
             Ok(named(&[("https", 3), ("http", 4), ("http", 5)]))
         );
     }
@@ -295,25 +335,21 @@ mod tests {
     #[test]
     fn unnamed_systemd_sockets_are_unknown() {
         assert_eq!(
-            systemd_sockets(42, Some("42"), Some("2"), None),
+            systemd_sockets(2, None),
             Ok(named(&[("unknown", 3), ("unknown", 4)]))
         );
         assert_eq!(
-            systemd_sockets(42, Some("42"), Some("2"), Some("http:")),
+            systemd_sockets(2, Some("http:")),
             Ok(named(&[("http", 3), ("", 4)]))
         );
     }
 
     #[test]
     fn systemd_sockets_must_match_their_names() {
-        assert!(systemd_sockets(42, Some("42"), Some("1"), Some("http:https")).is_err());
-        assert!(systemd_sockets(42, Some("42"), Some("3"), Some("http:https")).is_err());
-        assert!(systemd_sockets(42, Some("42"), Some("-1"), None).is_err());
-        assert!(systemd_sockets(42, Some("42"), Some("many"), None).is_err());
-        assert_eq!(
-            systemd_sockets(42, Some("42"), Some("0"), None),
-            Ok(Vec::new())
-        );
+        assert!(systemd_sockets(1, Some("http:https")).is_err());
+        assert!(systemd_sockets(3, Some("http:https")).is_err());
+        assert_eq!(systemd_sockets(0, None), Ok(Vec::new()));
+        assert_eq!(systemd_sockets(0, Some("http")), Ok(Vec::new()));
     }
 
     #[cfg(target_os = "linux")]
