@@ -10,10 +10,10 @@ every second.
 
 ## Panes
 
-The screen has two panes, the tree and the selection, with a status
-line and a key hint line below them. In a terminal 110 columns or
-wider, the panes sit side by side. In a narrower one, the tree is on
-top.
+The tree is on the left. The selected row's details and logs are on
+the right, the details above the logs. A status line and a line of
+keys sit below them. In a terminal narrower than 110 columns, the tree
+is on top instead.
 
 `tab` moves the focus between the tree and the logs. The focused pane
 has a blue border. The keys at the bottom are the most used ones for
@@ -21,10 +21,12 @@ the focused pane.
 
 ### Tree
 
-The tree groups folders, projects, stacks, apps and processes. A level
-with a single child merges into its parent: a project with only the
-main stack lists its apps directly, and a single-app project shows the
-app on the project's row. Processes never merge into their app.
+The tree groups folders, projects, stacks, apps and processes. Inside a
+project, a level with a single child merges into its parent: a project
+with only the main stack lists its apps directly, and a single-app
+project shows the app on the project's row. An app with a single
+process has no process row. Folders never merge, and nothing merges
+inside a [kube project](kubernetes.md).
 
 The title counts running instances, shares and problems. The `CPU` and
 `MEM` columns cover everything running below a row.
@@ -38,7 +40,7 @@ Each row starts with a symbol for its state:
 | `◑` | Stopping |
 | `◆` (magenta) | Paused at a debugger prompt |
 | `◆` (yellow) | Suspended by a signal |
-| `○` | Stopped |
+| `○` | Stopped, or exited cleanly |
 | `✓` | A task that finished |
 | `✖` | Crashed |
 | `⊘` | Disabled |
@@ -51,16 +53,15 @@ Apps and processes can carry badges after their name:
 | `main` | The stack runs this app from the main checkout |
 | `pin` | Pinned: carte doesn't stop it for idleness |
 | `off` | Disabled |
-| `pin*`, `off*` | Temporary: lasts until the daemon restarts. `S` saves it to the project file |
+| `pin*`, `off*` | Temporary: lasts until the daemon restarts |
 | `shared` | On the public internet; see [sharing](sharing.md) |
 | `gave up` | carte stopped restarting a crashing process |
 | `!` | Has a problem; `!` lists them |
 
-### Selection
+### Details and logs
 
-The right pane shows the selected row: its details on top and its logs
-below. The details say what it's doing, what holds it running, its
-address and share, and its latest event.
+The details say what the selected row is doing, what keeps it running,
+its address and share, and its latest event.
 
 The logs of a project, stack or app merge the logs of its processes.
 Each line starts with its process's name in a colour of its own. `e`
@@ -77,27 +78,29 @@ how far up you are. `G` follows again.
 | Show | Keeps |
 | --- | --- |
 | All | Every instance |
-| Running | Instances that are running, starting, stopping, paused, suspended or crashed |
+| Running | Instances that aren't stopped, exited, done or disabled |
 | Shared | Shared instances |
 
-The tree's title names the filter while it isn't `all`. Processes of a
-shown app always show.
+The tree's title names the filter while it isn't `all`. The processes
+of a shown app always show.
 
 ## Filter and search
 
 `/` in the tree filters it by name. A match keeps its subtree, and its
 parents open to show it. `/` in the logs searches them: matches are
 highlighted, and `n` and `N` move to the next older and newer match.
-`enter` keeps the filter or search, and `esc` clears it.
+`enter` keeps the filter or search. `esc` clears the one in the
+focused pane.
 
 `ctrl-p` jumps to a project, stack, app or process by name, wherever it
-is in the tree. It opens the folds above it, and clears the filter if
-that hides it.
+is in the tree. It focuses the tree and opens the folds above the row.
+If the filter or the show filter hides the row, it clears both.
 
 ## Folds
 
-Projects start open, and everything below them starts closed. Folders
-start closed. A [kube project](kubernetes.md) starts closed, since
+Projects start open, and everything below them starts closed. A
+single-app project shows its app on its row, so it starts closed like
+an app. Folders start closed. A [kube project](kubernetes.md) starts closed, since
 opening it asks the cluster for its Services; its namespaces start open
 while something in them runs.
 
@@ -107,7 +110,7 @@ closed row moves to its parent, and `→` on an open row moves into it.
 
 ## Keys
 
-`?` shows these keys. They work in either pane unless noted.
+`?` shows the main keys. They work in either pane unless noted.
 
 ### Navigate
 
@@ -121,7 +124,7 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `tab` | Switch between the tree and the logs |
 | `/` | Filter the tree, or search the logs |
 | `n` `N` | Older, newer match (logs) |
-| `esc` | Clear the filter or search |
+| `esc` | Clear the filter or search of the focused pane |
 | `a` | Show all, running or shared instances |
 | `e` | Show logs or events |
 | `-` | Mark the logs with the time |
@@ -137,7 +140,7 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `r` | Restart |
 | `p` | Pin or unpin |
 | `d` | Disable or enable |
-| `S` | Save a temporary pin or disable to the project file |
+| `S` | Save a process's temporary pin or disable to the project file |
 | `o` | Open in the browser |
 | `w` | Share on the web, or stop sharing |
 | `W` | Share behind a password |
@@ -146,8 +149,11 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `v` | View the env |
 | `t` | Type into the process, like at a debugger prompt |
 
-`t` types into the selected process, or the selected app's paused or
-web process. Every key goes to the process until the
+`S` acts on the selected process, or on the one process below the
+selection with a temporary pin or disable.
+
+`t` types into the selected process. On an app, it picks the paused
+process, the web process, or the only process. Every key goes to the process until the
 [detach keys](cli.md#attach), `ctrl-q d` by default. The status line
 shows the prompt and what you've typed.
 
@@ -161,8 +167,8 @@ shows the prompt and what you've typed.
 | `?` | Show the keys |
 | `q`, `ctrl-c` | Quit |
 
-In a popup, like the help or the env, any other key closes it. The env
-scrolls with the navigation keys.
+Any key closes the help and the problems. The env scrolls with the
+navigation keys and `space`, and other keys close it.
 
 ## Mouse
 
@@ -171,7 +177,8 @@ scrolls with the navigation keys.
 | Click a row | Select it |
 | Click the selected row | Close or open it |
 | Click a pane | Focus it |
-| Wheel | Scroll the pane under the pointer |
+| Wheel over the tree | Move the selection |
+| Wheel over the logs | Scroll them |
 | Drag over the logs | Select lines; releasing copies them |
 
 `m` turns the mouse off, so the terminal's own selection works, and on
