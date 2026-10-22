@@ -102,7 +102,7 @@ Projects start open, and everything below them starts closed. A
 single-app project shows its app on its row, so it starts closed like
 an app. Folders start closed. A [kube project](kubernetes.md) starts closed, since
 opening it asks the cluster for its Services; its namespaces start open
-while something in them runs.
+while something in them runs or failed.
 
 `←` and `→`, or `h` and `l`, close and open the selected row. `←` on a
 closed row moves to its parent, and `→` on an open row moves into it.
