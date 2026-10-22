@@ -3,28 +3,22 @@
 Run your local web apps _à la carte_: visit `https://myapp.localhost` and
 carte starts the app, then stops it once you're done with it.
 
-- **Many apps at once:** add every app you work on, and carte keeps
-  memory in check by stopping the least recently used first.
-- **The whole process group**, not only the web server. Everything in
-  `Procfile.dev` starts and stops together, including asset watchers,
-  job workers and schedulers.
+- **Many apps at once:** carte stops the least recently used ones to
+  keep memory in check.
+- **The whole Procfile:** asset watchers, job workers and schedulers
+  start and stop with the web server.
 - **A hostname per worktree:** a worktree in a `feature-x` folder runs
   at `https://feature-x.myapp.localhost`.
-- **Projects and stacks:** a project can consist of many apps, and
-  their worktrees of the same name operate together as a stack.
-- **HTTPS everywhere,** with a local certificate authority your apps and
-  browsers trust.
+- **Projects and stacks:** apps that work together start together, and
+  worktrees with the same name form a stack.
+- **HTTPS everywhere,** with a local certificate authority.
 - **A terminal UI** for state, logs and controls.
 - **Sharing** apps on the public internet through Cloudflare Tunnel or
   ngrok.
 - **Kubernetes Services** at hostnames like
   `https://grafana.monitoring.prod.localhost`, forwarded when you visit.
 
-carte runs on macOS and Linux. On Linux, `carte setup` uses systemd to
-run the daemon, with
-[socket activation](docs/cli.md#socket-activation-on-linux), and
-systemd-resolved for a TLD other than `.localhost`; without them, it
-says what to set up yourself.
+carte runs on macOS and Linux.
 
 ## Install
 
@@ -47,44 +41,22 @@ carte setup --dry-run   # show what it will do
 carte setup
 ```
 
-Setup does this once per machine, asking for your password where needed:
+Setup runs once per machine and asks for your password where needed. It:
 
-- creates a local certificate authority that can sign only names under
-  the TLDs carte serves, and trusts it for HTTPS only
-- installs a LaunchAgent that runs the daemon on ports 80 and 443, on
-  127.0.0.1 and ::1
-- on Linux, installs systemd user units in its place: a socket unit for
-  each port and a service that runs the daemon. Ports below 1024 need
-  root there, so setup also lowers `net.ipv4.ip_unprivileged_port_start`
-  to 80 in `/etc/sysctl.d/50-carte.conf`, which applies to every program
-  on the machine
-- on Linux, adds the certificate authority to the system's certificates
-  (`update-ca-certificates` or `update-ca-trust`) and, with `certutil`,
-  to the databases Chrome and each Firefox profile read. Snap and
-  Flatpak browsers keep their own; setup names them for you to import
-  it by hand
-- for a TLD other than `.localhost`, sends its lookups to carte: through
-  `/etc/resolver/<tld>` on macOS, and on Linux through a systemd-resolved
-  DNS delegate (systemd 258 and later) or, on older versions where it
-  leaves other lookups alone, a drop-in. Where neither fits, setup says
-  what to configure, such as a dnsmasq line
+- creates a certificate authority for carte's hostnames and trusts it
+- runs the daemon on ports 80 and 443. On Linux, this lets every program
+  use ports from 80 up.
 
-Apps are served under `.localhost`, which needs no DNS setup;
-`carte setup --tld test` adds `.test`. `carte setup --check` reports
-what's in place, and `carte setup --uninstall` undoes it, removing only
-the CAs this install created from the keychain or the Linux stores.
+Apps are served under `.localhost`. To also serve them under `.test`, run
+`carte setup --tld test`.
 
-If you set carte up before its CA was limited to HTTPS, run `carte
-setup` once after upgrading. It replaces the CA with one trusted for
-HTTPS only, and removes the old one.
+`carte setup --check` shows what's in place, and `carte setup --uninstall`
+removes it.
 
 ### Coming from puma-dev
 
-`carte setup` will offer to replace any existing puma-dev installation.
-If you wish to keep using the `.test` hostname, a new resolver will be
-installed.
-
-To import your linked apps in `~/.puma-dev` to carte projects, you can run:
+`carte setup` offers to replace puma-dev, and to keep its `.test`
+hostnames. To turn the apps linked in `~/.puma-dev` into carte projects:
 
 ```sh
 carte import puma-dev
@@ -111,11 +83,8 @@ root = "~/code/myapp"
 
 and the app is at `https://myapp.localhost`.
 
-carte runs the processes in `Procfile.dev`, or `Procfile`, and gives each
-one its own `PORT`. Apps without a Procfile work too: a Rack app runs
-with Puma, and a Node app runs its `dev` script. A dev server next to
-Rails, like vite_ruby's or Shakapacker's, gets its paths on the app's
-hostname; see [Paths](docs/configuration.md#paths).
+carte runs the processes in the app's `Procfile.dev` or `Procfile`. Without
+one, it runs a Rack app with Puma and a Node app with its `dev` script.
 
 A project can also hold several apps that work together. Say the acme
 product is three repos in `~/work`, next to some unrelated ones:
@@ -147,50 +116,37 @@ depends_on = ["billing", "accounts"]
   `side-project` out.
 - `strip_prefix` shortens their hostnames to `accounts.acme.localhost`,
   `billing.acme.localhost` and `frontend.acme.localhost`.
-- `[env]` gives every app a variable per app, like
-  `ACME_BILLING_URL=https://billing.acme.localhost`, so the frontend
-  knows where to find the APIs.
+- `[env]` gives every app the others' URLs, like
+  `ACME_BILLING_URL=https://billing.acme.localhost`.
 - `depends_on` starts billing and accounts along with the frontend.
 
 A repo can also carry its own defaults in a `carte.toml`.
 
-[docs/configuration.md](docs/configuration.md) describes every setting:
-monorepos, templates for a folder of unrelated apps, services and tasks,
-teardown, serving files, and how each process's environment is built.
-`carte env` shows that environment, with where each value comes from.
+[docs/configuration.md](docs/configuration.md) describes every setting.
 
 ## Worktrees and stacks
 
-A stack is a set of apps that run and call each other together. You don't
-create stacks yourself: each worktree joins the stack named after its
-folder, so worktrees of several repos with the same folder name end up in
-one stack. Adding a worktree to billing:
+Worktrees with the same folder name form a stack: their apps run
+together and call each other. Say you add a worktree to billing:
 
 ```sh
 cd ~/work/acme-billing
 git worktree add ~/worktrees/acme-billing/feature-x -b feature-x
 ```
 
-Now `https://billing.feature-x.acme.localhost` runs the worktree, and
-`https://frontend.feature-x.acme.localhost` runs the frontend's main checkout
-as a separate instance whose URLs point into the `feature-x` stack. When
-you remove the worktree, carte stops its instance and the stack falls
-back to main.
+Now `https://billing.feature-x.acme.localhost` runs the worktree. The
+frontend has no `feature-x` worktree, so
+`https://frontend.feature-x.acme.localhost` runs its main checkout,
+calling the `feature-x` billing. Remove the worktree, and carte stops it.
 
-carte doesn't touch databases. Use `CARTE_CHECKOUT` in `database.yml` or
-similar if you want separate data per worktree.
-
-[Names and hostnames](docs/configuration.md#names-and-hostnames) has the
-naming rules.
+carte leaves databases alone. For separate data per worktree, use
+`CARTE_CHECKOUT` in `database.yml` or similar.
 
 ## Day to day
 
 Once a project is added, there's little left to do. Visiting an app
-starts it, new worktrees get their hostnames as you create them, and
-apps stop when you stop using them. carte picks up changes to project
-files by itself, and running apps get them on their next start.
-
-What's left:
+starts it, and it stops when you stop using it. New worktrees and
+changes to project files are picked up by themselves.
 
 ```sh
 carte restart   # the app you're in, to apply changes now
@@ -200,9 +156,8 @@ carte           # open the terminal UI
 
 `touch tmp/restart.txt` restarts an app too.
 
-The CLI also starts, stops, pins and inspects apps, and every command
-takes `--json`; see [docs/cli.md](docs/cli.md). Coding agents can use
-carte through `carte mcp`, an MCP server; see [docs/mcp.md](docs/mcp.md).
+[docs/cli.md](docs/cli.md) covers the rest of the CLI. Coding agents can
+use carte through its MCP server; see [docs/mcp.md](docs/mcp.md).
 
 ## Sharing
 
@@ -216,9 +171,9 @@ Sharing is always explicit, and only shared apps are reachable. See
 
 ## Kubernetes
 
-carte can also reach the Services of a Kubernetes cluster, the way
-`kubectl port-forward` does, but with nothing to run first. Give each
-cluster a project file that names its kubeconfig context:
+carte can forward to a Kubernetes cluster's Services, like
+`kubectl port-forward` without the command. Give the cluster a project
+file that names its kubeconfig context:
 
 ```toml
 # ~/.config/carte/projects/prod.toml
@@ -226,9 +181,8 @@ kube = { context = "prod" }
 ```
 
 The Service `grafana` in the `monitoring` namespace is then at
-`https://grafana.monitoring.prod.localhost`. You can leave out the
-namespace, as in `https://grafana.prod.localhost`, as long as only one
-namespace has a Service of that name.
+`https://grafana.monitoring.prod.localhost`, or
+`https://grafana.prod.localhost` if no other namespace has a `grafana`.
 
 `carte import kube` writes a project file for each context you pick. See
 [Kube projects](docs/configuration.md#kube-projects).
@@ -243,25 +197,21 @@ tld = "test"
 idle_timeout = "15m"
 ```
 
-carte reloads configuration when files change. A broken file keeps the
-last working version, and `carte ls` and the terminal UI show the error.
+carte reloads it when it changes. If a file is broken, carte keeps the
+last working version and shows the error.
 
 ## Alternatives
 
-carte is heavily inspired by [puma-dev](https://github.com/puma/puma-dev).
-The `.test` hostnames, starting apps on request, idle shutdown and
-`tmp/restart.txt` all come from it. If you want a simpler solution that
-just gives you a web server per app, it's highly recommended.
+carte is heavily inspired by [puma-dev](https://github.com/puma/puma-dev),
+which is a good choice if you just want a web server per app.
 
 [Overmind](https://github.com/DarthSim/overmind) and
 [process-compose](https://github.com/F1bonacc1/process-compose) run a
-project's processes in your terminal, with no daemon, hostnames or idle
-shutdown. They're a good fit if you work on one app at a time and want a
-better `bin/dev`.
+project's processes in your terminal. They suit working on one app at a
+time.
 
-[portless](https://github.com/vercel-labs/portless) gives dev servers you
-start yourself stable `.localhost` names, including one per worktree. It
-routes, but leaves starting and stopping processes to you.
+[portless](https://github.com/vercel-labs/portless) gives dev servers
+`.localhost` names, but you start and stop them yourself.
 
 ## Contributing
 
