@@ -63,7 +63,7 @@ pub fn restart_daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
     }
     // SAFETY: getuid has no preconditions and cannot fail.
     let service = format!("gui/{}/{LABEL}", unsafe { libc::getuid() });
-    if !crate::setup::check::launchd_loaded(&service) {
+    if !crate::setup::macos::launchd_loaded(&service) {
         bail!("carte's LaunchAgent isn't loaded; run `carte setup` to install it");
     }
     let home = std::env::var_os("HOME")
@@ -77,7 +77,7 @@ pub fn restart_daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
             paths.state_dir.display()
         );
     }
-    let before = crate::setup::check::launchd_pid(&service);
+    let before = crate::setup::macos::launchd_pid(&service);
     let status = std::process::Command::new("launchctl")
         .args(["kickstart", "-k", &service])
         .status()?;
@@ -88,7 +88,7 @@ pub fn restart_daemon(paths: &Paths) -> anyhow::Result<ExitCode> {
     let runtime = runtime()?;
     let started = std::time::Instant::now();
     loop {
-        let pid = crate::setup::check::launchd_pid(&service);
+        let pid = crate::setup::macos::launchd_pid(&service);
         if pid.is_some()
             && pid != before
             && runtime
