@@ -33,8 +33,8 @@ MAILCATCHER_SMTP = "1025"
 | `cwd` | the checkout | Working directory, relative to the checkout |
 | `env` | none | Env templates for this process, over the app's |
 | `http` | `true` for `web` | Whether this process serves the app's HTTP. At most one per app |
-| `paths` | none | Paths of the app's hostname that go to this process instead of the HTTP process, like `["/vite-dev/"]`. See [Paths](paths.md) |
-| `preset` | detected | `"vite_ruby"` or `"shakapacker"` fills in `paths` and `provides` for that dev server; `"none"` turns off the detection. See [Presets](paths.md#presets) |
+| `paths` | none | Paths of the app's hostname that go to this process instead of the HTTP process, like `["/vite-dev/"]`. See [Dev servers](dev-servers.md) |
+| `preset` | detected | `"vite_ruby"` or `"shakapacker"` fills in `paths` and `provides` for that dev server; `"none"` turns off the detection. See [Presets](dev-servers.md#presets) |
 | `ready` | `"port"` | When the app counts as started: `"port"` once the port accepts connections, or a path like `"/up"` once a GET of it answers without a 5xx |
 | `scope` | detected | `instance` runs per stack; `checkout` runs once per checkout and is shared by every stack running from it |
 | `pty` | `true` | Run under a pseudo-terminal, which [`carte attach`](cli.md#attach) connects to. `false` uses pipes |
@@ -192,7 +192,7 @@ it has `restart = "never"`:
   `carte stop-all`, touching `tmp/restart.txt`, or a change to its
   configuration, Procfile or checkout clears that too, so the next
   request starts it as usual. `carte stop-all --idle` leaves it.
-- A process with [`paths`](paths.md) takes no `restart` either: it's
+- A process with [`paths`](dev-servers.md) takes no `restart` either: it's
   restarted whenever it exits, like the HTTP process. Requests for its
   paths wait while it restarts, until it's ready again; other paths
   keep going to the HTTP process. Meanwhile the instance shows as

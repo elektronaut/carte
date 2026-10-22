@@ -1,4 +1,4 @@
-# Paths
+# Dev servers
 
 A Rails app often runs a JavaScript dev server next to Rails, like
 vite_ruby's `bin/vite dev` or Shakapacker's webpack-dev-server. Such a
