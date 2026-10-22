@@ -19,8 +19,8 @@ use std::sync::Arc;
 pub use error_page::ErrorPage;
 pub use listener::{Listener, ListenerOptions, is_loopback};
 pub use router::{
-    ActivityGuard, BoxFuture, Dial, Dialer, ListenerKind, Route, RouteRequest, Router,
-    UpstreamError, UpstreamIo, UpstreamStream,
+    ActivityGuard, BoxFuture, Dial, Dialer, Handled, ListenerKind, Resolution, Route, RouteRequest,
+    Router, Trace, UpstreamError, UpstreamIo, UpstreamStream,
 };
 
 /// A router and a pool of upstream connections, shared by any number of

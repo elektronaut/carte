@@ -127,6 +127,18 @@ struct Waiter {
     /// The request's path; `None` waits for the HTTP process.
     path: Option<String>,
     reply: oneshot::Sender<Result<Upstream, BootFailure>>,
+    /// Apps the request started ahead.
+    warmed: Vec<String>,
+}
+
+impl Waiter {
+    fn new(path: Option<String>, reply: oneshot::Sender<Result<Upstream, BootFailure>>) -> Self {
+        Waiter {
+            path,
+            reply,
+            warmed: Vec::new(),
+        }
+    }
 }
 
 /// Why an instance starts, for its `started` event.
@@ -285,6 +297,10 @@ impl Instance {
     /// as in flight until the proxy starts the request, or for [`ANSWERED`].
     fn reply(&mut self, waiter: Waiter, result: Result<Upstream, BootFailure>) {
         let proxied = waiter.path.is_some() && result.is_ok();
+        let result = result.map(|upstream| Upstream {
+            warmed: waiter.warmed,
+            ..upstream
+        });
         if waiter.reply.send(result).is_ok() && proxied {
             self.answered.push(Instant::now() + ANSWERED);
         }
@@ -316,12 +332,18 @@ impl Instance {
     }
 
     fn upstream(&self) -> Option<Upstream> {
-        self.route_port
-            .or_else(|| self.http().map(|p| p.port))
-            .map(|port| Upstream {
-                port,
-                boot: self.boot,
-            })
+        let upstream = |port, process| Upstream {
+            port,
+            boot: self.boot,
+            process,
+            warmed: Vec::new(),
+        };
+        match self.route_port {
+            Some(port) => Some(upstream(port, None)),
+            None => self
+                .http()
+                .map(|p| upstream(p.port, Some(p.spec.name.clone()))),
+        }
     }
 
     pub(super) fn any_running(&self) -> bool {
@@ -363,10 +385,14 @@ impl Instance {
                 failure.log = proc.log.lock().unwrap().tail(40);
                 return Some(Err(failure));
             }
-            return proc.serving().then_some(Ok(Upstream {
-                port: proc.port,
-                boot: self.boot,
-            }));
+            return proc.serving().then(|| {
+                Ok(Upstream {
+                    port: proc.port,
+                    boot: self.boot,
+                    process: Some(proc.spec.name.clone()),
+                    warmed: Vec::new(),
+                })
+            });
         }
         self.web_serving().then(|| {
             self.upstream()
@@ -588,10 +614,7 @@ impl Actor {
                     let _ = reply.send(Err(BootFailure::not_running(&key.app)));
                     return;
                 }
-                self.ensure_ready(key.clone(), path, reply);
-                if let Some(referrer) = request {
-                    self.requested(&key, referrer.as_ref());
-                }
+                self.ensure_ready(key, path, reply, request);
             }
             Msg::Activity(key, boot, activity) => self.activity(&key, boot, activity),
             Msg::Hold { target, reply } => {
@@ -860,43 +883,47 @@ impl Actor {
 
     // Starting
 
+    /// Starts the instance unless it runs, and answers once it can serve `path`. For
+    /// a proxied request, `request` has the instance of the page it came from.
     fn ensure_ready(
         &mut self,
         key: InstanceKey,
         path: Option<String>,
         reply: oneshot::Sender<Result<Upstream, BootFailure>>,
+        request: Option<Option<InstanceKey>>,
     ) {
-        if let Some(inst) = self.instances.get_mut(&key) {
-            match inst.state {
-                Lifecycle::Starting | Lifecycle::Ready => {
-                    match inst.answer(path.as_deref()) {
-                        Some(result) => inst.reply(Waiter { path, reply }, result),
-                        None => {
-                            inst.last_activity = Instant::now();
-                            inst.waiters.push(Waiter { path, reply });
-                        }
-                    }
+        let state = self.instances.get(&key).map(|inst| inst.state);
+        match state {
+            Some(Lifecycle::Starting | Lifecycle::Ready) => {}
+            Some(Lifecycle::Stopping) => {
+                let inst = self.instances.get_mut(&key).expect("stopping instance");
+                inst.restart_pending = true;
+                inst.restart_why.get_or_insert(Why::Request);
+            }
+            Some(Lifecycle::Stopped | Lifecycle::Crashed) | None => {
+                if let Err(failure) = self.start(&key, None, Why::Request) {
+                    let _ = reply.send(Err(failure));
                     return;
                 }
-                Lifecycle::Stopping => {
-                    inst.restart_pending = true;
-                    inst.restart_why.get_or_insert(Why::Request);
-                    inst.waiters.push(Waiter { path, reply });
-                    return;
-                }
-                Lifecycle::Stopped | Lifecycle::Crashed => {}
             }
         }
-        match self.start(&key, None, Why::Request) {
-            Ok(()) => {
-                let inst = self.instances.get_mut(&key).expect("started instance");
-                match inst.answer(path.as_deref()) {
-                    Some(result) => inst.reply(Waiter { path, reply }, result),
-                    None => inst.waiters.push(Waiter { path, reply }),
+        let warmed = match request {
+            Some(referrer) => self.requested(&key, referrer.as_ref()),
+            None => Vec::new(),
+        };
+        let inst = self.instances.get_mut(&key).expect("started instance");
+        let waiter = Waiter {
+            path,
+            reply,
+            warmed,
+        };
+        match inst.answer(waiter.path.as_deref()) {
+            Some(result) => inst.reply(waiter, result),
+            None => {
+                if matches!(state, Some(Lifecycle::Starting | Lifecycle::Ready)) {
+                    inst.last_activity = Instant::now();
                 }
-            }
-            Err(failure) => {
-                let _ = reply.send(Err(failure));
+                inst.waiters.push(waiter);
             }
         }
     }
@@ -917,10 +944,10 @@ impl Actor {
                 Some(result) => {
                     let _ = reply.send(result);
                 }
-                None => inst.waiters.push(Waiter { path: None, reply }),
+                None => inst.waiters.push(Waiter::new(None, reply)),
             },
             Lifecycle::Stopping if inst.restart_pending => {
-                inst.waiters.push(Waiter { path: None, reply });
+                inst.waiters.push(Waiter::new(None, reply));
             }
             Lifecycle::Crashed => {
                 let label = inst.label();
@@ -2363,13 +2390,13 @@ impl Actor {
     // Learned warming
 
     /// Notes a proxied request: what it came from, and whether it opens the instance,
-    /// which starts the apps that usually open next.
-    fn requested(&mut self, key: &InstanceKey, referrer: Option<&InstanceKey>) {
+    /// which starts the apps that usually open next. Returns the apps it started.
+    fn requested(&mut self, key: &InstanceKey, referrer: Option<&InstanceKey>) -> Vec<String> {
         let Some(inst) = self.instances.get_mut(key) else {
-            return;
+            return Vec::new();
         };
         if !inst.is_active() {
-            return;
+            return Vec::new();
         }
         let first = !std::mem::replace(&mut inst.opened, true);
         let stack = key.stack.slug().to_string();
@@ -2383,12 +2410,15 @@ impl Actor {
                 .warming
                 .opened(&key.project, &stack, &key.app, Instant::now());
             self.warming_changed = true;
-            self.warm(key, warm);
+            return self.warm(key, warm);
         }
+        Vec::new()
     }
 
     /// Starts the apps an open of `opened` warms, in its stack, while there's room.
-    fn warm(&mut self, opened: &InstanceKey, edges: Vec<Edge>) {
+    /// Returns the apps it started.
+    fn warm(&mut self, opened: &InstanceKey, edges: Vec<Edge>) -> Vec<String> {
+        let mut warmed = Vec::new();
         for edge in edges {
             let target = InstanceKey {
                 project: opened.project.clone(),
@@ -2396,7 +2426,7 @@ impl Actor {
                 stack: opened.stack.clone(),
             };
             let Some(state) = self.world.project(&target.project) else {
-                return;
+                return warmed;
             };
             let warmable = state.project.app(&target.app).is_some_and(|app| {
                 state.checkout(app, &target.stack).is_some() && !app.settings.never_warm
@@ -2409,14 +2439,16 @@ impl Actor {
                 continue;
             }
             if !self.room_to_warm() {
-                return;
+                return warmed;
             }
             if self.start(&target, None, Why::Warm(opened.clone())).is_ok()
                 && let Some(inst) = self.instances.get_mut(&target)
             {
                 inst.warmed_after = Some(opened.app.clone());
+                warmed.push(target.app);
             }
         }
+        warmed
     }
 
     fn room_to_warm(&self) -> bool {
@@ -3522,20 +3554,7 @@ impl Actor {
     ) -> Result<(Vec<Event>, EventFilter), String> {
         let filter = match target {
             None => EventFilter::default(),
-            Some(target) => {
-                let resolved = self.resolve(target)?;
-                let stack = match (&resolved.app, &resolved.stack) {
-                    (_, Some(stack)) => Some(stack.slug().to_string()),
-                    (Some(_), None) => Some("main".to_string()),
-                    (None, None) => None,
-                };
-                EventFilter {
-                    project: Some(resolved.project),
-                    stack,
-                    app: resolved.app,
-                    process: resolved.process,
-                }
-            }
+            Some(target) => EventFilter::for_target(self.resolve(target)?),
         };
         Ok((self.events.recent(&filter, tail), filter))
     }

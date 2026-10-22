@@ -31,11 +31,15 @@ use crate::process::Spawner;
 use crate::prune;
 
 /// Where a ready instance answers HTTP.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Upstream {
     pub port: u16,
     /// The start of the instance that answered, for [`Handle::activity`].
     pub boot: u64,
+    /// The process listening on `port`; `None` for an app's fixed `port`.
+    pub process: Option<String>,
+    /// Apps the request started ahead, as the instance's first request.
+    pub warmed: Vec<String>,
 }
 
 /// Why an instance couldn't serve a request, in words for an error page.

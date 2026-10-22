@@ -1,6 +1,7 @@
 //! The daemon's API over its Unix socket: JSON requests, newline-delimited JSON streams.
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequest, State};
@@ -10,8 +11,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use carte_api::attach::{self, AttachRequest};
 use carte_api::{
-    Address, ControlRequest, ErrorBody, EventsRequest, LogsRequest, MarkRequest, Problem,
-    PruneRequest, ShareRequest, StopAllRequest, UnshareRequest, paths,
+    Address, ControlRequest, ErrorBody, EventSubject, EventsRequest, LogsRequest, MarkRequest,
+    Problem, PruneRequest, RequestsRequest, ShareRequest, StopAllRequest, UnshareRequest, paths,
 };
 use carte_api::{Event, KubeServicesRequest, KubeServicesResponse, Snapshot};
 use carte_core::address;
@@ -23,17 +24,19 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use hyper_util::rt::TokioIo;
 
+use super::requests::{Entry, RequestLog};
 use crate::kube::Kube;
 use crate::paths::Paths;
-use crate::supervisor::{AttachError, Handle};
+use crate::supervisor::{AttachError, EventFilter, Handle};
 
 #[derive(Clone)]
 pub struct Api {
     pub supervisor: Handle,
     pub kube: Kube,
     pub paths: Paths,
+    pub requests: Arc<RequestLog>,
     /// Reloads the configuration from disk and returns its problems.
-    pub reload: std::sync::Arc<dyn Fn() -> Vec<Problem> + Send + Sync>,
+    pub reload: Arc<dyn Fn() -> Vec<Problem> + Send + Sync>,
 }
 
 pub fn router(api: Api) -> Router {
@@ -45,6 +48,7 @@ pub fn router(api: Api) -> Router {
         .route(paths::LOGS, post(logs))
         .route(paths::MARK, post(mark))
         .route(paths::EVENTS, post(events))
+        .route(paths::REQUESTS, post(requests))
         .route(paths::RELOAD, post(reload))
         .route(paths::ENV, get(daemon_env))
         .route(paths::PROCESS_ENV, post(process_env))
@@ -125,34 +129,44 @@ fn full_snapshot(api: &Api) -> Snapshot {
 
 /// Whether an event is about what a kube address names.
 fn kube_event_matches(address: &KubeAddress, event: &Event) -> bool {
-    event.subjects.iter().any(|subject| {
-        subject.project == address.project
-            && address
-                .namespace
-                .as_ref()
-                .is_none_or(|n| subject.stack.as_ref() == Some(n))
-            && address
-                .service
-                .as_ref()
-                .is_none_or(|s| subject.app.as_ref() == Some(s))
-    })
+    event
+        .subjects
+        .iter()
+        .any(|subject| kube_subject_matches(address, subject))
+}
+
+fn kube_subject_matches(address: &KubeAddress, subject: &EventSubject) -> bool {
+    subject.project == address.project
+        && address
+            .namespace
+            .as_ref()
+            .is_none_or(|n| subject.stack.as_ref() == Some(n))
+        && address
+            .service
+            .as_ref()
+            .is_none_or(|s| subject.app.as_ref() == Some(s))
 }
 
 /// A 404 answer when the address names nothing in the current world.
 fn unresolved(api: &Api, target: &Address) -> Option<Response> {
-    let parsed: address::Address = match target.address.parse() {
-        Ok(parsed) => parsed,
-        Err(err) => return Some(error(StatusCode::NOT_FOUND, err.to_string())),
-    };
+    resolve(api, target)
+        .err()
+        .map(|message| error(StatusCode::NOT_FOUND, message))
+}
+
+/// What the address names in the current world, or why it names nothing.
+fn resolve(api: &Api, target: &Address) -> Result<address::Target, String> {
+    let parsed: address::Address = target
+        .address
+        .parse()
+        .map_err(|err: address::AddressError| err.to_string())?;
     let world = api.supervisor.world();
     let cwd = target.cwd.as_deref();
     let resolved = match &target.project {
         Some(project) => address::resolve_in_project(&world, project, &parsed, cwd),
         None => address::resolve(&world, &parsed, cwd),
     };
-    resolved
-        .err()
-        .map(|err| error(StatusCode::NOT_FOUND, err.to_string()))
+    resolved.map_err(|err| err.to_string())
 }
 
 async fn snapshot(State(api): State<Api>) -> Response {
@@ -349,6 +363,66 @@ async fn kube_events(
         };
         forward(&tx, follow, |event| {
             event.seq > last && kube_event_matches(&address, event)
+        })
+        .await;
+    });
+    stream(rx)
+}
+
+/// Which requests a client wants, by the address it gave.
+enum RequestScope {
+    All,
+    Kube(KubeAddress),
+    Instances(EventFilter),
+}
+
+impl RequestScope {
+    fn matches(&self, entry: &Entry) -> bool {
+        let subject = entry.handled.resolution.subject.as_ref();
+        match self {
+            RequestScope::All => true,
+            RequestScope::Kube(address) => {
+                subject.is_some_and(|subject| kube_subject_matches(address, subject))
+            }
+            RequestScope::Instances(filter) => {
+                subject.is_some_and(|subject| filter.matches_subject(subject))
+            }
+        }
+    }
+}
+
+async fn requests(
+    State(api): State<Api>,
+    JsonBody(request): JsonBody<RequestsRequest>,
+) -> Response {
+    let scope = match &request.target {
+        None => RequestScope::All,
+        Some(target) => match kube_address(&api, target) {
+            Some(Ok(address)) => RequestScope::Kube(address),
+            Some(Err(message)) => return error(StatusCode::NOT_FOUND, message),
+            None => match resolve(&api, target) {
+                Ok(target) => RequestScope::Instances(EventFilter::for_target(target)),
+                Err(message) => return error(StatusCode::NOT_FOUND, message),
+            },
+        },
+    };
+    let mut follow = request.follow.then(|| api.requests.follow());
+    let entries = api
+        .requests
+        .recent(|entry| scope.matches(entry), request.tail.unwrap_or(100));
+    let last = entries.last().map_or(0, |e| e.seq);
+    let (tx, rx) = mpsc::channel(64);
+    tokio::spawn(async move {
+        for entry in &entries {
+            if tx.send(ndjson(&entry.to_api())).await.is_err() {
+                return;
+            }
+        }
+        let Some(follow) = follow.as_mut() else {
+            return;
+        };
+        forward_with(&tx, follow, |entry: &Arc<Entry>| {
+            (entry.seq > last && scope.matches(entry)).then(|| ndjson(&entry.to_api()))
         })
         .await;
     });
@@ -556,18 +630,30 @@ async fn forward<T: Clone + Serialize>(
     follow: &mut broadcast::Receiver<T>,
     keep: impl Fn(&T) -> bool,
 ) {
+    forward_with(tx, follow, |item| keep(item).then(|| ndjson(item))).await;
+}
+
+/// Sends the lines `line` makes of what `follow` brings, until the client goes away
+/// or nothing more can come.
+async fn forward_with<T: Clone>(
+    tx: &mpsc::Sender<Bytes>,
+    follow: &mut broadcast::Receiver<T>,
+    line: impl Fn(&T) -> Option<Bytes>,
+) {
     loop {
         let item = tokio::select! {
             _ = tx.closed() => return,
             item = follow.recv() => item,
         };
         match item {
-            Ok(item) if keep(&item) => {
-                if tx.send(ndjson(&item)).await.is_err() {
+            Ok(item) => {
+                if let Some(line) = line(&item)
+                    && tx.send(line).await.is_err()
+                {
                     return;
                 }
             }
-            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => return,
         }
     }

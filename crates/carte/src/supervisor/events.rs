@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use carte_api::{Event, EventKind, EventSubject};
+use carte_core::address::Target;
 use carte_core::model::{InstanceKey, Stack};
 use tokio::sync::broadcast;
 
@@ -141,25 +142,44 @@ pub struct EventFilter {
 }
 
 impl EventFilter {
+    /// What a resolved address names; an app without a stack is on main.
+    pub fn for_target(target: Target) -> Self {
+        let stack = match (&target.app, &target.stack) {
+            (_, Some(stack)) => Some(stack.slug().to_string()),
+            (Some(_), None) => Some("main".to_string()),
+            (None, None) => None,
+        };
+        EventFilter {
+            project: Some(target.project),
+            stack,
+            app: target.app,
+            process: target.process,
+        }
+    }
+
     pub fn matches(&self, event: &Event) -> bool {
+        self.project.is_none() || event.subjects.iter().any(|s| self.matches_subject(s))
+    }
+
+    /// Whether something about `subject` is wanted. What concerns an instance counts
+    /// for each of its processes.
+    pub fn matches_subject(&self, subject: &EventSubject) -> bool {
         let Some(project) = &self.project else {
             return true;
         };
-        event.subjects.iter().any(|s| {
-            s.project == *project
-                && self
-                    .stack
-                    .as_ref()
-                    .is_none_or(|stack| s.stack.as_ref() == Some(stack))
-                && self
-                    .app
-                    .as_ref()
-                    .is_none_or(|app| s.app.as_ref() == Some(app))
-                && self
-                    .process
-                    .as_ref()
-                    .is_none_or(|p| s.process.as_ref().is_none_or(|sp| sp == p))
-        })
+        subject.project == *project
+            && self
+                .stack
+                .as_ref()
+                .is_none_or(|stack| subject.stack.as_ref() == Some(stack))
+            && self
+                .app
+                .as_ref()
+                .is_none_or(|app| subject.app.as_ref() == Some(app))
+            && self
+                .process
+                .as_ref()
+                .is_none_or(|p| subject.process.as_ref().is_none_or(|sp| sp == p))
     }
 }
 

@@ -4,6 +4,7 @@ mod activation;
 mod api;
 pub mod attach;
 mod notifications;
+mod requests;
 mod router;
 pub mod tunnel;
 pub mod watch;
@@ -100,12 +101,14 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         Duration::from_secs(15),
         crate::kube::LOOKUP_TIMEOUT,
     );
+    let requests = Arc::new(requests::RequestLog::default());
     let proxy = Proxy::new(Arc::new(router::DaemonRouter {
         supervisor: router::SupervisorRouter {
             supervisor: supervisor.clone(),
             hold,
         },
         kube: kube.clone(),
+        requests: requests.clone(),
     }));
     let bind_hint = |port| {
         format!(
@@ -173,6 +176,7 @@ pub async fn run(paths: Paths) -> anyhow::Result<()> {
         supervisor: supervisor.clone(),
         kube,
         paths: paths.clone(),
+        requests,
         reload: Arc::new(move || {
             let world = discovery::load_world(&config_dir);
             let problems = world
