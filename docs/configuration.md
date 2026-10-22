@@ -5,25 +5,31 @@ carte reads three kinds of TOML files:
 | File | Holds |
 | --- | --- |
 | `~/.config/carte/config.toml` | Machine settings: TLD, ports, idle timeout, limits, sharing |
-| `~/.config/carte/projects/<name>.toml` | One project: where its apps are, env and per-app settings; or a [kube project](kubernetes.md) |
+| `~/.config/carte/projects/<name>.toml` | One project: where its apps are, env and per-app settings. Or a [kube project](kubernetes.md) |
 | `carte.toml` in a repo | Defaults for that app, which can be committed |
 
-The config directory is `~/.config/carte` and carte's state (logs, the
-CA, pidfiles, instance data) lives in `~/.local/state/carte`, or under
-`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` when set. `CARTE_CONFIG_DIR`
-and `CARTE_STATE_HOME` set them directly; `carte setup` writes both into
-the daemon's LaunchAgent, or its systemd user service on Linux.
+The config directory is `~/.config/carte`. carte's state lives in
+`~/.local/state/carte`: logs, the CA, pidfiles and instance data. When
+`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are set, the two directories
+go under them instead.
+
+`CARTE_CONFIG_DIR` and `CARTE_STATE_HOME` set the two directories
+directly. `carte setup` writes both into the daemon's LaunchAgent, or
+into its systemd user service on Linux.
 
 Every key is optional unless noted. Unknown keys are errors, so a typo is
 reported instead of ignored.
 
 The daemon reloads files when they change. A file with an error keeps
 its last working version, and `carte ls` and the terminal UI show the
-error. Changes to `[share]` need a daemon restart (`carte daemon restart`).
+error. Changes to `[share]` need a daemon restart
+(`carte daemon restart`).
 
-**Durations** are strings of numbers with units `d`, `h`, `m`, `s` and
-`ms`: `"15m"`, `"1h30m"`, `"500ms"`. **Sizes** are a number of bytes, or a string with a
-binary unit: `"512KB"`, `"256MB"`, `"1GB"`.
+**Durations** are strings of numbers with the units `d`, `h`, `m`, `s`
+and `ms`, like `"15m"`, `"1h30m"` or `"500ms"`.
+
+**Sizes** are a number of bytes, or a string with a binary unit, like
+`"512KB"`, `"256MB"` or `"1GB"`.
 
 The other pages cover project files and what's in them:
 
@@ -31,15 +37,16 @@ The other pages cover project files and what's in them:
   and hostnames, and per-app settings
 - [Processes](processes.md): services and tasks, crashes, notifications,
   teardown, Node apps and policies
-- [Dev servers](dev-servers.md): dev servers that serve paths on an app's hostname,
-  like vite_ruby's or Shakapacker's
+- [Dev servers](dev-servers.md): dev servers that serve paths on an
+  app's hostname, like vite_ruby's or Shakapacker's
 - [Environment](environment.md): how each process's environment is built,
   instance directories, env templates and env files
 - [Kubernetes](kubernetes.md): kube projects and forwarding
 
 ## Machine config
 
-`~/.config/carte/config.toml`. A missing file means all defaults.
+The machine config is `~/.config/carte/config.toml`. Without the file,
+every setting has its default.
 
 ```toml
 tld = "localhost"
@@ -62,39 +69,56 @@ detach_key = "ctrl-q d"
 
 | Key | Default | |
 | --- | --- | --- |
-| `tld` | `"localhost"` | The top-level domain apps are served under. `carte setup` refuses one that isn't dot-separated letters, digits and hyphens, such as `".test"` or a path, until `carte setup --tld <tld>` replaces it. Any other (like `"test"`) needs `/etc/resolver/<tld>` on macOS, or on Linux a systemd-resolved DNS delegate (systemd 258 and later) or drop-in, which `carte setup` writes; apps answer under `.localhost` too |
+| `tld` | `"localhost"` | The top-level domain apps are served under. See below |
 | `http_port` | `80` | Plain HTTP |
 | `https_port` | `443` | HTTPS |
-| `dns_port` | `9253` | carte's DNS server, which `/etc/resolver/<tld>` or systemd-resolved points to for a `tld` other than `localhost` |
-| `idle_timeout` | `"15m"` | How long an app runs without traffic before it's stopped; projects can override it. An app with a process at a [debugger prompt](cli.md#attach) doesn't stop |
-| `teardown_delay` | `"10m"` | How long a stack's worktrees must stay gone before its [teardown](processes.md#teardown) runs; projects can override it |
-| `notifications` | `true` | Desktop [notifications](processes.md#notifications) when a process crashes, carte gives up on it, or it stops at a debugger prompt |
+| `dns_port` | `9253` | carte's DNS server, for a `tld` other than `localhost`. `/etc/resolver/<tld>` or systemd-resolved points to it |
+| `idle_timeout` | `"15m"` | How long an app runs without traffic before it's stopped. Projects can override it. An app with a process at a [debugger prompt](cli.md#attach) doesn't stop |
+| `teardown_delay` | `"10m"` | How long a stack's worktrees must stay gone before its [teardown](processes.md#teardown) runs. Projects can override it |
+| `notifications` | `true` | Desktop [notifications](processes.md#notifications) when a process crashes, when carte gives up on it, or when it stops at a debugger prompt |
 
-Changing `tld` or the ports means running `carte setup` again;
+A `tld` other than `localhost`, like `"test"`, needs the system to send
+its DNS lookups to carte. `carte setup` sets this up:
+
+- On macOS, it writes `/etc/resolver/<tld>`.
+- On Linux, it writes a systemd-resolved DNS delegate (systemd 258 and
+  later) or a drop-in.
+
+Apps then answer under `.localhost` too.
+
+`carte setup` refuses a `tld` that isn't dot-separated letters, digits
+and hyphens, such as `".test"` or a path. It keeps refusing until
+`carte setup --tld <tld>` replaces it.
+
+Changing `tld` or the ports means running `carte setup` again.
 `carte setup --tld <tld>` changes `tld` and does the rest.
 
 ### `[limits]`
 
-Limits are targets, not walls: they decide which idle apps to stop and
+Limits are targets, not walls. They decide which idle apps to stop, and
 never block a start.
 
 | Key | Default | |
 | --- | --- | --- |
 | `memory_target` | `"50%"` | Above this, the least recently used apps are stopped. A percentage of RAM or a size (`"16GB"`) |
 | `instance_target` | none | The same, for the number of running instances |
-| `hard_ceiling` | `50` | No more instances than this start; requests get an error instead. Catches runaway loops |
-| `pty_reserve` | `64` | Ptys left free for your own terminals; processes fall back to pipes rather than use them |
+| `hard_ceiling` | `50` | No more instances than this start, and requests get an error instead. Catches runaway loops |
+| `pty_reserve` | `64` | Ptys left free for your own terminals. Processes fall back to pipes rather than use them |
 | `log_buffer` | `"1MB"` | Log kept per process |
-| `log_budget` | `"256MB"` | Log kept in total; stopped apps' logs go first |
+| `log_budget` | `"256MB"` | Log kept in total. Stopped apps' logs go first |
 
-Apps that are starting or became ready in the last 10 seconds, pinned,
-handling requests, running a `carte exec` command, kept running by an
-app that depends on them, or waiting at a
-[debugger prompt](cli.md#attach) are never stopped to meet a target.
+carte never stops an app to meet a target while it is:
+
+- starting, or became ready in the last 10 seconds
+- pinned
+- handling requests
+- running a `carte exec` command
+- kept running by an app that depends on it
+- waiting at a [debugger prompt](cli.md#attach)
 
 ### `[share]`
 
-Set up by `carte setup --share <domain>`. Without this section, sharing
+`carte setup --share <domain>` sets up this section. Without it, sharing
 is off.
 
 | Key | Default | |
@@ -106,9 +130,17 @@ is off.
 
 ### `[attach]`
 
-For [`carte attach`](cli.md#attach) and typing into a process from the
-terminal UI.
+These settings are for [`carte attach`](cli.md#attach), and for typing
+into a process from the terminal UI.
 
 | Key | Default | |
 | --- | --- | --- |
-| `detach_key` | `"ctrl-q d"` | The keys that detach: `ctrl-<key>` or single characters, separated by spaces. With two different keys, typing the first twice sends it once. One character alone isn't allowed. A letter after the prefix works on any keyboard layout, unlike `ctrl-]` or `~` |
+| `detach_key` | `"ctrl-q d"` | The keys that detach. See below |
+
+`detach_key` is a list of keys separated by spaces. Each key is
+`ctrl-<key>` or a single character.
+
+- One character alone isn't allowed.
+- With two different keys, typing the first one twice sends it once.
+- A letter after the prefix works on any keyboard layout, unlike `ctrl-]`
+  or `~`.
