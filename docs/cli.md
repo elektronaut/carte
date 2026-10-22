@@ -98,7 +98,9 @@ WantedBy=sockets.target
 ```
 
 `carte-https.socket` is the same with port 443 and
-`FileDescriptorName=https`, and `carte.service` runs `carte daemon`.
+`FileDescriptorName=https`. `carte.service` runs `carte daemon`, with
+`Requires=` and `After=` naming both socket units. The order of the
+sockets varies; the daemon picks them by name.
 
 `pin`, `disable` and their opposites last until the daemon restarts;
 `--save` writes them to the project file. It refuses for a project a
