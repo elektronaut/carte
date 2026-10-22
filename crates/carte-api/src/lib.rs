@@ -707,18 +707,24 @@ pub struct ProxiedRequest {
     pub path: String,
     /// The `Host` header, port included.
     pub host: String,
-    pub status: u16,
+    /// `None` when it was cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+    /// Its client went away before the response's head, as a reload does while an
+    /// app boots.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled: bool,
     /// From its arrival until carte knew where to send it, waiting for a boot
-    /// included.
+    /// included, or until it was cancelled.
     pub held_ms: u64,
-    /// From sending it on until the response's head came back; `None` when carte
-    /// answered it itself.
+    /// From sending it on until the response's head came back, or until it was
+    /// cancelled; `None` when carte answered it itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_ms: Option<u64>,
     /// It came from the internet, through a share.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared: bool,
-    /// The visitor's addresses as the tunnel gave them, for a shared request.
+    /// The visitor's address as the tunnel gave it, for a shared request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visitor: Option<String>,
     /// It asked to become a WebSocket.
@@ -729,6 +735,10 @@ pub struct ProxiedRequest {
     pub request_headers: Vec<Header>,
     /// As sent to the client.
     pub response_headers: Vec<Header>,
+    /// Long header values were cut short, or headers past the entry's budget left
+    /// out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub headers_truncated: bool,
 }
 
 /// How a request found its way.
@@ -741,7 +751,9 @@ pub struct RequestRoute {
     /// The hostname is one of the app's `aliases`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub via_alias: bool,
-    pub served: Served,
+    /// `None` when it was cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served: Option<Served>,
     /// Apps it started ahead, as the first request its instance got, because they
     /// usually open next.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

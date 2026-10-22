@@ -40,6 +40,8 @@ pub struct Upstream {
     pub process: Option<String>,
     /// Apps the request started ahead, as the instance's first request.
     pub warmed: Vec<String>,
+    /// `main` or the stack of the checkout the instance runs from.
+    pub checkout: Option<String>,
 }
 
 /// Why an instance couldn't serve a request, in words for an error page.

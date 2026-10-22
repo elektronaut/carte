@@ -33,7 +33,8 @@ impl Entry {
             method: handled.method.to_string(),
             path: handled.path.clone(),
             host: handled.host.clone(),
-            status: handled.status.as_u16(),
+            status: handled.status.map(|s| s.as_u16()),
+            cancelled: handled.status.is_none(),
             held_ms: handled.held.as_millis() as u64,
             upstream_ms: handled.upstream.map(|upstream| upstream.as_millis() as u64),
             shared: handled.kind == ListenerKind::Share,
@@ -47,6 +48,7 @@ impl Entry {
             },
             request_headers: headers(&handled.request_headers),
             response_headers: headers(&handled.response_headers),
+            headers_truncated: handled.headers_truncated,
         }
     }
 }
@@ -130,11 +132,11 @@ mod tests {
             method: http::Method::GET,
             host: "web.acme.test".into(),
             path: "/".into(),
-            status: http::StatusCode::OK,
+            status: Some(http::StatusCode::OK),
             held: std::time::Duration::ZERO,
             upstream: None,
             websocket: false,
-            served: carte_api::Served::Forward,
+            served: Some(carte_api::Served::Forward),
             resolution: Resolution {
                 subject: app.map(|app| carte_api::EventSubject {
                     project: "acme".into(),
@@ -146,6 +148,7 @@ mod tests {
             },
             request_headers: http::HeaderMap::new(),
             response_headers: http::HeaderMap::new(),
+            headers_truncated: false,
         }
     }
 

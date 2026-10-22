@@ -14,8 +14,10 @@ use carte::kube::{
 };
 use carte::paths::Paths;
 use carte::process::Spawner;
-use carte::proxy::{BoxFuture, Dialer, Route, UpstreamError};
+use carte::proxy::{BoxFuture, Dialer, Route, Trace, UpstreamError};
 use carte::supervisor::{self, Handle, Options};
+
+static TRACE: Trace = Trace::new();
 use carte_api::{Event, EventKind};
 use carte_core::discovery;
 use carte_core::kube::{KubeProject, KubeTarget};
@@ -571,13 +573,13 @@ async fn forwards_a_short_hostname_to_the_one_namespace_with_the_service() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let dialer = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
+    let dialer = upstream(setup.kube.route(&TRACE, target("grafana", None)).await).unwrap();
     assert_eq!(get(&dialer).await, "grafana-a");
     assert_eq!(get(&dialer).await, "grafana-a");
     let again = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -597,11 +599,11 @@ async fn an_ambiguous_short_hostname_lists_the_namespaces() {
     let setup = Setup::new(PROJECT);
     setup.cluster.add_service("blue", "web", &["web-a"]).await;
     setup.cluster.add_service("green", "web", &["web-b"]).await;
-    let (status, text) = upstream(setup.kube.route(target("web", None)).await).unwrap_err();
+    let (status, text) = upstream(setup.kube.route(&TRACE, target("web", None)).await).unwrap_err();
     assert_eq!(status, StatusCode::MULTIPLE_CHOICES);
     assert!(text.contains("https://web.blue.prod.localhost"), "{text}");
     assert!(text.contains("https://web.green.prod.localhost"), "{text}");
-    let dialer = upstream(setup.kube.route(target("web", Some("green"))).await).unwrap();
+    let dialer = upstream(setup.kube.route(&TRACE, target("web", Some("green"))).await).unwrap();
     assert_eq!(get(&dialer).await, "web-b");
 }
 
@@ -615,7 +617,7 @@ async fn a_replaced_pod_is_followed() {
     let dialer = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -641,7 +643,8 @@ async fn a_replaced_pod_is_followed() {
 #[tokio::test]
 async fn errors_become_pages_and_events() {
     let setup = Setup::new(PROJECT);
-    let (status, text) = upstream(setup.kube.route(target("nope", None)).await).unwrap_err();
+    let (status, text) =
+        upstream(setup.kube.route(&TRACE, target("nope", None)).await).unwrap_err();
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
         text.contains("No namespace of prod has a Service named nope"),
@@ -652,7 +655,7 @@ async fn errors_become_pages_and_events() {
     let (status, text) = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap_err();
@@ -694,7 +697,7 @@ async fn the_pods_port_forward_error_is_reported() {
         status[0].stacks[0].instances[0].last_error.clone()
     };
     setup.cluster.state().pod_error = Some(message.into());
-    let dialer = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
+    let dialer = upstream(setup.kube.route(&TRACE, target("grafana", None)).await).unwrap();
     assert_eq!(fails(&dialer).await, "", "the request fails");
     assert_eq!(last_error(&setup).as_deref(), Some(message));
     assert_eq!(failures(&setup).await, 1);
@@ -764,7 +767,8 @@ async fn disabled_services_are_refused() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let (status, _) = upstream(setup.kube.route(target("grafana", None)).await).unwrap_err();
+    let (status, _) =
+        upstream(setup.kube.route(&TRACE, target("grafana", None)).await).unwrap_err();
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
@@ -777,7 +781,7 @@ async fn idle_forwards_stop() {
         .await;
     let route = setup
         .kube
-        .route(target("grafana", Some("monitoring")))
+        .route(&TRACE, target("grafana", Some("monitoring")))
         .await;
     let dialer = upstream(route).unwrap();
     assert_eq!(get(&dialer).await, "grafana-a");
@@ -799,7 +803,7 @@ async fn idle_forwards_stop() {
     let dialer = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -851,7 +855,7 @@ async fn reports_status_and_controls_forwards() {
         .await
         .unwrap();
     assert_eq!(response.affected, vec!["grafana.prod@monitoring"]);
-    let route = setup.kube.route(target("grafana", None)).await;
+    let route = setup.kube.route(&TRACE, target("grafana", None)).await;
     let status = setup.kube.status(&world);
     let grafana = status[0]
         .stacks
@@ -920,7 +924,7 @@ async fn stop_all_includes_forwards() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let route = setup.kube.route(target("grafana", None)).await;
+    let route = setup.kube.route(&TRACE, target("grafana", None)).await;
     assert!(setup.kube.stop_all(true).is_empty(), "a request holds it");
     drop(route);
     assert_eq!(setup.kube.stop_all(true), vec!["grafana.prod@monitoring"]);
@@ -985,7 +989,7 @@ async fn a_short_hostname_skips_namespaces_that_refuse() {
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
     setup.cluster.state().forbidden.insert("logging".into());
-    let dialer = upstream(setup.kube.route(target("grafana", None)).await).unwrap();
+    let dialer = upstream(setup.kube.route(&TRACE, target("grafana", None)).await).unwrap();
     assert_eq!(get(&dialer).await, "grafana-a");
 }
 
@@ -999,7 +1003,8 @@ async fn no_such_service_names_the_namespaces_it_couldnt_read() {
         .add_service("logging", "grafana", &["grafana-a"])
         .await;
     setup.cluster.state().forbidden.insert("logging".into());
-    let (status, text) = upstream(setup.kube.route(target("grafana", None)).await).unwrap_err();
+    let (status, text) =
+        upstream(setup.kube.route(&TRACE, target("grafana", None)).await).unwrap_err();
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(text.contains("(couldn't read logging)"), "{text}");
 }
@@ -1015,7 +1020,8 @@ async fn a_short_hostname_where_every_namespace_refuses_names_them() {
         .await;
     setup.cluster.state().forbidden.insert("logging".into());
     setup.cluster.state().forbidden.insert("monitoring".into());
-    let (status, text) = upstream(setup.kube.route(target("grafana", None)).await).unwrap_err();
+    let (status, text) =
+        upstream(setup.kube.route(&TRACE, target("grafana", None)).await).unwrap_err();
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(text.contains("logging, monitoring"), "{text}");
     assert!(!text.contains("`namespaces`"), "{text}");
@@ -1427,7 +1433,7 @@ async fn a_connection_left_open_between_requests_doesnt_keep_a_forward() {
     let dialer = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -1474,7 +1480,7 @@ async fn a_route_reaches_its_forward_in_process() {
         .await;
     let route = setup
         .kube
-        .route(target("grafana", Some("monitoring")))
+        .route(&TRACE, target("grafana", Some("monitoring")))
         .await;
     assert!(
         matches!(route, Route::Dialed { .. }),
@@ -1496,7 +1502,7 @@ async fn a_changed_project_keeps_its_forwards_and_connections() {
     let first = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -1519,7 +1525,7 @@ async fn a_changed_project_keeps_its_forwards_and_connections() {
     let second = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -1548,7 +1554,11 @@ async fn another_current_context_keeps_the_client() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let route = || {
+        setup
+            .kube
+            .route(&TRACE, target("grafana", Some("monitoring")))
+    };
     let first = upstream(route().await).unwrap();
     let mut open = first.dial().await.unwrap();
     assert_eq!(echo(&mut open, "one").await, "one");
@@ -1577,7 +1587,11 @@ async fn a_changed_server_or_user_gives_new_connections_a_new_client() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let route = || {
+        setup
+            .kube
+            .route(&TRACE, target("grafana", Some("monitoring")))
+    };
     let dialer = upstream(route().await).unwrap();
     let mut open = dialer.dial().await.unwrap();
     assert_eq!(echo(&mut open, "one").await, "one");
@@ -1609,7 +1623,11 @@ async fn a_kubeconfig_caught_mid_rewrite_keeps_the_client() {
         .cluster
         .add_service("monitoring", "grafana", &["grafana-a"])
         .await;
-    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let route = || {
+        setup
+            .kube
+            .route(&TRACE, target("grafana", Some("monitoring")))
+    };
     let dialer = upstream(route().await).unwrap();
     let full = kubeconfig("prod", SERVER, "one");
     let users = full.find("users:").unwrap();
@@ -1650,7 +1668,11 @@ async fn a_kubeconfig_caught_mid_rewrite_keeps_the_client() {
 async fn a_certificate_rotated_in_place_gives_new_connections_a_new_client() {
     let setup = Setup::new(PROJECT);
     let (certificate, key) = with_client_certificate(&setup).await;
-    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let route = || {
+        setup
+            .kube
+            .route(&TRACE, target("grafana", Some("monitoring")))
+    };
     let dialer = upstream(route().await).unwrap();
     upstream(route().await).unwrap();
     assert_eq!(setup.cluster.state().clients, 1);
@@ -1702,7 +1724,11 @@ async fn with_client_certificate(setup: &Setup) -> (PathBuf, PathBuf) {
 async fn a_rotation_that_keeps_the_modification_time_is_noticed() {
     let setup = Setup::new(PROJECT);
     let (_, key) = with_client_certificate(&setup).await;
-    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let route = || {
+        setup
+            .kube
+            .route(&TRACE, target("grafana", Some("monitoring")))
+    };
     upstream(route().await).unwrap();
     let modified = std::fs::metadata(&key).unwrap().modified().unwrap();
     let keep_time = |path: &Path| {
@@ -1727,7 +1753,11 @@ async fn a_rotation_that_keeps_the_modification_time_is_noticed() {
 async fn a_rotation_caught_halfway_keeps_the_client() {
     let setup = Setup::new(PROJECT);
     let (certificate, key) = with_client_certificate(&setup).await;
-    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let route = || {
+        setup
+            .kube
+            .route(&TRACE, target("grafana", Some("monitoring")))
+    };
     let dialer = upstream(route().await).unwrap();
     assert_eq!(setup.cluster.state().clients, 1);
 
@@ -1754,7 +1784,11 @@ async fn a_rotation_caught_halfway_keeps_the_client() {
 async fn a_context_switched_to_a_cluster_that_fails_isnt_kept() {
     let setup = Setup::new(PROJECT);
     with_client_certificate(&setup).await;
-    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let route = || {
+        setup
+            .kube
+            .route(&TRACE, target("grafana", Some("monitoring")))
+    };
     upstream(route().await).unwrap();
     setup.cluster.state().connect_fails = Some("no route to host".into());
     let text = std::fs::read_to_string(&setup.kubeconfig).unwrap();
@@ -1779,7 +1813,11 @@ async fn kubeconfig_files_from_the_provider_env_are_watched() {
     let second = dir.join("second");
     std::fs::write(&first, "apiVersion: v1\nkind: Config\n").unwrap();
     std::fs::write(&second, kubeconfig("prod", SERVER, "two")).unwrap();
-    let route = || setup.kube.route(target("grafana", Some("monitoring")));
+    let route = || {
+        setup
+            .kube
+            .route(&TRACE, target("grafana", Some("monitoring")))
+    };
     upstream(route().await).unwrap();
     let list = std::env::join_paths([&first, &second]).unwrap();
     setup
@@ -1822,7 +1860,7 @@ async fn disabling_a_service_stops_its_forward() {
     let dialer = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -1857,8 +1895,13 @@ async fn disabling_a_service_stops_its_forward() {
 #[tokio::test]
 async fn failed_lookups_are_forgotten_after_the_idle_timeout() {
     let setup = Setup::new(PROJECT);
-    let (status, _) =
-        upstream(setup.kube.route(target("nope", Some("monitoring"))).await).unwrap_err();
+    let (status, _) = upstream(
+        setup
+            .kube
+            .route(&TRACE, target("nope", Some("monitoring")))
+            .await,
+    )
+    .unwrap_err();
     assert_eq!(status, StatusCode::NOT_FOUND);
     let listed = |setup: &Setup| {
         setup.kube.status(&setup.handle.world())[0]
@@ -1910,7 +1953,7 @@ async fn a_forward_whose_cluster_stops_answering_fails_in_time() {
     let dialer = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -1955,7 +1998,7 @@ async fn a_forward_moves_off_a_pod_that_doesnt_answer() {
     let dialer = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap();
@@ -1986,7 +2029,7 @@ async fn a_route_that_times_out_says_the_cluster_didnt_answer() {
     let (status, text) = upstream(
         setup
             .kube
-            .route(target("grafana", Some("monitoring")))
+            .route(&TRACE, target("grafana", Some("monitoring")))
             .await,
     )
     .unwrap_err();

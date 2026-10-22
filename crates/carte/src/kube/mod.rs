@@ -238,13 +238,9 @@ impl Kube {
         kube
     }
 
-    /// Resolves the target to a running forward, opening one when needed.
-    pub async fn route(&self, target: KubeTarget) -> Route {
-        self.route_traced(target, &Trace::new()).await
-    }
-
-    /// Like [`Kube::route`], noting the Service the request is for in `trace`.
-    pub async fn route_traced(&self, target: KubeTarget, trace: &Trace) -> Route {
+    /// Resolves the target to a running forward, opening one when needed, and notes
+    /// the Service in `trace`.
+    pub async fn route(&self, trace: &Trace, target: KubeTarget) -> Route {
         let route = self.inner.clone().route(target, trace);
         match tokio::time::timeout(self.inner.outer_timeout(), route).await {
             Ok(Ok(route)) => route,

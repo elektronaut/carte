@@ -337,6 +337,7 @@ impl Instance {
             boot: self.boot,
             process,
             warmed: Vec::new(),
+            checkout: self.checkout.as_ref().map(|c| c.slug().to_string()),
         };
         match self.route_port {
             Some(port) => Some(upstream(port, None)),
@@ -391,6 +392,7 @@ impl Instance {
                     boot: self.boot,
                     process: Some(proc.spec.name.clone()),
                     warmed: Vec::new(),
+                    checkout: self.checkout.as_ref().map(|c| c.slug().to_string()),
                 })
             });
         }
