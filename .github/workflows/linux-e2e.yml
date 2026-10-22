@@ -6,10 +6,19 @@ on:
   pull_request:
     paths:
       - crates/carte/src/setup/**
+      - crates/carte/src/tls/**
       - crates/carte/src/daemon/activation.rs
       - crates/carte/src/cli/setup.rs
+      - crates/carte/src/cli/control.rs
+      - crates/carte/src/dns.rs
+      - crates/carte/src/paths.rs
+      - Cargo.toml
+      - Cargo.lock
+      - crates/carte/Cargo.toml
       - scripts/linux-e2e/**
       - .github/workflows/linux-e2e.yml
+  schedule:
+    - cron: "29 5 * * 1"
   workflow_dispatch:
 concurrency:
   group: linux-e2e-${{ github.ref }}
@@ -25,7 +34,8 @@ jobs:
       fail-fast: false
       matrix:
         distro: [debian, fedora, ubuntu]
-    runs-on: ubuntu-latest
+    # The oldest glibc of the three images.
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6.1.0

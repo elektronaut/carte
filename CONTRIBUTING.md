@@ -108,10 +108,18 @@ input from the run's artifacts and add a regression test with the fix.
 The test suite can't run `carte setup`, since it changes the machine.
 `scripts/linux-e2e/run.sh` runs it for real in systemd containers, Ubuntu
 24.04 (systemd 255), Debian 13 (systemd 257) and Fedora 43 (systemd 258), as
-a user with passwordless sudo:
-it sets carte up with `--tld test`, checks the ports, units, certificate
-stores and DNS, restarts the daemon, and uninstalls it again. It needs
-Docker, and runs in CI for pull requests that touch setup.
+a user with passwordless sudo: it sets carte up with `--tld test`, checks the
+ports, units, certificate stores and DNS, restarts the daemon, and uninstalls
+it again. It needs Docker, and runs in CI for pull requests that touch setup
+and once a week.
+
+The containers run with `--privileged`, which systemd needs. Most kernel
+settings under `/proc/sys` aren't per container, so a write there would change
+the Docker host and every other container on it. The images therefore have no
+distribution sysctl files and no `systemd-sysctl.service`, and only
+`/proc/sys/net`, which belongs to the container's network namespace, is
+writable. The test stops if the rest is writable, and checks that
+`sysctl --system` reads only carte's file.
 
 ```sh
 scripts/linux-e2e/run.sh                   # every distribution
