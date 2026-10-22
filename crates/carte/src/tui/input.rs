@@ -21,6 +21,8 @@ pub enum Mode {
     Jump,
     /// Typing into the selected process.
     Type,
+    /// Picking a colour theme.
+    Themes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,7 @@ pub enum Intent {
     CopyUrl,
     CopyPublicUrl,
     StartJump,
+    PickTheme,
     /// Moves to the next older match of the logs search, or the next newer one.
     FindMatch {
         older: bool,
@@ -150,6 +153,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("I", "stop idle instances"),
             ("X", "stop all instances"),
             ("!", "problems"),
+            ("T", "pick a colour theme"),
             ("?", "this help"),
             ("q", "quit"),
         ],
@@ -189,6 +193,13 @@ pub fn intent(mode: &Mode, focus: Focus, key: KeyEvent) -> Option<Intent> {
             _ => Intent::Close,
         }),
         Mode::Help | Mode::Problems => Some(Intent::Close),
+        Mode::Themes => Some(match key.code {
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => Intent::Move(1),
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => Intent::Move(-1),
+            KeyCode::Enter => Intent::Yes,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('T') => Intent::Close,
+            _ => return None,
+        }),
         Mode::Normal => normal(focus, key),
         Mode::Type => Some(Intent::Typed(key)),
     }
@@ -240,6 +251,7 @@ fn normal(focus: Focus, key: KeyEvent) -> Option<Intent> {
         KeyCode::Char('z') => Some(Intent::ToggleZoom),
         KeyCode::Char('m') => Some(Intent::ToggleMouse),
         KeyCode::Char('t') => Some(Intent::StartTyping),
+        KeyCode::Char('T') => Some(Intent::PickTheme),
         _ => None,
     };
     if shared.is_some() {
@@ -366,7 +378,7 @@ mod tests {
     #[test]
     fn ctrl_c_always_quits() {
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        for mode in [Mode::Normal, Mode::Filter, Mode::Help] {
+        for mode in [Mode::Normal, Mode::Filter, Mode::Help, Mode::Themes] {
             assert_eq!(intent(&mode, Focus::Logs, ctrl_c), Some(Intent::Quit));
         }
     }

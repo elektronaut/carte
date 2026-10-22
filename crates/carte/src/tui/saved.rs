@@ -1,4 +1,5 @@
-//! What the TUI remembers between sessions: folds and which instances it shows.
+//! What the TUI remembers between sessions: folds, which instances it shows and the
+//! colour theme.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +14,9 @@ pub struct Saved {
     /// Explicit fold choices.
     #[serde(default)]
     pub expanded: Vec<(NodeId, bool)>,
+    /// The colour theme's id.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 impl Saved {
@@ -33,6 +37,7 @@ impl Saved {
         Saved {
             show: fold.show,
             expanded,
+            theme: None,
         }
     }
 

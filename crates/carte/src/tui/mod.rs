@@ -93,6 +93,10 @@ async fn event_loop(
     let mut app = app::App::new(Instant::now());
     app.start_at = start_at;
     app.detach_keys = detach_keys;
+    app.truecolor = theme::truecolor();
+    if let Some(theme) = restored.theme.as_deref().and_then(theme::named) {
+        app.use_theme(theme);
+    }
     restored.apply(&mut app.fold);
     terminal.draw(|frame| view::render(frame, &mut app))?;
     while let Some(event) = rx.recv().await {
@@ -109,5 +113,8 @@ async fn event_loop(
         }
         terminal.draw(|frame| view::render(frame, &mut app))?;
     }
-    Ok(saved::Saved::from_fold(&app.fold, &app.roots))
+    Ok(saved::Saved {
+        theme: Some(app.theme.id.clone()),
+        ..saved::Saved::from_fold(&app.fold, &app.roots)
+    })
 }

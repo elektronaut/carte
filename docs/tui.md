@@ -15,10 +15,11 @@ the right, the details above the tabs. A status line and a line of
 keys sit below them. In a terminal narrower than 110 columns, the tree
 is on top instead.
 
-`tab` moves the focus between the tree and the tabs. The focused pane
-has a blue border. The keys at the bottom are the most used ones for
-the focused pane. While there are problems, or the share tunnel is
-down, the keys start with `! problems`.
+`tab` moves the focus between the tree and the tabs. The focused
+pane's border has the theme's focus colour, blue in the `terminal`
+theme. The keys at the bottom are the most used ones for the focused
+pane. While there are problems, or the share tunnel is down, the keys
+start with `! problems`.
 
 `z` zooms the right side: the details and tabs fill the space, with
 the details at full width on top. Their short facts then share a line.
@@ -219,6 +220,7 @@ shows the prompt and what you've typed.
 | `I` | Stop idle instances |
 | `X` | Stop all instances, after asking |
 | `!` | List problems |
+| `T` | Pick a colour [theme](#themes) |
 | `?` | Show the keys |
 | `q`, `ctrl-c` | Quit |
 
@@ -241,6 +243,36 @@ Any key closes the help and the problems.
 `m` turns the mouse off, so the terminal's own selection works, and on
 again.
 
+## Themes
+
+`T` lists the colour themes. Moving through the list shows each one on
+the whole screen at once. `enter` keeps it, and `esc` goes back to the
+one you had.
+
+| Theme | Kind |
+| --- | --- |
+| Terminal | Your terminal's own colours; the default |
+| Catppuccin Latte | Light |
+| Catppuccin Frappé, Macchiato, Mocha | Dark |
+| Tokyo Night | Dark |
+| Tokyo Night Day | Light |
+| Gruvbox Dark, Gruvbox Light | Dark, light |
+| Dracula | Dark |
+| Alucard | Light |
+| Nord | Dark |
+| Solarized Dark, Solarized Light | Dark, light |
+| Rosé Pine | Dark |
+| Rosé Pine Dawn | Light |
+
+Every theme but `terminal` paints its own background, so a light theme
+stays readable in a dark terminal. They use 24-bit colour when
+`COLORTERM` is `truecolor` or `24bit`, and the nearest of the 256
+colours otherwise.
+
+Each theme follows its authors' palette. Where a colour is too faint to
+read on the theme's background or on the selection, carte darkens or
+lightens it a little, to a contrast of at least 3:1, or 4.5:1 for text.
+
 ## Saved state
 
 The terminal UI remembers some choices between sessions, in `tui.json`
@@ -248,6 +280,7 @@ in carte's state directory, `~/.local/state/carte` by default (see
 [configuration](configuration.md)). It saves them when you quit.
 
 - The show filter.
+- The colour theme.
 - Rows you opened or closed. Rows that no longer exist are dropped.
 
 A kube project's own fold isn't saved, so it opens closed each time.
