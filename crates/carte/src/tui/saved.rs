@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::app::App;
 use super::tree::{Fold, Node, NodeId, Show, node, path_to};
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +45,16 @@ impl Saved {
     pub fn apply(self, fold: &mut Fold) {
         fold.show = self.show;
         fold.expanded = self.expanded.into_iter().collect();
+    }
+}
+
+/// The theme picked this session, or else the one saved before, even when it no
+/// longer loads.
+pub fn theme_to_save(restored: Option<String>, app: &App) -> Option<String> {
+    if app.picked_theme {
+        Some(app.theme.id.clone())
+    } else {
+        restored
     }
 }
 
@@ -121,6 +132,37 @@ mod tests {
             restored.expanded.into_iter().collect::<Vec<_>>(),
             [(stack, false)]
         );
+    }
+
+    #[test]
+    fn a_theme_that_no_longer_loads_stays_saved_until_another_is_picked() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = path(dir.path());
+        std::fs::write(&file, r#"{"show":"all","expanded":[],"theme":"gone"}"#).unwrap();
+        let restored = load(&file).theme;
+        assert_eq!(restored.as_deref(), Some("gone"));
+
+        let mut app = App::new(std::time::Instant::now());
+        assert_eq!(app.theme.id, "terminal", "an unknown id draws as terminal");
+        let saved = Saved {
+            theme: theme_to_save(restored.clone(), &app),
+            ..Saved::default()
+        };
+        store(&file, &saved).unwrap();
+        assert_eq!(load(&file).theme.as_deref(), Some("gone"));
+
+        app.picked_theme = true;
+        assert_eq!(theme_to_save(restored, &app).as_deref(), Some("terminal"));
+    }
+
+    #[test]
+    fn an_older_file_without_a_theme_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = path(dir.path());
+        std::fs::write(&file, r#"{"show":"running","expanded":[]}"#).unwrap();
+        let saved = load(&file);
+        assert_eq!(saved.show, Show::Running);
+        assert_eq!(saved.theme, None);
     }
 
     #[test]

@@ -21,7 +21,7 @@ use super::logs::{Logs, Prefix};
 use super::requests::Requests;
 use super::tabs::{EnvSubject, EnvTab, Tab};
 use super::target;
-use super::theme::{self, Theme};
+use super::theme::{self, Colors, Theme};
 use super::tree::{self, Fold, Node, NodeId, Row, Show};
 use crate::logs::Stripper;
 
@@ -237,8 +237,9 @@ pub struct App {
     pub detach_keys: DetachKeys,
     pub typing: Option<Typing>,
     pub theme: Theme,
-    /// Themes are drawn with the nearest of 256 colours without it.
-    pub truecolor: bool,
+    pub colors: Colors,
+    /// The theme was picked this session, so it's the one to save.
+    pub picked_theme: bool,
     pub picker: Option<ThemePicker>,
     typing_sessions: u64,
 }
@@ -280,7 +281,8 @@ impl App {
             detach_keys: DetachKeys::default(),
             typing: None,
             theme: Theme::default(),
-            truecolor: true,
+            colors: Colors::Truecolor,
+            picked_theme: false,
             picker: None,
             typing_sessions: 0,
         }
@@ -889,10 +891,9 @@ impl App {
     /// `fg`, and truecolor becomes 256 colours where the terminal lacks it.
     fn drawable(&self, theme: Theme) -> Theme {
         let theme = theme.inherit();
-        if self.truecolor {
-            theme
-        } else {
-            theme.indexed()
+        match self.colors {
+            Colors::Truecolor => theme,
+            Colors::Indexed => theme.indexed(),
         }
     }
 
@@ -901,7 +902,7 @@ impl App {
     }
 
     fn pick_theme(&mut self) {
-        let themes: Vec<Theme> = theme::builtins()
+        let themes: Vec<Theme> = theme::builtins(self.colors)
             .into_iter()
             .map(|t| self.drawable(t))
             .collect();
@@ -933,6 +934,7 @@ impl App {
             Intent::Yes => {
                 self.mode = Mode::Normal;
                 self.picker = None;
+                self.picked_theme = true;
                 let label = self.theme.label.clone();
                 self.inform(&format!("theme: {label}"));
             }

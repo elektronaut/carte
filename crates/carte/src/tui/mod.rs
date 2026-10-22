@@ -93,8 +93,12 @@ async fn event_loop(
     let mut app = app::App::new(Instant::now());
     app.start_at = start_at;
     app.detach_keys = detach_keys;
-    app.truecolor = theme::truecolor();
-    if let Some(theme) = restored.theme.as_deref().and_then(theme::named) {
+    app.colors = theme::Colors::detect();
+    let restored_theme = restored.theme.clone();
+    if let Some(theme) = restored_theme
+        .as_deref()
+        .and_then(|id| theme::named(id, app.colors))
+    {
         app.use_theme(theme);
     }
     restored.apply(&mut app.fold);
@@ -114,7 +118,7 @@ async fn event_loop(
         terminal.draw(|frame| view::render(frame, &mut app))?;
     }
     Ok(saved::Saved {
-        theme: Some(app.theme.id.clone()),
+        theme: saved::theme_to_save(restored_theme, &app),
         ..saved::Saved::from_fold(&app.fold, &app.roots)
     })
 }

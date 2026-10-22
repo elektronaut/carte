@@ -245,9 +245,10 @@ again.
 
 ## Themes
 
-`T` lists the colour themes. Moving through the list shows each one on
-the whole screen at once. `enter` keeps it, and `esc` goes back to the
-one you had.
+`T` lists the colour themes, with a `•` next to the current one.
+Moving through the list shows each theme on the whole screen at once.
+`enter` keeps it. `esc`, `q` and `T` go back to the theme you had, and
+`ctrl-c` goes back to it and quits.
 
 | Theme | Kind |
 | --- | --- |
@@ -267,11 +268,26 @@ one you had.
 Every theme but `terminal` paints its own background, so a light theme
 stays readable in a dark terminal. They use 24-bit colour when
 `COLORTERM` is `truecolor` or `24bit`, and the nearest of the 256
-colours otherwise.
+colours otherwise. Over SSH, `COLORTERM` often isn't passed on.
 
-Each theme follows its authors' palette. Where a colour is too faint to
-read on the theme's background or on the selection, carte darkens or
-lightens it a little, to a contrast of at least 3:1, or 4.5:1 for text.
+Each theme follows its authors' palette, with a few colours adjusted so
+they read on the theme's background and on the selection:
+
+- Text has a contrast of at least 4.5:1.
+- Status colours, such as running, starting and crashed, the accent
+  and process names have at least 3:1. They are darkened or lightened,
+  which keeps their hue.
+- Secondary text has at least 3:1, and moves toward the text colour.
+- No text colour moves more than halfway to black, white or the text
+  colour.
+- A pane's border moves toward the background where it is too close to
+  the focused pane's border.
+
+At 256 colours, carte adjusts again for the nearest colours, so the
+same contrast holds.
+
+`terminal` draws selected log lines and the jump prompt's pick
+reversed, since its colours are up to your terminal.
 
 ## Saved state
 
