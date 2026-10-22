@@ -54,6 +54,10 @@ pub struct BootFailure {
     pub transient: bool,
 }
 
+/// Crashes within the crash window, or readiness timeouts in a row, after which
+/// carte stops restarting a process.
+pub const GIVE_UP_AFTER: u32 = 5;
+
 const NO_WEB_PROCESS: &str = "No web process";
 const NOT_RUNNING: &str = "Not running";
 

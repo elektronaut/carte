@@ -683,20 +683,16 @@ impl EventKind {
     }
 }
 
-/// A setting as carte resolved it, and its default: the built-in value, or the
-/// project's or the machine's setting it overrides.
+/// A setting as carte resolved it, with carte's built-in default and what it
+/// inherits from the layer above: the machine for a project, the project or the
+/// machine for an app, the app for a process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Setting<T> {
     pub value: T,
     pub default: T,
-}
-
-impl<T: PartialEq> Setting<T> {
-    /// The configuration sets it to something other than its default. A setting
-    /// written out with its default value doesn't differ.
-    pub fn differs(&self) -> bool {
-        self.value != self.default
-    }
+    pub inherited: T,
+    /// Someone configured it: `value` isn't the default, or isn't what it inherits.
+    pub differs: bool,
 }
 
 /// What carte resolved for an address, configuration only.
@@ -705,8 +701,8 @@ impl<T: PartialEq> Setting<T> {
 pub enum ResolvedConfig {
     /// A project, or one of its stacks.
     Project(ResolvedProject),
-    App(ResolvedApp),
-    Process(ResolvedProcess),
+    App(Box<ResolvedApp>),
+    Process(Box<ResolvedProcess>),
     /// A kube project, or a namespace or Service of it.
     Kube(ResolvedKube),
     /// Sent by a newer daemon than this client knows.
@@ -814,10 +810,13 @@ pub struct Dependency {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedEnv {
-    /// `mise`, `direnv`, `shell` or `none`; the default is what carte detects.
-    pub provider: Setting<String>,
+    /// The project's `env_provider`: `mise`, `direnv`, `shell` or `none`; `None`
+    /// detects one in each checkout.
+    pub provider: Setting<Option<String>>,
+    /// The provider the daemon finds for this checkout, on its own `PATH`.
+    pub detected: String,
     pub files: Setting<Vec<String>>,
-    /// The project's templates, then the app's.
+    /// The project's templates, then the app's, one per key.
     pub templates: Vec<EnvTemplate>,
 }
 
@@ -842,8 +841,10 @@ pub struct ResolvedProcess {
     /// Serves the app's HTTP.
     pub http: Setting<bool>,
     pub ready: Setting<Readiness>,
-    /// How long it may take to become ready.
-    pub boot_timeout_secs: u64,
+    /// How long it may take to become ready, or a task to finish; `None` for a
+    /// process carte doesn't wait for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_timeout_secs: Option<u64>,
     pub paths: Setting<Vec<String>>,
     /// `instance` or `checkout`.
     pub scope: Setting<String>,
@@ -868,6 +869,13 @@ pub struct ResolvedProcess {
     /// A `pin` or `disable` that lasts until the daemon restarts, over `policy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_policy: Option<Policy>,
+    /// Its own env templates, over the app's.
+    pub env: Vec<EnvTemplate>,
+    /// Env templates it sets on every process of the instance.
+    pub provides: Vec<EnvTemplate>,
+    /// Why its defaults are unknown; each setting then has its value as defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
