@@ -67,15 +67,17 @@ pub struct DnsFacts {
     pub stub: bool,
     /// carte's files, by TLD.
     pub files: BTreeMap<String, (DnsFile, String)>,
+    /// Files with carte's names that don't start with its header.
+    pub unowned: Vec<PathBuf>,
 }
 
 impl DnsFacts {
     /// Whether a global drop-in routes only its TLD to carte: with global servers it
     /// would replace or join them, global domains would go to carte too, and without
     /// a default-route link nothing else would answer. What carte's own drop-ins add
-    /// to the global settings doesn't count.
-    pub fn drop_in_is_safe(&self, port: u16) -> bool {
-        let mut servers = vec![format!("127.0.0.1:{port}")];
+    /// to the global settings doesn't count; another server at carte's address does.
+    pub fn drop_in_is_safe(&self) -> bool {
+        let mut servers = Vec::new();
         let mut domains = Vec::new();
         for (kind, text) in self.files.values() {
             if *kind == DnsFile::DropIn {
@@ -109,6 +111,7 @@ impl DnsFacts {
         };
         let status = output("resolvectl", &["status", "--no-pager"]);
         let mut files = BTreeMap::new();
+        let mut unowned = Vec::new();
         for (kind, dir, prefix, suffix) in [
             (DnsFile::DropIn, DROP_IN_DIR, "carte-", ".conf"),
             (DnsFile::Delegate, DELEGATE_DIR, "carte-", ".dns-delegate"),
@@ -125,10 +128,11 @@ impl DnsFacts {
                 else {
                     continue;
                 };
-                if let Ok(text) = fs::read_to_string(entry.path())
-                    && text.starts_with(HEADER)
-                {
-                    files.insert(tld.to_string(), (kind.clone(), text));
+                match fs::read_to_string(entry.path()) {
+                    Ok(text) if text.starts_with(HEADER) => {
+                        files.insert(tld.to_string(), (kind.clone(), text));
+                    }
+                    _ => unowned.push(entry.path()),
                 }
             }
         }
@@ -139,6 +143,7 @@ impl DnsFacts {
             routing: status.as_deref().map(parse_resolvectl).unwrap_or_default(),
             stub: fs::read_to_string("/etc/resolv.conf").is_ok_and(|text| uses_stub(&text)),
             files,
+            unowned,
         }
     }
 
@@ -244,7 +249,7 @@ fn wanted(env: &SetupEnv, dns: &DnsFacts) -> Result<DnsFile, String> {
     if dns.delegates() {
         return Ok(DnsFile::Delegate);
     }
-    if dns.drop_in_is_safe(port) {
+    if dns.drop_in_is_safe() {
         return Ok(DnsFile::DropIn);
     }
     Err(format!(
@@ -256,8 +261,9 @@ fn wanted(env: &SetupEnv, dns: &DnsFacts) -> Result<DnsFile, String> {
     ))
 }
 
-/// Has systemd-resolved read its files again: a reload from systemd 253, a restart
-/// before, which keeps the links' DNS settings.
+/// Has systemd-resolved read its files again. Whether it can reload varies by version
+/// and distribution (Ubuntu's 255 can't), so this reloads where it can and restarts
+/// elsewhere, which keeps the links' DNS settings.
 fn reload() -> Step {
     Step::sudo(
         "Have systemd-resolved read its configuration again",
@@ -303,6 +309,12 @@ pub(super) fn install_steps(env: &SetupEnv, dns: &DnsFacts, plan: &mut Plan) {
             let contents = kind.contents(tld, port);
             if dns.files.get(tld).map(|(k, text)| (k, text.as_str())) != Some((&kind, &contents)) {
                 let path = kind.path(tld);
+                if dns.unowned.contains(&path) {
+                    plan.notes.push(format!(
+                        "{} wasn't written by carte; setup replaces it",
+                        path.display()
+                    ));
+                }
                 if let Some(dir) = path.parent() {
                     plan.steps.push(Step::sudo(
                         format!("Create {}", dir.display()),
@@ -367,6 +379,10 @@ pub(super) fn check(report: &mut Report, env: &SetupEnv, dns: &DnsFacts) {
                 Status::Missing,
                 "resolver",
                 match wanted(env, dns) {
+                    Ok(kind) if dns.unowned.contains(&kind.path(tld)) => format!(
+                        "{} isn't carte's, as it lacks carte's header; `carte setup` replaces it",
+                        kind.path(tld).display()
+                    ),
                     Ok(kind) => format!("{} is missing", kind.path(tld).display()),
                     Err(_) => format!(
                         "nothing sends .{tld} lookups to carte; `carte setup` says what to configure"
@@ -381,7 +397,7 @@ pub(super) fn check(report: &mut Report, env: &SetupEnv, dns: &DnsFacts) {
                     kind.path(tld).display()
                 ),
             ),
-            Some((DnsFile::DropIn, _)) if !dns.drop_in_is_safe(port) => report.push(
+            Some((DnsFile::DropIn, _)) if !dns.drop_in_is_safe() => report.push(
                 Status::Warn,
                 "resolver",
                 format!(
@@ -470,6 +486,7 @@ Link 2 (eth0)
             routing: parse_resolvectl(status),
             stub: true,
             files: BTreeMap::new(),
+            unowned: Vec::new(),
         }
     }
 
@@ -645,6 +662,35 @@ Link 2 (eth0)
     }
 
     #[test]
+    fn replaces_a_file_with_carte_s_name_that_isnt_carte_s() {
+        let env = linux_env();
+        let path = DnsFile::Delegate.path("test");
+        let facts = DnsFacts {
+            unowned: vec![path.clone()],
+            ..dns(258, STATUS_GLOBAL)
+        };
+        let plan = plan_install(&env, &with_dns(&env, facts.clone()));
+        assert!(commands(&plan).contains(&format!("sudo tee {}", path.display())));
+        assert_eq!(
+            plan.notes,
+            [
+                "/etc/systemd/dns-delegate.d/carte-test.dns-delegate wasn't written by carte; setup replaces it"
+            ]
+        );
+        let mut report = Report::default();
+        check(&mut report, &env, &facts);
+        assert!(
+            report.to_string().contains(
+                "--  resolver  /etc/systemd/dns-delegate.d/carte-test.dns-delegate isn't carte's, as it lacks carte's header; `carte setup` replaces it\n"
+            ),
+            "{report}"
+        );
+        assert!(plan_uninstall(&env, &with_dns(&env, facts)).steps.iter().all(|s| {
+            !matches!(&s.action, Action::Run { command, .. } if command.args.iter().any(|a| a.contains("carte-test")))
+        }));
+    }
+
+    #[test]
     fn reports_the_resolver() {
         let env = linux_env();
         let report = |dns: &DnsFacts| {
@@ -711,26 +757,30 @@ Link 2 (eth0)
             files,
             ..DnsFacts::default()
         };
-        assert!(routed(&[], &[], BTreeMap::new()).drop_in_is_safe(9253));
+        assert!(routed(&[], &[], BTreeMap::new()).drop_in_is_safe());
+        assert!(
+            !routed(&["127.0.0.1:9253"], &[], BTreeMap::new()).drop_in_is_safe(),
+            "another server at carte's address isn't carte's"
+        );
         assert!(
             routed(
                 &["127.0.0.1:9253"],
                 &["~test"],
                 [file(DnsFile::DropIn, "test")].into()
             )
-            .drop_in_is_safe(9253)
+            .drop_in_is_safe()
         );
         let old_port = (
             "test".to_string(),
             (DnsFile::DropIn, DnsFile::DropIn.contents("test", 5353)),
         );
         assert!(
-            routed(&["127.0.0.1:5353"], &["~test"], [old_port].into()).drop_in_is_safe(9253),
+            routed(&["127.0.0.1:5353"], &["~test"], [old_port].into()).drop_in_is_safe(),
             "carte's drop-in for another port doesn't count"
         );
-        assert!(!routed(&["127.0.0.1:5353"], &[], BTreeMap::new()).drop_in_is_safe(9253));
-        assert!(!routed(&[], &["corp.example"], BTreeMap::new()).drop_in_is_safe(9253));
-        assert!(!dns(257, STATUS_GLOBAL).drop_in_is_safe(9253));
+        assert!(!routed(&["127.0.0.1:5353"], &[], BTreeMap::new()).drop_in_is_safe());
+        assert!(!routed(&[], &["corp.example"], BTreeMap::new()).drop_in_is_safe());
+        assert!(!dns(257, STATUS_GLOBAL).drop_in_is_safe());
         assert_eq!(
             parse_systemd_version("systemd 258~rc1 (258~rc1-1)\n"),
             Some(258)
