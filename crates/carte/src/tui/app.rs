@@ -21,7 +21,7 @@ use super::logs::{Logs, Prefix};
 use super::requests::Requests;
 use super::tabs::{EnvSubject, EnvTab, Tab};
 use super::target;
-use super::theme::Theme;
+use super::theme::{self, Theme};
 use super::tree::{self, Fold, Node, NodeId, Row, Show};
 use crate::logs::Stripper;
 
@@ -177,6 +177,14 @@ pub struct Notice {
     pub at: Instant,
 }
 
+/// The theme popup: moving through it shows each theme until enter keeps one or esc
+/// goes back to `previous`.
+pub struct ThemePicker {
+    pub themes: Vec<Theme>,
+    pub cursor: usize,
+    pub previous: Theme,
+}
+
 pub struct App {
     pub connection: Connection,
     /// The daemon's snapshot with the kube projects' listed Services merged in.
@@ -229,6 +237,9 @@ pub struct App {
     pub detach_keys: DetachKeys,
     pub typing: Option<Typing>,
     pub theme: Theme,
+    /// Themes are drawn with the nearest of 256 colours without it.
+    pub truecolor: bool,
+    pub picker: Option<ThemePicker>,
     typing_sessions: u64,
 }
 
@@ -269,6 +280,8 @@ impl App {
             detach_keys: DetachKeys::default(),
             typing: None,
             theme: Theme::default(),
+            truecolor: true,
+            picker: None,
             typing_sessions: 0,
         }
     }
@@ -663,6 +676,9 @@ impl App {
         if self.mode == Mode::Jump {
             return self.jump_key(intent);
         }
+        if self.mode == Mode::Themes {
+            return self.theme_key(intent);
+        }
         if self.mode == Mode::Type {
             if let Intent::Typed(key) = intent {
                 commands.extend(self.type_key(key));
@@ -787,6 +803,7 @@ impl App {
                     self.warn(&format!("no lines match {:?}", self.logs.search));
                 }
             }
+            (Intent::PickTheme, _) => self.pick_theme(),
             (Intent::StartJump, _) => {
                 self.mode = Mode::Jump;
                 self.jump = Some(Jump::default());
@@ -866,6 +883,70 @@ impl App {
             self.mode = Mode::Normal;
         }
         self.typing.take()
+    }
+
+    /// The theme as it draws on this terminal: text roles left at `Reset` take
+    /// `fg`, and truecolor becomes 256 colours where the terminal lacks it.
+    fn drawable(&self, theme: Theme) -> Theme {
+        let theme = theme.inherit();
+        if self.truecolor {
+            theme
+        } else {
+            theme.indexed()
+        }
+    }
+
+    pub fn use_theme(&mut self, theme: Theme) {
+        self.theme = self.drawable(theme);
+    }
+
+    fn pick_theme(&mut self) {
+        let themes: Vec<Theme> = theme::builtins()
+            .into_iter()
+            .map(|t| self.drawable(t))
+            .collect();
+        let cursor = themes
+            .iter()
+            .position(|t| t.id == self.theme.id)
+            .unwrap_or(0);
+        self.picker = Some(ThemePicker {
+            themes,
+            cursor,
+            previous: self.theme.clone(),
+        });
+        self.mode = Mode::Themes;
+    }
+
+    fn theme_key(&mut self, intent: Intent) {
+        let Some(picker) = &mut self.picker else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        match intent {
+            Intent::Move(delta) => {
+                picker.cursor = picker
+                    .cursor
+                    .saturating_add_signed(delta)
+                    .min(picker.themes.len() - 1);
+                self.theme = picker.themes[picker.cursor].clone();
+            }
+            Intent::Yes => {
+                self.mode = Mode::Normal;
+                self.picker = None;
+                let label = self.theme.label.clone();
+                self.inform(&format!("theme: {label}"));
+            }
+            Intent::Quit => {
+                self.theme = picker.previous.clone();
+                self.picker = None;
+                self.quit = true;
+            }
+            _ => {
+                self.theme = picker.previous.clone();
+                self.mode = Mode::Normal;
+                self.picker = None;
+            }
+        }
     }
 
     fn jump_key(&mut self, intent: Intent) {

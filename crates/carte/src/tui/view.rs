@@ -8,7 +8,7 @@ use carte_api::{
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap,
@@ -61,6 +61,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Mode::Problems => render_problems(theme, frame, main, app),
         Mode::Confirm(confirm) => render_confirm(theme, frame, main, app, confirm),
         Mode::Jump => render_jump(theme, frame, main, app),
+        Mode::Themes => render_themes(theme, frame, main, app),
         Mode::Normal | Mode::Filter | Mode::Type => {}
     }
 }
@@ -188,11 +189,6 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     let header = Row::new(["", "", "CPU", "MEM"]).fg(theme.muted);
-    let selected_style = if app.focus == Focus::Tree {
-        Style::new().bg(theme.selection_bg)
-    } else {
-        Style::new().add_modifier(Modifier::DIM | Modifier::REVERSED)
-    };
     let table = Table::new(
         rows,
         [
@@ -203,7 +199,7 @@ fn render_tree(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
         ],
     )
     .header(header)
-    .row_highlight_style(selected_style);
+    .row_highlight_style(theme.selection());
     let mut state = TableState::default()
         .with_offset(app.tree_offset)
         .with_selected((!app.rows.is_empty()).then_some(app.cursor));
@@ -296,8 +292,7 @@ fn render_input(theme: &Theme, frame: &mut Frame, inner: Rect, input: Input) -> 
     above
 }
 
-/// On the selected row, `muted` text is drawn in `selection_fg` while the tree has
-/// the focus, and in `fg` under the unfocused, reversed selection.
+/// On the selected row, `muted` text is drawn in `selection_fg`.
 fn tree_row(
     theme: &Theme,
     app: &App,
@@ -308,10 +303,7 @@ fn tree_row(
     let row_theme;
     let theme = if selected {
         row_theme = Theme {
-            muted: match app.focus {
-                Focus::Tree => theme.selection_fg,
-                Focus::Logs => theme.fg,
-            },
+            muted: theme.selection_fg,
             ..theme.clone()
         };
         &row_theme
@@ -1062,7 +1054,6 @@ fn render_request_list(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut 
         frame.render_widget(Paragraph::new(message.fg(theme.muted)), inner);
         return;
     }
-    let focused = app.focus == Focus::Logs;
     let range = app.requests.window(usize::from(inner.height));
     let requests = &app.requests;
     let selected = requests.selected_index();
@@ -1079,19 +1070,14 @@ fn render_request_list(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut 
         .range(range.clone())
         .enumerate()
         .map(|(i, request)| {
-            let muted = match (Some(range.start + i) == selected, focused) {
-                (true, true) => theme.selection_fg,
-                (true, false) => theme.fg,
-                (false, _) => theme.muted,
+            let muted = if Some(range.start + i) == selected {
+                theme.selection_fg
+            } else {
+                theme.muted
             };
             request_row(theme, request, muted, path_width)
         })
         .collect();
-    let selected_style = if focused {
-        Style::new().bg(theme.selection_bg)
-    } else {
-        Style::new().add_modifier(Modifier::DIM | Modifier::REVERSED)
-    };
     let table = Table::new(
         rows,
         [
@@ -1103,7 +1089,7 @@ fn render_request_list(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut 
             Constraint::Length(1),
         ],
     )
-    .row_highlight_style(selected_style);
+    .row_highlight_style(theme.selection());
     let mut state = TableState::default()
         .with_selected(selected.and_then(|index| index.checked_sub(range.start)));
     frame.render_stateful_widget(table, inner, &mut state);
@@ -1353,7 +1339,10 @@ fn render_logs(theme: &Theme, frame: &mut Frame, mut inner: Rect, app: &mut App)
                 .collect()
         };
         if selected {
-            line_rows = line_rows.into_iter().map(Line::reversed).collect();
+            line_rows = line_rows
+                .into_iter()
+                .map(|line| line.patch_style(theme.selection()))
+                .collect();
         }
         rows.extend(line_rows);
     }
@@ -1590,6 +1579,44 @@ fn render_help(theme: &Theme, frame: &mut Frame, area: Rect) {
     popup(theme, frame, area, "keys", lines);
 }
 
+/// Each theme with a swatch of its colours on its own background.
+fn render_themes(theme: &Theme, frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = &app.picker else {
+        return;
+    };
+    let width = picker
+        .themes
+        .iter()
+        .map(|t| t.label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines: Vec<Line<'static>> = picker
+        .themes
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut spans = vec![Span::raw(format!("{:width$}  ", t.label))];
+            let swatch = Style::new().bg(t.bg);
+            spans.push(Span::styled(" ", swatch));
+            for color in [t.fg, t.accent, t.ok, t.warn, t.error, t.shared] {
+                spans.push(Span::styled("●", swatch.fg(color)));
+            }
+            spans.push(Span::styled(" ", swatch));
+            let line = Line::from(spans);
+            if i == picker.cursor {
+                line.style(theme.selection())
+            } else {
+                line
+            }
+        })
+        .collect();
+    lines.push(Line::default());
+    lines.push(Line::from(
+        "↑↓ preview · enter keeps · esc goes back".fg(theme.muted),
+    ));
+    popup(theme, frame, area, "theme", lines);
+}
+
 /// The jump prompt near the top, with the best matches below what was typed.
 fn render_jump(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let all = jump::candidates(&app.roots);
@@ -1610,7 +1637,7 @@ fn render_jump(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     for (i, candidate) in found.iter().enumerate().skip(first).take(shown) {
         let line = Line::from(format!("  {}", candidate.name));
         lines.push(if i == prompt.cursor {
-            line.reversed()
+            line.style(theme.selection())
         } else {
             line
         });
@@ -1990,11 +2017,8 @@ mod tests {
         press(&mut app, now, KeyCode::Tab);
         for text in ["worker", "disabled"] {
             let unfocused = draw_cell(&mut app, text);
-            assert!(unfocused.modifier.contains(Modifier::REVERSED));
-            assert_eq!(
-                unfocused.fg, theme.fg,
-                "{text} reverses like the rest of the row"
-            );
+            assert_eq!(unfocused.bg, theme.selection_bg, "{text} stays selected");
+            assert_eq!(unfocused.fg, theme.selection_fg);
         }
     }
 
@@ -3441,5 +3465,55 @@ mod tests {
             }
         }
         assert!(screen.contains("pin* and off* last until the daemon restarts"));
+    }
+
+    #[test]
+    fn the_theme_picker_previews_and_goes_back_or_keeps() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('T'));
+        let screen = draw(&mut app, 100, 30);
+        assert!(screen.contains("Catppuccin Mocha"), "{screen}");
+        assert!(screen.contains("Rosé Pine Dawn"), "{screen}");
+
+        press(&mut app, now, KeyCode::Down);
+        assert_eq!(app.theme.id, "catppuccin-latte", "moving previews");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert_eq!(
+            terminal.backend().buffer()[(0, 0)].bg,
+            app.theme.bg,
+            "the whole screen takes the theme's background"
+        );
+        press(&mut app, now, KeyCode::Esc);
+        assert_eq!(app.theme, Theme::terminal(), "esc goes back");
+        assert_eq!(app.mode, Mode::Normal);
+
+        press(&mut app, now, KeyCode::Char('T'));
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Down);
+        press(&mut app, now, KeyCode::Enter);
+        assert_eq!(app.theme.id, "catppuccin-frappe", "enter keeps");
+        assert_eq!(app.mode, Mode::Normal);
+        press(&mut app, now, KeyCode::Char('T'));
+        assert_eq!(
+            app.picker.as_ref().unwrap().cursor,
+            2,
+            "opens at the current theme"
+        );
+    }
+
+    #[test]
+    fn without_truecolor_themes_draw_in_256_colours() {
+        let mut app = busy_app();
+        app.truecolor = false;
+        let now = app.now;
+        press(&mut app, now, KeyCode::Char('T'));
+        press(&mut app, now, KeyCode::Down);
+        assert!(
+            matches!(app.theme.bg, Color::Indexed(_)),
+            "{:?}",
+            app.theme.bg
+        );
     }
 }
