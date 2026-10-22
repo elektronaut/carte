@@ -4,6 +4,9 @@ RUN dnf -y install --setopt=install_weak_deps=False systemd systemd-resolved dbu
     python3 openssl curl ca-certificates p11-kit-trust nss-tools iproute procps-ng sudo util-linux-script \
  && dnf clean all
 RUN useradd -m -s /bin/bash dev && echo 'dev ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/dev
+# Readable by root without CAP_DAC_OVERRIDE, which Ubuntu hosts' AppArmor
+# profile for unix_chkpwd denies; with mode 000, PAM can't start dev's sessions.
+RUN chmod 0400 /etc/shadow
 # No distribution sysctl files, so `sysctl --system` applies only carte's.
 RUN rm -f /usr/lib/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf /etc/sysctl.d/*.conf /etc/sysctl.conf \
  && systemctl mask systemd-sysctl.service
