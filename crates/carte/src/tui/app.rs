@@ -310,7 +310,11 @@ impl App {
             }
             Event::Unshared(Err(message)) => self.warn(&message),
             Event::Env { generation, result } => {
+                self.env.in_flight = false;
                 if generation == self.env.generation {
+                    let result = result.map_err(|message| {
+                        message.replace("choose one with --process", "select one in the tree")
+                    });
                     self.env.env = Some(result);
                 }
             }
@@ -489,7 +493,11 @@ impl App {
                 }
                 self.focus = Focus::Logs;
                 let top = self.logs_area.y + 1;
-                if self.tab != Tab::Env
+                let lines = match self.tab {
+                    Tab::Logs | Tab::Events => true,
+                    Tab::Env => false,
+                };
+                if lines
                     && at.y >= top
                     && let Some(seq) = self.logs.seq_at(usize::from(at.y - top))
                 {
@@ -545,10 +553,11 @@ impl App {
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 let up = event.kind == MouseEventKind::ScrollUp;
-                if self.logs_area.contains(at) && self.tab == Tab::Env {
-                    self.env.scroll_by(if up { -3 } else { 3 });
-                } else if self.logs_area.contains(at) {
-                    self.logs.scroll_by(if up { 3 } else { -3 });
+                if self.logs_area.contains(at) {
+                    match self.tab {
+                        Tab::Logs | Tab::Events => self.logs.scroll_by(if up { 3 } else { -3 }),
+                        Tab::Env => self.env.scroll_by(if up { -3 } else { 3 }),
+                    }
                 } else if self.tree_area.contains(at) {
                     self.move_by(if up { -1 } else { 1 });
                 }
@@ -606,7 +615,10 @@ impl App {
             }
             return;
         }
-        let env = self.tab == Tab::Env;
+        let env = match self.tab {
+            Tab::Env => true,
+            Tab::Logs | Tab::Events => false,
+        };
         match (intent, self.focus) {
             (Intent::Quit, _) => self.quit = true,
             (Intent::Help, _) => self.mode = Mode::Help,
@@ -631,6 +643,7 @@ impl App {
             (Intent::Top, Focus::Logs) if env => self.env.scroll = 0,
             (Intent::Bottom, Focus::Logs) if env => self.env.scroll = usize::MAX,
             (Intent::StartFilter, Focus::Logs) if env => self.inform("/ searches the logs"),
+            (Intent::FindMatch { .. }, Focus::Logs) if env => {}
             (Intent::Move(delta), Focus::Logs) => self.logs.scroll_by(-delta),
             (Intent::PageDown, Focus::Tree) => self.move_by(page(self.tree_height)),
             (Intent::PageUp, Focus::Tree) => self.move_by(-page(self.tree_height)),
@@ -819,8 +832,11 @@ impl App {
 
     /// Shows `tab`; picking the env tab again fetches the env again.
     fn pick_tab(&mut self, tab: Tab) {
-        if tab == self.tab && tab == Tab::Env {
-            self.env.subject = EnvSubject::None;
+        if tab == self.tab {
+            match tab {
+                Tab::Env => self.env.subject = EnvSubject::None,
+                Tab::Logs | Tab::Events => {}
+            }
         }
         self.tab = tab;
     }
@@ -828,8 +844,9 @@ impl App {
     /// The env tab's subject: the selected process, or the process of the selected app
     /// that serves HTTP, or its only one.
     fn env_subject(&self) -> EnvSubject {
-        if self.tab != Tab::Env {
-            return EnvSubject::None;
+        match self.tab {
+            Tab::Env => {}
+            Tab::Logs | Tab::Events => return EnvSubject::None,
         }
         let unavailable = |text: &str| EnvSubject::Unavailable(text.to_string());
         let Some(id) = self.selected_node().map(Node::id) else {
@@ -892,20 +909,25 @@ impl App {
         }
     }
 
-    /// Fetches the env when the env tab's subject changed.
+    /// Fetches the env tab's subject once it changed, one fetch at a time: rendering
+    /// an env runs the project's env tools in the daemon. A subject that changes while
+    /// a fetch runs is fetched when it returns.
     fn sync_env(&mut self) -> Option<Command> {
         let subject = self.env_subject();
-        if subject == self.env.subject {
+        if subject != self.env.subject {
+            self.env.restart(subject);
+        }
+        if self.env.in_flight || self.env.env.is_some() {
             return None;
         }
-        let target = match &subject {
-            EnvSubject::Fetch { id, .. } => Some(target::address(id)),
-            _ => None,
+        let EnvSubject::Fetch { id, .. } = &self.env.subject else {
+            return None;
         };
-        let generation = self.env.restart(subject);
+        let target = target::address(id);
+        self.env.in_flight = true;
         Some(Command::FetchEnv {
-            generation,
-            target: target?,
+            generation: self.env.generation,
+            target,
         })
     }
 
@@ -1246,7 +1268,11 @@ impl App {
             return Some(Command::StopLogs);
         }
         let node = self.selected_node();
-        if self.tab == Tab::Events || self.follows_kube_events() {
+        let events = match self.tab {
+            Tab::Events => true,
+            Tab::Logs | Tab::Env => false,
+        };
+        if events || self.follows_kube_events() {
             return Some(Command::FollowEvents {
                 generation,
                 request: EventsRequest {
@@ -1279,26 +1305,30 @@ impl App {
     fn log_key(&self) -> Option<String> {
         self.snapshot.as_ref()?;
         let id = self.selected_node().map(Node::id);
-        if self.tab == Tab::Env {
-            return None;
-        }
-        if self.tab == Tab::Events {
-            return Some(match id {
+        match self.tab {
+            Tab::Env => None,
+            Tab::Events => Some(match id {
                 Some(id) if !matches!(id, NodeId::Folder { .. }) => {
                     format!("events {}", target::label(id))
                 }
                 _ => "events".to_string(),
-            });
+            }),
+            Tab::Logs => {
+                let id = id?;
+                if matches!(id, NodeId::Folder { .. }) {
+                    return None;
+                }
+                Some(target::label(id))
+            }
         }
-        let id = id?;
-        if matches!(id, NodeId::Folder { .. }) {
-            return None;
-        }
-        Some(target::label(id))
     }
 
     fn log_prefix(&self) -> Prefix {
-        if self.tab == Tab::Events || self.follows_kube_events() {
+        let events = match self.tab {
+            Tab::Events => true,
+            Tab::Logs | Tab::Env => false,
+        };
+        if events || self.follows_kube_events() {
             return Prefix::None;
         }
         match self.selected_node().map(Node::id) {
@@ -1594,6 +1624,18 @@ mod tests {
         assert_eq!(app.cursor, 0);
         app.update(mouse(MouseEventKind::ScrollDown, 10, 5), now);
         assert_eq!(app.cursor, 1);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_env_tab() {
+        let (mut app, now) = connected();
+        app.logs_area = Rect::new(40, 0, 40, 20);
+        press(&mut app, now, KeyCode::Char('3'));
+        app.update(mouse(MouseEventKind::ScrollDown, 50, 5), now);
+        assert_eq!(app.env.scroll, 3);
+        app.update(mouse(MouseEventKind::ScrollUp, 50, 5), now);
+        assert_eq!(app.env.scroll, 0);
+        assert_eq!(app.logs.scroll, 0, "the logs stay put");
     }
 
     #[test]
@@ -2004,15 +2046,15 @@ mod tests {
         press(&mut app, now, KeyCode::Tab);
 
         press(&mut app, now, KeyCode::Right);
-        let (latest, address) = fetches_env(&press(&mut app, now, KeyCode::Down));
-        assert_eq!(address, "nova-billing@main/web");
-        assert!(matches!(
-            app.env.subject,
-            EnvSubject::Fetch { note: None, .. }
-        ));
-        app.update(
+        let mut moved = press(&mut app, now, KeyCode::Down);
+        moved.extend(press(&mut app, now, KeyCode::Down));
+        assert!(
+            !moved.iter().any(|c| matches!(c, Command::FetchEnv { .. })),
+            "one fetch at a time: {moved:?}"
+        );
+        let commands = app.update(
             Event::Env {
-                generation: first,
+                generation: again,
                 result: Err("late".into()),
             },
             now,
@@ -2021,9 +2063,31 @@ mod tests {
             app.env.env, None,
             "an answer for an earlier selection is dropped"
         );
-        let commands = press(&mut app, now, KeyCode::Down);
-        assert_eq!(fetches_env(&commands).1, "nova-billing@main/worker");
-        assert!(latest < app.env.generation);
+        let (latest, address) = fetches_env(&commands);
+        assert_eq!(address, "nova-billing@main/worker", "the latest selection");
+        assert!(matches!(
+            app.env.subject,
+            EnvSubject::Fetch { note: None, .. }
+        ));
+        app.update(
+            Event::Env {
+                generation: latest,
+                result: Err(
+                    "no process of nova-billing serves HTTP; choose one with --process: web".into(),
+                ),
+            },
+            now,
+        );
+        assert_eq!(
+            app.env.env,
+            Some(Err(
+                "no process of nova-billing serves HTTP; select one in the tree: web".into()
+            ))
+        );
+        assert!(
+            press(&mut app, now, KeyCode::Char('?')).is_empty(),
+            "answered, so nothing more to fetch"
+        );
     }
 
     #[test]

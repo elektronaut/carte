@@ -67,8 +67,10 @@ pub enum EnvSubject {
 #[derive(Debug, Default)]
 pub struct EnvTab {
     pub subject: EnvSubject,
-    /// Counts fetches, so a late answer for an earlier subject is dropped.
+    /// Counts subjects; a fetch's answer carries the one it was for.
     pub generation: u64,
+    /// A fetch hasn't answered yet.
+    pub in_flight: bool,
     /// None while the daemon renders it.
     pub env: Option<Result<EnvResponse, String>>,
     pub scroll: usize,
@@ -77,13 +79,12 @@ pub struct EnvTab {
 }
 
 impl EnvTab {
-    /// Starts over for a new subject; returns the generation to fetch it with.
-    pub fn restart(&mut self, subject: EnvSubject) -> u64 {
+    /// Starts over for a new subject.
+    pub fn restart(&mut self, subject: EnvSubject) {
         self.subject = subject;
         self.generation += 1;
         self.env = None;
         self.scroll = 0;
-        self.generation
     }
 
     pub fn scroll_by(&mut self, delta: isize) {

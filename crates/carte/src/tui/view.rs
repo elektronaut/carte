@@ -33,6 +33,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     .areas(frame.area());
 
     app.problems_area = Rect::default();
+    app.logs_area = Rect::default();
+    app.tab_spans.clear();
     if app.snapshot.is_some() {
         let [left, right] = if main.width >= 110 {
             Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(main)
@@ -46,7 +48,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
     frame.render_widget(status_line(theme, app, status.width), status);
     frame.render_widget(
-        footer_line(theme, app.focus, has_problems(app), footer.width),
+        footer_line(theme, app.focus, app.tab, has_problems(app), footer.width),
         footer,
     );
 
@@ -830,6 +832,12 @@ fn render_tabs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
     let kube = id
         .as_ref()
         .is_some_and(|id| app.kube_project(id.project()).is_some());
+    let status = match app.tab {
+        Tab::Logs | Tab::Events => logs_status(theme, &app.logs),
+        Tab::Env => Vec::new(),
+    };
+    let status = Line::from(status);
+    let names_end = area.right().saturating_sub(1 + status.width() as u16);
     let mut title = vec![Span::raw(" ")];
     let mut x = area.x + 2;
     app.tab_spans.clear();
@@ -847,16 +855,13 @@ fn render_tabs(theme: &Theme, frame: &mut Frame, area: Rect, app: &mut App) {
             (false, false) => Style::new().fg(theme.muted),
         };
         title.push(Span::styled(name, style));
-        if x + width < area.right() {
+        if x + width <= names_end {
             app.tab_spans.push((tab, x, x + width));
         }
         x += width;
     }
     title.push(Span::raw(" "));
-    let mut block = pane(theme, Line::from(title), focused);
-    if app.tab != Tab::Env {
-        block = block.title(Line::from(logs_status(theme, &app.logs)).right_aligned());
-    }
+    let block = pane(theme, Line::from(title), focused).title(status.right_aligned());
     let inner = block.inner(area);
     app.logs_area = area;
     frame.render_widget(block, area);
@@ -886,7 +891,10 @@ fn logs_status(theme: &Theme, logs: &Logs) -> Vec<Span<'static>> {
 }
 
 fn render_logs(theme: &Theme, frame: &mut Frame, inner: Rect, app: &mut App) {
-    let events = app.tab == Tab::Events;
+    let events = match app.tab {
+        Tab::Events => true,
+        Tab::Logs | Tab::Env => false,
+    };
     app.logs.height = inner.height as usize;
     app.logs.width = inner.width as usize;
     let logs = &app.logs;
@@ -1073,7 +1081,7 @@ fn has_problems(app: &App) -> bool {
 
 /// The most used keys for the focused pane, as many as fit in `width`, after
 /// `! problems` while there are any.
-fn footer_line(theme: &Theme, focus: Focus, problems: bool, width: u16) -> Line<'static> {
+fn footer_line(theme: &Theme, focus: Focus, tab: Tab, problems: bool, width: u16) -> Line<'static> {
     let keys: &[(&str, &str)] = match focus {
         Focus::Tree => &[
             ("?", "help"),
@@ -1087,7 +1095,7 @@ fn footer_line(theme: &Theme, focus: Focus, problems: bool, width: u16) -> Line<
             ("a", "show"),
             ("d", "disable"),
             ("1-3", "tabs"),
-            ("tab", "logs"),
+            ("tab", tab.name()),
         ],
         Focus::Logs => &[
             ("?", "help"),
@@ -2287,6 +2295,29 @@ mod tests {
         app.update(click(column("1 logs") - 2), now);
         assert_eq!(app.tab, Tab::Events, "the border beside a tab isn't one");
         assert_eq!(cell(&mut app, "2 events").fg, theme.accent);
+        let commands = app.update(click(column("3 env")), now);
+        assert_eq!(app.tab, Tab::Env, "a muted tab opens too");
+        assert_eq!(commands, [Command::StopLogs]);
+
+        app.update(Event::Disconnected("gone".into()), now);
+        draw(&mut app, 120, 30);
+        app.update(click(column("1 logs")), now);
+        assert_eq!(app.tab, Tab::Env, "no tabs while the daemon is away");
+    }
+
+    #[test]
+    fn the_logs_status_hides_the_tab_names_it_covers() {
+        let mut app = busy_app();
+        let now = app.now;
+        press(&mut app, now, KeyCode::Tab);
+        press(&mut app, now, KeyCode::Char('/'));
+        for c in "puma-starting-mode".chars() {
+            press(&mut app, now, KeyCode::Char(c));
+        }
+        press(&mut app, now, KeyCode::Enter);
+        draw(&mut app, 56, 30);
+        let tabs: Vec<Tab> = app.tab_spans.iter().map(|(tab, ..)| *tab).collect();
+        assert_eq!(tabs, [Tab::Logs, Tab::Events], "env is under the status");
     }
 
     #[test]
