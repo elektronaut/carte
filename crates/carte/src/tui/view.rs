@@ -1149,16 +1149,10 @@ fn highlight(theme: &Theme, text: &str, search: &str, current: bool) -> Vec<Span
     if search.is_empty() {
         return vec![Span::raw(text.to_string())];
     }
-    let lower = text.to_ascii_lowercase();
-    let needle = search.to_ascii_lowercase();
+    let needle = super::logs::fold(search);
     let mut spans = Vec::new();
     let mut from = 0;
-    while let Some(found) = lower[from..].find(&needle) {
-        let start = from + found;
-        let end = start + needle.len();
-        if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
-            break;
-        }
+    while let Some((start, end)) = super::logs::find(text, &needle, from) {
         spans.push(Span::raw(text[from..start].to_string()));
         let matched = Span::raw(text[start..end].to_string());
         spans.push(matched.style(theme.search_match(current)));
@@ -2662,6 +2656,18 @@ mod tests {
         assert_eq!(spans[1].style, Style::new().black().on_yellow());
         let spans = highlight(&Theme::terminal(), "GET /up", "get", false);
         assert_eq!(spans[1].style, Style::new().yellow().bold());
+        for (text, search, matched) in [
+            ("Fakturaer på Øst: ÆØÅ", "æøå", "ÆØÅ"),
+            ("ble Æ og å", "Å", "å"),
+            ("ΟΔΟΣ ok", "οδος", "ΟΔΟΣ"),
+            ("İzmir İzmir", "iz", "İz"),
+            ("to İ and back", "İ", "İ"),
+        ] {
+            let spans = highlight(&Theme::terminal(), text, search, false);
+            let texts: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(texts[1], matched, "{search} in {text}");
+            assert_eq!(texts.concat(), text);
+        }
     }
 
     #[test]
