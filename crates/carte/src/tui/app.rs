@@ -180,6 +180,9 @@ pub struct App {
     pub logs: Logs,
     /// The tab the pane below the details shows.
     pub tab: Tab,
+    /// While the details and tabs fill the main area without the tree, the focus
+    /// from before.
+    pub zoom: Option<Focus>,
     pub notice: Option<Notice>,
     /// Passwords of the shares made here, by project and stack: the daemon only hands
     /// them out when a share is made.
@@ -229,6 +232,7 @@ impl App {
             mode: Mode::Normal,
             logs: Logs::default(),
             tab: Tab::Logs,
+            zoom: None,
             notice: None,
             credentials: BTreeMap::new(),
             tree_height: 0,
@@ -348,6 +352,9 @@ impl App {
             if now.duration_since(notice.at) > lasts {
                 self.notice = None;
             }
+        }
+        if self.zoom.is_some() {
+            self.focus = Focus::Logs;
         }
         commands.extend(self.sync_logs());
         commands.extend(self.sync_env());
@@ -624,6 +631,10 @@ impl App {
             (Intent::Help, _) => self.mode = Mode::Help,
             (Intent::Problems, _) => self.mode = Mode::Problems,
             (Intent::Close, _) => self.mode = Mode::Normal,
+            (Intent::SwitchFocus, _) if self.zoom.is_some() => {
+                self.zoom = None;
+                self.focus = Focus::Tree;
+            }
             (Intent::SwitchFocus, _) => {
                 self.focus = match self.focus {
                     Focus::Tree => Focus::Logs,
@@ -668,6 +679,13 @@ impl App {
             }
             (Intent::StartFilter, _) => self.mode = Mode::Filter,
             (Intent::FilterDone, _) => self.mode = Mode::Normal,
+            (Intent::ClearFilter, _)
+                if self.zoom.is_some()
+                    && self.mode == Mode::Normal
+                    && self.logs.search.is_empty() =>
+            {
+                self.unzoom();
+            }
             (Intent::ClearFilter, _) => {
                 self.mode = Mode::Normal;
                 self.edit_filter(|filter| filter.clear());
@@ -684,6 +702,11 @@ impl App {
                 } else {
                     "Mouse off: drag to select text, m turns it back on"
                 });
+            }
+            (Intent::ToggleZoom, _) if self.zoom.is_some() => self.unzoom(),
+            (Intent::ToggleZoom, _) => {
+                self.zoom = Some(self.focus);
+                self.focus = Focus::Logs;
             }
             (Intent::CycleShow, _) => {
                 self.fold.show = self.fold.show.next();
@@ -731,6 +754,12 @@ impl App {
             (Intent::Share { auth }, _) => commands.extend(self.share(auth)),
             (Intent::StartTyping, _) => commands.extend(self.start_typing()),
             (Intent::Typed(_), _) => {}
+        }
+    }
+
+    fn unzoom(&mut self) {
+        if let Some(focus) = self.zoom.take() {
+            self.focus = focus;
         }
     }
 
