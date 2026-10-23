@@ -2077,7 +2077,7 @@ mod tests {
 │    ▾ ● billing pin*    ready               3%  412M││                                                                │
 │        ● web           running             0%    0B││                                                                │
 │        ● worker pin*   running             0%    0B│╰────────────────────────────────────────────────────────────────╯
-│      ✖ frontend !      crashed                     │╭ 1 logs │ 2 events │ 3 env │ 4 config │ 5 requests ── following ╮
+│      ✖ frontend !      crashed                     │╭ 1 logs │ 2 requests │ 3 events │ 4 env │ 5 config ── following ╮
 │  ▸ ● feature-x         1/2                 0%    0B││web    Puma starting in single mode...                          │
 │                                                    ││worker Started worker with 5 threads                            │
 │                                                    ││web    GET /up 200 in 2ms                                       │
@@ -2389,7 +2389,7 @@ mod tests {
         stacks[1].instances[0].last_event =
             Some(event(3, carte_api::EventKind::Ready, "in 2.1s", 600_000));
         app.update(Event::Snapshot(Box::new(snapshot)), now);
-        let commands = press(&mut app, now, KeyCode::Char('2'));
+        let commands = press(&mut app, now, KeyCode::Char('3'));
         let Some(Command::FollowEvents { generation, .. }) = commands.first() else {
             panic!("{commands:?}");
         };
@@ -2413,7 +2413,7 @@ mod tests {
             screen.contains("stopped 3m ago: idle for 15m"),
             "the project shows its newest event:\n{screen}"
         );
-        assert!(screen.contains("2 events │ 3 env"), "{screen}");
+        assert!(screen.contains("3 events │ 4 env"), "{screen}");
         assert!(screen.contains("─ following ╮"), "{screen}");
         assert!(
             screen.contains("│14:32:05  nova-billing  stopped: idle for 15m"),
@@ -2468,7 +2468,7 @@ mod tests {
 │                                                                                                                      │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-╭ 1 logs │ 2 events │ 3 env │ 4 config │ 5 requests ──────────────────────────────────────────────────────── following ╮
+╭ 1 logs │ 2 requests │ 3 events │ 4 env │ 5 config ──────────────────────────────────────────────────────── following ╮
 │web GET /up 200 in 2ms                                                                                                │
 │                                                                                                                      │
 │                                                                                                                      │
@@ -2525,14 +2525,14 @@ mod tests {
         let (y, row) = screen
             .lines()
             .enumerate()
-            .find(|(_, r)| r.contains("2 events"))
+            .find(|(_, r)| r.contains("3 events"))
             .expect(&screen);
-        let x = row[..row.find("2 events").unwrap()].chars().count() as u16;
+        let x = row[..row.find("3 events").unwrap()].chars().count() as u16;
         app.update(click(x + 2, y as u16), now);
         assert_eq!(app.tab, Tab::Events, "{screen}");
         assert!(app.zoom.is_some());
 
-        press(&mut app, now, KeyCode::Char('3'));
+        press(&mut app, now, KeyCode::Char('4'));
         press(&mut app, now, KeyCode::Char('/'));
         assert_eq!(app.mode, Mode::Normal, "the env has nothing to search");
         let screen = draw(&mut app, 120, 12);
@@ -2704,7 +2704,7 @@ mod tests {
 │web exited with code 1 before it was ready                                    │
 │! stack \"billing\" names an app                                                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭ 1 logs │ 2 events │ 3 env │ 4 config │ 5 requests ──────────────── following ╮
+╭ 1 logs │ 2 requests │ 3 events │ 4 env │ 5 config ──────────────── following ╮
 │No output yet.                                                                │
 │                                                                              │
 │                                                                              │
@@ -2963,7 +2963,7 @@ mod tests {
         press(&mut app, now, KeyCode::Down);
         press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
-        press(&mut app, now, KeyCode::Char('3'));
+        press(&mut app, now, KeyCode::Char('4'));
         answer_env(&mut app, "nova-billing@main/web");
         let screen = draw(&mut app, 60, 30);
         let pane: Vec<&str> = screen
@@ -2974,7 +2974,7 @@ mod tests {
         assert_eq!(
             pane,
             [
-                "╭ 1 logs │ 2 events │ 3 env │ 4 config │ 5 requests ───────╮",
+                "╭ 1 logs │ 2 requests │ 3 events │ 4 env │ 5 config ───────╮",
                 "│CARTE_APP  nova-billing  carte                            │",
                 "│PATH       /Users/alex/.local/share/mise/installs/ruby/3.4│",
                 "│           /bin:/usr/local/bin:/usr/bin:/bin  mise        │",
@@ -3001,7 +3001,7 @@ mod tests {
         press(&mut app, now, KeyCode::Down);
         press(&mut app, now, KeyCode::Right);
         press(&mut app, now, KeyCode::Down);
-        press(&mut app, now, KeyCode::Char('3'));
+        press(&mut app, now, KeyCode::Char('4'));
         answer_env(&mut app, "nova-billing@main/web");
         let screen = draw(&mut app, 120, 30);
         assert!(
@@ -3023,7 +3023,7 @@ mod tests {
         let (y, line) = screen
             .lines()
             .enumerate()
-            .find(|(_, l)| l.contains("1 logs │ 2 events │ 3 env"))
+            .find(|(_, l)| l.contains("3 events │ 4 env"))
             .expect(&screen);
         assert!(line.contains("following ╮"), "{line}");
         let column = |name: &str| {
@@ -3043,9 +3043,9 @@ mod tests {
             logs.modifier.contains(ratatui::style::Modifier::BOLD),
             "the current tab"
         );
-        assert_eq!(cell(&mut app, "2 events").fg, theme.fg);
+        assert_eq!(cell(&mut app, "3 events").fg, theme.fg);
         assert_eq!(
-            cell(&mut app, "3 env").fg,
+            cell(&mut app, "4 env").fg,
             theme.muted,
             "a project has no env"
         );
@@ -3069,8 +3069,8 @@ mod tests {
         assert_eq!(app.focus, Focus::Tree, "a tab click leaves the focus");
         app.update(click(column("1 logs") - 2), now);
         assert_eq!(app.tab, Tab::Events, "the border beside a tab isn't one");
-        assert_eq!(cell(&mut app, "2 events").fg, theme.accent);
-        let commands = app.update(click(column("3 env")), now);
+        assert_eq!(cell(&mut app, "3 events").fg, theme.accent);
+        let commands = app.update(click(column("4 env")), now);
         assert_eq!(app.tab, Tab::Env, "a muted tab opens too");
         assert_eq!(commands, [Command::StopLogs]);
 
@@ -3087,7 +3087,11 @@ mod tests {
         press(&mut app, now, KeyCode::Tab);
         draw(&mut app, 36, 30);
         let tabs: Vec<Tab> = app.tab_spans.iter().map(|(tab, ..)| *tab).collect();
-        assert_eq!(tabs, [Tab::Logs, Tab::Events], "env is under the status");
+        assert_eq!(
+            tabs,
+            [Tab::Logs, Tab::Requests],
+            "events is under the status"
+        );
     }
 
     fn requests_app() -> App {
@@ -3095,7 +3099,7 @@ mod tests {
 
         let mut app = busy_app();
         let now = app.now;
-        press(&mut app, now, KeyCode::Char('5'));
+        press(&mut app, now, KeyCode::Char('2'));
         let generation = app.requests.generation;
         let mut shared = request(3, "/admin", Some(500));
         shared.shared = true;
@@ -3144,7 +3148,7 @@ mod tests {
         ] {
             assert!(screen.contains(&wanted), "{wanted:?} in\n{screen}");
         }
-        assert!(screen.contains("5 requests"), "{screen}");
+        assert!(screen.contains("2 requests"), "{screen}");
         assert!(screen.contains("─ following ╮"), "{screen}");
 
         let now = app.now;
