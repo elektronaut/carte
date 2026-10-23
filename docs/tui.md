@@ -78,7 +78,7 @@ the state, a long line ends in `…`, and the last line says how many
 more there are. The config tab has the rest.
 
 Below the details, the pane's top border lists its tabs: `1 logs`,
-`2 events`, `3 env`, `4 config` and `5 requests`. The current tab is
+`2 requests`, `3 events`, `4 env` and `5 config`. The current tab is
 highlighted. A tab that doesn't apply to the selection, such as env on
 a folder, is dimmed. `1` to `5` pick a tab, and `[` and `]` go to the
 previous and next.
@@ -90,31 +90,6 @@ events and requests are machine-wide.
 
 The logs of a project, stack or app merge the logs of its processes.
 Each line starts with its process's name in a colour of its own.
-
-The events are the selection's starts, stops, crashes and the like.
-
-The logs and events follow new lines. Scrolling up stops that, and the
-border shows how far up you are. `G` follows again.
-
-The env tab shows a process's env: each variable, its value and where
-it came from. Values aren't masked. On an app, it shows the env of the
-process that serves HTTP, and says so; select a process to see
-another's. An app with several processes and none serving HTTP lists
-them to pick from. `3` on the env tab fetches it again, as the env can
-change when a process starts.
-
-The config tab shows what carte resolved for the selection, from its
-configuration only. On an app: its checkout, hostnames, aliases, env
-sources, idle timeout, dependencies, served files, and each process
-with its command. On a process: its command, the command as it runs
-with its port, the port, readiness, paths, how it stops and restarts,
-and its policy. On a project or stack: the project file, settings, and
-each stack's checkouts. On a [kube project](kubernetes.md): its
-context, namespaces and forwards. Values someone configured are bold:
-those that aren't carte's default, or aren't what the machine, the
-project or the app gives them. Defaults are plain. A pin or disable
-that lasts until the daemon restarts shows apart from the configured
-policy. `4` on the config tab fetches it again.
 
 The requests tab lists the requests carte's proxy answered: the time,
 method, path, status, and how long it took. That is how long carte held
@@ -137,6 +112,31 @@ back to the list.
 Zoomed with `z`, the requests tab shows the list on the left and the
 selected request, or the newest, on the right. The wheel over the
 request scrolls it.
+
+The events are the selection's starts, stops, crashes and the like.
+
+The logs and events follow new lines. Scrolling up stops that, and the
+border shows how far up you are. `G` follows again.
+
+The env tab shows a process's env: each variable, its value and where
+it came from. Values aren't masked. On an app, it shows the env of the
+process that serves HTTP, and says so; select a process to see
+another's. An app with several processes and none serving HTTP lists
+them to pick from. `4` on the env tab fetches it again, as the env can
+change when a process starts.
+
+The config tab shows what carte resolved for the selection, from its
+configuration only. On an app: its checkout, hostnames, aliases, env
+sources, idle timeout, dependencies, served files, and each process
+with its command. On a process: its command, the command as it runs
+with its port, the port, readiness, paths, how it stops and restarts,
+and its policy. On a project or stack: the project file, settings, and
+each stack's checkouts. On a [kube project](kubernetes.md): its
+context, namespaces and forwards. Values someone configured are bold:
+those that aren't carte's default, or aren't what the machine, the
+project or the app gives them. Defaults are plain. A pin or disable
+that lasts until the daemon restarts shows apart from the configured
+policy. `5` on the config tab fetches it again.
 
 ## Show filter
 
@@ -194,7 +194,7 @@ closed row moves to its parent, and `→` on an open row moves into it.
 | `g` `G`, `Home` `End` | Top, bottom. `G` in the logs and requests follows new ones |
 | `PgUp` `PgDn` | Page up, down |
 | `tab` | Switch between the tree and the tabs |
-| `1` to `5` | Show the logs, events, env, config or requests tab |
+| `1` to `5` | Show the logs, requests, events, env or config tab |
 | `[` `]` | Previous, next tab |
 | `enter`, `esc` | Open a request, back to the list (requests) |
 | `/` | Filter the tree, or search the logs |

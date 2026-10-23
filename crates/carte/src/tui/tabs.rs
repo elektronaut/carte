@@ -7,24 +7,24 @@ use super::tree::NodeId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Logs,
+    Requests,
     Events,
     Env,
     Config,
-    Requests,
 }
 
 impl Tab {
     /// In the order the border lists them.
-    pub const ALL: [Tab; 5] = [Tab::Logs, Tab::Events, Tab::Env, Tab::Config, Tab::Requests];
+    pub const ALL: [Tab; 5] = [Tab::Logs, Tab::Requests, Tab::Events, Tab::Env, Tab::Config];
 
     /// The key that picks it.
     pub fn number(self) -> u8 {
         match self {
             Tab::Logs => 1,
-            Tab::Events => 2,
-            Tab::Env => 3,
-            Tab::Config => 4,
-            Tab::Requests => 5,
+            Tab::Requests => 2,
+            Tab::Events => 3,
+            Tab::Env => 4,
+            Tab::Config => 5,
         }
     }
 
@@ -144,16 +144,16 @@ mod tests {
     #[test]
     fn tabs_are_numbered_and_step_around() {
         assert_eq!(Tab::ALL.map(Tab::number), [1, 2, 3, 4, 5]);
-        assert_eq!(Tab::from_number(3), Some(Tab::Env));
-        assert_eq!(Tab::from_number(5), Some(Tab::Requests));
+        assert_eq!(Tab::from_number(4), Some(Tab::Env));
+        assert_eq!(Tab::from_number(2), Some(Tab::Requests));
         assert_eq!(Tab::from_number(0), None);
-        assert_eq!(Tab::from_number(4), Some(Tab::Config));
+        assert_eq!(Tab::from_number(5), Some(Tab::Config));
         assert_eq!(Tab::from_number(6), None);
-        assert_eq!(Tab::Logs.step(-1), Tab::Requests);
+        assert_eq!(Tab::Logs.step(-1), Tab::Config);
         assert_eq!(Tab::Env.step(1), Tab::Config);
-        assert_eq!(Tab::Config.step(1), Tab::Requests);
-        assert_eq!(Tab::Requests.step(1), Tab::Logs);
-        assert_eq!(Tab::Logs.step(1), Tab::Events);
+        assert_eq!(Tab::Config.step(1), Tab::Logs);
+        assert_eq!(Tab::Requests.step(1), Tab::Events);
+        assert_eq!(Tab::Logs.step(1), Tab::Requests);
     }
 
     #[test]
