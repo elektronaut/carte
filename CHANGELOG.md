@@ -1,5 +1,40 @@
 # Changelog
 
+## [0.7.0](https://github.com/elektronaut/carte/compare/v0.6.0...v0.7.0) (2026-10-23)
+
+
+### Features
+
+* **daemon:** keep the proxy's latest requests for the TUI ([ac3bf4b](https://github.com/elektronaut/carte/commit/ac3bf4bcdebf77e413e48a2dcf2f3717faa1ec2f))
+* **daemon:** resolve the config of an address with its defaults ([6294173](https://github.com/elektronaut/carte/commit/6294173fb1c38d363466ad30590b75035d5c23f7))
+* **tui:** a config tab, and details that show only state ([92404e4](https://github.com/elektronaut/carte/commit/92404e4eab1b2ddc965a07107616b2a65705d22a))
+* **tui:** a requests tab with each request's route, timings and headers ([e328a5c](https://github.com/elektronaut/carte/commit/e328a5c001cacb2a32287eb0843e3f4e57c15d5a))
+* **tui:** built-in colour themes and a theme picker ([6d5285a](https://github.com/elektronaut/carte/commit/6d5285ae19764e725568d1f501b52a04e03c4273))
+* **tui:** custom themes from ~/.config/carte/themes ([b1df02e](https://github.com/elektronaut/carte/commit/b1df02e35d4bf60fdde2e9e0e02d17c2de11a04c))
+* **tui:** make problems discoverable and clickable ([32babe2](https://github.com/elektronaut/carte/commit/32babe2f9cb602a005c76b75dc141861417d241d))
+* **tui:** order the tabs logs, requests, events, env, config ([a36091c](https://github.com/elektronaut/carte/commit/a36091c7ab459ae76befe0d9a07ea4e27253eec2))
+* **tui:** tabs for logs, events and env ([93f162e](https://github.com/elektronaut/carte/commit/93f162ee1b289ce058530bc8ef6eac4137982e6d))
+* **tui:** type filters and searches inside the pane, ctrl-f filters the logs ([a4b1a9e](https://github.com/elektronaut/carte/commit/a4b1a9edba4ece5aefd8e3074e8adb5d8d899e1c))
+* **tui:** z zooms the logs side ([ff526a8](https://github.com/elektronaut/carte/commit/ff526a8f9189df33ab3f99a2318da2bb71e1daa9))
+
+
+### Bug Fixes
+
+* **daemon:** keep cancelled requests, the tunnel's visitor and capped headers ([e4a9bb4](https://github.com/elektronaut/carte/commit/e4a9bb46b1a2aa61d19ca0d340b457e13487bc24))
+* **daemon:** mark settings that differ from the default or what they inherit ([dc0db89](https://github.com/elektronaut/carte/commit/dc0db8919659a070937e65fbab6863ddae737426))
+* **fuzz:** give the template target's project a serve_files ([27b1394](https://github.com/elektronaut/carte/commit/27b13944b13e98ec2248eda7bc916b9ba99dcd57))
+* **tui:** draw the one-row input label in text colour on the selection ([1f4bc55](https://github.com/elektronaut/carte/commit/1f4bc553e78c979bbe61a332d08b85a8eff9e286))
+* **tui:** draw the one-row input label like a selected line ([c030d6d](https://github.com/elektronaut/carte/commit/c030d6d478f5d6eaad3b1f774d539d1b7403f1f4))
+* **tui:** fetch the env one request at a time and keep tab clicks honest ([a9e6bab](https://github.com/elektronaut/carte/commit/a9e6babecdd7e2eddaf3fd33d4859d5d60d03166))
+* **tui:** keep muted text readable under the unfocused selection ([83e8bbb](https://github.com/elektronaut/carte/commit/83e8bbbb4aa0401706e953a9de1ea49a73324145))
+* **tui:** keep refused share visits, open requests and held views in the requests tab ([905747c](https://github.com/elektronaut/carte/commit/905747c4d20bbd7058a62148920a8f33b713091f))
+* **tui:** keep the current theme when its file breaks, and other theme file fixes ([0522f07](https://github.com/elektronaut/carte/commit/0522f07f051bebef73ebde26bbdeb7bddb9ad65e))
+* **tui:** keep the problems click area to what the title shows ([d06122a](https://github.com/elektronaut/carte/commit/d06122ab7eb4d6d60858904ecc7352c7b7799a11)), closes [#241](https://github.com/elektronaut/carte/issues/241)
+* **tui:** keep themes legible at 256 colours and keep their hues ([9671ee4](https://github.com/elektronaut/carte/commit/9671ee43ee1a86cb46476abe899ae58d001b00bd))
+* **tui:** match and highlight the logs search ignoring case beyond ASCII ([c41a3dc](https://github.com/elektronaut/carte/commit/c41a3dc12e3c76f259d19c68b0ca76a024c2cb54))
+* **tui:** pick 256-colour theme colours in OKLab and keep statuses apart ([5bae5e9](https://github.com/elektronaut/carte/commit/5bae5e902cb84c781c560886056fdb92e4440740))
+* **tui:** render from named colour roles and keep the selected row readable ([3c04d01](https://github.com/elektronaut/carte/commit/3c04d01bef9b88773dc3d1c493ac9e7d3441e52b))
+
 ## [0.6.0](https://github.com/elektronaut/carte/compare/v0.5.0...v0.6.0) (2026-10-21)
 
 
