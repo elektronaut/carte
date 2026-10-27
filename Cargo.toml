@@ -36,7 +36,7 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 bytes = "1"
 futures-util = "0.3"
 gethostname = "1.1"
-getrandom = "0.3"
+getrandom = "0.4"
 hickory-proto = { version = "0.26", default-features = false, features = ["std"] }
 http = "1"
 httpdate = "1"
@@ -53,7 +53,7 @@ tokio-tungstenite = "0.30"
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 time = "0.3"
 tower-service = "0.3"
-lru = "0.18"
+lru = "0.19"
 percent-encoding = "2.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 unicode-width = "0.2"
