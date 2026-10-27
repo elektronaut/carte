@@ -35,7 +35,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly-2026-10-01
-      - uses: taiki-e/install-action@v2.87.27
+      - uses: taiki-e/install-action@v2.87.31
         with:
           tool: cargo-fuzz@0.13.2
       - uses: actions/cache@v6.1.0
@@ -49,7 +49,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
           SECONDS_PER_TARGET: ${{ github.event_name == 'pull_request' && '30' || inputs.seconds || '300' }}
-      - uses: actions/upload-artifact@v7.0.1
+      - uses: actions/upload-artifact@v7.0.2
         if: failure()
         with:
           name: fuzz-crash-${{ matrix.target }}
